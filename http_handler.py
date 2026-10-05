@@ -1308,6 +1308,8 @@ class SPHandler(SimpleHTTPRequestHandler):
         parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'prints', <id>, <action>]
         if len(parts) == 5 and parts[4] == "repeat":
             self._jobs_call(lambda: print_history.repeat_print(self._job_id()))
+        elif len(parts) == 5 and parts[4] == "reprint":
+            self._jobs_call(lambda: print_history.reprint(self._job_id()))
         elif len(parts) == 5 and parts[4] == "outcome":
             def write():
                 body = self._json_body()
