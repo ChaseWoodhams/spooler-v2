@@ -48,6 +48,7 @@ import gcode_analysis
 import holds
 import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
 import orca_3mf
+import preflight
 import packing
 import remembered_defaults
 import slicer
@@ -1145,14 +1146,148 @@ def fix_scale(project_id: int) -> dict:
     return intake(project_id)
 
 
+QUICK_LAYER_HEIGHTS = (0.08, 0.12, 0.16, 0.2, 0.24, 0.28)   # the fixed list the Quick print dialog offers (0.4 mm nozzle)
+QUICK_SUPPORTS = ("off", "normal", "tree")
+QUICK_BRIMS = ("off", "auto", "custom")
+QUICK_OPTION_KEYS = ("layer_height", "infill", "walls", "supports", "brim", "brim_width")
+
+
+def _quick_overrides(options) -> dict:
+    """The per-project process overrides for the dialog's options (any subset). Refuses anything outside the choices."""
+    if not isinstance(options, dict):
+        raise jobs.JobError("options must be an object")
+    unknown = sorted(set(options) - set(QUICK_OPTION_KEYS))
+    if unknown:
+        raise jobs.JobError(f"Unknown option: {', '.join(unknown)}")
+    out = {}
+
+    def number(key, label):
+        try:
+            value = float(options[key])
+        except (TypeError, ValueError):
+            raise jobs.JobError(f"{label} must be a number")
+        if not math.isfinite(value):
+            raise jobs.JobError(f"{label} must be a number")
+        return value
+    if "layer_height" in options:
+        value = number("layer_height", "Layer height")
+        if not any(abs(value - choice) < 1e-6 for choice in QUICK_LAYER_HEIGHTS):
+            raise jobs.JobError("Layer height must be one of: " + ", ".join(f"{c:g}" for c in QUICK_LAYER_HEIGHTS) + " mm")
+        out["layer_height"] = f"{value:g}"
+    if "infill" in options:
+        value = number("infill", "Infill")
+        if not 0 <= value <= 100 or value != int(value):
+            raise jobs.JobError("Infill must be a whole percentage from 0 to 100")
+        out["sparse_infill_density"] = f"{int(value)}%"
+    if "walls" in options:
+        value = number("walls", "Walls")
+        if not 1 <= value <= 20 or value != int(value):
+            raise jobs.JobError("Walls must be a whole number from 1 to 20")
+        out["wall_loops"] = str(int(value))
+    if "supports" in options:
+        choice = options["supports"]
+        if choice not in QUICK_SUPPORTS:
+            raise jobs.JobError(f"Supports must be one of: {', '.join(QUICK_SUPPORTS)}")
+        out["enable_support"] = "0" if choice == "off" else "1"
+        if choice != "off":
+            out["support_type"] = "tree(auto)" if choice == "tree" else "normal(auto)"
+    if "brim" in options:
+        choice = options["brim"]
+        if choice not in QUICK_BRIMS:
+            raise jobs.JobError(f"Brim must be one of: {', '.join(QUICK_BRIMS)}")
+        out["brim_type"] = {"off": "no_brim", "auto": "auto_brim", "custom": "outer_only"}[choice]   # off is written, not implied
+        if choice == "custom":
+            if "brim_width" not in options:
+                raise jobs.JobError("A custom brim needs a brim_width")
+            width = number("brim_width", "Brim width")
+            if not 0 < width <= 20:
+                raise jobs.JobError("Brim width must be between 0 and 20 mm")
+            out["brim_width"] = f"{width:g}"
+    elif "brim_width" in options:
+        raise jobs.JobError("brim_width only goes with brim: custom")
+    return out
+
+
+def quick_options(project_id: int, preset: str | None = None) -> dict:
+    """What the Quick print dialog starts from: the option values (the preset's own, with this project's choices over
+    them), the fixed layer-height list and the remembered printer, preset, spool and plate side."""
+    record = get_project(project_id)
+    profile = record["data"]["profile"]
+    bundle_id = preset or profile.get("bundle_id")
+    process = {}
+    if bundle_id:
+        process = {**slicer.bundle_settings(bundle_id)["process"], **profile.get("process", {})}
+
+    def num(key, default, cast):
+        try:
+            return cast(float(str(process.get(key, default)).rstrip("%")))
+        except (TypeError, ValueError):
+            return cast(default)
+    supports = "off"
+    if str(process.get("enable_support", "0")) == "1":
+        supports = "tree" if str(process.get("support_type", "")).startswith("tree") else "normal"
+    brim_type = process.get("brim_type", "auto_brim")   # the slicer's default when a preset says nothing
+    brim = "off" if brim_type == "no_brim" else "auto" if brim_type == "auto_brim" else "custom"
+    options = {"layer_height": num("layer_height", 0.2, float), "infill": num("sparse_infill_density", 15, int),
+               "walls": num("wall_loops", 2, int), "supports": supports, "brim": brim}
+    if brim == "custom":
+        options["brim_width"] = num("brim_width", 5, float)
+    plate = record["data"]["plates"][0]
+    remembered = remembered_defaults.usable()
+    return {"options": options, "layer_heights": list(QUICK_LAYER_HEIGHTS), "preset": bundle_id,
+            "printer_id": plate.get("printer_id"), "bed": record["data"]["bed"], "spool_id": profile.get("spool_id"),
+            "leveling": bool(remembered["options"].get("leveling")), "timelapse": bool(remembered["options"].get("timelapse"))}
+
+
+def _apply_quick_choices(project_id: int, body: dict) -> None:
+    """Write the dialog's printer, preset, plate side, spool and options to the project (nothing if any is refused)."""
+    options = _quick_overrides(body["options"]) if body.get("options") is not None else {}
+    if body.get("printer_id"):
+        jobs._require_printer(body["printer_id"])
+    if body.get("bed") is not None and body["bed"] not in slicer.BED_TYPES:
+        raise jobs.JobError(f"bed must be one of: {', '.join(slicer.BED_TYPES)}")
+    spool = _spool_id(body.get("spool_id")) if "spool_id" in body else None
+    bundle_id = body.get("preset") or get_project(project_id)["data"]["profile"].get("bundle_id")
+    base = slicer.bundle_settings(bundle_id) if bundle_id else None   # a preset that doesn't exist is refused here
+
+    def change(data):
+        profile = data["profile"]
+        if body.get("printer_id"):
+            data["plates"][0]["printer_id"] = body["printer_id"]
+        if body.get("bed") is not None:
+            data["bed"] = body["bed"]
+        if "spool_id" in body:
+            profile["spool_id"] = spool
+        if body.get("preset"):
+            profile["bundle_id"] = body["preset"]          # the options stay: they are overrides, not part of the preset
+        merged = {**profile.get("process", {}), **options}
+        if base is not None and merged:
+            merged = slicer.normalize_overrides({"process": merged}, base).get("process", {})
+        profile["process"] = merged
+    _mutate(project_id, "data", change)
+
+
+def _plate_preflight(project_id: int, plate: dict, bed: str) -> dict:
+    """The preflight checks a sliced plate would get as a Job on its printer, before it is queued."""
+    printer = state.printers.get(plate.get("printer_id") or "")
+    analysis = json.loads(plate_file(project_id, plate["id"], "analysis").read_text(encoding="utf-8"))
+    spool_info = preflight.loaded_spool(printer) if printer is not None else {"spool": None}
+    hardware = preflight.printer_hardware(printer.id) if printer is not None else {"nozzle_diameter": None}
+    job = {"id": 0, "source": "upload", "print_opts": {"smooth_plate": bed == "smooth"}, "estimate_g": None}
+    checks = preflight.evaluate(job, printer, analysis, spool_info, hardware)
+    worst = max((c["level"] for c in checks), key=preflight.LEVEL_ORDER.get, default="pass")
+    return {"state": "ready", "can_start": worst != "fail", "needs_acknowledgement": worst == "warn",
+            "warnings": [{"level": c["level"], "title": c["title"], "detail": c["detail"]} for c in checks if c["level"] in ("warn", "fail")],
+            "checks": sorted(checks, key=lambda c: -preflight.LEVEL_ORDER[c["level"]])}
+
+
 def slice_and_print(project_id: int, body: dict) -> dict:
-    """One action: place the model whole if it isn't yet, slice the plate and queue it when it's done."""
+    """One action: apply the dialog's choices, place the model whole if it isn't yet, slice the plate and queue it when it's
+    done. With `review` it stops after slicing and returns the preflight warnings under "review" instead of queueing."""
     info = intake(project_id)
     if not info["can_print"]:
         raise jobs.JobError(info["reason"] or "The model can't be printed yet", 409)
-    if body.get("printer_id"):
-        jobs._require_printer(body["printer_id"])
-        _mutate(project_id, "data", lambda d: d["plates"][0].__setitem__("printer_id", body["printer_id"]))
+    _apply_quick_choices(project_id, body)
     if info.get("kind") == "gcode":      # already sliced: queue it as it is
         _require_printers(get_project(project_id), {1})
         queue_plate(project_id, 1, {"leveling": bool(body.get("leveling")), "timelapse": bool(body.get("timelapse"))})
@@ -1160,13 +1295,29 @@ def slice_and_print(project_id: int, body: dict) -> dict:
     if not info["placed"]:
         place_whole_model(project_id)
     record = get_project(project_id)
-    plate_id = record["data"]["plates"][0]["id"]
+    plate = record["data"]["plates"][0]
+    plate_id = plate["id"]
     entry = record["slices"].get(str(plate_id)) or {}
+    review = bool(body.get("review"))
+    acknowledge = bool(body.get("acknowledge_warnings"))
+    opts = {"leveling": bool(body.get("leveling")), "timelapse": bool(body.get("timelapse")), "acknowledge": acknowledge}
     if entry.get("state") == SLICED and not entry.get("outdated"):
         _require_printers(record, {plate_id})
-        queue_plate(project_id, plate_id, {"leveling": bool(body.get("leveling")), "timelapse": bool(body.get("timelapse"))})
+        report = _plate_preflight(project_id, plate, record["data"]["bed"])
+        if review:
+            return {**record, "review": report}
+        if not report["can_start"]:
+            raise jobs.JobError("Preflight failed: " + "; ".join(c["title"] for c in report["checks"] if c["level"] == "fail"), 409)
+        job = queue_plate(project_id, plate_id, opts)
+        if acknowledge:
+            jobs.acknowledge_warnings(job["id"], plate.get("printer_id"))
         return get_project(project_id)
-    return request_slice(project_id, plate_id, send=True)
+    if entry.get("state") in (QUEUED, SLICING) and review:
+        return {**record, "review": {"state": "slicing"}}
+    if review:
+        _require_printers(record, {plate_id})
+        return {**request_slice(project_id, plate_id), "review": {"state": "slicing"}}
+    return request_slice(project_id, plate_id, send=True, send_opts=opts)
 
 
 def _footprint(project_id: int, obj: dict) -> tuple:
@@ -1506,12 +1657,12 @@ def read_arrangement(path: Path) -> dict:
 
 # ── Slicing a plate ────────────────────────────────────────────────────────────
 
-def _queued_entry(previous: dict | None, queued_at: float, send: bool = False) -> dict:
+def _queued_entry(previous: dict | None, queued_at: float, send: bool = False, send_opts: dict | None = None) -> dict:
     """A plate waiting to be sliced. `last_duration_ms` (how long it took before) lets the page show an expected time."""
     previous = previous or {}
     last = previous.get("duration_ms", previous.get("last_duration_ms"))
     return {"state": QUEUED, "queued_at": queued_at, **({"last_duration_ms": last} if last is not None else {}),
-            **({"auto_send": True} if send else {})}
+            **({"auto_send": True} if send else {}), **({"send_opts": send_opts} if send and send_opts else {})}
 
 
 def _require_printers(record: dict, plate_ids) -> None:
@@ -1530,7 +1681,7 @@ def _stage(project_id: int, plate_id: int, stage: str) -> None:
     _mutate(project_id, "slices", change)
 
 
-def request_slice(project_id: int, plate_id: int, send: bool = False) -> dict:
+def request_slice(project_id: int, plate_id: int, send: bool = False, send_opts: dict | None = None) -> dict:
     """Slice one plate. With `send`, the finished plate goes to the queue for its own printer."""
     record = get_project(project_id)
     if plate_id not in {p["id"] for p in record["data"]["plates"]}:
@@ -1541,7 +1692,7 @@ def request_slice(project_id: int, plate_id: int, send: bool = False) -> dict:
         raise jobs.JobError("The plate is already being sliced", 409)
     if send:
         _require_printers(record, {plate_id})
-    _mutate(project_id, "slices", lambda s: s.__setitem__(str(plate_id), _queued_entry(s.get(str(plate_id)), time.time(), send)))
+    _mutate(project_id, "slices", lambda s: s.__setitem__(str(plate_id), _queued_entry(s.get(str(plate_id)), time.time(), send, send_opts)))
     notify_worker()
     return get_project(project_id)
 
@@ -1935,9 +2086,10 @@ async def process_next(slot: int = 0) -> bool:
         _mutate(project_id, "models", update, created_at)
     else:
         try:
-            auto = bool(get_project(project_id)["slices"].get(str(item), {}).get("auto_send"))
+            queued = get_project(project_id)["slices"].get(str(item), {})
+            auto, send_opts = bool(queued.get("auto_send")), queued.get("send_opts") or {}
         except jobs.JobError:
-            auto = False
+            auto, send_opts = False, {}
         try:
             result = await loop.run_in_executor(None, _slice, project_id, item, slot)
         except Exception as e:
@@ -1947,15 +2099,18 @@ async def process_next(slot: int = 0) -> bool:
             result["auto_send"] = True   # the page keeps checking until the plate is in the queue (or says why not)
         _mutate(project_id, "slices", lambda s: s.__setitem__(str(item), result), created_at)
         if auto and result.get("state") == SLICED:
-            await loop.run_in_executor(None, _auto_send, project_id, item, created_at)
+            await loop.run_in_executor(None, _auto_send, project_id, item, created_at, send_opts)
             await jobs.broadcast()
     return True
 
 
-def _auto_send(project_id: int, plate_id: int, created_at: float) -> None:
+def _auto_send(project_id: int, plate_id: int, created_at: float, send_opts: dict | None = None) -> None:
     """Slice & send: put the finished plate in the queue for its printer, and note the job (or why it couldn't be sent)."""
     try:
-        job = queue_plate(project_id, plate_id, {})
+        send_opts = send_opts or {}
+        job = queue_plate(project_id, plate_id, {"leveling": send_opts.get("leveling"), "timelapse": send_opts.get("timelapse")})
+        if send_opts.get("acknowledge"):
+            jobs.acknowledge_warnings(job["id"], job.get("printer_id"))
         outcome = {"sent_job": job["id"], "sent_to": job.get("printer_id")}
     except jobs.JobError as e:
         outcome = {"send_error": str(e)}
