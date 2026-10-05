@@ -47,7 +47,7 @@ const OutcomePrompt = (() => {
     return box;
   }
 
-  const heading = item => `<h3 style="margin:0">${esc(item.printer_name)} finished ${esc(item.project_name ? `${item.project_name} · ${item.plate_name || ""}` : item.file_name)}</h3>
+  const heading = item => `<h3 style="margin:0">${esc(item.printer_name)} finished ${esc(item.project_name ? (item.plate_name ? `${item.project_name} · ${item.plate_name}` : item.project_name) : item.file_name)}</h3>
     <div style="color:var(--text-muted,#9ca3af)">The printer reported <b>${esc(item.reported_outcome)}</b>${item.outcome_unconfirmed ? " (not confirmed yet)" : ""}
       · ${minutes(item.duration_s) || "under 1m"}${item.estimate_s ? ` of ${minutes(item.estimate_s)} estimated` : ""}</div>
     ${item.snapshot ? `<img src="${esc(item.snapshot)}" alt="Printer camera when the print ended" style="width:100%;border-radius:8px">` : ""}`;
