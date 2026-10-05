@@ -21,6 +21,7 @@ import farm
 import health
 import jobs
 import preflight
+import remembered_defaults
 import print_history
 import projects
 import slicer
@@ -614,6 +615,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(slicer.stock_presets, broadcast=False)
         elif self.path == "/api/slicer/spools":
             self._jobs_call(farm.list_spools, broadcast=False)
+        elif self.path == "/api/defaults":
+            self._jobs_call(lambda: {"defaults": remembered_defaults.get()}, broadcast=False)
         elif self.path == "/api/slices":
             self._json({"slices": slicer.list_slices()})
         elif self.path == "/api/splits":
@@ -695,6 +698,9 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if self.path.startswith("/api/jobs/"):
             self._jobs_call(lambda: jobs.update_job(self._job_id(), self._json_body()))
+            return
+        if self.path == "/api/defaults":
+            self._jobs_call(lambda: {"defaults": remembered_defaults.save(self._json_body())}, broadcast=False)
             return
         if self.path.startswith("/api/prints/"):
             self._jobs_call(lambda: print_history.update_notes(self._job_id(), self._json_body().get("notes")),
