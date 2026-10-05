@@ -51,32 +51,24 @@
   <div class="app-body">
 
   <nav class="sidenav">
-    <button id="btn-printers-nav" class="sidenav-item mobile-only" title="Printers">
+    <button id="btn-printers-nav" class="sidenav-item active" title="Printers">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>
       </svg>
       <span>Printers</span>
     </button>
+    <a id="btn-slicer" class="sidenav-item" href="#projects" title="Projects: import a model, split it, lay out plates, slice and print">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M3 8l5-3 3 1.8V19l-3 1.8-5-3z"/><path d="M13 6.8 16 5l5 3v9.8l-5 3-3-1.8z"/>
+      </svg>
+      <span>Projects</span>
+    </a>
     <button id="btn-history" class="sidenav-item" title="Print history">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
       </svg>
       <span>History</span>
     </button>
-    <button id="btn-queue" class="sidenav-item" title="Print queue">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <line x1="9" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="9" y1="18" x2="21" y2="18"/>
-        <line x1="4" y1="6" x2="4.01" y2="6"/><line x1="4" y1="12" x2="4.01" y2="12"/><line x1="4" y1="18" x2="4.01" y2="18"/>
-      </svg>
-      <span>Queue</span>
-      <span id="queue-count" class="sidenav-badge" hidden></span>
-    </button>
-    <a id="btn-slicer" class="sidenav-item" href="/slicer.html" title="Projects: upload a model, split it, lay out plates, slice and send to the queue">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round">
-        <path d="M3 8l5-3 3 1.8V19l-3 1.8-5-3z"/><path d="M13 6.8 16 5l5 3v9.8l-5 3-3-1.8z"/>
-      </svg>
-      <span>Projects</span>
-    </a>
     <button id="btn-spools" class="sidenav-item" title="Filament spools (Reel)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/>
@@ -116,6 +108,13 @@
   </div>
 
   <main id="main">
+    <section id="needs-you" class="dash-section needs-you" hidden aria-live="polite" aria-label="Needs you"></section>
+    <div id="dash-bar" class="dash-bar">
+      <h2>Printers</h2>
+      <button id="btn-queue" class="btn btn-secondary btn-sm" type="button" title="Every waiting job across all projects">
+        Queue <span id="queue-count" class="sidenav-badge" hidden></span>
+      </button>
+    </div>
     <div id="empty-state" class="empty-state">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
         <rect x="2" y="3" width="20" height="14" rx="2"/>
@@ -127,6 +126,10 @@
     </div>
     <div id="printer-grid" class="printer-grid" style="display:none"></div>
     <section id="printer-detail" class="printer-detail" hidden aria-live="polite"></section>
+    <section id="dash-projects" class="dash-section" hidden aria-label="Active projects"></section>
+    <section id="projects-view" class="projects-view" hidden aria-label="Projects">
+      <iframe id="projects-frame" title="Projects" loading="lazy"></iframe>
+    </section>
   </main>
 
   <!-- Printers panel (add + edit) -->
@@ -872,6 +875,7 @@
   <script src="outcome-prompt.js?v=1"></script>
   <script src="app.js?v=63"></script>
   <script src="import.js?v=1"></script>
+  <script src="dashboard.js?v=1"></script>
   <script>
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});

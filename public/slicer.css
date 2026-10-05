@@ -383,3 +383,9 @@ body.print-step .slicer-sidebar { display: none; }
 .pp-bar-filament i { display: block; height: 100%; background: var(--accent, #d67634); }
 .pp-warn { color: #d9534f; }
 .pp-preview { width: 100%; max-width: 320px; height: auto; align-self: center; border-radius: 8px; background: var(--surface2); }
+
+
+/* Inside the app shell the shell's own nav replaces the Spooler link. */
+body.embedded .slicer-home { display: none; }
+.slicer-small-screen-note { display: none; margin: 0; padding: 6px 14px; font-size: 12px; color: var(--text-muted); background: var(--surface2); border-bottom: 1px solid var(--border); }
+@media (max-width: 640px) { .slicer-small-screen-note { display: block; } }

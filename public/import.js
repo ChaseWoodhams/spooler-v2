@@ -27,7 +27,7 @@
       let body = {};
       try { body = JSON.parse(xhr.responseText); } catch (_) { /* not JSON */ }
       if (xhr.status === 200 && body.id) {
-        location.href = `/slicer.html?project=${body.id}&confirm=1`;
+        location.hash = `#projects=${body.id}&confirm=1`; // the Project opens inside the app shell
         return;
       }
       if (xhr.status === 401) { location.replace("/login"); return; }
