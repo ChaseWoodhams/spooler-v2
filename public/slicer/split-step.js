@@ -437,8 +437,9 @@ function sideModel() {
     : `<button class="btn btn-primary" data-action="go-split">Plan the cuts →</button>`;
   return `${failedBlock()}
   <section class="split-section"><h4>${esc(current.source_name)}</h4>
+    ${hint ? `<p class="split-hint split-bad">${esc(hint)}</p>` : ""}
     <dl class="split-facts">
-      <dt>Size</dt><dd>${sizeText(a.size)}</dd>
+      <dt>Size</dt><dd><strong>${sizeText(a.size)}</strong> · scale ×${s.scale}</dd>
       <dt>Volume</dt><dd>${a.volume_cm3.toLocaleString()} cm³</dd>
       <dt>Triangles</dt><dd>${a.source_triangles.toLocaleString()}${a.triangles !== a.source_triangles ? ` → ${a.triangles.toLocaleString()} (simplified 0.01 mm)` : ""}</dd>
       <dt>Mesh</dt><dd>${a.repairs.length ? esc(a.repairs.join("; ")) : "Closed solid, no repairs needed"}</dd>
@@ -453,7 +454,6 @@ function sideModel() {
     </div>
     <div class="split-chips">${[[1, "mm"], [10, "cm"], [25.4, "inch"], [1000, "m"]]
       .map(([f, unit]) => `<button class="btn btn-secondary btn-sm" data-action="scale-preset" data-scale="${f}">${unit} ×${f}</button>`).join("")}</div>
-    ${hint ? `<p class="split-hint">${esc(hint)}</p>` : ""}
     <div class="split-actions-row"><button class="btn btn-secondary btn-sm" data-action="apply-size">Apply and analyse again</button></div>
   </section>
   <div class="split-actions">${next}</div>`;
