@@ -182,12 +182,12 @@ function historyDetail(p) {
 // (and Reprint its stored G-code); without them the Print stays in History and the buttons are disabled.
 function quickPrintButtons(p) {
   const gone = "The hidden project for this quick print is gone";
-  const reprintOff = !p.outcome ? "Still printing" : !p.reprint_available ? (p.project_available ? "The stored G-code for this print is gone" : gone) : "";
-  const openOff = p.project_available ? "" : gone;
-  const changeOff = !p.outcome ? "Still printing" : p.project_available ? "" : gone;
-  return `<button class="btn btn-secondary btn-sm" data-history-action="reprint" data-print-id="${p.id}"${reprintOff ? ` disabled title="${_histAttr(reprintOff)}"` : ""}>Reprint</button>
-      <button class="btn btn-secondary btn-sm" data-history-action="reprint-changes" data-print-id="${p.id}"${changeOff ? ` disabled title="${_histAttr(changeOff)}"` : ""}>Reprint with changes</button>
-      <button class="btn btn-secondary btn-sm" data-history-action="open-project" data-print-id="${p.id}"${openOff ? ` disabled title="${_histAttr(openOff)}"` : ""}>Open as project</button>`;
+  const button = (action, label, why) => `<button class="btn btn-secondary btn-sm" data-history-action="${action}" data-print-id="${p.id}"${why ? ` disabled title="${_histAttr(why)}"` : ""}>${label}</button>`;
+  const reprintWhy = !p.outcome ? "Still printing" : !p.reprint_available ? (p.project_available ? "The stored G-code for this print is gone" : gone) : "";
+  const openWhy = p.project_available ? "" : gone;
+  const changeWhy = !p.outcome ? "Still printing" : openWhy;
+  return [button("reprint", "Reprint", reprintWhy), button("reprint-changes", "Reprint with changes", changeWhy),
+    button("open-project", "Open as project", openWhy)].join(" ");
 }
 
 // Reprint with changes reopens the Quick print modal on the Print's hidden project, which still holds the printer, preset,

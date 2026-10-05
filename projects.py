@@ -310,7 +310,8 @@ def _create_project_from_single_object_3mf(path: Path, stem: str, scale, up, qui
     profile, bed = _orca_profile(parsed["project"], notes)
     base = slicer.bundle_settings(profile["bundle_id"]) if profile.get("bundle_id") else None
     profile["process"] = {**profile["process"], **_clean_object_settings(obj["settings"], base, obj["name"], notes)}
-    verts = obj["verts"] @ obj["instances"][0]["matrix"]      # the object as the file poses it (its own scale and turn)
+    instance = next((i for i in obj["instances"] if i["printable"]), obj["instances"][0])   # a disabled copy is not the one to print
+    verts = obj["verts"] @ instance["matrix"]      # the object as the file poses it (its own scale and turn)
     staging = Path(tempfile.mkdtemp(prefix=".orca-", dir=path.parent))
     try:
         stl = staging / "model.stl"
@@ -438,7 +439,9 @@ def validate_data(raw, record: dict) -> dict:
             "overrides": slicer.normalize_overrides({"process": overrides}, base).get("process", {}) if overrides else {},
         })
     out = {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
-    if (record.get("data") or {}).get("orientation"):     # a quick print's chosen orientation isn't the client's to edit
+    # A quick print's chosen orientation is the server's alone: whatever a save sends, the stored value is kept (the
+    # other writers, _mutate on "data", change a copy of the stored data and so keep it too).
+    if (record.get("data") or {}).get("orientation"):
         out["orientation"] = record["data"]["orientation"]
     return out
 
@@ -1225,12 +1228,15 @@ def quick_options(project_id: int, preset: str | None = None) -> dict:
             return cast(float(str(process.get(key, default)).rstrip("%")))
         except (TypeError, ValueError):
             return cast(default)
+    # What the dialog can't express is reported as "preset" (the preset's own value, left alone unless the user picks another)
     supports = "off"
     if str(process.get("enable_support", "0")) == "1":
-        supports = "tree" if str(process.get("support_type", "")).startswith("tree") else "normal"
+        kind = str(process.get("support_type", ""))
+        supports = "tree" if kind == "tree(auto)" else "normal" if kind == "normal(auto)" else "preset"
     brim_type = process.get("brim_type", "auto_brim")   # the slicer's default when a preset says nothing
-    brim = "off" if brim_type == "no_brim" else "auto" if brim_type == "auto_brim" else "custom"
-    options = {"layer_height": num("layer_height", 0.2, float), "infill": num("sparse_infill_density", 15, int),
+    brim = {"no_brim": "off", "auto_brim": "auto", "outer_only": "custom"}.get(brim_type, "preset")
+    infill = num("sparse_infill_density", 15, float)
+    options = {"layer_height": num("layer_height", 0.2, float), "infill": int(infill) if infill == int(infill) else infill,
                "walls": num("wall_loops", 2, int), "supports": supports, "brim": brim}
     if brim == "custom":
         options["brim_width"] = num("brim_width", 5, float)
@@ -1289,8 +1295,10 @@ def slice_and_print(project_id: int, body: dict) -> dict:
     info = intake(project_id)
     if not info["can_print"]:
         raise jobs.JobError(info["reason"] or "The model can't be printed yet", 409)
+    if info.get("kind") == "gcode":      # already sliced: its preset and options are fixed in the file, so none are written
+        body = {k: v for k, v in body.items() if k not in ("options", "preset")}
     _apply_quick_choices(project_id, body)
-    if info.get("kind") == "gcode":      # already sliced: queue it as it is
+    if info.get("kind") == "gcode":      # queue it as it is
         record = get_project(project_id)
         _require_printers(record, {1})
         plate = record["data"]["plates"][0]
@@ -1934,6 +1942,8 @@ def queue_plates(project_id: int, body: dict) -> dict:
         raise jobs.JobError(f"{_names(outdated)} changed after {'it was' if one else 'they were'} sliced — slice {'it' if one else 'them'} again", 409)
     if not body.get("again"):
         repeats = [p["name"] for p in plates if p["id"] in _open_job_plates(project_id)]
+        if repeats and record["quick"]:      # a quick print's user never sees plates
+            raise jobs.JobError("This print is already waiting in the queue — send again only to print another copy", 409)
         if repeats:
             raise jobs.JobError(f"{_names(repeats)} {'is' if len(repeats) == 1 else 'are'} already in the queue — "
                                 "send again only to print another copy", 409)

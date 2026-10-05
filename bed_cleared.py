@@ -78,13 +78,18 @@ async def confirm(printer_id: str, print_id=None, outcome=None, failure_reasons=
     result = {**status(printer_id), "print": record, "started": None, "start_error": None,
               "reprint": None, "reprint_error": None}
     if reprint:
-        plate = record or (print_history.get_print(print_id) if print_id is not None else None)
-        if not plate or not plate.get("project_id") or not plate.get("plate_id"):
+        printed = record or (print_history.get_print(print_id) if print_id is not None else None)
+        if not printed or not printed.get("project_id") or not printed.get("plate_id"):
             result["reprint_error"] = "This print was not made from a project plate, so there is nothing to reprint"
         else:
             import projects  # imported here because only a reprint needs it, and projects drags in the slicer and 3MF stack
             try:
-                result["reprint"] = projects.reprint_plate(plate["project_id"], plate["plate_id"])
+                with database.transaction() as conn:
+                    quick = conn.execute("SELECT quick FROM projects WHERE id = ?", (printed["project_id"],)).fetchone()
+                if quick and quick["quick"]:     # a quick print has no plate to the user: reprint the Print itself
+                    result["reprint"] = print_history.reprint(printed["id"])
+                else:
+                    result["reprint"] = projects.reprint_plate(printed["project_id"], printed["plate_id"])
             except jobs.JobError as e:
                 result["reprint_error"] = str(e)
     if result["auto_start"]:

@@ -89,11 +89,12 @@ class QuickIntakeApiTests(unittest.IsolatedAsyncioTestCase):
         return project
 
     @staticmethod
-    def plain_3mf(objects: int) -> bytes:
+    def plain_3mf(objects: int, disabled: int = 0) -> bytes:
         """A 3MF from a generic tool: a mesh and build items, no Orca metadata."""
         verts = "".join(f'<vertex x="{x}" y="{y}" z="{z}"/>' for x, y, z in (CUBE + 10))
         tris = "".join(f'<triangle v1="{a}" v2="{b}" v3="{c}"/>' for a, b, c in TRIS)
         items = "".join(f'<item objectid="1" transform="1 0 0 0 1 0 0 0 1 {50 * n} 0 0"/>' for n in range(objects))
+        items = "".join(f'<item objectid="1" printable="0" transform="1 0 0 0 1 0 0 0 1 {50 * n} 90 0"/>' for n in range(disabled)) + items
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as archive:
             archive.writestr(orca_3mf.MODEL_PATH, f'<model unit="millimeter"><resources><object id="1"><mesh><vertices>{verts}</vertices>'
@@ -119,6 +120,12 @@ class QuickIntakeApiTests(unittest.IsolatedAsyncioTestCase):
         intake = self.call("GET", f"/api/projects/{project['id']}/intake")[1]
         self.assertEqual((intake["state"], intake["can_print"], intake["kind"]), ("ready", True, "model"))
         self.assertEqual(self.visible_ids(), [])
+
+    async def test_a_disabled_object_does_not_make_a_single_object_3mf_a_multi_object_one(self):
+        project = await self.quick_upload(self.plain_3mf(1, disabled=2), "part.3mf")
+        self.assertIs(project["quick"], True)
+        self.assertNotIn("routed", project)
+        self.assertEqual(self.call("GET", f"/api/projects/{project['id']}/intake")[1]["can_print"], True)
 
     async def test_a_multi_object_plain_3mf_is_routed_to_a_visible_project_not_merged(self):
         project = await self.quick_upload(self.plain_3mf(2), "pair.3mf")
