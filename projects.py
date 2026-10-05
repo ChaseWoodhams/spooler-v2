@@ -262,23 +262,69 @@ def create_project_from_upload(stream, length: int, filename: str, scale=1.0, up
     A G-code file instead becomes a one-plate project holding it as an imported Slice."""
     if filename.lower().endswith(".gcode"):
         return create_project_from_gcode(stream, length, filename, bed, quick=quick)
-    if filename.lower().endswith(".3mf"):  # an OrcaSlicer/BambuStudio project keeps its plates and settings
+    if filename.lower().endswith(".3mf"):
         path = _spool(stream, length)
         try:
-            if orca_3mf.is_project(path):
-                project = create_project(Path(filename.replace("\\", "/")).stem[:120], quick=quick)
-                try:
-                    return import_orca_project(project["id"], path, fresh=True)
-                except BaseException:
-                    delete_project(project["id"])
-                    raise
-            with path.open("rb") as fh:
-                split = splits.create_split(fh, length, filename, {"scale": scale, "up": up})
+            return _create_project_from_3mf(path, length, filename, scale, up, quick)
         finally:
             path.unlink(missing_ok=True)
-        return create_project(Path(split["source_name"]).stem, split_id=split["id"], quick=quick)
     split = splits.create_split(stream, length, filename, {"scale": scale, "up": up})
     return create_project(Path(split["source_name"]).stem, split_id=split["id"], quick=quick)
+
+
+def _create_project_from_3mf(path: Path, length: int, filename: str, scale, up, quick: bool) -> dict:
+    """Objects and plates are counted before anything is created. One object on one plate is a model like any other
+    (an Orca project's settings become the project's starting values); anything bigger becomes a normal, visible Project
+    with its objects and plates, even when a quick print was asked for (the result then says `routed`)."""
+    try:
+        found = orca_3mf.summary(path)
+    except orca_3mf.ThreeMFError as e:
+        raise jobs.JobError(str(e)) from e
+    stem = Path(filename.replace("\\", "/")).stem[:120]
+    if found["objects"] > 1 or found["plates"] > 1:
+        project = create_project(stem)
+        try:
+            imported = import_orca_project(project["id"], path, fresh=True)
+        except BaseException:
+            delete_project(project["id"])
+            raise
+        if quick:
+            counts = [f"{found['objects']} objects" if found["objects"] > 1 else None,
+                      f"{found['plates']} plates" if found["plates"] > 1 else None]
+            imported["routed"] = {"to": "project", "reason": f"The file has {' on '.join(c for c in counts if c)}, so it opens as a project"}
+        return imported
+    return _create_project_from_single_object_3mf(path, stem, scale, up, quick)
+
+
+def _create_project_from_single_object_3mf(path: Path, stem: str, scale, up, quick: bool) -> dict:
+    """A one-object 3MF (plain or Orca/Bambu), read with our own parser, normalised to the shape of a plain model upload (a split-owned whole model, so the
+    quick print intake works on it); the file's own settings and plate side become the project's starting values."""
+    _require_geometry()
+    try:
+        parsed = orca_3mf.parse(path)
+    except orca_3mf.ThreeMFError as e:
+        raise jobs.JobError(str(e)) from e
+    (obj,) = parsed["objects"]
+    notes = list(parsed["warnings"])
+    profile, bed = _orca_profile(parsed["project"], notes)
+    base = slicer.bundle_settings(profile["bundle_id"]) if profile.get("bundle_id") else None
+    profile["process"] = {**profile["process"], **_clean_object_settings(obj["settings"], base, obj["name"], notes)}
+    verts = obj["verts"] @ obj["instances"][0]["matrix"]      # the object as the file poses it (its own scale and turn)
+    staging = Path(tempfile.mkdtemp(prefix=".orca-", dir=path.parent))
+    try:
+        stl = staging / "model.stl"
+        write_stl(stl, verts, obj["tris"])
+        with stl.open("rb") as fh:
+            split = splits.create_split(fh, stl.stat().st_size, f"{stem}.stl", {"scale": scale, "up": up})
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    project = create_project(stem, split_id=split["id"], quick=quick)
+    try:
+        _mutate(project["id"], "data", lambda d: d.update(bed=bed, profile={"spool_id": None, **profile}))
+    except BaseException:
+        delete_project(project["id"])
+        raise
+    return {**get_project(project["id"]), "import_notes": list(dict.fromkeys(notes))}
 
 
 def delete_project(project_id: int) -> None:
@@ -585,6 +631,19 @@ def _orca_profile(project: dict | None, notes: list) -> tuple:
         return default, "textured"
 
 
+def _clean_object_settings(settings: dict, base: dict | None, label: str, notes: list) -> dict:
+    """The per-object process settings of an Orca project that this profile accepts; the rest are noted and left out."""
+    kept = {}
+    for key, value in settings.items():
+        try:
+            if base is None:
+                raise jobs.JobError("no profile")
+            kept.update(slicer.normalize_overrides({"process": {key: value}}, base).get("process", {}))
+        except jobs.JobError:
+            notes.append(f"{label}: setting “{key}” can't be used here and was left out")
+    return kept
+
+
 def import_orca_project(project_id: int, path: Path, fresh: bool = False) -> dict:
     """Bring the plates, objects, per-object settings and (for a new project) the settings of an Orca/Bambu 3MF into a project.
     With `fresh` the project's empty first plate is replaced; otherwise the file's plates are added after the existing ones."""
@@ -605,15 +664,7 @@ def import_orca_project(project_id: int, path: Path, fresh: bool = False) -> dic
     base = slicer.bundle_settings(profile["bundle_id"]) if profile.get("bundle_id") else None
 
     def clean(settings: dict, label: str) -> dict:
-        kept = {}
-        for key, value in settings.items():
-            try:
-                if base is None:
-                    raise jobs.JobError("no profile")
-                kept.update(slicer.normalize_overrides({"process": {key: value}}, base).get("process", {}))
-            except jobs.JobError:
-                notes.append(f"{label}: setting “{key}” can't be used here and was left out")
-        return kept
+        return _clean_object_settings(settings, base, label, notes)
 
     model_ids, models = {}, []
     next_model = _next_id(record["models"])
@@ -920,11 +971,17 @@ def intake(project_id: int) -> dict:
     can be skipped), whether its size is plausible for its scale, and a rough estimate."""
     record = get_project(project_id)
     split_id = record.get("split_id")
+    entry = (record["slices"] or {}).get("1") or {}
+    if split_id is None and entry.get("imported") and not record["data"]["objects"]:   # uploaded G-code: already sliced
+        grams = entry.get("estimate_g")
+        return {"state": "ready", "kind": "gcode", "file": f"{record['name']}.gcode", "placed": True, "fits": True, "scale_ok": True,
+                "can_print": True, "reason": None,
+                "estimate": {"grams": round(grams) if grams is not None else None, "seconds": entry.get("estimate_s"), "rough": False}}
     if split_id is None:
         return {"state": "none", "can_print": False, "reason": "This project has no uploaded model"}
     split = splits.get_split(split_id, detail=True)
     placed = any((m.get("split") or {}).get("id") == split_id for m in record["models"])
-    out = {"state": "analysing", "file": split["source_name"], "placed": placed, "can_print": False, "reason": None}
+    out = {"state": "analysing", "kind": "model", "file": split["source_name"], "placed": placed, "can_print": False, "reason": None}
     analysis = split.get("analysis")
     if split["state"] == splits.FAILED and not analysis:
         return {**out, "state": "failed", "reason": split.get("error") or "The model couldn't be read"}
@@ -984,6 +1041,10 @@ def slice_and_print(project_id: int, body: dict) -> dict:
     if body.get("printer_id"):
         jobs._require_printer(body["printer_id"])
         _mutate(project_id, "data", lambda d: d["plates"][0].__setitem__("printer_id", body["printer_id"]))
+    if info.get("kind") == "gcode":      # already sliced: queue it as it is
+        _require_printers(get_project(project_id), {1})
+        queue_plate(project_id, 1, {"leveling": bool(body.get("leveling")), "timelapse": bool(body.get("timelapse"))})
+        return get_project(project_id)
     if not info["placed"]:
         place_whole_model(project_id)
     record = get_project(project_id)
