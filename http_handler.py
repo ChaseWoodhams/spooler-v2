@@ -1171,10 +1171,12 @@ class SPHandler(SimpleHTTPRequestHandler):
         if path == "/api/projects/upload":
             self._handle_project_upload(new_project=True)
             return
-        if len(parts) == 5 and parts[4] in ("auto-place", "fix-scale", "print"):
+        if len(parts) == 5 and parts[4] in ("auto-place", "fix-scale", "print", "lay-flat", "rotate"):
             actions = {
                 "auto-place": lambda: projects.auto_place(self._job_id()),
                 "fix-scale":  lambda: projects.fix_scale(self._job_id()),
+                "lay-flat":   lambda: projects.lay_flat(self._job_id()),
+                "rotate":     lambda: projects.rotate_quarter(self._job_id()),
                 "print":      lambda: projects.slice_and_print(self._job_id(), self._json_body()),
             }
             self._jobs_call(actions[parts[4]], broadcast=False)
