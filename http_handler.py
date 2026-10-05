@@ -657,7 +657,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._send_snapshot(lambda: outcome_prompt.snapshot_file(self._job_id()), "private, max-age=3600")
         elif self.path == "/api/failure-reasons":
             self._json({"failure_reasons": list(print_history.FAILURE_REASONS),
-                        "cancel_reasons": list(print_history.CANCEL_REASONS)})
+                        "cancel_reasons": list(print_history.CANCEL_REASONS),
+                        "labels": print_history.FAILURE_REASON_LABELS})
         elif self.path.startswith("/api/prints/export.csv"):
             self._send_prints_csv()
         elif self.path.startswith("/api/prints/"):

@@ -31,6 +31,12 @@ OUTCOMES       = ("completed", "cancelled", "failed", "unknown")
 FAILURE_REASONS = ("adhesion", "spaghetti", "warping", "layer_shift", "clog", "filament", "surface_quality",
                    "power_network", "other")
 CANCEL_REASONS  = FAILURE_REASONS + ("cancelled_on_purpose",)
+# What the UI shows for each reason id, served by GET /api/failure-reasons so the list lives only here.
+FAILURE_REASON_LABELS = {
+    "adhesion": "Adhesion / came loose", "spaghetti": "Spaghetti", "warping": "Warping", "layer_shift": "Layer shift",
+    "clog": "Clog / under-extrusion", "filament": "Filament ran out or tangled", "surface_quality": "Surface quality",
+    "power_network": "Power or network", "other": "Other", "cancelled_on_purpose": "Cancelled on purpose",
+}
 SEARCH_COLUMNS = ("file_name", "printer_name", "material", "filament_name", "vendor", "notes", "detail")
 PAGE_LIMIT_MAX = 200
 EXPORT_LIMIT   = 20000

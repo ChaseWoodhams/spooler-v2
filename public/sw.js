@@ -36,7 +36,7 @@ self.addEventListener("notificationclick", (e) => {
         body: JSON.stringify(extra.bed_cleared.body),
       }).then((r) => {
         if (r.ok) return;
-        // Signed out or refused: fall back to opening the printer so the user can answer there.
+        // Signed out, or refused (409: a newer print has ended since this notification): open the printer to answer there.
         return clients.openWindow(extra.url || "/");
       }).catch(() => clients.openWindow(extra.url || "/"))
     );

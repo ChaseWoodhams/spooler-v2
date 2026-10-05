@@ -6,12 +6,18 @@ const HISTORY_PAGE = 50;
 const PRINT_OUTCOME_LABEL = { completed: "Completed", cancelled: "Cancelled", failed: "Failed", unknown: "Outcome unknown" };
 const PRINT_OUTCOME_CLASS = { completed: "complete", cancelled: "cancelled", failed: "offline", unknown: "paused" };
 
-const FAILURE_REASON_LABEL = {
-  adhesion: "Adhesion / came loose", spaghetti: "Spaghetti", warping: "Warping", layer_shift: "Layer shift",
-  clog: "Clog / under-extrusion", filament: "Filament ran out or tangled", surface_quality: "Surface quality",
-  power_network: "Power or network", other: "Other", cancelled_on_purpose: "Cancelled on purpose",
-};
-const FAILURE_REASON_IDS = Object.keys(FAILURE_REASON_LABEL).filter(r => r !== "cancelled_on_purpose");
+// The reason ids and labels live on the backend (GET /api/failure-reasons); loadFailureReasons() fetches them once.
+let _failureReasons = { cancel_reasons: [], labels: {} };
+let _failureReasonsRequest = null;
+function loadFailureReasons() {
+  if (!_failureReasonsRequest) {
+    _failureReasonsRequest = fetch("/api/failure-reasons").then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(data => { _failureReasons = data; })
+      .catch(() => { _failureReasonsRequest = null; }); // try again next time; the form just has no reasons until then
+  }
+  return _failureReasonsRequest;
+}
+const failureReasonLabel = id => _failureReasons.labels[id] || id;
 
 let historyPrints = [];
 let historyTotal  = 0;
@@ -65,6 +71,7 @@ async function loadHistory(append = false) {
   params.set("offset", append ? historyPrints.length : 0);
   const request = ++_historyRequest;
   try {
+    await loadFailureReasons();
     const r = await fetch(`/api/prints?${params}`);
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
@@ -137,7 +144,7 @@ function historyDetail(p) {
     ["Cost", p.cost != null ? formatCost(p.cost) : "—"],
     ["Queue job", p.job_id ? `#${p.job_id}${detail?.job ? ` · ${detail.job.name}` : ""}` : "Started outside the queue"],
   ];
-  if (p.failure_reasons?.length) facts.push(["Failure reasons", p.failure_reasons.map(r => FAILURE_REASON_LABEL[r] || r).join(", ")]);
+  if (p.failure_reasons?.length) facts.push(["Failure reasons", p.failure_reasons.map(failureReasonLabel).join(", ")]);
   if (p.detail) facts.push(["Details", p.detail]);
   if (p.source === "imported") facts.push(["Source", "Imported from the previous history log"]);
 
@@ -171,8 +178,8 @@ function historyDetail(p) {
 }
 
 function historyOutcomeForm(p) {
-  const reasons = [...FAILURE_REASON_IDS, "cancelled_on_purpose"]
-    .map(r => `<label${r === "cancelled_on_purpose" && p.outcome !== "cancelled" ? " hidden" : ""}><input type="checkbox" data-history-reason="${p.id}" value="${r}"${(p.failure_reasons || []).includes(r) ? " checked" : ""}> ${escHtml(FAILURE_REASON_LABEL[r])}</label>`).join(" ");
+  const reasons = _failureReasons.cancel_reasons
+    .map(r => `<label${r === "cancelled_on_purpose" && p.outcome !== "cancelled" ? " hidden" : ""}><input type="checkbox" data-history-reason="${p.id}" value="${r}"${(p.failure_reasons || []).includes(r) ? " checked" : ""}> ${escHtml(failureReasonLabel(r))}</label>`).join(" ");
   const options = ["completed", "cancelled", "failed", "unknown"]
     .map(o => `<option value="${o}"${o === p.outcome ? " selected" : ""}>${escHtml(PRINT_OUTCOME_LABEL[o])}</option>`).join("");
   return `<fieldset class="history-outcome-form">

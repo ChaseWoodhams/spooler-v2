@@ -4,9 +4,11 @@
    Plain script: used by the dashboard (index.html) and the project page (slicer.html).
    Public: OutcomePrompt.open(printerId), OutcomePrompt.awaiting() -> Promise<array of printer ids awaiting>. */
 const OutcomePrompt = (() => {
-  const REASONS = [["adhesion", "Adhesion / came loose"], ["spaghetti", "Spaghetti"], ["warping", "Warping"],
-    ["layer_shift", "Layer shift"], ["clog", "Clog / under-extrusion"], ["filament", "Filament ran out or tangled"],
-    ["surface_quality", "Surface quality"], ["power_network", "Power or network"], ["other", "Other"]];
+  // The failure reasons come from the backend (GET /api/failure-reasons) so the list lives in one place.
+  async function failureReasons() {
+    const data = await api("GET", "/api/failure-reasons");
+    return data.failure_reasons.map(id => [id, data.labels[id] || id]);
+  }
   const esc = s => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   const say = (msg, bad) => {
     if (typeof toast === "function") return toast(msg, bad);
@@ -66,11 +68,13 @@ const OutcomePrompt = (() => {
     };
   }
 
-  function sheet(item) {
+  async function sheet(item) {
+    let reasonList;
+    try { reasonList = await failureReasons(); } catch (e) { say(`Couldn't load the failure reasons: ${e.message}`, true); return; }
     const canReprint = !!(item.project_id && item.plate_id);
     show(`${heading(item)}
       <fieldset style="border:1px solid var(--border,#2a2d38);border-radius:8px"><legend>What went wrong? (pick at least one)</legend>
-        ${REASONS.map(([id, label]) => `<label style="display:block;padding:4px 0"><input type="checkbox" data-reason value="${id}"> ${esc(label)}</label>`).join("")}</fieldset>
+        ${reasonList.map(([id, label]) => `<label style="display:block;padding:4px 0"><input type="checkbox" data-reason value="${id}"> ${esc(label)}</label>`).join("")}</fieldset>
       <label>Note (optional) <textarea data-note rows="2" style="width:100%"></textarea></label>
       <label><input type="checkbox" data-bed checked> Bed cleared</label>
       ${canReprint ? '<label><input type="checkbox" data-reprint> Reprint this plate next</label>' : ""}
