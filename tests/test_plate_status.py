@@ -168,6 +168,18 @@ class PlateStatusTests(unittest.TestCase):
         states = self.states()
         self.assertEqual((states[1], states[2], states[3]), ("queued", "waiting", "sliced"))
 
+    def test_a_plate_whose_job_waits_on_another_job_is_waiting_until_that_job_completes(self):
+        for n in (1, 2):
+            self.slice_plate(n)
+        first = self.plate_job(1, printer_id="p1")
+        held = self.plate_job(2)
+        with database.transaction() as conn:
+            conn.execute("INSERT INTO job_holds (job_id, after_job_id, created_at) VALUES (?, ?, 1)", (held["id"], first["id"]))
+        self.assertEqual((self.states()[1], self.states()[2]), ("queued", "waiting"))
+        self.run_job(first, "plate1.gcode")
+        self.push(9, "plate1.gcode", 50, 50)
+        self.assertEqual((self.states()[1], self.states()[2]), ("printed_ok", "queued"))
+
     def test_a_plate_on_the_printer_is_printing_then_printed_ok(self):
         self.slice_plate(5)
         job = self.plate_job(5)

@@ -51,6 +51,39 @@ def waiting_on(job_id: int) -> list:
         return [_describe(conn, row) for row in rows if not _satisfied(conn, row)]
 
 
+def _queued_on_plate(conn, project_id: int, plate_id: int) -> list:
+    return [r["id"] for r in conn.execute("SELECT id FROM jobs WHERE project_id = ? AND plate_id = ? AND state = ?",
+                                          (project_id, plate_id, jobs.QUEUED))]
+
+
+def _waits_for(conn, job_id: int) -> list:
+    """Ids of the queued Jobs that could still release this Job's unsatisfied holds."""
+    targets = []
+    for row in conn.execute("SELECT * FROM job_holds WHERE job_id = ?", (job_id,)).fetchall():
+        if _satisfied(conn, row):
+            continue
+        if row["after_job_id"] is not None:
+            targets.append(row["after_job_id"])
+        else:
+            targets += _queued_on_plate(conn, row["after_project_id"], row["after_plate_id"])
+    return targets
+
+
+def _would_deadlock(conn, job_id: int, targets: list) -> bool:
+    """Whether making `job_id` wait for any of `targets` closes a circle: a target that (through its own holds, on
+    jobs or plates) already waits, directly or not, for `job_id`."""
+    seen, pending = set(), list(targets)
+    while pending:
+        current = pending.pop()
+        if current == job_id:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        pending += _waits_for(conn, current)
+    return False
+
+
 def add(job_id: int, body: dict) -> dict:
     after_job = body.get("after_job_id")
     project, plate = body.get("after_project_id"), body.get("after_plate_id")
@@ -69,14 +102,16 @@ def add(job_id: int, body: dict) -> dict:
                 raise jobs.JobError("A job can't wait for itself")
             if conn.execute("SELECT 1 FROM jobs WHERE id = ?", (after_job,)).fetchone() is None:
                 raise jobs.JobError("Job to wait for not found", 404)
-            if conn.execute("SELECT 1 FROM job_holds WHERE job_id = ? AND after_job_id = ?", (after_job, job_id)).fetchone():
-                raise jobs.JobError("That job is already waiting for this one", 409)
+            targets = [after_job]
             plate = None
         else:
             if plate is None or not all(isinstance(v, int) and not isinstance(v, bool) for v in (project, plate)):
                 raise jobs.JobError("after_project_id and after_plate_id must be numbers")
             if conn.execute("SELECT 1 FROM projects WHERE id = ?", (project,)).fetchone() is None:
                 raise jobs.JobError("Project not found", 404)
+            targets = _queued_on_plate(conn, project, plate)
+        if _would_deadlock(conn, job_id, targets):
+            raise jobs.JobError("That would make jobs wait for each other in a circle, so none of them could start", 409)
         conn.execute("INSERT INTO job_holds (job_id, after_job_id, after_project_id, after_plate_id, created_at) "
                      "VALUES (?, ?, ?, ?, ?)", (job_id, after_job, project, plate, time.time()))
         jobs._log(conn, job_id, "held", f"waiting for {'job ' + str(after_job) if after_job is not None else f'plate {plate}'}")

@@ -31,6 +31,12 @@ OUTCOMES       = ("completed", "cancelled", "failed", "unknown")
 FAILURE_REASONS = ("adhesion", "spaghetti", "warping", "layer_shift", "clog", "filament", "surface_quality",
                    "power_network", "other")
 CANCEL_REASONS  = FAILURE_REASONS + ("cancelled_on_purpose",)
+# What the UI shows for each reason id, served by GET /api/failure-reasons so the list lives only here.
+FAILURE_REASON_LABELS = {
+    "adhesion": "Adhesion / came loose", "spaghetti": "Spaghetti", "warping": "Warping", "layer_shift": "Layer shift",
+    "clog": "Clog / under-extrusion", "filament": "Filament ran out or tangled", "surface_quality": "Surface quality",
+    "power_network": "Power or network", "other": "Other", "cancelled_on_purpose": "Cancelled on purpose",
+}
 SEARCH_COLUMNS = ("file_name", "printer_name", "material", "filament_name", "vendor", "notes", "detail")
 PAGE_LIMIT_MAX = 200
 EXPORT_LIMIT   = 20000
@@ -289,12 +295,45 @@ def search(q: str = "", printer_id: str | None = None, outcome: str | None = Non
     return {"prints": [_to_print(r) for r in rows], "total": summary["prints"], "summary": summary}
 
 
-def get_print(print_id: int) -> dict:
+def find_print(print_id: int) -> dict | None:
+    """The Print's record without its Job and timeline, or None."""
     with database.transaction() as conn:
         row = conn.execute("SELECT * FROM prints WHERE id = ?", (print_id,)).fetchone()
-    if row is None:
+    return _to_print(row) if row else None
+
+
+def latest_print(printer_id: str) -> dict | None:
+    """The printer's most recent Print (still printing or closed), or None when it has never printed."""
+    with database.transaction() as conn:
+        row = conn.execute("SELECT * FROM prints WHERE printer_id = ? ORDER BY id DESC LIMIT 1", (printer_id,)).fetchone()
+    return _to_print(row) if row else None
+
+
+def latest_closed_prints() -> list:
+    """Each printer's latest Print, for printers whose latest Print has closed, oldest end first."""
+    with database.transaction() as conn:
+        rows = conn.execute("SELECT * FROM prints p WHERE outcome IS NOT NULL AND id = "
+                            "(SELECT MAX(id) FROM prints WHERE printer_id = p.printer_id) ORDER BY ended_at, id").fetchall()
+    return [_to_print(r) for r in rows]
+
+
+def set_end_snapshot(print_id: int, relative_path: str) -> None:
+    with database.transaction() as conn:
+        conn.execute("UPDATE prints SET end_snapshot = ? WHERE id = ?", (relative_path, print_id))
+
+
+def printer_standing(printer_id: str) -> dict:
+    """`running` (a Print is open) and `last_ended_at` (end of the printer's latest finished Print, or None)."""
+    with database.transaction() as conn:
+        row = conn.execute("SELECT MAX(ended_at) AS at, COUNT(*) FILTER (WHERE outcome IS NULL) AS running "
+                           "FROM prints WHERE printer_id = ?", (printer_id,)).fetchone()
+    return {"running": bool(row["running"]), "last_ended_at": row["at"]}
+
+
+def get_print(print_id: int) -> dict:
+    record = find_print(print_id)
+    if record is None:
         raise jobs.JobError("Print not found", 404)
-    record = _to_print(row)
     record["job"] = jobs.get_job(record["job_id"]) if record["job_id"] else None
     record["job_events"] = jobs.job_events(record["job_id"]) if record["job"] else []
     return record
@@ -309,10 +348,10 @@ def update_notes(print_id: int, notes) -> dict:
     return get_print(print_id)
 
 
-def set_outcome(print_id: int, outcome, failure_reasons=None, note=None) -> dict:
+def set_outcome(print_id: int, outcome, failure_reasons=None, notes=None) -> dict:
     """Record the user's answer for a finished print: it overrides what the printer reported and confirms it.
     A failed print needs at least one failure reason; a cancelled one takes optional reasons, including
-    cancelled on purpose. A note, when given, replaces the print's notes."""
+    cancelled on purpose. `notes`, when given, replaces the print's notes."""
     if outcome not in OUTCOMES:
         raise jobs.JobError(f"outcome must be one of: {', '.join(OUTCOMES)}")
     reasons = list(dict.fromkeys(failure_reasons or []))
@@ -329,7 +368,7 @@ def set_outcome(print_id: int, outcome, failure_reasons=None, note=None) -> dict
             raise jobs.JobError("The print is still running", 409)
         conn.execute("UPDATE prints SET outcome = ?, failure_reasons = ?, outcome_unconfirmed = 0, "
                      "notes = COALESCE(?, notes) WHERE id = ?",
-                     (outcome, json.dumps(reasons), None if note is None else str(note)[:4000], print_id))
+                     (outcome, json.dumps(reasons), None if notes is None else str(notes)[:4000], print_id))
     return get_print(print_id)
 
 

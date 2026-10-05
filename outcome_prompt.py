@@ -22,12 +22,12 @@ import database
 import jobs
 import print_history
 import push
+import snapshots
 import state
 
 REMINDER_DELAY_S = int(os.getenv("REMINDER_DELAY_S", str(30 * 60)))
 REMINDER_CHECK_S = 60
 SNAPSHOT_TIMEOUT_S = 5
-SNAPSHOT_MAX_BYTES = 4_000_000
 
 _reminded: dict = {}  # print id → when it was last pushed or reminded about (kept in memory; a restart re-reminds once)
 
@@ -120,38 +120,6 @@ def notify(record: dict) -> None:
         print(f"[Outcome] Could not notify about print {record.get('id')}: {e}")
 
 
-def first_jpeg(stream: bytes) -> bytes | None:
-    """The first complete JPEG in a multipart (MJPEG) stream, or None when the stream stops before one ends."""
-    start = stream.find(b"\xff\xd8")
-    end = stream.find(b"\xff\xd9", start + 2) if start >= 0 else -1
-    return stream[start:end + 2] if end >= 0 else None
-
-
-def fetch_frame(camera_url: str) -> bytes | None:
-    """One frame from the printer's camera stream."""
-    parsed = urllib.parse.urlparse(camera_url)
-    path = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
-    import http.client
-    conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=SNAPSHOT_TIMEOUT_S)
-    try:
-        conn.request("GET", path)
-        resp = conn.getresponse()
-        if resp.status != 200:
-            return None
-        buffer = b""
-        while len(buffer) < SNAPSHOT_MAX_BYTES:
-            chunk = resp.read(8192)
-            if not chunk:
-                break
-            buffer += chunk
-            frame = first_jpeg(buffer)
-            if frame:
-                return frame
-    finally:
-        conn.close()
-    return None
-
-
 def snapshot_path(relative: str) -> Path:
     return jobs._data_dir / relative
 
@@ -163,7 +131,7 @@ def take_snapshot(record: dict) -> str | None:
     if not url:
         return None
     try:
-        frame = fetch_frame(url)
+        frame = snapshots.grab_frame(url, timeout=SNAPSHOT_TIMEOUT_S)
     except (OSError, socket.error) as e:
         print(f"[Outcome] No snapshot from {record['printer_name']}: {e}")
         return None
@@ -173,17 +141,15 @@ def take_snapshot(record: dict) -> str | None:
     path = snapshot_path(relative)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(frame)
-    with database.transaction() as conn:
-        conn.execute("UPDATE prints SET end_snapshot = ? WHERE id = ?", (relative, record["id"]))
+    print_history.set_end_snapshot(record["id"], relative)
     return relative
 
 
 def snapshot_file(print_id: int) -> Path:
-    with database.transaction() as conn:
-        row = conn.execute("SELECT end_snapshot FROM prints WHERE id = ?", (print_id,)).fetchone()
-    if row is None:
+    record = print_history.find_print(print_id)
+    if record is None:
         raise jobs.JobError("Print not found", 404)
-    path = snapshot_path(row["end_snapshot"]) if row["end_snapshot"] else None
+    path = snapshot_path(record["end_snapshot"]) if record["end_snapshot"] else None
     if path is None or not path.is_file():
         raise jobs.JobError("No snapshot for this print", 404)
     return path
@@ -193,15 +159,11 @@ def snapshot_file(print_id: int) -> Path:
 
 def awaiting() -> list:
     """Each printer's latest closed Print while its Outcome is unconfirmed or a queued Job waits for Bed cleared."""
-    with database.transaction() as conn:
-        rows = conn.execute("SELECT * FROM prints p WHERE outcome IS NOT NULL AND id = "
-                            "(SELECT MAX(id) FROM prints WHERE printer_id = p.printer_id) ORDER BY ended_at, id").fetchall()
     queued = {j["printer_id"] for j in jobs.list_jobs() if j["state"] == jobs.QUEUED and j["printer_id"]}
     out = []
-    for row in rows:
-        if state.printers.get(row["printer_id"]) is None:
+    for record in print_history.latest_closed_prints():
+        if state.printers.get(record["printer_id"]) is None:
             continue
-        record = print_history._to_print(row)
         needs_bed = record["printer_id"] in queued and not bed_cleared.status(record["printer_id"])["valid"]
         if not (record["outcome_unconfirmed"] or needs_bed):
             continue
@@ -226,9 +188,7 @@ def send_due_reminders(now: float | None = None) -> int:
         if now - _reminded.get(item["print_id"], item["ended_at"] or now) < REMINDER_DELAY_S:
             continue
         _reminded[item["print_id"]] = now
-        with database.transaction() as conn:
-            row = conn.execute("SELECT * FROM prints WHERE id = ?", (item["print_id"],)).fetchone()
-        send_push(*push_payload(print_history._to_print(row), reminder=True))
+        send_push(*push_payload(print_history.find_print(item["print_id"]), reminder=True))
         sent += 1
     return sent
 

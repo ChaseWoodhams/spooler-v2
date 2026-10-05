@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -438,15 +439,31 @@ def notifier(title: str, body: str) -> None:
         print(f"[Jobs] Notification failed: {e}")
 
 
-def acknowledged_warnings(job_id: int) -> list:
-    """The preflight warnings the user accepted when queueing the job (the latest acknowledgement)."""
+def warning_key(check_id: str | None, title: str) -> tuple:
+    """What identifies a warning across checks: its check id and its title with the numbers blanked out, so a
+    warning whose figure moved ("Spool #7 has 120 g left" → "…95 g left") is still the same warning."""
+    return (check_id, re.sub(r"\d+(?:[.,]\d+)*", "#", title))
+
+
+def _same_warning(accepted: tuple, current: tuple) -> bool:
+    return accepted[1] == current[1] and (accepted[0] is None or accepted[0] == current[0])
+
+
+def _acknowledged_entries(job_id: int) -> list:
+    """The latest acknowledgement as (check id or None, title) pairs; older records stored bare titles."""
     with database.transaction() as conn:
         row = conn.execute("SELECT detail FROM job_events WHERE job_id = ? AND event = 'warnings_acknowledged' "
                            "ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
     try:
-        return list(json.loads(row["detail"])) if row else []
+        items = json.loads(row["detail"]) if row else []
     except ValueError:
         return []
+    return [(i.get("id"), i.get("title", "")) if isinstance(i, dict) else (None, str(i)) for i in items]
+
+
+def acknowledged_warnings(job_id: int) -> list:
+    """The titles of the preflight warnings the user accepted when queueing the job (the latest acknowledgement)."""
+    return [title for _, title in _acknowledged_entries(job_id)]
 
 
 def acknowledge_warnings(job_id: int, printer_id: str | None = None) -> dict:
@@ -455,8 +472,9 @@ def acknowledge_warnings(job_id: int, printer_id: str | None = None) -> dict:
     report = preflight.check_job_id(job_id, printer_id)
     if not report["can_start"]:
         raise JobError("Preflight failed: " + "; ".join(c["title"] for c in report["checks"] if c["level"] == "fail"), 409)
-    titles = [c["title"] for c in report["checks"] if c["level"] == "warn"]
-    log_event(job_id, "warnings_acknowledged", json.dumps(titles))
+    accepted = [{"id": c["id"], "title": c["title"]} for c in report["checks"] if c["level"] == "warn"]
+    titles = [w["title"] for w in accepted]
+    log_event(job_id, "warnings_acknowledged", json.dumps(accepted))
     return {"job_id": job_id, "acknowledged": titles}
 
 
@@ -497,10 +515,13 @@ async def _start_job(job_id: int, printer_id: str | None, acknowledge_warnings: 
     import preflight  # imported here because preflight imports this module
     report = await asyncio.get_running_loop().run_in_executor(None, preflight.check_job, job, printer)
     failed = [c["title"] for c in report["checks"] if c["level"] == "fail"]
-    warnings = [c["title"] for c in report["checks"] if c["level"] == "warn"]
+    warning_checks = [c for c in report["checks"] if c["level"] == "warn"]
+    warnings = [c["title"] for c in warning_checks]
     if failed:
         raise JobError("Preflight failed: " + "; ".join(failed), 409)
-    new_warnings = [w for w in warnings if w not in acknowledged_warnings(job_id)]
+    accepted = [warning_key(*e) for e in _acknowledged_entries(job_id)]
+    new_warnings = [c["title"] for c in warning_checks
+                    if not any(_same_warning(a, warning_key(c["id"], c["title"])) for a in accepted)]
     if new_warnings and not acknowledge_warnings:
         raise JobError(("New preflight warnings since this job was queued: " if unattended else
                         "Review the preflight warnings before starting: ") + "; ".join(new_warnings), 409)

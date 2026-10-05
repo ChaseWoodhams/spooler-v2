@@ -147,6 +147,10 @@ class JobsApiTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/api/prints?unconfirmed=1")[1]["total"], 0)
         status, reasons = self.call("GET", "/api/failure-reasons")
         self.assertEqual((status, len(reasons["failure_reasons"])), (200, 9))
+        self.assertEqual(reasons["cancel_reasons"], reasons["failure_reasons"] + ["cancelled_on_purpose"])
+        self.assertEqual(set(reasons["labels"]), set(reasons["cancel_reasons"]))  # the one list of labels the UI renders
+        self.assertEqual(reasons["labels"]["adhesion"], "Adhesion / came loose")
+        self.assertEqual(reasons["labels"]["cancelled_on_purpose"], "Cancelled on purpose")
 
         self.assertEqual(self.call("GET", "/api/prints?outcome=exploded")[0], 400)
         self.assertEqual(self.call("GET", "/api/prints?since=yesterday")[0], 400)
