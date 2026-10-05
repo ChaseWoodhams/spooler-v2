@@ -691,7 +691,7 @@ class SPHandler(SimpleHTTPRequestHandler):
         elif (
             PROXY_SPOOLMAN
             and "text/html" in self.headers.get("Accept", "")
-            and self.path not in ("/", "")
+            and self.path.split("?")[0] not in ("/", "")
             and not Path(self.path.split("?")[0]).suffix
         ):
             # Spoolman SPA sub-route (e.g. /spools after client-side navigation + refresh)

@@ -1,7 +1,7 @@
 /* Spooler project workspace – the Print step: the project page. A progress header, a printer card for each printer, a
    colour-coded map of every plate beside a Next up list, and a detail card for the selected plate. Mounted by main.js
    (which owns the step bar); reads /api/projects/<id>/status, /api/projects/<id>/jobs and /api/printers, and polls them
-   while the step is on screen. Reprint, Hold and Bed cleared wait for their own backend and show disabled or not at all. */
+   while the step is on screen. Holds, Reprint, the queue-time warning check and each printer's auto-start toggle use the jobs and printer endpoints. */
 
 const STATUS = {
   unsliced: "Not sliced", sliced: "Sliced", waiting: "Waiting on plate", queued: "Queued",
@@ -23,6 +23,11 @@ let printers = [];
 let awaiting = new Set();   // printer ids whose last print is waiting for an answer (OutcomePrompt)
 let focusedPrinter = false; // a push deep link (?printer=) is scrolled to once
 const focusPrinterId = new URLSearchParams(location.search).get("printer"); // read at load: opening a project rewrites the URL
+let allJobs = [];           // GET /api/jobs: every Job with its holds (the project list does not carry them)
+let autoStart = {};         // printer id -> whether Bed cleared releases the next queued Job on it
+let holdPicker = null;      // plate id whose "Hold after..." chooser is open
+let holdChoice = "";        // the chooser's current value: "plate:<id>" or "job:<id>"
+let warnPanel = null;       // { jobId, titles }: warnings found when queueing that wait for an accept
 let selected = null;
 let timer = null;
 
@@ -72,8 +77,10 @@ function printerCards() {
       : running ? ["printing", "Printing", `${plate ? esc(plate.name) : esc(running.name)}${layers}`]
       : ["sliced", "Free", queued ? `${plural(queued, "plate")} queued for it` : "Nothing queued for it"];
     const asking = awaiting.has(printer.id);
+    const auto = autoStart[printer.id] !== false;
     return `<div class="pp-card pp-printer st-${cls}" id="pp-printer-${esc(printer.id)}"><b>${esc(printer.name)}</b> <span class="pp-chip st-${cls}">${label}</span>
       <div class="slicer-muted">${note}</div>
+      <label class="pp-autostart" title="When on, Bed cleared starts the next queued plate on this printer by itself"><input type="checkbox" data-autostart="${esc(printer.id)}"${auto ? " checked" : ""}> Auto-start next plate</label>
       ${asking ? `<button type="button" class="btn btn-primary btn-sm" data-outcome="${esc(printer.id)}">Print ended: Printed OK · Bed cleared / Failed…</button>` : ""}</div>`;
   }).join("")}</div>`;
 }
@@ -114,18 +121,40 @@ function detail() {
   }
   if (plate.status === "queued" || plate.status === "waiting") {
     actions.push(`<a class="btn btn-primary btn-sm" href="/?review=${plate.job_id}" title="Preview the toolpath, run the preflight checks and start">Review &amp; start</a>`);
-    actions.push(btn("hold", "Hold after…", false, disabled("Holding a plate for another is not available yet")));
+    actions.push(btn("hold", "Hold after…", false, ' title="Wait for another plate or Job to print OK first"'));
   }
-  if (plate.status === "failed") actions.push(btn("reprint", "Reprint", true, disabled("Reprinting a failed plate is not available yet")));
+  if (plate.status === "failed") actions.push(btn("reprint", "Reprint", true, ' title="Queue this plate again from its stored G-code"'));
   actions.push(btn("open", "Open in Plates", false));
   if (host.hasAssembly?.()) actions.push(btn("assembly", "Assembly order", false, ' title="Which parts join in what order, from the Split step"'));
+  const job = plate.job_id ? allJobs.find(j => j.id === plate.job_id) : null;
+  const holds = job?.holds || [];
+  const holdName = h => h.after_job_id != null ? `Job ${esc(allJobs.find(j => j.id === h.after_job_id)?.name || h.after_job_id)}`
+    : esc(plateOf(h.after_plate_id)?.name || `plate ${h.after_plate_id}`);
+  const holdList = holds.length ? `<div class="pp-holds">${holds.map(h =>
+    `<span class="pp-hold${h.satisfied ? " done" : ""}">Hold: after ${holdName(h)}${h.satisfied ? " (done)" : ""}
+      <button type="button" class="btn btn-secondary btn-sm" data-act="unhold" data-hold="${h.id}" aria-label="Remove hold">×</button></span>`).join("")}</div>` : "";
+  const otherPlates = status.plates.filter(p => p.id !== plate.id && p.status !== "printed_ok");
+  const otherJobs = allJobs.filter(j => ["queued", "starting", "printing"].includes(j.state) && j.id !== plate.job_id
+    && !(j.project_id === host.projectId() && j.plate_id != null));
+  const picker = holdPicker === plate.id && job ? `<div class="pp-holdpicker"><select data-holdchoice aria-label="Hold ${esc(plate.name)} after">
+      <option value="">Choose what to wait for…</option>
+      ${otherPlates.length ? `<optgroup label="Plates in this project">${otherPlates.map(p =>
+        `<option value="plate:${p.id}"${holdChoice === "plate:" + p.id ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</optgroup>` : ""}
+      ${otherJobs.length ? `<optgroup label="Other Jobs">${otherJobs.map(j =>
+        `<option value="job:${j.id}"${holdChoice === "job:" + j.id ? " selected" : ""}>${esc(j.name)}</option>`).join("")}</optgroup>` : ""}
+    </select>${btn("hold-add", "Hold", true)}${btn("hold-cancel", "Cancel", false)}</div>` : "";
+  const warnBox = warnPanel && job && warnPanel.jobId === job.id ? `<div class="pp-warnbox" role="alert"><b>Preflight warnings</b>
+    <ul>${warnPanel.titles.map(t => `<li>${esc(t)}</li>`).join("")}</ul>
+    <div class="slicer-muted">${warnPanel.canStart ? "Accept them now and Bed cleared can start this plate without asking again." : "Other checks are failing: open Review &amp; start to see them."}</div>
+    <div class="pp-actions">${btn("accept-warnings", "Accept warnings", true, warnPanel.canStart ? "" : disabled("Fix the failing checks first"))}${btn("dismiss-warnings", "Not now", false)}</div></div>` : "";
   const picture = `/api/projects/${host.projectId()}/plates/${plate.id}/preview.png?v=${plate.layout}`;
   return `<div class="pp-card"><div><b>${esc(plate.name)}</b> ${chip(plate.status)}</div>
     ${plate.parts ? `<img class="pp-preview" src="${picture}" alt="${esc(plate.name)} as laid out" width="320" height="240" loading="lazy">` : ""}
     <div class="slicer-muted">${facts || "No slice yet"}</div>
     ${plate.status === "waiting" ? '<div class="slicer-muted">Waiting on another plate to print OK first</div>' : ""}
     ${editable ? `<label class="pp-printon">Print on <select data-printon aria-label="Print ${esc(plate.name)} on">${options}</select></label>` : ""}
-    <div class="pp-actions">${actions.join("")}</div></div>`;
+    ${warnBox}${holdList}
+    <div class="pp-actions">${actions.join("")}</div>${picker}</div>`;
 }
 
 function render() {
@@ -142,10 +171,13 @@ async function refresh() {
   if (!shown) return;
   const id = host.projectId();
   try {
-    const [s, j, p] = await Promise.all([host.api("GET", `/api/projects/${id}/status`), host.api("GET", `/api/projects/${id}/jobs`),
-      host.api("GET", "/api/printers")]);
+    const [s, j, p, all] = await Promise.all([host.api("GET", `/api/projects/${id}/status`), host.api("GET", `/api/projects/${id}/jobs`),
+      host.api("GET", "/api/printers"), host.api("GET", "/api/jobs")]);
+    const cc1 = p.filter(x => x.printer_type === "cc1");
+    const beds = await Promise.all(cc1.map(x => host.api("GET", `/api/printers/${encodeURIComponent(x.id)}/bed-cleared`).catch(() => null)));
     if (!shown || host.projectId() !== id) return;
-    status = s; jobs = j.jobs; printers = p.filter(x => x.printer_type === "cc1");
+    status = s; jobs = j.jobs; printers = cc1; allJobs = all.jobs;
+    autoStart = Object.fromEntries(cc1.map((x, i) => [x.id, beds[i]?.auto_start !== false]));
     awaiting = new Set((await OutcomePrompt.awaiting()).map(a => a.printer_id));
     render();
     const focus = focusPrinterId;
@@ -157,15 +189,47 @@ async function refresh() {
   if (shown) timer = setTimeout(refresh, POLL_MS);
 }
 
+/** Show a just-queued Job's preflight warnings so the user can accept them once. */
+async function checkWarnings(job) {
+  warnPanel = null;
+  if (!job?.id) return;
+  try {
+    const report = await host.api("GET", `/api/jobs/${job.id}/preflight`);
+    const titles = report.checks.filter(c => c.level === "warn").map(c => c.title);
+    if (titles.length) warnPanel = { jobId: job.id, titles, canStart: report.can_start };
+  } catch (err) { /* the Review dialog shows the checks */ }
+}
+
 async function act(name, button) {
   const plate = plateOf(selected);
   if (name === "open") return host.onOpenPlate(selected);
   if (name === "assembly") return host.onOpenAssembly();
   if (name === "slice") await host.onSlice(selected);
   else if (name === "queue") {
-    await host.api("POST", `/api/projects/${host.projectId()}/plates/${selected}/queue`, plate.printer_id ? { printer_id: plate.printer_id } : {});
+    const queued = await host.api("POST", `/api/projects/${host.projectId()}/plates/${selected}/queue`, plate.printer_id ? { printer_id: plate.printer_id } : {});
     host.toast(`${plate.name} is in the queue`);
-  } else if (name === "assign") {
+    checkWarnings(queued).then(render);   // the preflight can take a moment: do not hold the button for it
+  } else if (name === "hold") { holdPicker = holdPicker === plate.id ? null : plate.id; holdChoice = ""; return render(); }
+  else if (name === "hold-cancel") { holdPicker = null; return render(); }
+  else if (name === "hold-add") {
+    const [kind, id] = holdChoice.split(":");
+    if (!id) throw new Error("Choose what to wait for first");
+    await host.api("POST", `/api/jobs/${plate.job_id}/holds`, kind === "job" ? { after_job_id: Number(id) }
+      : { after_project_id: host.projectId(), after_plate_id: Number(id) });
+    holdPicker = null;
+    host.toast(`${plate.name} now waits for ${kind === "job" ? "that Job" : plateOf(Number(id))?.name}`);
+  } else if (name === "unhold") {
+    await host.api("DELETE", `/api/jobs/${plate.job_id}/holds/${button.dataset.hold}`);
+    host.toast("Hold removed");
+  } else if (name === "reprint") {
+    await host.api("POST", `/api/projects/${host.projectId()}/plates/${selected}/reprint`, {});
+    host.toast(`${plate.name} is back in the queue`);
+  } else if (name === "accept-warnings") {
+    await host.api("POST", `/api/jobs/${warnPanel.jobId}/acknowledge-warnings`, {});
+    warnPanel = null;
+    host.toast("Warnings accepted: later auto-starts will go ahead on them");
+  } else if (name === "dismiss-warnings") warnPanel = null;
+  else if (name === "assign") {
     const ids = jobs.filter(j => j.state === "queued").map(j => j.id), ready = printers.filter(p => p.connected).map(p => p.id);
     await host.api("POST", "/api/jobs/assign", { job_ids: ids, printer_ids: ready });
     host.toast(`Spread ${plural(ids.length, "plate")} over ${plural(ready.length, "printer")}`);
@@ -186,6 +250,18 @@ function bind() {
     } else if (cell) { selected = Number(cell.dataset.plate); render(); }
   });
   root.addEventListener("change", async e => {
+    const choice = e.target.closest("[data-holdchoice]");
+    if (choice) { holdChoice = choice.value; return; }
+    const toggle = e.target.closest("[data-autostart]");
+    if (toggle) {
+      const printerId = toggle.dataset.autostart, enabled = toggle.checked;
+      try {
+        await host.api("POST", `/api/printers/${encodeURIComponent(printerId)}/auto-start`, { enabled });
+        autoStart[printerId] = enabled;
+        host.toast(`Auto-start ${enabled ? "on" : "off"} for ${printerName(printerId)}`);
+      } catch (err) { toggle.checked = !enabled; host.toast(err.message, true); }
+      return;
+    }
     const select = e.target.closest("[data-printon]");
     if (!select) return;
     const plate = plateOf(selected), printerId = select.value || null;
