@@ -1289,8 +1289,15 @@ def slice_and_print(project_id: int, body: dict) -> dict:
         raise jobs.JobError(info["reason"] or "The model can't be printed yet", 409)
     _apply_quick_choices(project_id, body)
     if info.get("kind") == "gcode":      # already sliced: queue it as it is
-        _require_printers(get_project(project_id), {1})
-        queue_plate(project_id, 1, {"leveling": bool(body.get("leveling")), "timelapse": bool(body.get("timelapse"))})
+        record = get_project(project_id)
+        _require_printers(record, {1})
+        plate = record["data"]["plates"][0]
+        if body.get("review"):      # the preflight report first, as for a sliced model
+            return {**record, "review": _plate_preflight(project_id, plate, record["data"]["bed"])}
+        acknowledge = bool(body.get("acknowledge_warnings"))
+        job = queue_plate(project_id, 1, {"leveling": bool(body.get("leveling")), "timelapse": bool(body.get("timelapse")), "acknowledge": acknowledge})
+        if acknowledge:
+            jobs.acknowledge_warnings(job["id"], plate.get("printer_id"))
         return get_project(project_id)
     if not info["placed"]:
         place_whole_model(project_id)
