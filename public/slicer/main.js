@@ -5,6 +5,7 @@
 import * as orient from "./orient.js?v=1";
 import { SettingsPanel } from "./settings.js?v=4";
 import { splitStep } from "./split-step.js";
+import { projectPage } from "./project-page.js";
 import { Viewport, featureColor } from "./viewport.js?v=4";
 
 const $ = id => document.getElementById(id);
@@ -13,7 +14,7 @@ const clone = v => JSON.parse(JSON.stringify(v));
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const listNames = names => names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0] || "";
 
-const STEPS = [["model", "Model"], ["split", "Split"], ["plates", "Plates"], ["slice", "Slice"], ["queue", "Queue"]];
+const STEPS = [["model", "Model"], ["split", "Split"], ["plates", "Plates"], ["slice", "Slice"], ["queue", "Queue"], ["print", "Print"]];
 const JOB_STATES = {
   queued: ["Queued", "idle"], starting: ["Starting", "warmingup"], printing: ["Printing", "printing"], completed: ["Printed", "complete"],
   cancelled: ["Cancelled", "cancelled"], failed: ["Failed", "offline"], unknown: ["Outcome unknown", "paused"],
@@ -162,6 +163,19 @@ async function boot() {
   state.settings = new SettingsPanel({
     tabs: $("settings-tabs"), pages: $("settings-pages"), body: $("settings-body"), search: $("settings-search"),
     mode: $("settings-mode"), onChange: changeSetting, onReset: resetSettings, onTab: tab => { state.settingsTab = tab; renderSettings(); },
+  });
+  projectPage.attach({
+    api, toast,
+    projectId: () => state.project.id,
+    sliceState: plateId => sliceEntry(plateId)?.state,
+    onSlice: plateId => requestPlateSlice(plateId),
+    onOpenPlate: plateId => { selectPlate(plateId); setStep("plates"); },
+    onSetPrinter: (plateId, printerId) => {
+      const plate = data().plates.find(p => p.id === plateId);
+      if (!plate) return;
+      plate.printer_id = printerId;
+      changed();
+    },
   });
   splitStep.attach({
     api, toast,
@@ -317,6 +331,14 @@ async function chooseSpool(value) {
   }
 }
 
+async function requestPlateSlice(plateId) {
+  await flushSave();
+  applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${plateId}/slice`, {}));
+  renderAll({ geometry: false });
+  schedulePoll();
+  toast("Slicing…");
+}
+
 async function sliceAndSend(plateIds) {
   await flushSave();
   const url = plateIds ? `/api/projects/${state.project.id}/plates/${plateIds[0]}/slice` : `/api/projects/${state.project.id}/slice`;
@@ -406,6 +428,7 @@ function stepAvailable(step) {
     case "plates": return !project.split_id || data().objects.length > 0;
     case "slice":  return data().objects.length > 0;
     case "queue":  return platesWithObjects().some(p => isUpToDate(p.id)) || state.jobs.length > 0;
+    case "print":  return Object.values(project.slices).some(s => s.state === "sliced") || state.jobs.length > 0;
   }
   return false;
 }
@@ -419,7 +442,7 @@ function stepDone(step) {
     case "slice":  return platesWithObjects().length > 0 && platesWithObjects().every(p => isUpToDate(p.id));
     case "queue":  return state.jobs.length > 0;
   }
-  return false;
+  return false;   // Print is never "done": the project page shows how far along it is
 }
 
 function defaultStep() {
@@ -438,10 +461,15 @@ async function setStep(step, { force = false } = {}) {
   state.step = step;
   remember(`slicer.step.${state.project.id}`, step);
   const splitView = step === "model" || step === "split";
+  const pageView = step === "print";
+  document.body.classList.toggle("print-step", pageView);
+  $("project-page").hidden = !pageView;
   $("split-stage").hidden = !splitView;
   $("split-side").hidden = !splitView;
-  $("viewport").hidden = splitView;
-  $("plate-tabs").hidden = splitView;
+  $("viewport").hidden = splitView || pageView;
+  $("plate-tabs").hidden = splitView || pageView;
+  if (pageView) projectPage.show();
+  else projectPage.hide();
   document.querySelectorAll("[data-steps]").forEach(el => { el.hidden = !el.dataset.steps.split(" ").includes(step); });
   if (splitView) splitStep.show(step);
   else splitStep.hide();
@@ -451,11 +479,11 @@ async function setStep(step, { force = false } = {}) {
     loadPrinters();
     loadJobs();
   }
-  if (!splitView) {
+  if (!splitView && !pageView) {
     state.viewport?.resize();
     await setMode(step === "slice" && sliceEntry()?.state === "sliced" ? "preview" : "prepare");
   }
-  renderAll({ geometry: !splitView });
+  renderAll({ geometry: !splitView && !pageView });
 }
 
 function renderSteps() {

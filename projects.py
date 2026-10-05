@@ -1599,7 +1599,7 @@ def plate_status(project_id: int) -> dict:
     cancelled or failed → failed); otherwise sliced when the plate has a Slice, else unsliced."""
     record = get_project(project_id)
     with database.transaction() as conn:
-        job_rows = conn.execute("SELECT id, plate_id, state FROM jobs WHERE project_id = ? AND plate_id IS NOT NULL "
+        job_rows = conn.execute("SELECT id, plate_id, state, printer_id FROM jobs WHERE project_id = ? AND plate_id IS NOT NULL "
                                 "AND state IN ('queued', 'starting', 'printing')", (project_id,)).fetchall()
         print_rows = conn.execute("SELECT plate_id, outcome FROM prints WHERE project_id = ? AND plate_id IS NOT NULL "
                                   "ORDER BY started_at, id", (project_id,)).fetchall()
@@ -1616,7 +1616,16 @@ def plate_status(project_id: int) -> dict:
     queued = {r["plate_id"] for r in job_rows if r["state"] == "queued"}
     waiting = {r["plate_id"] for r in holds if r["after_plate_id"] not in printed}
 
+    open_job = {}  # plate id → its newest open Job
+    for row in job_rows:
+        if row["plate_id"] not in open_job or row["id"] > open_job[row["plate_id"]]["id"]:
+            open_job[row["plate_id"]] = row
+    parts = {}
+    for obj in record["data"].get("objects", []):
+        parts[obj.get("plate")] = parts.get(obj.get("plate"), 0) + 1
+
     plates, counts = [], {status: 0 for status in PLATE_STATUSES}
+    filament = {"used": 0.0, "total": 0.0}
     for plate in record["data"]["plates"]:
         n = plate["id"]
         entry = record["slices"].get(str(n)) or {}
@@ -1633,12 +1642,38 @@ def plate_status(project_id: int) -> dict:
         else:
             status = "unsliced"
         counts[status] += 1
+        sliced = entry.get("state") == SLICED
+        grams = entry.get("estimate_g") if sliced else None
+        if grams:
+            filament["total"] += grams
+            if status == "printed_ok":
+                filament["used"] += grams
+        job = open_job.get(n)
         plates.append({"id": n, "name": plate.get("name"), "status": status,
-                       "outdated": bool(entry.get("outdated")) if entry.get("state") == SLICED else False})
+                       "outdated": bool(entry.get("outdated")) if sliced else False,
+                       "parts": parts.get(n, 0), "job_id": job["id"] if job else None,
+                       "printer_id": (job["printer_id"] if job else None) or plate.get("printer_id"),
+                       "estimate_s": entry.get("estimate_s") if sliced else None, "estimate_g": grams})
     total = len(plates)
     return {"project_id": project_id, "plates": plates,
             "progress": {"total": total, "counts": counts, "printed_ok": counts["printed_ok"],
-                         "percent": round(100 * counts["printed_ok"] / total) if total else 0}}
+                         "percent": round(100 * counts["printed_ok"] / total) if total else 0,
+                         "filament_g": {key: round(value, 1) for key, value in filament.items()}}}
+
+
+def reprint_plate(project_id: int, plate_id: int) -> dict:
+    """Queue a failed plate again by re-queuing its newest failed Job (the whole plate, even if it only partly failed)."""
+    status = {p["id"]: p["status"] for p in plate_status(project_id)["plates"]}
+    if plate_id not in status:
+        raise jobs.JobError("Plate not found", 404)
+    if status[plate_id] != "failed":
+        raise jobs.JobError("Only a failed plate can be reprinted", 409)
+    with database.transaction() as conn:
+        row = conn.execute("SELECT id FROM jobs WHERE project_id = ? AND plate_id = ? AND state IN ('failed', 'cancelled') "
+                           "ORDER BY COALESCE(finished_at, updated_at) DESC, id DESC LIMIT 1", (project_id, plate_id)).fetchone()
+    if row is None:
+        raise jobs.JobError("The G-code for this plate is no longer stored — slice it again", 410)
+    return jobs.requeue(row["id"])
 
 
 # ── Background worker ──────────────────────────────────────────────────────────

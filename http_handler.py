@@ -17,6 +17,7 @@ from pathlib import Path
 import os
 import asyncio
 import backup
+import bed_cleared
 import farm
 import health
 import jobs
@@ -638,6 +639,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: preflight.check_job_id(self._job_id(), printer_id or None), broadcast=False)
         elif self.path.startswith("/api/jobs/") and self.path.endswith("/toolpath"):
             self._send_toolpath()
+        elif self.path.startswith("/api/printers/") and self.path.endswith("/bed-cleared"):
+            self._jobs_call(lambda: bed_cleared.status(self._path_printer_id()), broadcast=False)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
             self._jobs_call(lambda: preflight.printer_hardware(self._path_printer_id()), broadcast=False)
         elif self.path == "/api/prints" or self.path.startswith("/api/prints?"):
@@ -795,6 +798,15 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._handle_splits_post()
         elif self.path == "/api/projects" or self.path.startswith("/api/projects/"):
             self._handle_projects_post()
+        elif self.path.startswith("/api/printers/") and self.path.endswith("/bed-cleared"):
+            def confirm():
+                body = self._json_body()
+                return bed_cleared.confirm(self._path_printer_id(), body.get("print_id"), body.get("outcome"),
+                                           body.get("failure_reasons"), body.get("notes"))
+            self._jobs_call(confirm, coroutine=True)
+        elif self.path.startswith("/api/printers/") and self.path.endswith("/auto-start"):
+            self._jobs_call(lambda: bed_cleared.set_auto_start(
+                self._path_printer_id(), self._json_body().get("enabled")), broadcast=False)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
             self._jobs_call(lambda: preflight.set_printer_hardware(
                 self._path_printer_id(), self._json_body().get("nozzle_diameter")), broadcast=False)
@@ -1178,7 +1190,7 @@ class SPHandler(SimpleHTTPRequestHandler):
                 return projects.add_split_parts(self._job_id(), split_id, body.get("parts"))
             self._jobs_call(from_split, broadcast=False)
             return
-        if len(parts) == 7 and parts[4] == "plates" and parts[5].isdigit() and parts[6] in ("arrange", "slice", "queue", "merge"):
+        if len(parts) == 7 and parts[4] == "plates" and parts[5].isdigit() and parts[6] in ("arrange", "slice", "queue", "merge", "reprint"):
             plate_id, action = int(parts[5]), parts[6]
 
             def merge():
@@ -1192,8 +1204,9 @@ class SPHandler(SimpleHTTPRequestHandler):
                 "slice":   lambda: projects.request_slice(self._job_id(), plate_id, bool(self._json_body().get("send"))),
                 "queue":   lambda: projects.queue_plate(self._job_id(), plate_id, self._json_body()),
                 "merge":   merge,
+                "reprint": lambda: projects.reprint_plate(self._job_id(), plate_id),
             }
-            self._jobs_call(actions[action], broadcast=action == "queue")
+            self._jobs_call(actions[action], broadcast=action in ("queue", "reprint"))
             return
         self._json({"error": "Not found"}, 404)
 
