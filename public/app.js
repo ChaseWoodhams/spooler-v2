@@ -597,6 +597,11 @@ function renderPrinter(printer) {
 
     <!-- Controls -->
     <div class="card-controls">
+      ${connected && !printing && !paused ? `
+        <button class="btn btn-primary btn-sm" onclick="confirmBedCleared('${escAttr(printer.id)}')" title="Confirm the printed plate is off the bed; releases the next queued job when auto-start is on">
+          Printed OK · Bed cleared
+        </button>
+      ` : ""}
       ${printing ? `
         <button class="btn btn-secondary btn-sm" onclick="printerAction('${escAttr(printer.id)}','pause')">
           <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
@@ -1804,6 +1809,30 @@ document.getElementById("btn-files-refresh").addEventListener("click", () => {
 document.getElementById("modal-files").addEventListener("click", (e) => {
   if (e.target === document.getElementById("modal-files")) closeFileBrowser();
 });
+
+// Printed OK · Bed cleared: pre-fills the outcome from what the printer reported (only a completed print is
+// confirmed here; anything else is corrected in History), then releases the next job if auto-start is on.
+async function confirmBedCleared(printerId) {
+  try {
+    const body = {};
+    const latest = await (await fetch(`/api/prints?printer_id=${encodeURIComponent(printerId)}&limit=1`)).json();
+    const last = latest.prints && latest.prints[0];
+    if (last && last.outcome === "completed" && last.outcome_unconfirmed) {
+      body.print_id = last.id;
+      body.outcome = "completed";
+    }
+    const resp = await fetch(`/api/printers/${encodeURIComponent(printerId)}/bed-cleared`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const result = await resp.json();
+    if (!resp.ok) { toast(result.error || "Could not confirm", true); return; }
+    if (result.started) toast(`Bed cleared. Starting ${result.started.file_name}`);
+    else if (result.start_error) toast(`Bed cleared, but nothing started: ${result.start_error}`, true);
+    else toast("Bed cleared. Printer is ready");
+  } catch (e) {
+    toast("Could not confirm Bed cleared", true);
+  }
+}
 
 // ─── Toast ─────────────────────────────────────────────────────────────────────
 function toast(msg, isError = false) {

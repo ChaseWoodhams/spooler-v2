@@ -17,6 +17,7 @@ from pathlib import Path
 import os
 import asyncio
 import backup
+import bed_cleared
 import farm
 import health
 import jobs
@@ -638,6 +639,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: preflight.check_job_id(self._job_id(), printer_id or None), broadcast=False)
         elif self.path.startswith("/api/jobs/") and self.path.endswith("/toolpath"):
             self._send_toolpath()
+        elif self.path.startswith("/api/printers/") and self.path.endswith("/bed-cleared"):
+            self._jobs_call(lambda: bed_cleared.status(self._path_printer_id()), broadcast=False)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
             self._jobs_call(lambda: preflight.printer_hardware(self._path_printer_id()), broadcast=False)
         elif self.path == "/api/prints" or self.path.startswith("/api/prints?"):
@@ -795,6 +798,15 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._handle_splits_post()
         elif self.path == "/api/projects" or self.path.startswith("/api/projects/"):
             self._handle_projects_post()
+        elif self.path.startswith("/api/printers/") and self.path.endswith("/bed-cleared"):
+            def confirm():
+                body = self._json_body()
+                return bed_cleared.confirm(self._path_printer_id(), body.get("print_id"), body.get("outcome"),
+                                           body.get("failure_reasons"), body.get("notes"))
+            self._jobs_call(confirm, coroutine=True)
+        elif self.path.startswith("/api/printers/") and self.path.endswith("/auto-start"):
+            self._jobs_call(lambda: bed_cleared.set_auto_start(
+                self._path_printer_id(), self._json_body().get("enabled")), broadcast=False)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
             self._jobs_call(lambda: preflight.set_printer_hardware(
                 self._path_printer_id(), self._json_body().get("nozzle_diameter")), broadcast=False)
