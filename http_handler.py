@@ -1101,6 +1101,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
                 self._json(projects.plate_status(project_id))
+            elif len(parts) == 5 and parts[4] == "intake":
+                self._json(projects.intake(project_id))
             elif len(parts) == 5 and parts[4] == "export.3mf":
                 record = projects.get_project(project_id)
                 name = re.sub(r'[^\w .-]+', "_", record["name"]).strip() or "project"
@@ -1144,6 +1146,14 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/projects/upload":
             self._handle_project_upload(new_project=True)
+            return
+        if len(parts) == 5 and parts[4] in ("auto-place", "fix-scale", "print"):
+            actions = {
+                "auto-place": lambda: projects.auto_place(self._job_id()),
+                "fix-scale":  lambda: projects.fix_scale(self._job_id()),
+                "print":      lambda: projects.slice_and_print(self._job_id(), self._json_body()),
+            }
+            self._jobs_call(actions[parts[4]], broadcast=False)
             return
         if len(parts) == 5 and parts[4] in ("layout", "whole", "pack", "slice", "queue"):
             actions = {
