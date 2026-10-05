@@ -45,7 +45,6 @@ DEFAULT_PRESETS = {
     "process":  "0.20mm Standard @Elegoo CC 0.4 nozzle",
     "filament": "Elegoo PLA @ECC",
 }
-RECENT_LIMIT = 20
 NO_WINDOW    = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 QUEUED, SLICING, DONE, FAILED = "queued", "slicing", "done", "failed"
@@ -569,16 +568,6 @@ def get_slice(slice_id: int) -> dict:
     return _to_slice(row)
 
 
-def list_slices(recent: int = RECENT_LIMIT) -> list:
-    """Slices waiting or running, then the most recent finished ones."""
-    with database.transaction() as conn:
-        open_rows = conn.execute("SELECT * FROM slices WHERE state IN (?, ?) ORDER BY created_at, id",
-                                 (SLICING, QUEUED)).fetchall()
-        done_rows = conn.execute("SELECT * FROM slices WHERE state IN (?, ?) ORDER BY finished_at DESC, id DESC "
-                                 "LIMIT ?", (DONE, FAILED, recent)).fetchall()
-    return [_to_slice(r) for r in open_rows + done_rows]
-
-
 def _update(slice_id: int, **fields) -> None:
     with database.transaction() as conn:
         conn.execute(f"UPDATE slices SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
@@ -635,24 +624,6 @@ def create_slice(stream, length: int, filename: str, bundle_id: str, bed: str = 
         if final_dir is not None:
             shutil.rmtree(final_dir, ignore_errors=True)
         raise
-    notify_worker()
-    return get_slice(slice_id)
-
-
-def delete_slice(slice_id: int) -> None:
-    record = get_slice(slice_id)
-    if record["state"] == SLICING:
-        raise jobs.JobError("This model is being sliced right now — wait for it to finish", 409)
-    with database.transaction() as conn:
-        conn.execute("DELETE FROM slices WHERE id = ?", (slice_id,))
-    shutil.rmtree(slices_dir() / str(slice_id), ignore_errors=True)
-
-
-def retry_slice(slice_id: int) -> dict:
-    record = get_slice(slice_id)
-    if record["state"] != FAILED:
-        raise jobs.JobError("Only failed slices can be retried", 409)
-    _update(slice_id, state=QUEUED, error=None, exit_code=None, started_at=None, finished_at=None)
     notify_worker()
     return get_slice(slice_id)
 
@@ -769,7 +740,6 @@ async def process_next() -> bool:
         conn.execute("UPDATE slices SET state = ?, started_at = ?, error = NULL, exit_code = NULL WHERE id = ?",
                      (SLICING, time.time(), row["id"]))
     record = get_slice(row["id"])
-    await broadcast()
     loop = asyncio.get_running_loop()
     try:
         result = await loop.run_in_executor(None, run_slice, record)
@@ -784,7 +754,6 @@ async def process_next() -> bool:
                 estimate_g=result["estimate_g"], duration_ms=result["duration_ms"], finished_at=time.time())
         print(f"[Slicer] {record['source_name']} sliced in {result['duration_ms']} ms → job(s) {job_ids}")
         await jobs.broadcast()
-    await broadcast()
     return True
 
 
@@ -824,14 +793,3 @@ def status() -> dict:
         "bed_types":              BED_TYPES,
         "model_types":            list(MODEL_SUFFIXES),
     }
-
-
-async def broadcast() -> None:
-    if state.browser_clients:
-        await state.broadcast_to_browsers({"type": "slices", "slices": list_slices()})
-
-
-def broadcast_threadsafe() -> None:
-    loop = state.loop
-    if loop is not None and loop.is_running():
-        asyncio.run_coroutine_threadsafe(broadcast(), loop)

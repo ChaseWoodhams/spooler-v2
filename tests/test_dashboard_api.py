@@ -84,6 +84,22 @@ class DashboardApiTests(unittest.TestCase):
         needs = self.dashboard()["needs_you"]
         self.assertEqual([p["file_name"] for p in needs["prints"]], ["plate5.gcode"])
 
+    def test_prints_and_jobs_with_no_project_still_show_on_the_dashboard_and_in_history(self):
+        import io
+        # A file queued from the printer file browser is a plain Job: no project, no plate
+        queued = self.post("/api/jobs", {"printer_id": "p1", "printer_file": "/local/benchy.gcode"})
+        self.assertEqual((queued["project_id"], queued["plate_id"]), (None, None))
+        loose = test_plate_status.jobs.create_upload_job(io.BytesIO(test_plate_status.GCODE), len(test_plate_status.GCODE),
+                                                         "loose.gcode", "p1")
+        self.ps.run_job(loose, "loose.gcode")
+        self.ps.push(9, "loose.gcode", 50, 50)
+
+        (waiting,) = self.dashboard()["needs_you"]["printers"]
+        self.assertEqual(waiting["print"]["file_name"], "loose.gcode")
+        self.assertEqual(waiting["next_job"]["id"], queued["id"])
+        (record,) = self.ps.prints()
+        self.assertEqual((record["file_name"], record["project_id"], record["plate_id"]), ("loose.gcode", None, None))
+
     def test_active_project_rows_show_progress_and_leave_out_untouched_projects(self):
         self.assertEqual(self.dashboard()["projects"], [])
         self.ps.slice_plate(4)

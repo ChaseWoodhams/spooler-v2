@@ -264,25 +264,16 @@
         <button id="btn-queue-close" class="btn btn-secondary btn-sm">Close</button>
       </div>
       <div class="action-row">
-        <button id="btn-queue-add-model" class="btn btn-primary btn-sm" title="Upload an STL, 3MF, OBJ or STEP model and slice it with OrcaSlicer">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
-            <path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/>
-          </svg>
-          Slice model
-        </button>
-        <input id="model-file-input" type="file" accept=".stl,.3mf,.obj,.step,.stp" hidden />
-        <button id="btn-queue-add" class="btn btn-secondary btn-sm">
+        <button id="btn-queue-import" class="btn btn-primary btn-sm" title="Import an STL, OBJ, 3MF or G-code file as a Project">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 5v14M5 12h14"/>
           </svg>
-          Add G-code
+          Import
         </button>
-        <input id="queue-file-input" type="file" accept=".gcode" hidden />
-        <span class="queue-hint">Drop a model or .gcode file here, or use <strong>Queue</strong> in a printer's file browser.</span>
+        <span class="queue-hint">Files you import become a Project. Drop one here, or use <strong>Queue</strong> in a printer's file browser to queue a file that is already on the printer.</span>
       </div>
     </div>
     <div class="side-panel-body">
-      <div id="slice-body" class="slice-body"></div>
       <div id="queue-body" class="queue-body"></div>
     </div>
   </div>
@@ -729,80 +720,9 @@
         Notes
         <textarea id="job-input-notes" rows="3" maxlength="2000" placeholder="Material, nozzle, anything to remember"></textarea>
       </label>
-      <div id="job-upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
       <div class="modal-actions">
         <button id="btn-job-cancel" class="btn btn-secondary">Cancel</button>
-        <button id="btn-job-save" class="btn btn-primary">Add to queue</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Slice model dialog -->
-  <div id="modal-slice" class="modal">
-    <div class="modal-box modal-box-wide">
-      <h3>Slice model</h3>
-      <p id="slice-modal-file" class="job-modal-file"></p>
-      <label>
-        Profile
-        <select id="slice-input-profile"></select>
-      </label>
-      <button id="btn-slice-new-profile" type="button" class="link-btn">Lock another stock profile…</button>
-      <div id="slice-profile-form" class="slice-profile-form" hidden>
-        <label>
-          Printer preset
-          <select id="slice-preset-machine"></select>
-        </label>
-        <label>
-          Process
-          <select id="slice-preset-process"></select>
-        </label>
-        <label>
-          Filament
-          <select id="slice-preset-filament"></select>
-        </label>
-        <div class="modal-actions">
-          <button id="btn-slice-lock-profile" type="button" class="btn btn-secondary btn-sm">Lock profile</button>
-        </div>
-      </div>
-      <div class="print-opts-group">
-        <div class="print-opts-group-label">Build Plate</div>
-        <div class="print-plate-row">
-          <button id="slice-plate-textured" type="button" class="btn btn-primary print-plate-btn">Textured (Side A)</button>
-          <button id="slice-plate-smooth" type="button" class="btn btn-secondary print-plate-btn">Smooth (Side B)</button>
-        </div>
-      </div>
-      <label>
-        Printer
-        <select id="slice-input-printer"></select>
-      </label>
-      <div class="print-opts-group">
-        <div class="print-opts-group-label">Options</div>
-        <div class="print-opts-rows">
-          <div class="print-opts-row">
-            <span>Time-lapse</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="slice-opt-timelapse" role="switch" aria-label="Time-lapse">
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-          <div class="print-opts-row">
-            <span>Heated Bed Leveling</span>
-            <label class="toggle-switch">
-              <input type="checkbox" id="slice-opt-leveling" role="switch" aria-label="Heated bed leveling">
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-        </div>
-      </div>
-      <label>
-        Notes
-        <textarea id="slice-input-notes" rows="2" maxlength="2000" placeholder="Material, purpose, anything to remember"></textarea>
-      </label>
-      <p id="slice-unavailable" class="job-error" hidden></p>
-      <div id="slice-upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
-      <div class="modal-actions">
-        <button id="btn-slice-cancel" class="btn btn-secondary">Cancel</button>
-        <button id="btn-slice-save" class="btn btn-primary">Upload &amp; slice</button>
+        <button id="btn-job-save" class="btn btn-primary">Save</button>
       </div>
     </div>
   </div>
@@ -868,13 +788,12 @@
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   <script src="/config.js"></script>
   <script src="health.js?v=1"></script>
-  <script src="jobs.js?v=4"></script>
-  <script src="slices.js?v=1"></script>
+  <script src="jobs.js?v=5"></script>
   <script src="preview.js?v=1"></script>
   <script src="history.js?v=3"></script>
   <script src="outcome-prompt.js?v=1"></script>
-  <script src="app.js?v=63"></script>
-  <script src="import.js?v=1"></script>
+  <script src="app.js?v=64"></script>
+  <script src="import.js?v=2"></script>
   <script src="dashboard.js?v=1"></script>
   <script>
     if ("serviceWorker" in navigator) {

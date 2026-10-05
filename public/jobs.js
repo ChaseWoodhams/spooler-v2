@@ -14,7 +14,7 @@ const JOB_STATE_CLASS = {
 };
 
 let queueJobs = [];
-let _jobEditor = null;        // { mode: "new", file, printerId } | { mode: "edit", job }
+let _jobEditor = null;        // { mode: "edit", job }
 let _queueRenderTimer = null;
 let _assigningBatch = null;   // batch id whose printer chooser is open
 
@@ -57,12 +57,6 @@ async function jobsApi(method, path, body) {
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `Request failed (HTTP ${r.status})`);
   return data;
-}
-
-function uploadJobFile(file, printerId, onProgress) {
-  const params = new URLSearchParams({ filename: file.name });
-  if (printerId) params.set("printer_id", printerId);
-  return uploadFileWithProgress(`/api/jobs/upload?${params}`, file, onProgress); // slices.js
 }
 
 async function queuePrinterFile(printerId, file) {
@@ -159,7 +153,7 @@ function renderQueue() {
   body.innerHTML =
     queueSection("Active", active, jobActiveCard, "Nothing from the queue is printing.") +
     `<section class="queue-section"><h4>${escHtml(`Queued (${queued.length})`)}</h4>${queuedWithBatches(queued)
-      || `<p class="queue-empty">${escHtml("The queue is empty — add a G-code file to get started.")}</p>`}</section>` +
+      || `<p class="queue-empty">${escHtml("The queue is empty — import a file to get started.")}</p>`}</section>` +
     (done.length ? queueSection("Recently finished", done, jobDoneCard) : "");
 }
 
@@ -360,10 +354,6 @@ document.getElementById("queue-body").addEventListener("change", async (e) => {
 });
 
 // ─── Job editor modal ─────────────────────────────────────────────────────────
-function _rememberedPrinter() {
-  try { return localStorage.getItem("queue.lastPrinter") || ""; } catch (_) { return ""; }
-}
-
 function setJobPlate(smooth) {
   document.getElementById("job-plate-textured").className = `btn print-plate-btn ${smooth ? "btn-secondary" : "btn-primary"}`;
   document.getElementById("job-plate-smooth").className = `btn print-plate-btn ${smooth ? "btn-primary" : "btn-secondary"}`;
@@ -372,28 +362,24 @@ function setJobPlate(smooth) {
 
 function openJobEditor(editor) {
   _jobEditor = editor;
-  const isNew = editor.mode === "new";
-  const job = editor.job || {};
+  const job = editor.job;
   const opts = job.print_opts || {};
-  document.getElementById("job-modal-title").textContent = isNew ? "Add to queue" : "Edit queued job";
-  document.getElementById("job-modal-file").textContent = isNew
-    ? `${editor.file.name} · ${formatFileSize(editor.file.size)}` : job.file_name;
-  document.getElementById("job-input-name").value = isNew ? editor.file.name.replace(/\.gcode$/i, "") : job.name;
+  document.getElementById("job-modal-title").textContent = "Edit queued job";
+  document.getElementById("job-modal-file").textContent = job.file_name;
+  document.getElementById("job-input-name").value = job.name;
   const select = document.getElementById("job-input-printer");
   if (job.source === "printer") {
     select.innerHTML = `<option value="${_jobAttr(job.printer_id)}">${escHtml(jobPrinterName(job.printer_id))}</option>`;
     select.disabled = true;
   } else {
-    select.innerHTML = jobPrinterOptions(isNew ? editor.printerId : job.printer_id);
+    select.innerHTML = jobPrinterOptions(job.printer_id);
     select.disabled = false;
   }
   setJobPlate(!!opts.smooth_plate);
   document.getElementById("job-opt-timelapse").checked = !!opts.timelapse;
   document.getElementById("job-opt-leveling").checked = !!opts.leveling;
   document.getElementById("job-input-notes").value = job.notes || "";
-  document.getElementById("job-upload-progress").hidden = true;
   const save = document.getElementById("btn-job-save");
-  save.textContent = isNew ? "Add to queue" : "Save";
   save.disabled = false;
   document.getElementById("modal-job").classList.add("open");
   document.getElementById("job-input-name").focus();
@@ -420,31 +406,14 @@ async function saveJobEditor() {
   };
   save.disabled = true;
   try {
-    if (editor.mode === "new") {
-      const bar = document.querySelector("#job-upload-progress .job-upload-bar");
-      document.getElementById("job-upload-progress").hidden = false;
-      bar.style.width = "0%";
-      const job = await uploadJobFile(editor.file, printerId, pct => { bar.style.width = `${pct}%`; });
-      await jobsApi("PATCH", `/api/jobs/${job.id}`, changes);
-      try { localStorage.setItem("queue.lastPrinter", printerId || ""); } catch (_) {}
-      toast(`Added ${changes.name || job.name} to the queue`);
-    } else {
-      if (editor.job.source !== "printer") changes.printer_id = printerId;
-      await jobsApi("PATCH", `/api/jobs/${editor.job.id}`, changes);
-    }
+    if (editor.job.source !== "printer") changes.printer_id = printerId;
+    await jobsApi("PATCH", `/api/jobs/${editor.job.id}`, changes);
     closeJobEditor();
   } catch (err) {
     toast(err.message, true);
     save.disabled = false;
   }
   loadJobs();
-}
-
-function addJobFile(file) {
-  if (!file) return;
-  if (SLICE_MODEL_RE.test(file.name)) { addModelFile(file); return; } // models are sliced first (slices.js)
-  if (!/\.gcode$/i.test(file.name)) { toast("Drop a .gcode file or an STL, 3MF, OBJ or STEP model", true); return; }
-  openJobEditor({ mode: "new", file, printerId: _rememberedPrinter() });
 }
 
 document.getElementById("job-plate-textured").addEventListener("click", () => setJobPlate(false));
@@ -477,26 +446,4 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (document.getElementById("modal-job").classList.contains("open")) closeJobEditor();
   else closeQueue();
-});
-
-const _queueFileInput = document.getElementById("queue-file-input");
-document.getElementById("btn-queue-add").addEventListener("click", () => _queueFileInput.click());
-_queueFileInput.addEventListener("change", () => {
-  addJobFile(_queueFileInput.files[0]);
-  _queueFileInput.value = "";
-});
-
-const _queuePanel = document.getElementById("panel-queue");
-_queuePanel.addEventListener("dragover", (e) => {
-  if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
-  e.preventDefault();
-  document.getElementById("queue-body").classList.add("drop-target");
-});
-_queuePanel.addEventListener("dragleave", (e) => {
-  if (!_queuePanel.contains(e.relatedTarget)) document.getElementById("queue-body").classList.remove("drop-target");
-});
-_queuePanel.addEventListener("drop", (e) => {
-  e.preventDefault();
-  document.getElementById("queue-body").classList.remove("drop-target");
-  addJobFile(e.dataTransfer.files[0]);
 });

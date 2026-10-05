@@ -182,7 +182,7 @@ class JobsApiTests(unittest.TestCase):
         status, started = self.call("POST", f"/api/jobs/{stored['id']}/start", {"acknowledge_warnings": True})
         self.assertEqual((status, started["state"]), (200, "starting"))
 
-    def test_slicing_routes(self):
+    def test_the_standalone_slice_endpoints_are_retired(self):
         import slicer
         from tests.test_slicer import cube_stl, fake_runner, make_fake_orca
 
@@ -201,21 +201,15 @@ class JobsApiTests(unittest.TestCase):
         status, same = self.call("POST", "/api/slicer/profiles", presets["defaults"])
         self.assertEqual((status, same["id"]), (200, bundle_id))
 
+        # The standalone slice door is closed: Import (POST /api/projects/upload) is the only way in
         query = f"filename=cube.stl&bundle_id={bundle_id}&bed=smooth&leveling=1&printer_id=p1&notes=bracket%20v2"
-        status, record = self.call("POST", f"/api/slices/upload?{query}", raw=cube_stl())
-        self.assertEqual((status, record["state"], record["print_opts"]["leveling"]), (200, "queued", True))
-        self.assertEqual(self.call("POST", f"/api/slices/upload?filename=cube.gcode&bundle_id={bundle_id}", raw=b"x")[0], 400)
-
-        asyncio.run_coroutine_threadsafe(slicer.process_next(), self.loop).result(10)
-        status, listing = self.call("GET", "/api/slices")
-        done = listing["slices"][0]
-        self.assertEqual((status, done["state"], done["notes"]), (200, "done", "bracket v2"))
-        job = jobs.get_job(done["job_ids"][0])
-        self.assertEqual((job["print_opts"]["smooth_plate"], job["printer_id"]), (True, "p1"))
-
-        self.assertEqual(self.call("POST", f"/api/slices/{done['id']}/retry", {})[0], 409)
-        self.assertEqual(self.call("DELETE", f"/api/slices/{done['id']}")[0], 200)
-        self.assertEqual(self.call("GET", "/api/slices")[1]["slices"], [])
+        self.assertEqual(self.call("POST", f"/api/slices/upload?{query}", raw=cube_stl())[0], 404)
+        with self.assertRaises(urllib.error.HTTPError) as gone:  # a page request, so the 404 isn't JSON
+            _opener.open(self.base + "/api/slices", timeout=10)
+        self.assertEqual(gone.exception.code, 404)
+        self.assertEqual(self.call("POST", "/api/slices/1/retry", {})[0], 404)
+        self.assertEqual(self.call("DELETE", "/api/slices/1")[0], 404)
+        self.assertEqual(jobs.list_jobs(), [])
 
     @unittest.skipUnless(auth.AUTH_ENABLED, "authentication disabled in this environment")
     def test_login_is_required(self):
