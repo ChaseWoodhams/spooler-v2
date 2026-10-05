@@ -1419,6 +1419,61 @@ def project_jobs(project_id: int) -> list:
     return [jobs._to_job(row) for row in rows]
 
 
+# ── Plate status and project progress ─────────────────────────────────────────
+
+PLATE_STATUSES = ("unsliced", "sliced", "waiting", "queued", "printing", "printed_ok", "failed")
+
+
+def plate_status(project_id: int) -> dict:
+    """Each plate's status and the project's progress, worked out from the slices, the queue and print history.
+
+    printing → a Job is starting or printing, or a Print is open; waiting → a queued Job holds for a plate that hasn't
+    printed OK yet; queued → a queued Job; otherwise the latest finished Print decides (completed → printed_ok,
+    cancelled or failed → failed); otherwise sliced when the plate has a Slice, else unsliced."""
+    record = get_project(project_id)
+    with database.transaction() as conn:
+        job_rows = conn.execute("SELECT id, plate_id, state FROM jobs WHERE project_id = ? AND plate_id IS NOT NULL "
+                                "AND state IN ('queued', 'starting', 'printing')", (project_id,)).fetchall()
+        print_rows = conn.execute("SELECT plate_id, outcome FROM prints WHERE project_id = ? AND plate_id IS NOT NULL "
+                                  "ORDER BY started_at, id", (project_id,)).fetchall()
+        holds = conn.execute("SELECT j.plate_id, h.after_plate_id FROM job_holds h JOIN jobs j ON j.id = h.job_id "
+                             "WHERE j.project_id = ? AND j.state = 'queued' AND h.after_project_id = ?",
+                             (project_id, project_id)).fetchall()
+    latest = {}  # plate id → outcome of its latest Print (None while it is still printing)
+    for row in print_rows:
+        if row["outcome"] == "unknown":
+            continue
+        latest[row["plate_id"]] = row["outcome"]
+    printed = {n for n, outcome in latest.items() if outcome == "completed"}
+    printing = {r["plate_id"] for r in job_rows if r["state"] in ("starting", "printing")} | {n for n, o in latest.items() if o is None}
+    queued = {r["plate_id"] for r in job_rows if r["state"] == "queued"}
+    waiting = {r["plate_id"] for r in holds if r["after_plate_id"] not in printed}
+
+    plates, counts = [], {status: 0 for status in PLATE_STATUSES}
+    for plate in record["data"]["plates"]:
+        n = plate["id"]
+        entry = record["slices"].get(str(n)) or {}
+        if n in printing:
+            status = "printing"
+        elif n in queued:
+            status = "waiting" if n in waiting else "queued"
+        elif latest.get(n) == "completed":
+            status = "printed_ok"
+        elif latest.get(n) in ("failed", "cancelled"):
+            status = "failed"
+        elif entry.get("state") == SLICED:
+            status = "sliced"
+        else:
+            status = "unsliced"
+        counts[status] += 1
+        plates.append({"id": n, "name": plate.get("name"), "status": status,
+                       "outdated": bool(entry.get("outdated")) if entry.get("state") == SLICED else False})
+    total = len(plates)
+    return {"project_id": project_id, "plates": plates,
+            "progress": {"total": total, "counts": counts, "printed_ok": counts["printed_ok"],
+                         "percent": round(100 * counts["printed_ok"] / total) if total else 0}}
+
+
 # ── Background worker ──────────────────────────────────────────────────────────
 
 def _claim() -> tuple | None:

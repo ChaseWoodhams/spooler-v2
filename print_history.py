@@ -111,10 +111,10 @@ def _open_record(printer, filename: str, pi: dict) -> None:
         conn.execute("UPDATE prints SET outcome = 'unknown', detail = 'Superseded by a newer print', "
                      "ended_at = ? WHERE printer_id = ? AND outcome IS NULL", (now, printer.id))
         record_id = conn.execute(
-            "INSERT INTO prints (printer_id, printer_name, printer_type, job_id, file_name, started_at, "
-            "total_layers, estimate_s, estimate_g) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO prints (printer_id, printer_name, printer_type, job_id, project_id, plate_id, file_name, "
+            "started_at, total_layers, estimate_s, estimate_g) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (printer.id, printer.name, getattr(printer, "printer_type", None), job["id"] if job else None,
-             filename, started_at, pi.get("TotalLayer") or None,
+             job.get("project_id") if job else None, job.get("plate_id") if job else None, filename, started_at, pi.get("TotalLayer") or None,
              job["estimate_s"] if job else None, job["estimate_g"] if job else None),
         ).lastrowid
     _open[printer.id] = {"id": record_id, "file_name": filename,

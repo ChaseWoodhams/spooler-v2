@@ -1090,6 +1090,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json(projects.get_project(project_id))
             elif len(parts) == 5 and parts[4] == "jobs":
                 self._json({"jobs": projects.project_jobs(project_id)})
+            elif len(parts) == 5 and parts[4] == "status":
+                self._json(projects.plate_status(project_id))
             elif len(parts) == 5 and parts[4] == "export.3mf":
                 record = projects.get_project(project_id)
                 name = re.sub(r'[^\w .-]+', "_", record["name"]).strip() or "project"

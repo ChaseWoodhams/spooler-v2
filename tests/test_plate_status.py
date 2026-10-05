@@ -1,0 +1,199 @@
+"""A Print remembers its project and plate; the backend serves each plate's status and the project's progress."""
+import asyncio
+import json
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
+
+import database
+import jobs
+import print_history
+import state
+from http_handler import SPHandler
+from tests.test_jobs import GCODE, FakePrinter
+
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+PLATES = 26  # the saved SEAT project: 26 plates, only plate 4 sliced
+
+
+class PlateStatusTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        database.configure(self.dir / "spooler.db")
+        jobs.init(self.dir)
+        print_history.init()
+        self._saved = (state.printers, state.loop)
+        self.printer = FakePrinter()
+        state.printers = {"p1": self.printer}
+        self.loop = asyncio.new_event_loop()
+        self.loop_thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.loop_thread.start()
+        state.loop = self.loop
+        for patcher in (mock.patch.object(jobs, "uploader", lambda ip, path, name, progress: None),
+                        mock.patch("http_handler._auth_ok", return_value=True)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), SPHandler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.project_id = self.make_project()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+        async def cancel_start_tasks():
+            for task in list(jobs._start_tasks.values()):
+                task.cancel()
+
+        asyncio.run_coroutine_threadsafe(cancel_start_tasks(), self.loop).result(5)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.loop_thread.join(5)
+        self.loop.close()
+        state.printers, state.loop = self._saved
+        database.configure(database.DB_FILE)
+        jobs._data_dir = jobs.DATA_DIR
+        self._tmp.cleanup()
+
+    # fixtures
+
+    def make_project(self) -> int:
+        data = {"bed": "textured", "profile": {"bundle_id": "x"},
+                "plates": [{"id": n, "name": f"Plate {n}"} for n in range(1, PLATES + 1)],
+                "objects": [{"id": n, "model": 1, "name": f"part {n}", "plate": n, "position": [0, 0], "rotation": [0, 0, 0],
+                             "scale": [1, 1, 1], "overrides": {}} for n in range(1, PLATES + 1)]}
+        models = [{"id": 1, "name": "seat", "file": "seat.stl", "state": "ready", "sha256": "abc"}]
+        with database.transaction() as conn:
+            return conn.execute("INSERT INTO projects (name, data, models, slices, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
+                                ("SEAT", json.dumps(data), json.dumps(models), json.dumps({}))).lastrowid
+
+    def slice_plate(self, plate_id, state_="sliced"):
+        """Record a finished slice for a plate (the saved SEAT project had plate 4 sliced)."""
+        import projects
+        record = projects.get_project(self.project_id)
+        entry = {"state": state_, "fingerprint": projects.fingerprint(record, plate_id)}
+        slices = {**record["slices"], str(plate_id): entry}
+        with database.transaction() as conn:
+            conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(slices), self.project_id))
+
+    def plate_job(self, plate_id, printer_id="p1"):
+        job = jobs.create_upload_job(__import__("io").BytesIO(GCODE), len(GCODE), f"plate{plate_id}.gcode", printer_id)
+        with database.transaction() as conn:
+            conn.execute("UPDATE jobs SET project_id = ?, plate_id = ? WHERE id = ?", (self.project_id, plate_id, job["id"]))
+        return job
+
+    def run_job(self, job, name):
+        """Start the job on the printer and let the printer report it working."""
+        asyncio.run_coroutine_threadsafe(jobs.start_job(job["id"]), self.loop).result(5)
+        for _ in range(200):
+            if self.printer.started:
+                break
+            threading.Event().wait(0.01)
+        self.printer.started.clear()
+        self.push(13, name, 1, 50)
+
+    def push(self, code, filename="", layer=0, total=0):
+        self.printer.status = {"CurrentStatus": [0], "PrintInfo": {
+            "Status": code, "Filename": filename, "CurrentLayer": layer, "TotalLayer": total, "CurrentTicks": 0}}
+        jobs.on_printer_status(self.printer)
+        return print_history.on_printer_status(self.printer)
+
+    def get(self, path):
+        with _opener.open(self.base + path, timeout=10) as resp:
+            return json.loads(resp.read())
+
+    def call(self, method, path):
+        request = urllib.request.Request(self.base + path, method=method)
+        with _opener.open(request, timeout=10) as resp:
+            return resp.status, json.loads(resp.read())
+
+    def prints(self):
+        return self.get("/api/prints")["prints"]
+
+    # the Print-to-plate link
+
+    def test_print_from_a_plate_keeps_its_project_and_plate_after_the_job_is_deleted(self):
+        job = self.plate_job(4)
+        self.run_job(job, "plate4.gcode")
+        self.push(9, "plate4.gcode", 50, 50)
+        record = self.prints()[0]
+        self.assertEqual((record["project_id"], record["plate_id"], record["job_id"]), (self.project_id, 4, job["id"]))
+
+        self.call("DELETE", f"/api/jobs/{job['id']}")
+        record = self.prints()[0]
+        self.assertEqual((record["project_id"], record["plate_id"], record["job_id"]), (self.project_id, 4, None))
+
+    def test_print_without_a_project_is_unaffected_and_listed(self):
+        self.push(13, "loose.gcode", 1, 50)
+        self.push(9, "loose.gcode", 50, 50)
+        listed = self.prints()
+        self.assertEqual(len(listed), 1)
+        self.assertEqual((listed[0]["project_id"], listed[0]["plate_id"], listed[0]["outcome"]), (None, None, "completed"))
+
+    # per-plate status and project progress
+
+    def status(self):
+        return self.get(f"/api/projects/{self.project_id}/status")
+
+    def states(self):
+        return {p["id"]: p["status"] for p in self.status()["plates"]}
+
+    def test_saved_project_has_every_plate_unsliced_except_the_sliced_one(self):
+        self.slice_plate(4)
+        status = self.status()
+        self.assertEqual(len(status["plates"]), PLATES)
+        states = self.states()
+        self.assertEqual(states[4], "sliced")
+        self.assertEqual({s for n, s in states.items() if n != 4}, {"unsliced"})
+        self.assertEqual(status["progress"]["total"], PLATES)
+        self.assertEqual(status["progress"]["counts"]["sliced"], 1)
+        self.assertEqual(status["progress"]["counts"]["unsliced"], PLATES - 1)
+        self.assertEqual(status["progress"]["printed_ok"], 0)
+
+    def test_a_plate_in_the_queue_is_queued_and_one_held_by_another_plate_is_waiting(self):
+        for n in (1, 2, 3):
+            self.slice_plate(n)
+        self.plate_job(1)
+        held = self.plate_job(2)
+        with database.transaction() as conn:
+            conn.execute("INSERT INTO job_holds (job_id, after_project_id, after_plate_id, created_at) VALUES (?, ?, 1, 1)",
+                         (held["id"], self.project_id))
+        states = self.states()
+        self.assertEqual((states[1], states[2], states[3]), ("queued", "waiting", "sliced"))
+
+    def test_a_plate_on_the_printer_is_printing_then_printed_ok(self):
+        self.slice_plate(5)
+        job = self.plate_job(5)
+        self.run_job(job, "plate5.gcode")
+        self.assertEqual(self.states()[5], "printing")
+        self.push(9, "plate5.gcode", 50, 50)
+        status = self.status()
+        self.assertEqual(self.states()[5], "printed_ok")
+        self.assertEqual(status["progress"]["printed_ok"], 1)
+        self.assertEqual(status["progress"]["counts"]["printed_ok"], 1)
+
+    def test_a_cancelled_print_is_failed_until_the_plate_is_printed_again(self):
+        self.slice_plate(6)
+        self.run_job(self.plate_job(6), "plate6.gcode")
+        self.push(8, "plate6.gcode", 20, 50)
+        self.assertEqual(self.states()[6], "failed")
+        self.assertEqual(self.status()["progress"]["counts"]["failed"], 1)
+        self.plate_job(6)
+        self.assertEqual(self.states()[6], "queued")
+
+    def test_status_survives_deleting_the_job_and_missing_projects_are_404(self):
+        self.slice_plate(7)
+        job = self.plate_job(7)
+        self.run_job(job, "plate7.gcode")
+        self.push(9, "plate7.gcode", 50, 50)
+        self.call("DELETE", f"/api/jobs/{job['id']}")
+        self.assertEqual(self.states()[7], "printed_ok")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.get("/api/projects/999/status")
+        self.assertEqual(caught.exception.code, 404)
