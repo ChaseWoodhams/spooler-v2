@@ -73,11 +73,11 @@ class PlateStatusTests(unittest.TestCase):
             return conn.execute("INSERT INTO projects (name, data, models, slices, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
                                 ("SEAT", json.dumps(data), json.dumps(models), json.dumps({}))).lastrowid
 
-    def slice_plate(self, plate_id, state_="sliced"):
+    def slice_plate(self, plate_id, state_="sliced", **extra):
         """Record a finished slice for a plate (the saved SEAT project had plate 4 sliced)."""
         import projects
         record = projects.get_project(self.project_id)
-        entry = {"state": state_, "fingerprint": projects.fingerprint(record, plate_id)}
+        entry = {"state": state_, "fingerprint": projects.fingerprint(record, plate_id), **extra}
         slices = {**record["slices"], str(plate_id): entry}
         with database.transaction() as conn:
             conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(slices), self.project_id))
@@ -197,3 +197,18 @@ class PlateStatusTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/api/projects/999/status")
         self.assertEqual(caught.exception.code, 404)
+
+    def test_status_carries_what_the_project_page_shows_for_each_plate(self):
+        self.slice_plate(1, estimate_s=3600, estimate_g=10.0)
+        self.slice_plate(2, estimate_s=7200, estimate_g=20.0)
+        self.slice_plate(3)  # sliced, no estimate recorded
+        self.run_job(self.plate_job(1), "plate1.gcode")
+        self.push(9, "plate1.gcode", 50, 50)  # plate 1 printed OK
+        queued = self.plate_job(2)
+        plates = {p["id"]: p for p in self.status()["plates"]}
+        self.assertEqual((plates[1]["estimate_s"], plates[1]["estimate_g"], plates[1]["parts"]), (3600, 10.0, 1))
+        self.assertEqual((plates[2]["job_id"], plates[2]["printer_id"]), (queued["id"], "p1"))
+        self.assertIsNone(plates[3]["estimate_s"])
+        self.assertIsNone(plates[3]["job_id"])
+        self.assertIsNone(plates[4]["estimate_g"])
+        self.assertEqual(self.status()["progress"]["filament_g"], {"used": 10.0, "total": 30.0})
