@@ -1,4 +1,4 @@
-"""Import and the simple print: whether an imported model fits the bed (so Split is skipped), the scale guard, and
+"""Import and Quick print: whether an imported model fits the bed (so Split is skipped), the scale guard, and
 Slice & print as one action. Everything is exercised through the HTTP API."""
 import asyncio
 import io
@@ -27,7 +27,7 @@ _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
-class SimplePrintApiTests(unittest.IsolatedAsyncioTestCase):
+class QuickPrintApiTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         from http_handler import SPHandler
         self._tmp = tempfile.TemporaryDirectory()
@@ -292,6 +292,14 @@ class SimplePrintApiTests(unittest.IsolatedAsyncioTestCase):
         pid = await self.import_model(box_stl(self.dir / "slab.stl", (80, 60, 10)), "slab.stl")
         after = self.call("POST", f"/api/projects/{pid}/lay-flat", {})[1]
         self.assertEqual(after["size"], [80.0, 60.0, 10.0])
+
+    async def test_laying_flat_a_cylinder_standing_on_its_cap_leaves_it_upright(self):
+        import trimesh
+        trimesh.creation.cylinder(radius=15, height=40).export(self.dir / "cyl.stl")   # both caps tie as the largest face
+        pid = await self.import_model((self.dir / "cyl.stl").read_bytes(), "cyl.stl")
+        after = self.call("POST", f"/api/projects/{pid}/lay-flat", {})[1]
+        self.assertEqual(after["rotation"][:2], [0.0, 0.0], after)    # not turned upside down
+        self.assertAlmostEqual(after["size"][2], 40.0, delta=0.2)
 
     async def test_laying_flat_a_model_on_its_edge_gives_it_its_widest_footprint(self):
         pid = await self.import_model(box_stl(self.dir / "slab.stl", (10, 60, 80)), "slab.stl")

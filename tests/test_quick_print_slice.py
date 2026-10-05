@@ -1,6 +1,6 @@
 """Quick print slicing and queueing: the options reach the slicer config, a preset change keeps them, leveling and
 timelapse survive the fresh-slice path, bad models are blocked, and preflight warnings come before queueing.
-Everything is exercised through the HTTP API (the harness is the Simple print one)."""
+Everything is exercised through the HTTP API (the harness is the one in test_quick_print)."""
 import hashlib
 import json
 import unittest
@@ -10,22 +10,22 @@ from unittest import mock
 import projects
 import slicer
 import splits
-from tests import test_simple_print
+from tests import test_quick_print
 from tests.test_jobs import GCODE, isolate_preflight
-from tests.test_simple_print import GEOMETRY
+from tests.test_quick_print import GEOMETRY
 from tests.test_slicer import cube_stl, fake_runner
 
 
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
 class QuickPrintSliceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        test_simple_print.SimplePrintApiTests.setUp(self)
+        test_quick_print.QuickPrintApiTests.setUp(self)
         isolate_preflight(self, self.dir)
 
-    asyncTearDown = test_simple_print.SimplePrintApiTests.asyncTearDown
-    tearDown = test_simple_print.SimplePrintApiTests.tearDown
-    call = test_simple_print.SimplePrintApiTests.call
-    quick_upload = test_simple_print.SimplePrintApiTests.quick_upload
+    asyncTearDown = test_quick_print.QuickPrintApiTests.asyncTearDown
+    tearDown = test_quick_print.QuickPrintApiTests.tearDown
+    call = test_quick_print.QuickPrintApiTests.call
+    quick_upload = test_quick_print.QuickPrintApiTests.quick_upload
 
     async def settle(self):
         """Run the workers with a recording fake Orca."""
