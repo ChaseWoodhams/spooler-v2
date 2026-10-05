@@ -45,29 +45,32 @@ def status(printer_id: str) -> dict:
     with database.transaction() as conn:
         cleared = conn.execute("SELECT MAX(cleared_at) AS at FROM bed_cleared WHERE printer_id = ?",
                                (printer_id,)).fetchone()["at"]
-        last = conn.execute("SELECT MAX(ended_at) AS at, COUNT(*) FILTER (WHERE outcome IS NULL) AS running "
-                            "FROM prints WHERE printer_id = ?", (printer_id,)).fetchone()
-    valid = cleared is not None and not last["running"] and (last["at"] is None or cleared > last["at"])
+    last = print_history.printer_standing(printer_id)
+    valid = cleared is not None and not last["running"] and (last["last_ended_at"] is None or cleared > last["last_ended_at"])
     return {"printer_id": printer_id, "auto_start": auto_start(printer_id), "cleared_at": cleared,
-            "last_print_ended_at": last["at"], "valid": valid}
+            "last_print_ended_at": last["last_ended_at"], "valid": valid}
 
 
-async def confirm(printer_id: str, print_id=None, outcome=None, failure_reasons=None, note=None, reprint=False) -> dict:
+async def confirm(printer_id: str, print_id=None, outcome=None, failure_reasons=None, notes=None, reprint=False) -> dict:
     """Record Bed cleared, optionally confirming the finished print's outcome in the same action. `reprint` also
     re-queues the print's plate (the Failed… sheet's "Reprint this plate next"); a reprint that cannot happen is
-    reported in `reprint_error` and does not undo the rest."""
+    reported in `reprint_error` and does not undo the rest. A `print_id` must be the printer's latest Print: a stale
+    confirmation (an old notification tapped after a newer print ended) must neither rewrite an older Print's outcome
+    nor release the next Job onto a bed it says nothing about."""
     _require_printer(printer_id)
-    with database.transaction() as conn:
-        if conn.execute("SELECT 1 FROM prints WHERE printer_id = ? AND outcome IS NULL", (printer_id,)).fetchone():
-            raise jobs.JobError("The printer is still printing", 409)
-        if print_id is None and outcome is not None:
-            row = conn.execute("SELECT id FROM prints WHERE printer_id = ? ORDER BY id DESC LIMIT 1",
-                               (printer_id,)).fetchone()
-            print_id = row["id"] if row else None
-        elif print_id is not None and not conn.execute(
-                "SELECT 1 FROM prints WHERE id = ? AND printer_id = ?", (print_id, printer_id)).fetchone():
+    latest = print_history.latest_print(printer_id)
+    if latest is not None and latest["outcome"] is None:
+        raise jobs.JobError("The printer is still printing", 409)
+    if print_id is None and outcome is not None:
+        print_id = latest["id"] if latest else None
+    elif print_id is not None:
+        found = print_history.find_print(print_id)
+        if found is None or found["printer_id"] != printer_id:
             raise jobs.JobError("Print not found for this printer", 404)
-    record = print_history.set_outcome(print_id, outcome, failure_reasons, note) if outcome is not None else None
+        if latest is None or found["id"] != latest["id"]:
+            raise jobs.JobError("That is not this printer's latest print, so the confirmation is out of date. "
+                                "Check the printer's current bed instead", 409)
+    record = print_history.set_outcome(print_id, outcome, failure_reasons, notes) if outcome is not None else None
     with database.transaction() as conn:
         conn.execute("INSERT INTO bed_cleared (printer_id, print_id, cleared_at) VALUES (?, ?, ?)",
                      (printer_id, print_id, time.time()))
@@ -79,7 +82,7 @@ async def confirm(printer_id: str, print_id=None, outcome=None, failure_reasons=
         if not plate or not plate.get("project_id") or not plate.get("plate_id"):
             result["reprint_error"] = "This print was not made from a project plate, so there is nothing to reprint"
         else:
-            import projects
+            import projects  # imported here because only a reprint needs it, and projects drags in the slicer and 3MF stack
             try:
                 result["reprint"] = projects.reprint_plate(plate["project_id"], plate["plate_id"])
             except jobs.JobError as e:

@@ -85,6 +85,27 @@ class BedClearedApiTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(self.printer.started, [])
 
+    def test_a_stale_confirmation_for_an_older_print_is_refused(self):
+        job = self.queue()
+        older = self.finish_print("one.gcode")
+        time.sleep(0.02)
+        newer = self.finish_print("two.gcode")
+        self.assertNotEqual(older, newer)
+        status, refused = self.api.call("POST", "/api/printers/p1/bed-cleared",
+                                        {"print_id": older, "outcome": "failed", "failure_reasons": ["clog"]})
+        self.assertEqual(status, 409)
+        self.assertIn("latest print", refused["error"])
+        time.sleep(0.2)
+        self.assertEqual(self.printer.started, [])
+        self.assertEqual(self.api.call("GET", "/api/jobs")[1]["jobs"][0]["state"], "queued")
+        self.assertFalse(self.api.call("GET", "/api/printers/p1/bed-cleared")[1]["valid"])
+        self.assertEqual(self.api.call("GET", f"/api/prints/{older}")[1]["outcome"], "completed")
+        # Also refused without an outcome (the bare Bed cleared button of a stale notification).
+        self.assertEqual(self.api.call("POST", "/api/printers/p1/bed-cleared", {"print_id": older})[0], 409)
+        # The latest print can still be confirmed.
+        status, result = self.api.call("POST", "/api/printers/p1/bed-cleared", {"print_id": newer, "outcome": "completed"})
+        self.assertEqual((status, result["started"]["id"]), (200, job["id"]))
+
     def test_unknown_printer_is_not_found(self):
         self.assertEqual(self.api.call("POST", "/api/printers/nope/bed-cleared", {})[0], 404)
 
