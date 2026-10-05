@@ -93,6 +93,12 @@ class AdditiveSchemaTests(unittest.TestCase):
         listing = {j["id"]: j for j in self.get("/api/jobs")["jobs"]}
         self.assertEqual((listing[1]["project_id"], listing[1]["plate_id"]), (1, 4))
 
+    def test_existing_projects_default_to_not_quick_and_stay_listed(self):
+        self.start()
+        listed = self.get("/api/projects")["projects"]
+        self.assertEqual([p["name"] for p in listed], ["SEAT"])
+        self.assertIs(self.get("/api/projects/1")["quick"], False)
+
     def test_new_structures_exist_with_defaults(self):
         self.start()
         conn = sqlite3.connect(self.db)
