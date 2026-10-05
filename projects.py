@@ -436,7 +436,10 @@ def validate_data(raw, record: dict) -> dict:
             "scale": _numbers(obj.get("scale", [1, 1, 1]), 3, "Scale", 0.01, 100),
             "overrides": slicer.normalize_overrides({"process": overrides}, base).get("process", {}) if overrides else {},
         })
-    return {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
+    out = {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
+    if (record.get("data") or {}).get("orientation"):     # a quick print's chosen orientation isn't the client's to edit
+        out["orientation"] = record["data"]["orientation"]
+    return out
 
 
 def update_project(project_id: int, body: dict) -> dict:
@@ -940,12 +943,18 @@ def place_whole_model(project_id: int) -> dict:
         raise jobs.JobError("Wait for the model to be analysed", 409)
     limits = _machine_limits_for(record)
     x0, y0, x1, y1 = limits["bed"]
-    center = _whole_position(split["analysis"]["size"], limits) or ((x0 + x1) / 2, (y0 + y1) / 2)
+    rotation = _orientation(record)
+    size = _oriented_size(split, rotation) if any(rotation) else split["analysis"]["size"]
+    center = _whole_position(size, limits) or ((x0 + x1) / 2, (y0 + y1) / 2)
     model = _store_source(project_id, _next_id(record["models"]), split["source_name"],
                           _copy_from(splits.work_dir(split_id) / split["source_file"]), split["settings"]["scale"], split["settings"]["up"])
     model["split"] = {"id": split_id, "part": 0, "supports": False}
     layout = [{"group": False, "items": [{"key": 0, "center": center, "turned": False, "oversize": False}]}]
-    return _replace_split_models(project_id, split_id, [model], layout)
+    placed = _replace_split_models(project_id, split_id, [model], layout)
+    if any(rotation):
+        _mutate(project_id, "data", lambda d: [o.__setitem__("rotation", list(rotation)) for o in d["objects"] if o["model"] == model["id"]])
+        placed = get_project(project_id)
+    return placed
 
 
 # ── Import and the simple print ────────────────────────────────────────────────
@@ -996,6 +1005,9 @@ def intake(project_id: int) -> dict:
     fix = _scale_suggestion(longest, scale) if doubtful else None
     if doubtful:   # the analysis rounds to 0.1 mm, which reads 0 for a speck
         size = [round(x * scale, 4) for x in analysis.get("raw_size") or size]
+    rotation = _orientation(record)
+    if any(rotation) and not doubtful:
+        size = _oriented_size(split, rotation)
     fits = _whole_position(size, limits) is not None
     reason = None
     if doubtful:
@@ -1005,9 +1017,100 @@ def intake(project_id: int) -> dict:
     grams = analysis["volume_cm3"] * ROUGH_G_PER_CM3
     return {**out, "state": "ready", "size": size, "volume_cm3": analysis["volume_cm3"],
             "repaired": bool(analysis.get("repairs")), "repairs": analysis.get("repairs") or [],
-            "scale": scale, "scale_ok": not doubtful, "scale_fix": fix,
+            "scale": scale, "rotation": list(rotation), "scale_ok": not doubtful, "scale_fix": fix,
             "fits": fits, "can_print": reason is None, "reason": reason,
             "estimate": {"grams": round(grams), "seconds": round(grams / ROUGH_G_PER_HOUR * 3600), "rough": True}}
+
+
+def _orientation(record: dict) -> list:
+    """The rotation (degrees about X, Y, Z) a quick model will be placed with, before it is on a plate."""
+    return [float(r) for r in record["data"].get("orientation") or (0.0, 0.0, 0.0)]
+
+
+def _split_mesh(split: dict):
+    import numpy as np
+    with np.load(splits.work_dir(split["id"]) / "model.npz") as data:
+        return data["verts"].astype(float), np.asarray(data["tris"])
+
+
+def _oriented_size(split: dict, rotation) -> list:
+    """Width, depth and height (mm, one decimal) of the analysed model turned by `rotation`."""
+    verts, _ = _split_mesh(split)
+    turned = verts @ rotation_matrix(rotation).T
+    return [round(float(x), 1) for x in turned.max(axis=0) - turned.min(axis=0)]
+
+
+def _euler_zyx(matrix) -> list:
+    """Degrees about X, Y, Z that rotation_matrix turns back into `matrix`."""
+    sy = -float(matrix[2][0])
+    ry = math.asin(max(-1.0, min(1.0, sy)))
+    if abs(sy) < 0.999999:
+        rx, rz = math.atan2(matrix[2][1], matrix[2][2]), math.atan2(matrix[1][0], matrix[0][0])
+    else:
+        rx, rz = math.atan2(-matrix[1][2], matrix[1][1]), 0.0
+    return [round(math.degrees(a) % 360, 4) % 360 for a in (rx, ry, rz)]
+
+
+def _largest_face_normal(verts, tris):
+    """Normal of the largest flat face: triangles facing the same way (within about 1 degree) are one face."""
+    import numpy as np
+    a, b, c = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+    cross = np.cross(b - a, c - a)
+    area = np.linalg.norm(cross, axis=1) / 2
+    keep = area > 1e-9
+    normals = cross[keep] / (2 * area[keep, None])
+    area = area[keep]
+    best, best_area = None, -1.0
+    for index in np.argsort(-area)[:2000]:                  # a face is as good as its biggest triangles suggest
+        close = normals @ normals[index] > math.cos(math.radians(1.0))
+        total = float(area[close].sum())
+        if total > best_area:
+            best, best_area = normals[close].T @ area[close], total
+    return best / np.linalg.norm(best)
+
+
+def _quick_orientation(project_id: int, change) -> dict:
+    """Change a quick model's orientation before it is placed: `change(split, current rotation)` gives the new one."""
+    record = get_project(project_id)
+    split_id = record.get("split_id")
+    if split_id is None:
+        raise jobs.JobError("This project has no uploaded model", 409)
+    if any((m.get("split") or {}).get("id") == split_id for m in record["models"]):
+        raise jobs.JobError("The model is already on a plate; turn it there", 409)
+    split = splits.get_split(split_id, detail=True)
+    if not split.get("analysis"):
+        raise jobs.JobError("Wait for the model to be analysed", 409)
+    rotation = [r % 360 for r in change(split, _orientation(record))]
+    _mutate(project_id, "data", lambda d: d.__setitem__("orientation", rotation))
+    return intake(project_id)
+
+
+def lay_flat(project_id: int) -> dict:
+    """Put the model on its largest flat face, turned to take the least room on the bed."""
+    import numpy as np
+
+    def change(split, current):
+        verts, tris = _split_mesh(split)
+        normal = _largest_face_normal(verts, tris)
+        down = np.array([0.0, 0.0, -1.0])
+        axis = np.cross(normal, down)
+        sine, cosine = float(np.linalg.norm(axis)), float(normal @ down)
+        if sine < 1e-9:
+            flip = np.eye(3) if cosine > 0 else np.diag([1.0, -1.0, -1.0])
+        else:
+            k = axis / sine
+            cross = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+            flip = np.eye(3) + sine * cross + (1 - cosine) * (cross @ cross)
+        # then spin it about the vertical axis to the tightest footprint, so a long model lies along the bed's diagonal
+        flat = verts[:: max(1, len(verts) // 4000)] @ flip.T
+        best = min(range(90), key=lambda deg: np.prod(np.ptp(flat[:, :2] @ rotation_matrix([0, 0, deg])[:2, :2].T, axis=0)))
+        return _euler_zyx(rotation_matrix([0, 0, best]) @ flip)
+    return _quick_orientation(project_id, change)
+
+
+def rotate_quarter(project_id: int) -> dict:
+    """Turn the model 90 degrees about the vertical axis."""
+    return _quick_orientation(project_id, lambda split, current: [current[0], current[1], (current[2] + 90) % 360])
 
 
 def auto_place(project_id: int) -> dict:

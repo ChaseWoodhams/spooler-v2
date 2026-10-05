@@ -240,6 +240,77 @@ class SimplePrintApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(j["plate_id"], j["printer_id"], j["state"]) for j in queued], [(1, "p1", "queued")])
         self.assertEqual(project["slices"]["1"]["sent_job"], queued[0]["id"])
 
+    def standing_plate_stl(self):
+        """A 240 x 150 x 5 plate stood on a corner: its diagonal makes it 276 mm tall, past the printer's 256, though it
+        lies flat comfortably."""
+        import numpy as np
+        import trimesh
+        mesh = trimesh.creation.box((240, 150, 5))
+        mesh.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 4, [0, 0, 1]))
+        mesh.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [0, 1, 0]))
+        path = self.dir / "plate.stl"
+        mesh.export(path)
+        return path.read_bytes()
+
+    async def test_lay_flat_puts_a_too_tall_model_on_its_largest_face_and_it_then_fits_and_prints(self):
+        pid = await self.import_model(self.standing_plate_stl(), "plate.stl")
+        before = self.call("GET", f"/api/projects/{pid}/intake")[1]
+        self.assertEqual((before["fits"], before["can_print"]), (False, False))
+        self.assertAlmostEqual(before["size"][2], 276.0, delta=1.0)
+        self.assertEqual(before["rotation"], [0.0, 0.0, 0.0])
+        status, after = self.call("POST", f"/api/projects/{pid}/lay-flat", {})
+        self.assertEqual(status, 200, after)
+        self.assertEqual((after["fits"], after["can_print"]), (True, True), after)
+        for got, want in zip(sorted(after["size"]), [5.0, 150.0, 240.0]):
+            self.assertAlmostEqual(got, want, delta=0.2)
+        self.assertEqual(after["size"][2], 5.0)     # the thin side is the height
+        self.assertEqual(self.call("GET", f"/api/projects/{pid}/intake")[1]["size"], after["size"])   # remembered
+        self.assertEqual(self.call("POST", f"/api/projects/{pid}/print", {"printer_id": "p1"})[0], 200)
+        await self.settle()
+        project = projects.get_project(pid)
+        self.assertEqual(project["data"]["objects"][0]["rotation"], after["rotation"])
+        self.assertEqual(project["slices"]["1"]["state"], "sliced", project["slices"]["1"].get("error"))
+
+    async def test_laying_flat_a_model_already_flat_changes_nothing(self):
+        pid = await self.import_model(box_stl(self.dir / "slab.stl", (80, 60, 10)), "slab.stl")
+        after = self.call("POST", f"/api/projects/{pid}/lay-flat", {})[1]
+        self.assertEqual(after["size"], [80.0, 60.0, 10.0])
+
+    async def test_laying_flat_a_model_on_its_edge_gives_it_its_widest_footprint(self):
+        pid = await self.import_model(box_stl(self.dir / "slab.stl", (10, 60, 80)), "slab.stl")
+        after = self.call("POST", f"/api/projects/{pid}/lay-flat", {})[1]
+        self.assertEqual(sorted(after["size"]), [10.0, 60.0, 80.0])
+        self.assertEqual(after["size"][2], 10.0)
+
+    async def test_rotate_turns_the_model_90_degrees_about_the_vertical_axis(self):
+        pid = await self.import_model(box_stl(self.dir / "slab.stl", (200, 100, 20)), "slab.stl")
+        turned = self.call("POST", f"/api/projects/{pid}/rotate", {})[1]
+        self.assertEqual((turned["size"], turned["rotation"]), ([100.0, 200.0, 20.0], [0.0, 0.0, 90.0]))
+        for expected in (180.0, 270.0, 0.0):
+            again = self.call("POST", f"/api/projects/{pid}/rotate", {})[1]
+            self.assertEqual(again["rotation"], [0.0, 0.0, expected])
+        self.assertEqual(again["size"], [200.0, 100.0, 20.0])
+        self.call("POST", f"/api/projects/{pid}/rotate", {})
+        self.assertEqual(self.call("POST", f"/api/projects/{pid}/auto-place", {})[0], 200)
+        await self.settle()
+        placed = projects.get_project(pid)["data"]["objects"][0]
+        self.assertEqual(placed["rotation"], [0.0, 0.0, 90.0])
+
+    async def test_orientation_cannot_change_once_the_model_is_on_a_plate(self):
+        pid = await self.import_model(cube_stl(30), "cube.stl")
+        self.call("POST", f"/api/projects/{pid}/auto-place", {})
+        for action in ("rotate", "lay-flat"):
+            status, error = self.call("POST", f"/api/projects/{pid}/{action}", {})
+            self.assertEqual(status, 409)
+            self.assertIn("plate", error["error"])
+
+    async def test_orientation_survives_a_save_of_the_project(self):
+        pid = await self.import_model(box_stl(self.dir / "slab.stl", (200, 100, 20)), "slab.stl")
+        self.call("POST", f"/api/projects/{pid}/rotate", {})
+        project = self.call("GET", f"/api/projects/{pid}")[1]
+        self.assertEqual(self.call("PATCH", f"/api/projects/{pid}", {"data": project["data"], "revision": project["revision"]})[0], 200)
+        self.assertEqual(self.call("GET", f"/api/projects/{pid}/intake")[1]["size"], [100.0, 200.0, 20.0])
+
     async def test_slice_and_print_needs_a_printer(self):
         pid = await self.import_model(cube_stl(30), "cube.stl")
         projects.update_project(pid, {})                      # no printer remembered, none chosen
