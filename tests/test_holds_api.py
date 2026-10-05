@@ -127,6 +127,31 @@ class HoldsApiTests(unittest.TestCase):
         status, result = self.api.call("DELETE", f"/api/jobs/{held['id']}/holds/{hold_id}")
         self.assertEqual((status, result["holds"], result["held"]), (200, [], False))
 
+    def test_a_longer_cycle_of_holds_is_refused(self):
+        a, b, c = self.queue("a.gcode"), self.queue("b.gcode"), self.queue("c.gcode")
+        self.assertEqual(self.hold(a, after_job_id=b["id"])[0], 200)
+        self.assertEqual(self.hold(b, after_job_id=c["id"])[0], 200)
+        status, refused = self.hold(c, after_job_id=a["id"])
+        self.assertEqual(status, 409)
+        self.assertIn("circle", refused["error"])
+        self.assertEqual(self.job(c["id"])["holds"], [])
+        self.assertFalse(self.job(c["id"])["held"])  # c can still start, so a printer is never left with nothing startable
+
+    def test_a_cycle_through_a_plate_hold_is_refused(self):
+        with database.transaction() as conn:
+            project = conn.execute("INSERT INTO projects (name, data, models, slices, created_at, updated_at) "
+                                   "VALUES ('P', '{}', '[]', '{}', 1, 1)").lastrowid
+        plate1, plate2 = self.queue("p1.gcode"), self.queue("p2.gcode")
+        with database.transaction() as conn:
+            for job, plate in ((plate1, 1), (plate2, 2)):
+                conn.execute("UPDATE jobs SET project_id = ?, plate_id = ? WHERE id = ?", (project, plate, job["id"]))
+        self.assertEqual(self.hold(plate2, after_project_id=project, after_plate_id=1)[0], 200)
+        status, refused = self.hold(plate1, after_job_id=plate2["id"])  # plate 1 would wait for plate 2's job
+        self.assertEqual(status, 409)
+        self.assertIn("circle", refused["error"])
+        status, refused = self.hold(plate1, after_project_id=project, after_plate_id=2)
+        self.assertEqual(status, 409)
+
     # carried warnings and blocked unattended starts
 
     def acknowledge(self, job):
