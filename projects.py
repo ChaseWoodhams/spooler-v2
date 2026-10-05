@@ -154,7 +154,7 @@ def _to_project(row) -> dict:
     for plate in record["data"].get("plates", []):
         entry = record["slices"].get(str(plate["id"]))
         if entry and entry.get("state") == SLICED:
-            entry["outdated"] = entry.get("fingerprint") != fingerprint(record, plate["id"])
+            entry["outdated"] = not entry.get("imported") and entry.get("fingerprint") != fingerprint(record, plate["id"])
     return record
 
 
@@ -214,8 +214,48 @@ def create_project(name: str = "", split_id: int | None = None) -> dict:
     return get_project(project_id)
 
 
-def create_project_from_upload(stream, length: int, filename: str, scale=1.0, up="z") -> dict:
-    """Start the workflow from a model file: it's stored as a split model (analysed first) owned by a new project."""
+def create_project_from_gcode(stream, length: int, filename: str, bed: str = "textured") -> dict:
+    """A one-plate project with no objects whose plate holds the uploaded G-code as an imported (never outdated) Slice.
+    `bed` is the plate side the file was sliced for; the file can't say."""
+    if bed not in slicer.BED_TYPES:
+        raise jobs.JobError("bed must be 'textured' or 'smooth'")
+    try:
+        name = safe_gcode_name(filename)
+    except ValueError as e:
+        raise jobs.JobError(str(e)) from e
+    if length > jobs.MAX_UPLOAD_BYTES:
+        raise jobs.JobError(f"The file is larger than {jobs.MAX_UPLOAD_BYTES // (1024 * 1024)} MB", 413)
+    path = _spool(stream, length)
+    try:
+        project = create_project(name.rsplit(".", 1)[0][:120])
+        try:
+            work = plate_dir(project["id"], 1)
+            work.mkdir(parents=True)
+            os.replace(path, work / "plate.gcode")
+            analysis, toolpath = gcode_analysis.analyze(work / "plate.gcode")
+            (work / "toolpath.bin").write_bytes(toolpath)
+            (work / "analysis.json").write_text(json.dumps(analysis), encoding="utf-8")
+            estimates = analysis.get("estimates") or {}
+            entry = {"state": SLICED, "error": None, "imported": True, "sliced_at": time.time(),
+                     "estimate_s": estimates.get("estimate_s"), "estimate_g": estimates.get("estimate_g"),
+                     "layers": len(analysis["layers"]), "slicer": analysis.get("slicer"),
+                     "gcode_bytes": (work / "plate.gcode").stat().st_size,
+                     "findings": [f for f in analysis.get("findings", []) if f["level"] == "fail"][:5]}
+            _mutate(project["id"], "slices", lambda s: s.__setitem__("1", entry))
+            _mutate(project["id"], "data", lambda d: d.__setitem__("bed", bed))
+        except BaseException:
+            delete_project(project["id"])
+            raise
+        return get_project(project["id"])
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def create_project_from_upload(stream, length: int, filename: str, scale=1.0, up="z", bed: str = "textured") -> dict:
+    """Start the workflow from a model file: it's stored as a split model (analysed first) owned by a new project.
+    A G-code file instead becomes a one-plate project holding it as an imported Slice."""
+    if filename.lower().endswith(".gcode"):
+        return create_project_from_gcode(stream, length, filename, bed)
     if filename.lower().endswith(".3mf"):  # an OrcaSlicer/BambuStudio project keeps its plates and settings
         path = _spool(stream, length)
         try:
@@ -1388,7 +1428,8 @@ def queue_plates(project_id: int, body: dict) -> dict:
     data = record["data"]
     wanted = _plate_list(body.get("plates"))
     if wanted is None:
-        plates = [p for p in data["plates"] if any(o["plate"] == p["id"] for o in data["objects"])]
+        plates = [p for p in data["plates"] if any(o["plate"] == p["id"] for o in data["objects"])
+                  or (record["slices"].get(str(p["id"])) or {}).get("imported")]
     else:
         plates = [p for p in data["plates"] if p["id"] in wanted]
         if len(plates) != len(wanted):

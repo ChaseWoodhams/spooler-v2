@@ -18,7 +18,7 @@ import projects
 import slicer
 import splits
 import state
-from tests.test_jobs import FakePrinter
+from tests.test_jobs import GCODE, FakePrinter
 from tests.test_slicer import cube_stl, fake_runner, make_fake_orca
 
 GEOMETRY = not splits.missing_modules()
@@ -331,6 +331,42 @@ class WorkflowApiTests(unittest.TestCase):
         status, other = self.call("POST", "/api/projects", {"name": "Again", "split_id": project["split_id"]})
         self.assertEqual((status, other["split_id"]), (200, project["split_id"]))
         self.assertEqual(self.call("POST", "/api/projects", {"split_id": 999})[0], 404)
+
+    def import_gcode(self, bed="smooth"):
+        return self.call("POST", f"/api/projects/upload?filename=benchy.gcode&bed={bed}", raw=GCODE)
+
+    def test_gcode_import_makes_a_one_plate_project_with_an_imported_slice(self):
+        status, project = self.import_gcode()
+        self.assertEqual((status, project["name"]), (200, "benchy"), project)
+        self.assertEqual(([p["id"] for p in project["data"]["plates"]], project["data"]["objects"], project["data"]["bed"]),
+                         ([1], [], "smooth"))
+        entry = project["slices"]["1"]
+        self.assertEqual((entry["state"], entry["imported"], entry["estimate_s"], entry["estimate_g"]), ("sliced", True, 3723, 12.5))
+        self.assertEqual(self.call("GET", f"/api/projects/{project['id']}/plates/1/analysis")[0], 200)  # the preview reads the file
+        self.assertEqual(self.call("POST", "/api/projects/upload?filename=x.txt", raw=GCODE)[0], 400)
+        self.assertEqual(self.call("POST", "/api/projects/upload?filename=x.gcode&bed=gold", raw=GCODE)[0], 400)
+
+    def test_an_imported_slice_is_never_outdated(self):
+        _, project = self.import_gcode()
+        pid = project["id"]
+        data = json.loads(json.dumps(project["data"]))
+        data["bed"] = "textured"
+        data["profile"]["process"] = {"layer_height": "0.3"}
+        status, changed = self.call("PATCH", f"/api/projects/{pid}", {"data": data, "revision": project["revision"]})
+        self.assertEqual(status, 200, changed)
+        self.assertFalse(changed["slices"]["1"]["outdated"])
+        self.assertFalse(self.call("GET", f"/api/projects/{pid}")[1]["slices"]["1"]["outdated"])
+        self.assertEqual(self.call("POST", f"/api/projects/{pid}/slice")[0], 409)         # nothing to slice again
+
+    def test_an_imported_plate_is_sent_with_its_side_and_not_skipped(self):
+        _, project = self.import_gcode("textured")
+        pid = project["id"]
+        status, sent = self.call("POST", f"/api/projects/{pid}/queue", {})
+        self.assertEqual(status, 200, sent)
+        self.assertEqual([(j["project_id"], j["plate_id"], j["print_opts"]["smooth_plate"]) for j in sent["jobs"]], [(pid, 1, False)])
+        self.assertEqual(self.call("POST", f"/api/projects/{pid}/queue", {"plates": [1]})[0], 409)  # already queued
+        _, smooth = self.import_gcode("smooth")
+        self.assertTrue(self.call("POST", f"/api/projects/{smooth['id']}/queue", {})[1]["jobs"][0]["print_opts"]["smooth_plate"])
 
 
 if __name__ == "__main__":

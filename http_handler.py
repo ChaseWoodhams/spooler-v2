@@ -1202,7 +1202,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             length = 0
         if new_project:
             self._splits_call(lambda: projects.create_project_from_upload(self.rfile, length, value("filename"),
-                                                                          scale=value("scale") or 1.0, up=value("up") or "z"))
+                                                                          scale=value("scale") or 1.0, up=value("up") or "z",
+                                                                          bed=value("bed") or "textured"))
             return
         self._jobs_call(lambda: projects.import_model(self._job_id(), self.rfile, length, value("filename"),
                                                      scale=value("scale") or 1.0, up=value("up") or "z",
