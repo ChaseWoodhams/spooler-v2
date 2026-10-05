@@ -1146,7 +1146,7 @@ def fix_scale(project_id: int) -> dict:
     return intake(project_id)
 
 
-QUICK_LAYER_HEIGHTS = (0.08, 0.12, 0.16, 0.2, 0.24, 0.28)   # the fixed list the Quick print dialog offers (0.4 mm nozzle)
+QUICK_LAYER_HEIGHTS = (0.08, 0.12, 0.16, 0.2, 0.24, 0.28, 0.32)   # the fixed list the Quick print dialog offers (0.4 mm nozzle)
 QUICK_SUPPORTS = ("off", "normal", "tree")
 QUICK_BRIMS = ("off", "auto", "custom")
 QUICK_OPTION_KEYS = ("layer_height", "infill", "walls", "supports", "brim", "brim_width")
