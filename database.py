@@ -220,6 +220,10 @@ MIGRATIONS = [
     """
     ALTER TABLE projects ADD COLUMN quick INTEGER NOT NULL DEFAULT 0 CHECK (quick IN (0, 1));
     """,
+    # 9 — A Print remembers it came from a Quick print, so History still knows after the hidden project is deleted
+    """
+    ALTER TABLE prints ADD COLUMN was_quick INTEGER NOT NULL DEFAULT 0 CHECK (was_quick IN (0, 1));
+    """,
 ]
 
 _lock = threading.RLock()
