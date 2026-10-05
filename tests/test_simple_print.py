@@ -240,6 +240,23 @@ class SimplePrintApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(j["plate_id"], j["printer_id"], j["state"]) for j in queued], [(1, "p1", "queued")])
         self.assertEqual(project["slices"]["1"]["sent_job"], queued[0]["id"])
 
+    async def test_a_quick_gcode_upload_reviews_its_preflight_then_queues_without_slicing(self):
+        from tests.test_jobs import GCODE
+        status, project = self.call("POST", "/api/projects/upload?filename=cube.gcode&quick=1", raw=GCODE)
+        self.assertEqual(status, 200, project)
+        pid = project["id"]
+        intake = self.call("GET", f"/api/projects/{pid}/intake")[1]
+        self.assertEqual((intake["kind"], intake["can_print"], intake["file"]), ("gcode", True, "cube.gcode"))
+        status, reviewed = self.call("POST", f"/api/projects/{pid}/print", {"printer_id": "p1", "review": True})
+        self.assertEqual(status, 200, reviewed)
+        self.assertIn("checks", reviewed["review"])
+        self.assertEqual(projects.project_jobs(pid), [])      # a review queues nothing
+        status, project = self.call("POST", f"/api/projects/{pid}/print", {"printer_id": "p1", "leveling": True})
+        self.assertEqual(status, 200, project)
+        queued = projects.project_jobs(pid)
+        self.assertEqual([(j["printer_id"], j["state"]) for j in queued], [("p1", "queued")])
+        self.assertEqual(self.call("GET", f"/api/jobs/{queued[0]['id']}/preflight")[0], 200)
+
     def standing_plate_stl(self):
         """A 240 x 150 x 5 plate stood on a corner: its diagonal makes it 276 mm tall, past the printer's 256, though it
         lies flat comfortably."""
