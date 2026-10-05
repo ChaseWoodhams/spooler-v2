@@ -48,6 +48,7 @@ import gcode_analysis
 import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
 import orca_3mf
 import packing
+import remembered_defaults
 import slicer
 import splits
 import state
@@ -197,8 +198,14 @@ def create_project(name: str = "", split_id: int | None = None) -> dict:
     """A project with one empty plate. With `split_id` it belongs to that split model and lays out its parts."""
     if split_id is not None:
         splits.get_split(split_id)
-    data = {"bed": "textured", "profile": {"bundle_id": _default_bundle_id(), "process": {}, "filament": {}},
-            "plates": [_new_plate(1)], "objects": []}
+    remembered = remembered_defaults.usable()
+    plate = _new_plate(1)
+    if remembered["printer"]:
+        plate["printer_id"] = remembered["printer"]
+    data = {"bed": remembered["plate_side"] or "textured",
+            "profile": {"bundle_id": remembered["profile"] or _default_bundle_id(), "process": {}, "filament": {},
+                        "spool_id": remembered["spool"]},
+            "plates": [plate], "objects": []}
     now = time.time()
     with database.transaction() as conn:
         project_id = conn.execute("INSERT INTO projects (name, data, split_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",

@@ -112,6 +112,20 @@ function remember(key, value) {
   return null;
 }
 
+// What the user last picked lives on the server (printer, profile, spool, plate side, send options), so every
+// browser starts a new project from it. Saving is best effort: a failure never interrupts the work.
+function rememberDefaults(change) {
+  api("PATCH", "/api/defaults", change).catch(() => {});
+}
+
+async function applySendDefaults() {
+  try {
+    const { options } = (await api("GET", "/api/defaults")).defaults;
+    $("send-leveling").checked = Boolean(options.leveling);
+    $("send-timelapse").checked = Boolean(options.timelapse);
+  } catch (_) { /* the checkboxes stay as they are */ }
+}
+
 const data = () => state.project.data;
 const plateById = id => data().plates.find(p => p.id === id) || null;
 const currentPlate = () => plateById(state.plate);
@@ -166,6 +180,7 @@ async function boot() {
   await loadPresets();
   loadSpools();
   loadPrinters();
+  applySendDefaults();
   const params = new URLSearchParams(location.search);
   const id = Number(params.get("project")) || (params.has("new") ? 0 : Number(remember("slicer.project")) || 0);
   if (id) {
@@ -274,6 +289,7 @@ async function chooseSpool(value) {
   if (!id) {
     for (const key of SPOOL_KEYS) delete profile.filament[key];
     profile.spool_id = null;
+    rememberDefaults({ spool: null });
     changed();
     renderAll();
     return;
@@ -288,6 +304,7 @@ async function chooseSpool(value) {
     for (const key of SPOOL_KEYS) delete data().profile.filament[key];
     Object.assign(data().profile.filament, match.changes);
     data().profile.spool_id = id;
+    rememberDefaults({ spool: id, profile: data().profile.bundle_id });
     changed();
     renderAll();
     toast(`Using ${match.spool.name}` + (match.preset ? "" : " — no stock preset for this material, so the preset's other settings are kept"));
@@ -675,6 +692,7 @@ async function choosePreset(kind, name) {
     await bundleSettings(bundle.id);
     const profile = data().profile;
     data().profile = { ...profile, bundle_id: bundle.id, [kind]: {}, ...(kind === "machine" ? { process: {}, filament: {} } : {}) };
+    rememberDefaults({ profile: bundle.id });
     changed();
     renderAll();
     toast(`Using ${bundle.label}`);
@@ -703,6 +721,7 @@ async function savePreset() {
     await loadBundles();
     await bundleSettings(bundle.id);
     data().profile = { ...data().profile, bundle_id: bundle.id, [kind]: {} };
+    rememberDefaults({ profile: bundle.id });
     $("dlg-save-profile").close();
     changed();
     renderAll();
@@ -1556,6 +1575,7 @@ async function sendBatch() {
   const repeats = chosen.filter(id => openJobPlates().has(id)).map(id => plateById(id).name);
   if (repeats.length && !confirm(`${listNames(repeats)} ${repeats.length === 1 ? "is" : "are"} already in the queue. Send another copy?`)) return;
   await flushSave();
+  rememberDefaults({ options: { leveling: $("send-leveling").checked, timelapse: $("send-timelapse").checked } });
   await withButton($("btn-send-batch"), async () => {
     const result = await api("POST", `/api/projects/${state.project.id}/queue`, {
       plates: chosen, leveling: $("send-leveling").checked, timelapse: $("send-timelapse").checked, again: repeats.length > 0 });
@@ -1728,7 +1748,7 @@ function bindUi() {
   }
   $("btn-import-preset").addEventListener("click", () => $("preset-file").click());
   $("preset-file").addEventListener("change", e => { const [file] = e.target.files; e.target.value = ""; if (file) importPreset(file); });
-  $("bed-select").addEventListener("change", e => { data().bed = e.target.value; changed(); renderViewport(); });
+  $("bed-select").addEventListener("change", e => { data().bed = e.target.value; rememberDefaults({ plate_side: data().bed }); changed(); renderViewport(); });
 
   $("btn-save-profile-confirm").addEventListener("click", savePreset);
 
@@ -1888,6 +1908,7 @@ function bindUi() {
     const plate = currentPlate();
     if (!plate) return;
     plate.printer_id = e.target.value || null;
+    rememberDefaults({ printer: plate.printer_id });
     changed();
     renderFarm();
   });
