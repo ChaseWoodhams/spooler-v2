@@ -45,6 +45,7 @@ from xml.sax.saxutils import escape
 import brick_post
 import database
 import gcode_analysis
+import holds
 import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
 import orca_3mf
 import packing
@@ -1624,8 +1625,8 @@ PLATE_STATUSES = ("unsliced", "sliced", "waiting", "queued", "printing", "printe
 def plate_status(project_id: int) -> dict:
     """Each plate's status and the project's progress, worked out from the slices, the queue and print history.
 
-    printing → a Job is starting or printing, or a Print is open; waiting → a queued Job holds for a plate that hasn't
-    printed OK yet; queued → a queued Job; otherwise the latest finished Print decides (completed → printed_ok,
+    printing → a Job is starting or printing, or a Print is open; waiting → a queued Job has a hold (on another Job or
+    plate) that isn't satisfied yet; queued → a queued Job; otherwise the latest finished Print decides (completed → printed_ok,
     cancelled or failed → failed); otherwise sliced when the plate has a Slice, else unsliced."""
     record = get_project(project_id)
     with database.transaction() as conn:
@@ -1633,9 +1634,6 @@ def plate_status(project_id: int) -> dict:
                                 "AND state IN ('queued', 'starting', 'printing')", (project_id,)).fetchall()
         print_rows = conn.execute("SELECT plate_id, outcome, filament_g FROM prints WHERE project_id = ? AND plate_id IS NOT NULL "
                                   "ORDER BY started_at, id", (project_id,)).fetchall()
-        holds = conn.execute("SELECT j.plate_id, h.after_plate_id FROM job_holds h JOIN jobs j ON j.id = h.job_id "
-                             "WHERE j.project_id = ? AND j.state = 'queued' AND h.after_project_id = ?",
-                             (project_id, project_id)).fetchall()
     latest = {}  # plate id → outcome of its latest Print (None while it is still printing)
     consumed = {}  # plate id → grams its finished Prints used, as the printer counted them
     for row in print_rows:
@@ -1644,10 +1642,9 @@ def plate_status(project_id: int) -> dict:
         if row["outcome"] == "unknown":
             continue
         latest[row["plate_id"]] = row["outcome"]
-    printed = {n for n, outcome in latest.items() if outcome == "completed"}
     printing = {r["plate_id"] for r in job_rows if r["state"] in ("starting", "printing")} | {n for n, o in latest.items() if o is None}
     queued = {r["plate_id"] for r in job_rows if r["state"] == "queued"}
-    waiting = {r["plate_id"] for r in holds if r["after_plate_id"] not in printed}
+    waiting = {r["plate_id"] for r in job_rows if r["state"] == "queued" and holds.waiting_on(r["id"])}
 
     open_job = {}  # plate id → its newest open Job
     for row in job_rows:
