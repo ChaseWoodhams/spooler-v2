@@ -197,3 +197,52 @@ class PlateStatusTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/api/projects/999/status")
         self.assertEqual(caught.exception.code, 404)
+
+    # reprint of a failed plate
+
+    def post(self, path):
+        request = urllib.request.Request(self.base + path, data=b"{}", method="POST", headers={"Content-Type": "application/json"})
+        try:
+            with _opener.open(request, timeout=10) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def fail_plate(self, plate_id, code=8):
+        self.slice_plate(plate_id)
+        job = self.plate_job(plate_id)
+        self.run_job(job, f"plate{plate_id}.gcode")
+        self.push(code, f"plate{plate_id}.gcode", 20, 50)
+        return job
+
+    def test_reprint_queues_a_failed_plate_again_for_the_same_printer_from_the_stored_gcode(self):
+        job = self.fail_plate(8)
+        self.assertEqual(self.states()[8], "failed")
+        status, body = self.post(f"/api/projects/{self.project_id}/plates/8/reprint")
+        self.assertEqual(status, 200)
+        self.assertEqual((body["id"], body["state"], body["printer_id"]), (job["id"], "queued", "p1"))
+        self.assertEqual(self.states()[8], "queued")
+
+    def test_reprint_with_the_stored_gcode_gone_says_so_and_queues_nothing(self):
+        job = self.fail_plate(9)
+        for stored in (self.dir / "jobs").rglob("*.gcode"):
+            stored.unlink()
+        status, body = self.post(f"/api/projects/{self.project_id}/plates/9/reprint")
+        self.assertEqual(status, 410)
+        self.assertIn("G-code", body["error"])
+        self.assertEqual(self.states()[9], "failed")
+        self.assertEqual(jobs.get_job(job["id"])["state"], "cancelled")
+
+    def test_reprint_of_a_plate_that_has_not_failed_is_refused(self):
+        self.slice_plate(10)
+        status, _ = self.post(f"/api/projects/{self.project_id}/plates/10/reprint")
+        self.assertEqual(status, 409)
+        status, _ = self.post(f"/api/projects/{self.project_id}/plates/999/reprint")
+        self.assertEqual(status, 404)
+
+    def test_reprint_when_the_failed_job_was_deleted_says_the_gcode_is_gone(self):
+        job = self.fail_plate(11)
+        self.call("DELETE", f"/api/jobs/{job['id']}")
+        status, body = self.post(f"/api/projects/{self.project_id}/plates/11/reprint")
+        self.assertEqual(status, 410)
+        self.assertEqual(self.states()[11], "failed")
