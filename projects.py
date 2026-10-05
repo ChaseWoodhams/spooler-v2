@@ -1542,6 +1542,21 @@ def plate_status(project_id: int) -> dict:
                          "filament_g": {key: round(value, 1) for key, value in filament.items()}}}
 
 
+def reprint_plate(project_id: int, plate_id: int) -> dict:
+    """Queue a failed plate again by re-queuing its newest failed Job (the whole plate, even if it only partly failed)."""
+    status = {p["id"]: p["status"] for p in plate_status(project_id)["plates"]}
+    if plate_id not in status:
+        raise jobs.JobError("Plate not found", 404)
+    if status[plate_id] != "failed":
+        raise jobs.JobError("Only a failed plate can be reprinted", 409)
+    with database.transaction() as conn:
+        row = conn.execute("SELECT id FROM jobs WHERE project_id = ? AND plate_id = ? AND state IN ('failed', 'cancelled') "
+                           "ORDER BY COALESCE(finished_at, updated_at) DESC, id DESC LIMIT 1", (project_id, plate_id)).fetchone()
+    if row is None:
+        raise jobs.JobError("The G-code for this plate is no longer stored — slice it again", 410)
+    return jobs.requeue(row["id"])
+
+
 # ── Background worker ──────────────────────────────────────────────────────────
 
 def _claim() -> tuple | None:

@@ -1180,7 +1180,7 @@ class SPHandler(SimpleHTTPRequestHandler):
                 return projects.add_split_parts(self._job_id(), split_id, body.get("parts"))
             self._jobs_call(from_split, broadcast=False)
             return
-        if len(parts) == 7 and parts[4] == "plates" and parts[5].isdigit() and parts[6] in ("arrange", "slice", "queue", "merge"):
+        if len(parts) == 7 and parts[4] == "plates" and parts[5].isdigit() and parts[6] in ("arrange", "slice", "queue", "merge", "reprint"):
             plate_id, action = int(parts[5]), parts[6]
 
             def merge():
@@ -1194,8 +1194,9 @@ class SPHandler(SimpleHTTPRequestHandler):
                 "slice":   lambda: projects.request_slice(self._job_id(), plate_id, bool(self._json_body().get("send"))),
                 "queue":   lambda: projects.queue_plate(self._job_id(), plate_id, self._json_body()),
                 "merge":   merge,
+                "reprint": lambda: projects.reprint_plate(self._job_id(), plate_id),
             }
-            self._jobs_call(actions[action], broadcast=action == "queue")
+            self._jobs_call(actions[action], broadcast=action in ("queue", "reprint"))
             return
         self._json({"error": "Not found"}, 404)
 
