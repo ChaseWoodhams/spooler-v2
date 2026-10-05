@@ -1,6 +1,7 @@
 """A Print remembers its project and plate; the backend serves each plate's status and the project's progress."""
 import asyncio
 import json
+import struct
 import tempfile
 import threading
 import unittest
@@ -211,7 +212,9 @@ class PlateStatusTests(unittest.TestCase):
         self.assertIsNone(plates[3]["estimate_s"])
         self.assertIsNone(plates[3]["job_id"])
         self.assertIsNone(plates[4]["estimate_g"])
-        self.assertEqual(self.status()["progress"]["filament_g"], {"used": 10.0, "total": 30.0})
+        filament = self.status()["progress"]["filament_g"]
+        self.assertEqual((filament["used"], filament["total"]), (10.0, 30.0))
+        self.assertEqual(filament["unknown_plates"], PLATES - 2)  # every plate but 1 and 2 has no estimate yet
 
     # reprint of a failed plate
 
@@ -261,3 +264,69 @@ class PlateStatusTests(unittest.TestCase):
         status, body = self.post(f"/api/projects/{self.project_id}/plates/11/reprint")
         self.assertEqual(status, 410)
         self.assertEqual(self.states()[11], "failed")
+
+    # the project's filament total
+
+    def record_grams(self, filename, grams):
+        with database.transaction() as conn:
+            conn.execute("UPDATE prints SET filament_g = ? WHERE file_name = ?", (grams, filename))
+
+    def test_filament_used_is_what_the_prints_really_consumed_including_failed_ones(self):
+        self.slice_plate(1, estimate_g=10.0)
+        self.slice_plate(2, estimate_g=20.0)
+        self.run_job(self.plate_job(1), "plate1.gcode")
+        self.push(9, "plate1.gcode", 50, 50)
+        self.record_grams("plate1.gcode", 11.5)  # the printer's own count beats the estimate
+        self.run_job(self.plate_job(2), "plate2.gcode")
+        self.push(8, "plate2.gcode", 20, 50)
+        self.record_grams("plate2.gcode", 6.0)  # a failed plate still used filament
+        filament = self.status()["progress"]["filament_g"]
+        self.assertEqual((filament["used"], filament["total"]), (17.5, 30.0))
+
+    def test_filament_shows_the_chosen_spool_from_spoolman_and_survives_spoolman_being_down(self):
+        self.slice_plate(1, estimate_g=10.0)
+        with database.transaction() as conn:
+            row = conn.execute("SELECT data FROM projects WHERE id = ?", (self.project_id,)).fetchone()
+            data = json.loads(row["data"])
+            data["profile"]["spool_id"] = 7
+            conn.execute("UPDATE projects SET data = ? WHERE id = ?", (json.dumps(data), self.project_id))
+        with mock.patch("spoolman.spool_level", return_value={"name": "Sunlu PLA grey", "remaining_g": 420.0}) as level:
+            spool = self.status()["progress"]["filament_g"]["spool"]
+        level.assert_called_with(7)
+        self.assertEqual(spool, {"id": 7, "name": "Sunlu PLA grey", "remaining_g": 420.0})
+        with mock.patch("spoolman.spool_level", return_value=None):
+            self.assertEqual(self.status()["progress"]["filament_g"]["spool"], {"id": 7, "name": None, "remaining_g": None})
+
+    def test_filament_has_no_spool_when_the_project_has_none(self):
+        self.assertIsNone(self.status()["progress"]["filament_g"]["spool"])
+
+    # the per-plate preview picture
+
+    def add_cube(self, model_id=1):
+        import numpy as np
+        verts = np.array([(x, y, z) for x in (0, 20) for y in (0, 20) for z in (0, 20)], "<f4")
+        tris = np.array([(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1),
+                         (2, 3, 7), (2, 7, 6), (0, 2, 6), (0, 6, 4), (1, 5, 7), (1, 7, 3)], "<u4")
+        folder = Path(self.dir) / "projects" / str(self.project_id) / "models" / str(model_id)
+        folder.mkdir(parents=True)
+        (folder / "preview.bin").write_bytes(b"SPV1" + struct.pack("<I", 1) + struct.pack("<II", len(verts), len(tris)) + verts.tobytes() + tris.tobytes())
+
+    def picture(self, plate_id):
+        with _opener.open(f"{self.base}/api/projects/{self.project_id}/plates/{plate_id}/preview.png", timeout=20) as resp:
+            return resp.headers["Content-Type"], resp.read()
+
+    def test_a_plate_has_a_preview_picture_of_its_layout_sliced_or_not(self):
+        import projects
+        projects.configure(self.dir)
+        self.add_cube()
+        kind, body = self.picture(3)  # plate 3 is not sliced
+        self.assertEqual(kind, "image/png")
+        self.assertEqual(body[:4], bytes([137]) + b"PNG")
+        self.assertGreater(len(body), 300)
+
+    def test_a_preview_for_a_missing_plate_is_404(self):
+        import projects
+        projects.configure(self.dir)
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.picture(999)
+        self.assertEqual(caught.exception.code, 404)

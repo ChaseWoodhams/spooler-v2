@@ -51,6 +51,7 @@ import packing
 import remembered_defaults
 import slicer
 import splits
+import spoolman
 import state
 import thumbnails
 from gcode_meta import safe_gcode_name
@@ -1503,6 +1504,35 @@ def plate_file(project_id: int, plate_id: int, kind: str) -> Path:
     return path
 
 
+_previews: dict = {}  # (project, plate) → (fingerprint, PNG), so the page's polling doesn't render again
+PREVIEW_SIZE = (320, 240)
+
+
+def plate_preview(project_id: int, plate_id: int) -> bytes:
+    """A picture of the plate as laid out: its parts placed on the bed, drawn the way the printer's own thumbnail is."""
+    record = get_project(project_id)
+    if not any(p["id"] == plate_id for p in record["data"]["plates"]):
+        raise jobs.JobError("The plate was removed", 404)
+    stamp = fingerprint(record, plate_id)
+    cached = _previews.get((project_id, plate_id))
+    if cached and cached[0] == stamp:
+        return cached[1]
+    ready = {m["id"] for m in record["models"] if m.get("state") == READY}
+    meshes, complete = [], True
+    for obj in record["data"].get("objects", []):
+        if obj["plate"] == plate_id and obj["model"] in ready:
+            try:
+                verts, tris = load_mesh(project_id, obj["model"], preview=True)
+            except (OSError, jobs.JobError):
+                complete = False
+                continue
+            meshes.append((place(verts, obj), tris))
+    png = thumbnails.render(meshes, *PREVIEW_SIZE)
+    if complete:
+        _previews[(project_id, plate_id)] = (stamp, png)
+    return png
+
+
 def plate_analysis(project_id: int, plate_id: int) -> dict:
     analysis = json.loads(plate_file(project_id, plate_id, "analysis").read_text(encoding="utf-8"))
     analysis.pop("occupancy", None)
@@ -1601,13 +1631,16 @@ def plate_status(project_id: int) -> dict:
     with database.transaction() as conn:
         job_rows = conn.execute("SELECT id, plate_id, state, printer_id FROM jobs WHERE project_id = ? AND plate_id IS NOT NULL "
                                 "AND state IN ('queued', 'starting', 'printing')", (project_id,)).fetchall()
-        print_rows = conn.execute("SELECT plate_id, outcome FROM prints WHERE project_id = ? AND plate_id IS NOT NULL "
+        print_rows = conn.execute("SELECT plate_id, outcome, filament_g FROM prints WHERE project_id = ? AND plate_id IS NOT NULL "
                                   "ORDER BY started_at, id", (project_id,)).fetchall()
         holds = conn.execute("SELECT j.plate_id, h.after_plate_id FROM job_holds h JOIN jobs j ON j.id = h.job_id "
                              "WHERE j.project_id = ? AND j.state = 'queued' AND h.after_project_id = ?",
                              (project_id, project_id)).fetchall()
     latest = {}  # plate id → outcome of its latest Print (None while it is still printing)
+    consumed = {}  # plate id → grams its finished Prints used, as the printer counted them
     for row in print_rows:
+        if row["outcome"] in ("completed", "failed", "cancelled") and row["filament_g"]:
+            consumed[row["plate_id"]] = consumed.get(row["plate_id"], 0.0) + row["filament_g"]
         if row["outcome"] == "unknown":
             continue
         latest[row["plate_id"]] = row["outcome"]
@@ -1625,7 +1658,7 @@ def plate_status(project_id: int) -> dict:
         parts[obj.get("plate")] = parts.get(obj.get("plate"), 0) + 1
 
     plates, counts = [], {status: 0 for status in PLATE_STATUSES}
-    filament = {"used": 0.0, "total": 0.0}
+    filament = {"used": 0.0, "total": 0.0, "unknown_plates": 0}
     for plate in record["data"]["plates"]:
         n = plate["id"]
         entry = record["slices"].get(str(n)) or {}
@@ -1646,19 +1679,31 @@ def plate_status(project_id: int) -> dict:
         grams = entry.get("estimate_g") if sliced else None
         if grams:
             filament["total"] += grams
-            if status == "printed_ok":
-                filament["used"] += grams
+        else:
+            filament["unknown_plates"] += 1  # not sliced yet, so its filament isn't in the total
+        # what the printer counted wins; a plate printed OK with no count falls back to its estimate
+        filament["used"] += consumed[n] if n in consumed else (grams or 0.0) if status == "printed_ok" else 0.0
         job = open_job.get(n)
         plates.append({"id": n, "name": plate.get("name"), "status": status,
                        "outdated": bool(entry.get("outdated")) if sliced else False,
-                       "parts": parts.get(n, 0), "job_id": job["id"] if job else None,
+                       "parts": parts.get(n, 0), "layout": fingerprint(record, n), "job_id": job["id"] if job else None,
                        "printer_id": (job["printer_id"] if job else None) or plate.get("printer_id"),
                        "estimate_s": entry.get("estimate_s") if sliced else None, "estimate_g": grams})
     total = len(plates)
     return {"project_id": project_id, "plates": plates,
             "progress": {"total": total, "counts": counts, "printed_ok": counts["printed_ok"],
                          "percent": round(100 * counts["printed_ok"] / total) if total else 0,
-                         "filament_g": {key: round(value, 1) for key, value in filament.items()}}}
+                         "filament_g": {"used": round(filament["used"], 1), "total": round(filament["total"], 1),
+                                        "unknown_plates": filament["unknown_plates"], "spool": _spool_level(record)}}}
+
+
+def _spool_level(record: dict) -> dict | None:
+    """The Spoolman spool chosen for the project and what is left on it (None values when Spoolman can't say)."""
+    spool_id = (record["data"].get("profile") or {}).get("spool_id")
+    if not spool_id:
+        return None
+    level = spoolman.spool_level(spool_id) or {}
+    return {"id": spool_id, "name": level.get("name"), "remaining_g": level.get("remaining_g")}
 
 
 def reprint_plate(project_id: int, plate_id: int) -> dict:
