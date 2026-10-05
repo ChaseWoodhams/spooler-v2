@@ -223,7 +223,8 @@ class SliceTests(SlicerTestCase):
         self.assertEqual(err.exception.status, 404)
         with self.assertRaisesRegex(JobError, "bed must be"):
             self.upload(bed="glass")
-        self.assertEqual(slicer.list_slices(), [])
+        with database.transaction() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM slices").fetchone()[0], 0)  # nothing was stored
 
     async def test_slicing_creates_a_queued_job_and_keeps_every_artifact(self):
         runner = fake_runner()
@@ -269,7 +270,7 @@ class SliceTests(SlicerTestCase):
         self.assertEqual(names, ["bracket_plate1.gcode", "bracket_plate2.gcode"])
         self.assertEqual(done["estimate_s"], 1128)
 
-    async def test_slicer_errors_are_explained_and_can_be_retried(self):
+    async def test_slicer_errors_are_explained(self):
         with mock.patch.object(slicer, "runner", fake_runner(code=4294967290)):  # -6 as reported on Windows
             record = self.upload()
             await slicer.process_next()
@@ -277,12 +278,6 @@ class SliceTests(SlicerTestCase):
         self.assertEqual((failed["state"], failed["exit_code"]), ("failed", -6))
         self.assertIn("can't be parsed", failed["error"])
         self.assertEqual(jobs.list_jobs(), [])
-
-        self.assertEqual(slicer.retry_slice(record["id"])["state"], "queued")
-        slicer.delete_slice(record["id"])
-        self.assertFalse((slicer.slices_dir() / str(record["id"])).exists())
-        with self.assertRaises(JobError):
-            slicer.get_slice(record["id"])
 
     async def test_missing_output_fails_the_slice(self):
         with mock.patch.object(slicer, "runner", fake_runner(write_output=False)):

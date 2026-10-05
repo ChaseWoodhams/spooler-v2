@@ -1360,7 +1360,6 @@ body.panel-open { overflow: hidden; }
 }
 .queue-hint { align-self: center; font-size: 12px; color: var(--text-muted); }
 .queue-body { display: flex; flex-direction: column; gap: 20px; min-height: 100%; padding: 16px 20px 24px; }
-.queue-body.drop-target { outline: 2px dashed var(--accent); outline-offset: -8px; }
 .queue-section h4 {
   font-size: 11px;
   font-weight: 600;
@@ -1436,7 +1435,6 @@ body.panel-open { overflow: hidden; }
 .modal-box textarea:focus { border-color: var(--accent); }
 
 /* ─── Slicing ─────────────────────────────────────────────────────────────── */
-.slice-body:not(:empty) { padding: 16px 20px 0; }
 .link-btn {
   align-self: flex-start;
   margin-top: -8px;
@@ -1448,16 +1446,6 @@ body.panel-open { overflow: hidden; }
   cursor: pointer;
 }
 .link-btn:hover { text-decoration: underline; }
-.slice-profile-form {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-#modal-slice .modal-box { max-height: 92vh; overflow-y: auto; }
 .job-progress-busy .job-progress-bar { width: 35%; animation: job-busy 1.2s ease-in-out infinite; }
 @keyframes job-busy {
   from { transform: translateX(-100%); }

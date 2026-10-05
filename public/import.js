@@ -27,7 +27,9 @@
       let body = {};
       try { body = JSON.parse(xhr.responseText); } catch (_) { /* not JSON */ }
       if (xhr.status === 200 && body.id) {
+        if (typeof closeQueue === "function") closeQueue(); // importing from the Queue panel
         location.hash = `#projects=${body.id}&confirm=1`; // the Project opens inside the app shell
+        reset();
         return;
       }
       if (xhr.status === 401) { location.replace("/login"); return; }
@@ -44,6 +46,7 @@
   }
 
   button.addEventListener("click", () => input.click());
+  document.getElementById("btn-queue-import")?.addEventListener("click", () => input.click()); // the Queue panel's Import button
   input.addEventListener("change", () => { importFile(input.files[0]); input.value = ""; });
 
   // Drop a file anywhere on the dashboard (not onto a form field or a dialog that handles its own drops)

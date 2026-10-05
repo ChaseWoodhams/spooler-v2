@@ -109,7 +109,6 @@ function connect() {
     send({ action: "list_printers" });
     loadHistory();
     loadJobs();
-    loadSlicer();
     fetchSpools();
   };
 
@@ -151,9 +150,6 @@ function handleMessage(msg) {
       break;
     case "jobs":
       applyJobs(msg.jobs);
-      break;
-    case "slices":
-      applySlices(msg.slices);
       break;
     case "printer_update":
       const linkChanged = printers[msg.printer.id]?.connected !== msg.printer.connected;

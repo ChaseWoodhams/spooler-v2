@@ -623,8 +623,6 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(farm.list_spools, broadcast=False)
         elif self.path == "/api/defaults":
             self._jobs_call(lambda: {"defaults": remembered_defaults.get()}, broadcast=False)
-        elif self.path == "/api/slices":
-            self._json({"slices": slicer.list_slices()})
         elif self.path == "/api/splits":
             self._json({"splits": splits.list_splits()})
         elif self.path == "/api/splits/status":
@@ -745,9 +743,6 @@ class SPHandler(SimpleHTTPRequestHandler):
         if self.path.startswith("/api/jobs/"):
             self._jobs_call(lambda: jobs.delete_job(self._job_id()))
             return
-        if self.path.startswith("/api/slices/"):
-            self._slices_call(lambda: slicer.delete_slice(self._job_id()))
-            return
         if self.path.startswith("/api/slicer/presets/"):
             parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'slicer', 'presets', <kind>, <name>]
             if len(parts) == 6:
@@ -808,7 +803,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._handle_jobs_post()
         elif self.path.startswith("/api/prints/"):
             self._handle_prints_post()
-        elif self.path.startswith("/api/slices/") or self.path in ("/api/slicer/profiles", "/api/slicer/presets", "/api/slicer/presets/import", "/api/slicer/spool-match"):
+        elif self.path in ("/api/slicer/profiles", "/api/slicer/presets", "/api/slicer/presets/import", "/api/slicer/spool-match"):
             self._handle_slicer_post()
         elif self.path.startswith("/api/splits/"):
             self._handle_splits_post()
@@ -1035,16 +1030,9 @@ class SPHandler(SimpleHTTPRequestHandler):
 
     # ── Slicing ───────────────────────────────────────────────────────────────
 
-    def _slices_call(self, fn) -> None:
-        self._jobs_call(fn, broadcast=False)
-        slicer.broadcast_threadsafe()
-
     def _handle_slicer_post(self):
         path = self.path.split("?", 1)[0]
-        parts = path.split("/")  # ['', 'api', 'slices', <id>, <action>]
-        if path == "/api/slices/upload":
-            self._handle_slice_upload()
-        elif path == "/api/slicer/profiles":
+        if path == "/api/slicer/profiles":
             self._jobs_call(self._create_profile, broadcast=False)
         elif path == "/api/slicer/spool-match":
             def match():
@@ -1056,27 +1044,8 @@ class SPHandler(SimpleHTTPRequestHandler):
         elif path == "/api/slicer/presets/import":
             self._jobs_call(lambda: slicer.import_user_preset(self._json_body().get("preset"), self._json_body().get("name")),
                             broadcast=False)
-        elif len(parts) == 5 and parts[2] == "slices" and parts[4] == "retry":
-            self._slices_call(lambda: slicer.retry_slice(self._job_id()))
         else:
             self._json({"error": "Not found"}, 404)
-
-    def _handle_slice_upload(self):
-        # The body is the raw model file, streamed to disk; options travel in the query string.
-        self.close_connection = True  # an early rejection leaves the body unread
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-
-        def value(key: str) -> str:
-            return (query.get(key) or [""])[0]
-
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-        except ValueError:
-            length = 0
-        options = {"leveling": value("leveling") in ("1", "true"), "timelapse": value("timelapse") in ("1", "true")}
-        self._slices_call(lambda: slicer.create_slice(
-            self.rfile, length, value("filename"), value("bundle_id"), bed=value("bed") or "textured",
-            printer_id=value("printer_id") or None, print_opts=options, notes=value("notes")))
 
     def _save_preset(self) -> dict:
         body = self._json_body()
@@ -1093,11 +1062,9 @@ class SPHandler(SimpleHTTPRequestHandler):
 
     # ── Splitting large models ────────────────────────────────────────────────
 
-    def _splits_call(self, fn, *, queue: bool = False) -> None:
+    def _splits_call(self, fn) -> None:
         self._jobs_call(fn, broadcast=False)
         splits.broadcast_threadsafe()
-        if queue:
-            slicer.broadcast_threadsafe()
 
     def _handle_splits_get(self):
         parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'splits', <id>, <kind>, <file>]
@@ -1156,7 +1123,7 @@ class SPHandler(SimpleHTTPRequestHandler):
         if action not in actions:
             self._json({"error": "Not found"}, 404)
             return
-        self._splits_call(actions[action], queue=action == "queue")
+        self._splits_call(actions[action])
 
     # ── Slicer workspace projects ─────────────────────────────────────────────
 
