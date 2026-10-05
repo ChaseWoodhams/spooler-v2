@@ -15,7 +15,7 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-let host = null;   // { api, toast, projectId(), sliceState(plateId), onSlice(id), onOpenPlate(id), onSetPrinter(id, printerId) }
+let host = null;   // { api, toast, projectId(), sliceState(plateId), onSlice(id), onOpenPlate(id), onSetPrinter(id, printerId), hasAssembly(), onOpenAssembly() }
 let shown = false;
 let status = null; // GET /api/projects/<id>/status
 let jobs = [];
@@ -40,10 +40,21 @@ function header() {
   const waiting = c.queued + c.waiting, toSlice = c.sliced + c.unsliced;
   return `<div class="pp-card pp-progress">
     <div class="pp-progress-head"><b>${progress.printed_ok} of ${plural(progress.total, "plate")} printed</b>
-      <span class="slicer-muted">${c.failed} failed · ${c.printing} printing · ${waiting} waiting · ${toSlice} to slice${grams.total ? ` · ${Math.round(grams.used)} of ${Math.round(grams.total)} g of filament` : ""}</span></div>
+      <span class="slicer-muted">${c.failed} failed · ${c.printing} printing · ${waiting} waiting · ${toSlice} to slice</span></div>
     <div class="pp-bar" role="img" aria-label="${progress.printed_ok} of ${progress.total} plates printed">${BAR_ORDER.map(s =>
       `<i class="st-${s}" style="width:${progress.total ? c[s] / progress.total * 100 : 0}%" title="${STATUS[s]}: ${c[s]}"></i>`).join("")}</div>
+    ${filament(grams)}
   </div>`;
+}
+
+function filament(grams) {
+  if (!grams.total && !grams.used) return "";
+  const pct = grams.total ? Math.min(100, grams.used / grams.total * 100) : 0;
+  const open = grams.unknown_plates ? ` (${plural(grams.unknown_plates, "plate")} not sliced yet, so not counted)` : "";
+  const spool = grams.spool ? ` · spool ${esc(grams.spool.name || "#" + grams.spool.id)}${grams.spool.remaining_g != null ? `: ${Math.round(grams.spool.remaining_g)} g left${
+    grams.spool.remaining_g < grams.total - grams.used ? ` <b class="pp-warn">(not enough for the rest)</b>` : ""}` : ""}` : "";
+  return `<div class="pp-filament"><div class="pp-bar pp-bar-filament" role="img" aria-label="${Math.round(grams.used)} of ${Math.round(grams.total)} grams of filament used"><i style="width:${pct}%"></i></div>
+    <span class="slicer-muted">Filament: ${Math.round(grams.used)} g used of ${Math.round(grams.total)} g needed${open}${spool}</span></div>`;
 }
 
 function printerCards() {
@@ -102,7 +113,10 @@ function detail() {
   }
   if (plate.status === "failed") actions.push(btn("reprint", "Reprint", true, disabled("Reprinting a failed plate is not available yet")));
   actions.push(btn("open", "Open in Plates", false));
+  if (host.hasAssembly?.()) actions.push(btn("assembly", "Assembly order", false, ' title="Which parts join in what order, from the Split step"'));
+  const picture = `/api/projects/${host.projectId()}/plates/${plate.id}/preview.png?v=${plate.layout}`;
   return `<div class="pp-card"><div><b>${esc(plate.name)}</b> ${chip(plate.status)}</div>
+    ${plate.parts ? `<img class="pp-preview" src="${picture}" alt="${esc(plate.name)} as laid out" width="320" height="240" loading="lazy">` : ""}
     <div class="slicer-muted">${facts || "No slice yet"}</div>
     ${plate.status === "waiting" ? '<div class="slicer-muted">Waiting on another plate to print OK first</div>' : ""}
     ${editable ? `<label class="pp-printon">Print on <select data-printon aria-label="Print ${esc(plate.name)} on">${options}</select></label>` : ""}
@@ -135,6 +149,7 @@ async function refresh() {
 async function act(name, button) {
   const plate = plateOf(selected);
   if (name === "open") return host.onOpenPlate(selected);
+  if (name === "assembly") return host.onOpenAssembly();
   if (name === "slice") await host.onSlice(selected);
   else if (name === "queue") {
     await host.api("POST", `/api/projects/${host.projectId()}/plates/${selected}/queue`, plate.printer_id ? { printer_id: plate.printer_id } : {});

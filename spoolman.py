@@ -239,3 +239,27 @@ def flush_spoolman_outbox(loop: asyncio.AbstractEventLoop | None = None) -> dict
         print(f"[Spoolman] Replayed {len(report['sent'])} queued deduction(s), "
               f"{report['remaining']} still pending")
     return report
+
+
+_spool_levels: dict = {}   # spool id → (fetched at, level)
+SPOOL_LEVEL_TTL = 30.0
+
+
+def spool_level(spool_id: int) -> dict | None:
+    """{"name", "remaining_g"} of a Spoolman spool, or None when Spoolman can't say. Cached briefly, failures too,
+    so a page that polls every few seconds never waits on an unreachable Spoolman."""
+    cached = _spool_levels.get(spool_id)
+    if cached and time.time() - cached[0] < SPOOL_LEVEL_TTL:
+        return cached[1]
+    level = None
+    try:
+        with urllib.request.urlopen(f"{get_spoolman_url()}/api/v1/spool/{int(spool_id)}", timeout=2) as resp:
+            spool = json.loads(resp.read())
+        filament = spool.get("filament") or {}
+        name = " ".join(x for x in (filament.get("vendor", {}).get("name"), filament.get("name")) if x) or None
+        remaining = spool.get("remaining_weight")
+        level = {"name": name, "remaining_g": round(float(remaining), 1) if remaining is not None else None}
+    except Exception:
+        pass
+    _spool_levels[spool_id] = (time.time(), level)
+    return level

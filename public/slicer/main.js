@@ -170,6 +170,8 @@ async function boot() {
     sliceState: plateId => sliceEntry(plateId)?.state,
     onSlice: plateId => requestPlateSlice(plateId),
     onOpenPlate: plateId => { selectPlate(plateId); setStep("plates"); },
+    hasAssembly: () => !!(state.project.split_id && splitStep.split?.result?.assembly),
+    onOpenAssembly: async () => { await setStep("split"); document.querySelector(".split-assembly")?.scrollIntoView({ block: "center" }); },
     onSetPrinter: (plateId, printerId) => {
       const plate = data().plates.find(p => p.id === plateId);
       if (!plate) return;

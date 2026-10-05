@@ -1058,11 +1058,11 @@ class SPHandler(SimpleHTTPRequestHandler):
         except jobs.JobError as e:
             self._json({"error": str(e)}, e.status)
 
-    def _send_bytes(self, body: bytes, content_type: str, download_name: str | None = None) -> None:
+    def _send_bytes(self, body: bytes, content_type: str, download_name: str | None = None, cache: str = "no-store") -> None:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         if download_name:
             self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
         self.end_headers()
@@ -1122,6 +1122,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "fit":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 self._json(farm.plate_fit(projects.get_project(project_id), int(parts[5]), (query.get("printer_id") or [None])[0]))
+            elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "preview.png":
+                self._send_bytes(projects.plate_preview(project_id, int(parts[5])), "image/png", cache="private, max-age=86400")
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "analysis":
                 self._json(projects.plate_analysis(project_id, int(parts[5])))
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] in ("toolpath", "gcode"):

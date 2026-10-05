@@ -353,3 +353,8 @@ body.print-step .slicer-sidebar { display: none; }
 @media (max-width: 900px) { .pp-layout { grid-template-columns: 1fr; } .project-page { padding: 10px; } }
 .pp-printer .pp-chip { align-self: flex-start; }
 .pp-printon select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; font-size: 12px; }
+.pp-filament { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.pp-bar-filament { height: 6px; }
+.pp-bar-filament i { display: block; height: 100%; background: var(--accent, #d67634); }
+.pp-warn { color: #d9534f; }
+.pp-preview { width: 100%; max-width: 320px; height: auto; align-self: center; border-radius: 8px; background: var(--surface2); }
