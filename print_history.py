@@ -53,6 +53,8 @@ def init() -> None:
 def _to_print(row) -> dict:
     record = dict(row)
     record["spools"] = json.loads(record["spools"] or "[]")
+    record["failure_reasons"] = json.loads(record.get("failure_reasons") or "[]")
+    record["outcome_unconfirmed"] = bool(record.get("outcome_unconfirmed"))
     return record
 
 

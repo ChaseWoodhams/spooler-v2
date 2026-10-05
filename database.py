@@ -164,6 +164,58 @@ MIGRATIONS = [
     ALTER TABLE jobs ADD COLUMN batch_id TEXT;
     CREATE INDEX jobs_by_project ON jobs (project_id, plate_id);
     """,
+    # 7 — workflow rework foundation (additive): auto-start, Bed cleared, Holds, failure reasons,
+    #     Unconfirmed outcome, a Print's project/plate link, imported slices, remembered defaults
+    """
+    CREATE TABLE printer_settings (
+        printer_id  TEXT PRIMARY KEY,
+        auto_start  INTEGER NOT NULL DEFAULT 1 CHECK (auto_start IN (0, 1)),
+        updated_at  REAL
+    );
+    -- Auto-start is on for every printer that already has jobs or prints.
+    INSERT OR IGNORE INTO printer_settings (printer_id)
+        SELECT printer_id FROM jobs WHERE printer_id IS NOT NULL
+        UNION SELECT printer_id FROM prints WHERE printer_id IS NOT NULL;
+
+    -- Bed cleared confirmations; one only counts if newer than the end of the printer's last print.
+    CREATE TABLE bed_cleared (
+        id          INTEGER PRIMARY KEY,
+        printer_id  TEXT    NOT NULL,
+        print_id    INTEGER REFERENCES prints (id) ON DELETE SET NULL,
+        cleared_at  REAL    NOT NULL
+    );
+    CREATE INDEX bed_cleared_by_printer ON bed_cleared (printer_id, cleared_at);
+
+    -- A queued job waits until another job, or a project plate, has a completed print.
+    CREATE TABLE job_holds (
+        id                 INTEGER PRIMARY KEY,
+        job_id             INTEGER NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+        after_job_id       INTEGER REFERENCES jobs (id) ON DELETE CASCADE,
+        after_project_id   INTEGER REFERENCES projects (id) ON DELETE CASCADE,
+        after_plate_id     INTEGER,
+        created_at         REAL    NOT NULL
+    );
+    CREATE INDEX job_holds_by_job ON job_holds (job_id);
+
+    ALTER TABLE prints ADD COLUMN project_id INTEGER REFERENCES projects (id) ON DELETE SET NULL;
+    ALTER TABLE prints ADD COLUMN plate_id INTEGER;
+    ALTER TABLE prints ADD COLUMN failure_reasons TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE prints ADD COLUMN outcome_unconfirmed INTEGER NOT NULL DEFAULT 0 CHECK (outcome_unconfirmed IN (0, 1));
+    ALTER TABLE prints ADD COLUMN end_snapshot TEXT;
+    UPDATE prints SET
+        project_id = (SELECT j.project_id FROM jobs j WHERE j.id = prints.job_id),
+        plate_id   = (SELECT j.plate_id   FROM jobs j WHERE j.id = prints.job_id)
+        WHERE job_id IS NOT NULL;
+    CREATE INDEX prints_by_project ON prints (project_id, plate_id);
+
+    ALTER TABLE slices ADD COLUMN imported INTEGER NOT NULL DEFAULT 0 CHECK (imported IN (0, 1));
+
+    CREATE TABLE remembered_defaults (
+        key         TEXT PRIMARY KEY,
+        value       TEXT NOT NULL DEFAULT 'null',
+        updated_at  REAL
+    );
+    """,
 ]
 
 _lock = threading.RLock()
@@ -183,6 +235,17 @@ def _open() -> sqlite3.Connection:
     return conn
 
 
+def _backup_before_upgrade() -> None:
+    """Snapshot the app's data before the schema changes. A failure aborts the upgrade."""
+    import backup
+
+    if _path == DB_FILE:
+        backup.create_backup("pre-migration")
+    else:  # a database somewhere else (tests): keep the backup beside it
+        backup.create_backup("pre-migration", data_dir=_path.parent, backup_dir=_path.parent / "backups",
+                             extra_databases=[])
+
+
 def migrate() -> int:
     """Apply pending migrations. Returns the schema version."""
     with _lock:
@@ -190,6 +253,8 @@ def migrate() -> int:
         conn = _open()
         try:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if 0 < version < len(MIGRATIONS):
+                _backup_before_upgrade()
             for number, sql in enumerate(MIGRATIONS[version:], start=version + 1):
                 conn.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = {number};\nCOMMIT;")
             return len(MIGRATIONS)
