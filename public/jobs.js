@@ -185,7 +185,7 @@ function queuedWithBatches(queued) {
       <div class="queue-batch-head">
         <span class="queue-batch-title" title="${_jobAttr(title)}">${escHtml(title)} · ${block.items.length} plates</span>
         <button class="btn btn-secondary btn-sm" data-batch-action="assign" data-batch="${_jobAttr(block.batch)}">Assign printers</button>
-        ${first.project_id ? `<a class="btn btn-secondary btn-sm" href="/slicer.html?project=${first.project_id}">Project</a>` : ""}
+        ${first.project_id && !first.project_quick ? `<a class="btn btn-secondary btn-sm" href="/slicer.html?project=${first.project_id}">Project</a>` : ""}
       </div>
       ${chooser}${cards}
     </div>`;

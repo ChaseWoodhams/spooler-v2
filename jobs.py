@@ -103,6 +103,19 @@ def _to_job(row) -> dict:
     return job
 
 
+def _with_project_quick(listed: list) -> list:
+    """Mark each job whose project is a hidden Quick print one, so the Queue and dashboard do not link to it."""
+    ids = {job["project_id"] for job in listed if job.get("project_id")}
+    quick = set()
+    if ids:
+        with database.transaction() as conn:
+            quick = {r["id"] for r in conn.execute(
+                f"SELECT id FROM projects WHERE quick = 1 AND id IN ({', '.join('?' * len(ids))})", tuple(ids))}
+    for job in listed:
+        job["project_quick"] = job.get("project_id") in quick
+    return listed
+
+
 def _with_holds(listed: list) -> list:
     """Add each job's dependency holds and whether it is still waiting on one."""
     import holds  # imported here because holds imports this module
@@ -116,7 +129,7 @@ def _with_holds(listed: list) -> list:
 def get_job(job_id: int) -> dict | None:
     with database.transaction() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    return _with_holds([_to_job(row)])[0] if row else None
+    return _with_project_quick(_with_holds([_to_job(row)]))[0] if row else None
 
 
 def list_jobs(recent: int = RECENT_LIMIT) -> list:
@@ -132,7 +145,7 @@ def list_jobs(recent: int = RECENT_LIMIT) -> list:
             "ORDER BY finished_at DESC, id DESC LIMIT ?",
             (*FINAL, recent),
         ).fetchall()
-    return _with_holds([_to_job(r) for r in open_rows + done_rows])
+    return _with_project_quick(_with_holds([_to_job(r) for r in open_rows + done_rows]))
 
 
 def job_events(job_id: int) -> list:

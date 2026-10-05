@@ -63,21 +63,33 @@ def _clock(seconds) -> str:
 
 
 def _names(record: dict) -> tuple:
-    """(project name, plate name) for a Print made from a plate, else (None, None)."""
+    """(project name, plate name) for a Print made from a plate, else (None, None). A quick print's project is the
+    model: it has a name (the model's) but no plate name, because nobody sees the hidden project or its plates."""
     if not record.get("project_id"):
         return None, None
     with database.transaction() as conn:
-        row = conn.execute("SELECT name, data FROM projects WHERE id = ?", (record["project_id"],)).fetchone()
+        row = conn.execute("SELECT name, data, quick FROM projects WHERE id = ?", (record["project_id"],)).fetchone()
     if row is None:
         return None, None
+    if row["quick"]:
+        return row["name"], None
     plate = next((p for p in json.loads(row["data"] or "{}").get("plates", []) if p.get("id") == record.get("plate_id")), None)
     plate_name = (plate or {}).get("name") or (f"Plate {record['plate_id']}" if record.get("plate_id") else None)
     return row["name"], plate_name
 
 
+def _is_quick(record: dict) -> bool:
+    if not record.get("project_id"):
+        return False
+    with database.transaction() as conn:
+        row = conn.execute("SELECT quick FROM projects WHERE id = ?", (record["project_id"],)).fetchone()
+    return bool(row and row["quick"])
+
+
 def deep_link(record: dict) -> str:
-    """The project with the printer's card focused, or the printer's own page when the Print has no project."""
-    if record.get("project_id"):
+    """The project with the printer's card focused, or the printer's own page when the Print has no project or its
+    project is a hidden Quick print one (that page is never linked to)."""
+    if record.get("project_id") and not _is_quick(record):
         return f"/#projects={record['project_id']}&printer={urllib.parse.quote(record['printer_id'], safe='')}"
     return f"/#printer={urllib.parse.quote(record['printer_id'], safe='')}"
 
@@ -170,7 +182,7 @@ def awaiting() -> list:
         project, plate = _names(record)
         out.append({"print_id": record["id"], "printer_id": record["printer_id"], "printer_name": record["printer_name"],
                     "file_name": record["file_name"], "project_id": record["project_id"], "project_name": project,
-                    "plate_id": record["plate_id"], "plate_name": plate, "reported_outcome": record["outcome"],
+                    "plate_id": record["plate_id"], "plate_name": plate, "quick": _is_quick(record), "reported_outcome": record["outcome"],
                     "outcome_unconfirmed": record["outcome_unconfirmed"], "bed_cleared_needed": needs_bed,
                     "ended_at": record["ended_at"], "duration_s": record["duration_s"], "estimate_s": record["estimate_s"],
                     "snapshot": f"/api/prints/{record['id']}/snapshot" if record["end_snapshot"] else None,
