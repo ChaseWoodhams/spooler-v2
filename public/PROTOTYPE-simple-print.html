@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<!-- PROTOTYPE (throwaway): "Simple print confirm screen", wayfinder ticket 03.
+     Three variants of the import -> confirm screen for a model that fits the bed, switchable with ?variant=A|B|C (or arrow keys).
+     Stub data only, no backend. Open this file directly in a browser. Delete after the decision is captured. -->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PROTOTYPE – simple print confirm</title>
+<link rel="stylesheet" href="style.css" />
+<style>
+  body { margin: 0; background: var(--bg, #0d0e12); color: var(--text, #e8e8ec); font-family: system-ui, sans-serif; min-height: 100vh; padding-bottom: 70px; }
+  .muted { color: var(--text-muted, #8a8d98); font-size: 12px; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border, #2a2c35); }
+  .pill.good { color: var(--green, #4ade80); border-color: var(--green, #4ade80); }
+  .pill.warn { color: var(--yellow, #facc15); border-color: var(--yellow, #facc15); }
+  .card { background: var(--surface, #16171d); border: 1px solid var(--border, #2a2c35); border-radius: 10px; padding: 14px; }
+  select, input { background: var(--surface2, #1e2028); color: inherit; border: 1px solid var(--border, #2a2c35); border-radius: 8px; padding: 6px 8px; font-size: 13px; }
+  .top { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border, #2a2c35); }
+  .top b { font-size: 14px; }
+  .go { background: var(--accent, #ff6b2b); color: #fff; border: 0; border-radius: 8px; padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .go.secondary { background: transparent; border: 1px solid var(--border, #2a2c35); color: inherit; font-weight: 400; }
+  .link { background: none; border: 0; color: var(--accent, #ff6b2b); cursor: pointer; font-size: 12px; padding: 0; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 18px 16px; }
+  .state-bar { display: flex; gap: 8px; align-items: center; padding: 6px 16px; background: rgba(255,255,255,.03); font-size: 12px; }
+  .viewport { background: #0a0b0f; border: 1px solid var(--border, #2a2c35); border-radius: 10px; display: grid; place-items: center; position: relative; min-height: 300px; }
+  .viewport svg { width: 80%; max-width: 420px; }
+  .row { display: grid; grid-template-columns: 110px 1fr auto; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border, #2a2c35); }
+  .row:last-child { border-bottom: 0; }
+  .row .k { color: var(--text-muted, #8a8d98); font-size: 12px; }
+  .stepper { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+  .stepper .s { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border, #2a2c35); color: var(--text-muted, #8a8d98); }
+  .stepper .s.done { color: var(--green, #4ade80); border-color: var(--green, #4ade80); }
+  .stepper .s.skip { text-decoration: line-through; opacity: .6; }
+  .stepper .s.cur { background: rgba(255,107,43,.15); color: var(--text, #e8e8ec); border-color: var(--accent, #ff6b2b); }
+  #proto-bar { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; align-items: center; background: #fff; color: #111;
+    padding: 8px 14px; border-radius: 999px; box-shadow: 0 4px 20px rgba(0,0,0,.5); font: 600 13px system-ui; z-index: 99; }
+  #proto-bar button { border: 0; background: #eee; border-radius: 50%; width: 26px; height: 26px; cursor: pointer; font-size: 14px; }
+  #proto-bar label { font-weight: 400; display: flex; gap: 4px; align-items: center; border-left: 1px solid #ccc; padding-left: 10px; }
+  #sent { margin-top: 14px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="proto-bar"></div>
+
+<script>
+// ---- stub project state (in memory only) ----
+const S = {
+  name: "Phone stand", file: "phone_stand.stl",
+  size: [92.4, 64.0, 78.1], vol: "41.2 cm³", repaired: "2 flipped faces fixed",
+  scaleOk: true,               // toggle in the bar: simulates a metres/inches mistake
+  printer: "Centauri Carbon Dunt", profile: "0.20mm Standard · Elegoo PLA", spool: "Elegoo PLA Grey (612 g left)",
+  side: "textured", est: "1 h 52 min · 38 g", advanced: false, sent: false,
+};
+const VARIANTS = { A: "Preview + one card", B: "Checklist rows", C: "Preview-first, stepper dock" };
+const q = new URLSearchParams(location.search);
+let variant = (q.get("variant") || "A").toUpperCase();
+
+const sel = (id, opts, cur) => `<select data-k="${id}">${opts.map(o => `<option${o === cur ? " selected" : ""}>${o}</option>`).join("")}</select>`;
+const PRINTERS = ["Centauri Carbon Dunt (idle)", "Centauri Carbon OG (printing, 40 min left)", "Any free printer"];
+const PROFILES = ["0.20mm Standard · Elegoo PLA", "0.12mm Fine · Elegoo PLA", "0.28mm Draft · Elegoo PLA"];
+const SPOOLS = ["Elegoo PLA Grey (612 g left)", "Elegoo PLA White (88 g left)", "No spool"];
+const SIDES = ["Textured PEI (Side A)", "Smooth PEI (Side B)"];
+const fits = () => S.scaleOk;
+const sizeTxt = () => S.scaleOk ? S.size.join(" × ") + " mm" : "0.09 × 0.06 × 0.08 mm";
+
+const model = `<svg viewBox="0 0 400 260"><ellipse cx="200" cy="215" rx="170" ry="30" fill="#15161c" stroke="#2a2c35"/>
+  <polygon points="150,200 250,200 270,120 130,120" fill="#ff6b2b" opacity=".85"/><polygon points="130,120 270,120 235,70 165,70" fill="#ffa070"/>
+  <text x="200" y="250" fill="#8a8d98" font-size="11" text-anchor="middle">256 × 256 bed${S.scaleOk ? "" : " – model is barely visible"}</text></svg>`;
+
+const fitBadge = () => fits() ? `<span class="pill good">Fits the bed · no split needed</span>`
+  : `<span class="pill warn">Tiny: ${sizeTxt()} – check scale</span> <button class="link" data-act="fixscale">It's in metres → ×1000</button>`;
+const repairBadge = () => `<span class="pill good">Closed solid · ${S.repaired}</span>`;
+const go = () => `<button class="go" data-act="send" ${fits() ? "" : "disabled style='opacity:.4'"}>Slice &amp; print</button>`;
+const sentMsg = () => S.sent ? `<div id="sent" class="card"><b>Sliced → queued on ${S.printer.split(" (")[0]}</b><div class="muted">Est. ${S.est}. It starts when you confirm the bed is cleared (printer 2 is mid-print).</div></div>` : "";
+
+const advancedPanel = () => `<div class="card" style="margin-top:12px"><div class="stepper">
+  <span class="s done">1 Model ✓</span><span class="s skip">2 Split</span> <span class="muted">Split not needed</span>
+  <span class="s done">3 Plate ✓ (auto, 1 object)</span><span class="s cur">4 Slice</span><span class="s">5 Print</span></div>
+  <p class="muted">Advanced opens the full project workspace on the step you click. Everything the confirm screen set carries over.</p></div>`;
+const advToggle = () => `<button class="link" data-act="adv">${S.advanced ? "Hide advanced ▴" : "Advanced: plates, split, every setting ▾"}</button>`;
+
+// ---- Variant A: model preview left, ONE card right ----
+function A() {
+  return `<div class="wrap"><div style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(280px,1fr);gap:16px">
+    <div class="viewport">${model}</div>
+    <div class="card"><h3 style="margin:0 0 4px">${S.name}</h3><div class="muted">${S.file} · ${sizeTxt()} · ${S.vol}</div>
+      <div style="margin:8px 0;display:flex;gap:6px;flex-wrap:wrap">${fitBadge()} ${repairBadge()}</div>
+      <div style="display:grid;gap:8px;margin:12px 0">
+        ${sel("printer", PRINTERS, PRINTERS[0])}${sel("profile", PROFILES, S.profile)}${sel("spool", SPOOLS, SPOOLS[0])}${sel("side", SIDES, SIDES[0])}</div>
+      <div style="display:flex;gap:10px;align-items:center">${go()}<span class="muted">~${S.est}</span></div>
+      <div style="margin-top:10px">${advToggle()}</div></div></div>
+    ${S.advanced ? advancedPanel() : ""}${sentMsg()}</div>`;
+}
+
+// ---- Variant B: no big preview; a vertical checklist of decisions, thumbnail small ----
+function B() {
+  const r = (k, v, extra = "") => `<div class="row"><span class="k">${k}</span><span>${v}</span><span>${extra}</span></div>`;
+  return `<div class="wrap" style="max-width:640px"><div class="card">
+    <div style="display:flex;gap:12px;align-items:center"><div style="width:84px;height:64px" class="viewport">${model}</div>
+      <div><h3 style="margin:0">${S.name}</h3><div class="muted">${S.file}</div></div></div>
+    ${r("Model", `${sizeTxt()} ${fitBadge()}`, `<button class="link" data-act="fixscale">Scale…</button>`)}
+    ${r("Checked", repairBadge())}
+    ${r("Print on", sel("printer", PRINTERS, PRINTERS[0]))}
+    ${r("Material", sel("spool", SPOOLS, SPOOLS[0]), sel("side", SIDES, SIDES[0]))}
+    ${r("Quality", sel("profile", PROFILES, S.profile))}
+    <div style="display:flex;gap:10px;align-items:center;margin-top:12px">${go()}<button class="go secondary" data-act="adv">Customise…</button><span class="muted">~${S.est}</span></div></div>
+    ${S.advanced ? advancedPanel() : ""}${sentMsg()}</div>`;
+}
+
+// ---- Variant C: full-bleed preview, floating chips, compact stepper dock at the bottom ----
+function C() {
+  return `<div class="wrap"><div class="viewport" style="min-height:420px">${model}
+    <div style="position:absolute;top:10px;left:10px;display:flex;gap:6px;flex-wrap:wrap">${fitBadge()} ${repairBadge()}</div>
+    <div style="position:absolute;top:10px;right:10px" class="card"><b>${S.name}</b><div class="muted">${sizeTxt()}</div></div>
+    <div style="position:absolute;bottom:10px;left:10px;right:10px" class="card">
+      <div class="stepper" style="margin-bottom:10px"><span class="s done">Model ✓</span><span class="s skip">Split</span><span class="muted">not needed</span>
+        <span class="s done">Plate ✓ auto</span><span class="s cur">Slice &amp; print</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        ${sel("printer", PRINTERS, PRINTERS[0])}${sel("profile", PROFILES, S.profile)}${sel("spool", SPOOLS, SPOOLS[0])}${sel("side", SIDES, SIDES[0])}
+        <span style="flex:1"></span><span class="muted">~${S.est}</span>${go()}</div></div></div>
+    <div style="margin-top:8px">${advToggle()}</div>${S.advanced ? advancedPanel() : ""}${sentMsg()}</div>`;
+}
+
+function render() {
+  history.replaceState(null, "", `?variant=${variant}`);
+  document.getElementById("app").innerHTML =
+    `<div class="top"><b>Spooler</b><span class="muted">/ ${S.name}</span><span style="flex:1"></span><span class="pill">dropped phone_stand.stl</span></div>` + { A, B, C }[variant]();
+  document.getElementById("proto-bar").innerHTML = `<button data-v="-1">‹</button><span>${variant} (${VARIANTS[variant]})</span><button data-v="1">›</button>
+    <label><input type="checkbox" id="scale" ${S.scaleOk ? "" : "checked"}> simulate wrong scale</label>`;
+}
+document.addEventListener("click", e => {
+  const v = e.target.closest("[data-v]"); const a = e.target.closest("[data-act]");
+  if (v) { const k = Object.keys(VARIANTS); variant = k[(k.indexOf(variant) + +v.dataset.v + k.length) % k.length]; render(); }
+  if (a) { const t = a.dataset.act;
+    if (t === "adv") S.advanced = !S.advanced; if (t === "send") S.sent = true; if (t === "fixscale") S.scaleOk = true;
+    render(); }
+});
+document.addEventListener("change", e => { if (e.target.id === "scale") { S.scaleOk = !e.target.checked; S.sent = false; render(); } });
+document.addEventListener("keydown", e => {
+  if (/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return;
+  const k = Object.keys(VARIANTS); if (e.key === "ArrowRight") variant = k[(k.indexOf(variant) + 1) % 3]; else if (e.key === "ArrowLeft") variant = k[(k.indexOf(variant) + 2) % 3]; else return; render();
+});
+render();
+</script>
+</body>
+</html>
