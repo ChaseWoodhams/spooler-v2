@@ -20,6 +20,8 @@ let shown = false;
 let status = null; // GET /api/projects/<id>/status
 let jobs = [];
 let printers = [];
+let awaiting = new Set();   // printer ids whose last print is waiting for an answer (OutcomePrompt)
+let focusedPrinter = false; // a push deep link (?printer=) is scrolled to once
 let selected = null;
 let timer = null;
 
@@ -57,8 +59,10 @@ function printerCards() {
     const [cls, label, note] = !printer.connected ? ["failed", "Offline", "Not connected"]
       : running ? ["printing", "Printing", `${plate ? esc(plate.name) : esc(running.name)}${layers}`]
       : ["sliced", "Free", queued ? `${plural(queued, "plate")} queued for it` : "Nothing queued for it"];
-    return `<div class="pp-card pp-printer st-${cls}"><b>${esc(printer.name)}</b> <span class="pp-chip st-${cls}">${label}</span>
-      <div class="slicer-muted">${note}</div></div>`;
+    const asking = awaiting.has(printer.id);
+    return `<div class="pp-card pp-printer st-${cls}" id="pp-printer-${esc(printer.id)}"><b>${esc(printer.name)}</b> <span class="pp-chip st-${cls}">${label}</span>
+      <div class="slicer-muted">${note}</div>
+      ${asking ? `<button type="button" class="btn btn-primary btn-sm" data-outcome="${esc(printer.id)}">Print ended: Printed OK · Bed cleared / Failed…</button>` : ""}</div>`;
   }).join("")}</div>`;
 }
 
@@ -127,7 +131,13 @@ async function refresh() {
       host.api("GET", "/api/printers")]);
     if (!shown || host.projectId() !== id) return;
     status = s; jobs = j.jobs; printers = p.filter(x => x.printer_type === "cc1");
+    awaiting = new Set((await OutcomePrompt.awaiting()).map(a => a.printer_id));
     render();
+    const focus = new URLSearchParams(location.search).get("printer");
+    if (focus && !focusedPrinter) {   // opened from a push: bring that printer's card into view
+      const card = document.getElementById(`pp-printer-${focus}`);
+      if (card) { focusedPrinter = true; card.scrollIntoView({ block: "center" }); card.style.outline = "2px solid var(--accent, #ff6b2b)"; }
+    }
   } catch (err) { /* keep what is on screen; the next tick tries again */ }
   if (shown) timer = setTimeout(refresh, POLL_MS);
 }
@@ -150,6 +160,8 @@ async function act(name, button) {
 function bind() {
   const root = $("project-page");
   root.addEventListener("click", async e => {
+    const ask = e.target.closest("[data-outcome]");
+    if (ask) { OutcomePrompt.open(ask.dataset.outcome); return; }
     const cell = e.target.closest("[data-plate]");
     const button = e.target.closest("[data-act]");
     if (button && !button.disabled) {
@@ -172,7 +184,7 @@ function bind() {
 
 export const projectPage = {
   attach(hooks) { host = hooks; bind(); },
-  show() { shown = true; status = null; selected = null; $("project-page").innerHTML = '<p class="slicer-muted">Loading…</p>'; refresh(); },
+  show() { shown = true; focusedPrinter = false; status = null; selected = null; $("project-page").innerHTML = '<p class="slicer-muted">Loading…</p>'; refresh(); },
   hide() { shown = false; clearTimeout(timer); },
   /** Redraw from what is already loaded (a slice finished, the selection moved). */
   redraw() { render(); },

@@ -21,6 +21,7 @@ import bed_cleared
 import farm
 import health
 import jobs
+import outcome_prompt
 import preflight
 import remembered_defaults
 import print_history
@@ -645,6 +646,11 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: preflight.printer_hardware(self._path_printer_id()), broadcast=False)
         elif self.path == "/api/prints" or self.path.startswith("/api/prints?"):
             self._jobs_call(lambda: print_history.search(**self._print_filters(paged=True)), broadcast=False)
+        elif self.path == "/api/outcome-prompts":
+            self._jobs_call(lambda: {"awaiting": outcome_prompt.awaiting(), "reminder_delay_s": outcome_prompt.REMINDER_DELAY_S},
+                            broadcast=False)
+        elif self.path.startswith("/api/prints/") and self.path.split("?", 1)[0].endswith("/snapshot"):
+            self._send_print_snapshot()
         elif self.path == "/api/failure-reasons":
             self._json({"failure_reasons": list(print_history.FAILURE_REASONS),
                         "cancel_reasons": list(print_history.CANCEL_REASONS)})
@@ -802,7 +808,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             def confirm():
                 body = self._json_body()
                 return bed_cleared.confirm(self._path_printer_id(), body.get("print_id"), body.get("outcome"),
-                                           body.get("failure_reasons"), body.get("notes"))
+                                           body.get("failure_reasons"), body.get("notes"), bool(body.get("reprint")))
             self._jobs_call(confirm, coroutine=True)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/auto-start"):
             self._jobs_call(lambda: bed_cleared.set_auto_start(
@@ -927,6 +933,22 @@ class SPHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_print_snapshot(self):
+        try:
+            data = outcome_prompt.snapshot_file(self._job_id()).read_bytes()
+        except jobs.JobError as e:
+            self._json({"error": str(e)}, e.status)
+            return
+        except OSError:
+            self._json({"error": "No snapshot for this print"}, 404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, max-age=3600")
         self.end_headers()
         self.wfile.write(data)
 

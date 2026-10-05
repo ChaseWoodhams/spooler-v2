@@ -1550,7 +1550,7 @@ def reprint_plate(project_id: int, plate_id: int) -> dict:
     if status[plate_id] != "failed":
         raise jobs.JobError("Only a failed plate can be reprinted", 409)
     with database.transaction() as conn:
-        row = conn.execute("SELECT id FROM jobs WHERE project_id = ? AND plate_id = ? AND state IN ('failed', 'cancelled') "
+        row = conn.execute("SELECT id FROM jobs WHERE project_id = ? AND plate_id = ? AND state IN ('failed', 'cancelled', 'completed') "
                            "ORDER BY COALESCE(finished_at, updated_at) DESC, id DESC LIMIT 1", (project_id, plate_id)).fetchone()
     if row is None:
         raise jobs.JobError("The G-code for this plate is no longer stored — slice it again", 410)

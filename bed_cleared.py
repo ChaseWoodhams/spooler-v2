@@ -52,8 +52,10 @@ def status(printer_id: str) -> dict:
             "last_print_ended_at": last["at"], "valid": valid}
 
 
-async def confirm(printer_id: str, print_id=None, outcome=None, failure_reasons=None, note=None) -> dict:
-    """Record Bed cleared, optionally confirming the finished print's outcome in the same action."""
+async def confirm(printer_id: str, print_id=None, outcome=None, failure_reasons=None, note=None, reprint=False) -> dict:
+    """Record Bed cleared, optionally confirming the finished print's outcome in the same action. `reprint` also
+    re-queues the print's plate (the Failed… sheet's "Reprint this plate next"); a reprint that cannot happen is
+    reported in `reprint_error` and does not undo the rest."""
     _require_printer(printer_id)
     with database.transaction() as conn:
         if conn.execute("SELECT 1 FROM prints WHERE printer_id = ? AND outcome IS NULL", (printer_id,)).fetchone():
@@ -70,7 +72,18 @@ async def confirm(printer_id: str, print_id=None, outcome=None, failure_reasons=
         conn.execute("INSERT INTO bed_cleared (printer_id, print_id, cleared_at) VALUES (?, ?, ?)",
                      (printer_id, print_id, time.time()))
 
-    result = {**status(printer_id), "print": record, "started": None, "start_error": None}
+    result = {**status(printer_id), "print": record, "started": None, "start_error": None,
+              "reprint": None, "reprint_error": None}
+    if reprint:
+        plate = record or (print_history.get_print(print_id) if print_id is not None else None)
+        if not plate or not plate.get("project_id") or not plate.get("plate_id"):
+            result["reprint_error"] = "This print was not made from a project plate, so there is nothing to reprint"
+        else:
+            import projects
+            try:
+                result["reprint"] = projects.reprint_plate(plate["project_id"], plate["plate_id"])
+            except jobs.JobError as e:
+                result["reprint_error"] = str(e)
     if result["auto_start"]:
         queued = next((j for j in jobs.list_jobs() if j["state"] == jobs.QUEUED and j["printer_id"] == printer_id), None)
         if queued:
