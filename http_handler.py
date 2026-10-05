@@ -1125,6 +1125,9 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json(projects.plate_status(project_id))
             elif len(parts) == 5 and parts[4] == "intake":
                 self._json(projects.intake(project_id))
+            elif len(parts) == 5 and parts[4] == "quick-options":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                self._json(projects.quick_options(project_id, (query.get("preset") or [None])[0]))
             elif len(parts) == 5 and parts[4] == "export.3mf":
                 record = projects.get_project(project_id)
                 name = re.sub(r'[^\w .-]+', "_", record["name"]).strip() or "project"
