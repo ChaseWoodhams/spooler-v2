@@ -643,7 +643,7 @@ class SPHandler(SimpleHTTPRequestHandler):
         elif self.path.startswith("/api/jobs/") and self.path.endswith("/toolpath"):
             self._send_toolpath()
         elif self.path.startswith("/api/jobs/") and self.path.split("?", 1)[0].endswith("/snapshot"):
-            self._send_job_snapshot()
+            self._send_snapshot(lambda: jobs.snapshot_file(self._job_id()), "no-store")
         elif self.path.startswith("/api/printers/") and self.path.endswith("/bed-cleared"):
             self._jobs_call(lambda: bed_cleared.status(self._path_printer_id()), broadcast=False)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
@@ -654,7 +654,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: {"awaiting": outcome_prompt.awaiting(), "reminder_delay_s": outcome_prompt.REMINDER_DELAY_S},
                             broadcast=False)
         elif self.path.startswith("/api/prints/") and self.path.split("?", 1)[0].endswith("/snapshot"):
-            self._send_print_snapshot()
+            self._send_snapshot(lambda: outcome_prompt.snapshot_file(self._job_id()), "private, max-age=3600")
         elif self.path == "/api/failure-reasons":
             self._json({"failure_reasons": list(print_history.FAILURE_REASONS),
                         "cancel_reasons": list(print_history.CANCEL_REASONS)})
@@ -896,18 +896,17 @@ class SPHandler(SimpleHTTPRequestHandler):
         except ValueError:
             raise jobs.JobError(message, 404)
 
-    def _send_job_snapshot(self):
+    def _send_snapshot(self, find, cache: str) -> None:
+        """Serve a stored JPEG: `find()` returns its path or raises a JobError."""
         try:
-            data = jobs.snapshot_file(self._job_id()).read_bytes()
+            data = find().read_bytes()
         except jobs.JobError as e:
             self._json({"error": str(e)}, e.status)
             return
-        self.send_response(200)
-        self.send_header("Content-Type", "image/jpeg")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
+        except OSError:
+            self._json({"error": "No snapshot found"}, 404)
+            return
+        self._send_bytes(data, "image/jpeg", cache=cache)
 
     def _json_body(self) -> dict:
         try:
@@ -958,22 +957,6 @@ class SPHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
-
-    def _send_print_snapshot(self):
-        try:
-            data = outcome_prompt.snapshot_file(self._job_id()).read_bytes()
-        except jobs.JobError as e:
-            self._json({"error": str(e)}, e.status)
-            return
-        except OSError:
-            self._json({"error": "No snapshot for this print"}, 404)
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "image/jpeg")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "private, max-age=3600")
         self.end_headers()
         self.wfile.write(data)
 
