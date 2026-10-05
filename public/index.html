@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=53" />
+  <link rel="stylesheet" href="style.css?v=54" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body>
@@ -31,6 +31,13 @@
         </svg>
         Discover
       </button>
+      <button id="btn-import" class="btn btn-primary" title="Import an STL, OBJ, 3MF or G-code file, or drop one anywhere on this page">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>
+        </svg>
+        <span>Import</span>
+      </button>
+      <input id="import-file" type="file" accept=".stl,.obj,.3mf,.gcode" hidden />
       <button id="btn-add" class="btn btn-primary" title="Add printer manually">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M12 5v14M5 12h14"/>
@@ -863,6 +870,7 @@
   <script src="preview.js?v=1"></script>
   <script src="history.js?v=3"></script>
   <script src="app.js?v=62"></script>
+  <script src="import.js?v=1"></script>
   <script>
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
