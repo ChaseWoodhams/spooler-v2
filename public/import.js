@@ -1,5 +1,5 @@
 /* Import from the dashboard: the Import button (a dropped file opens the Quick print modal instead) takes an STL, OBJ, 3MF or G-code file, makes a Project of it
-   and opens it on the confirm screen. The Projects page does the same in slicer/main.js. */
+   and opens it on the project stepper. The Projects page does the same in slicer/main.js. */
 (() => {
   const input = document.getElementById("import-file");
   const button = document.getElementById("btn-import");
@@ -28,7 +28,7 @@
       try { body = JSON.parse(xhr.responseText); } catch (_) { /* not JSON */ }
       if (xhr.status === 200 && body.id) {
         if (typeof closeQueue === "function") closeQueue(); // importing from the Queue panel
-        location.hash = `#projects=${body.id}&confirm=1`; // the Project opens inside the app shell
+        location.hash = `#projects=${body.id}`; // the Project opens inside the app shell, on the stepper
         reset();
         return;
       }

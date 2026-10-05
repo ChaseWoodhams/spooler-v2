@@ -958,7 +958,7 @@ def place_whole_model(project_id: int) -> dict:
     return placed
 
 
-# ── Import and the simple print ────────────────────────────────────────────────
+# ── Import and Quick print ────────────────────────────────────────────────
 
 PLAUSIBLE_MM = (5.0, 2000.0)   # the longest side of a model outside this is more likely a unit mistake than a real part
 SCALE_GUESSES = ((1000.0, "metres"), (25.4, "inches"), (10.0, "centimetres"), (100.0, "decimetres"),
@@ -1065,8 +1065,10 @@ def _largest_face_normal(verts, tris):
     for index in np.argsort(-area)[:2000]:                  # a face is as good as its biggest triangles suggest
         close = normals @ normals[index] > math.cos(math.radians(1.0))
         total = float(area[close].sum())
-        if total > best_area:
-            best, best_area = normals[close].T @ area[close], total
+        candidate = normals[close].T @ area[close]
+        # equal faces (a cylinder's two caps) tie: take the one already facing down, so a model resting flat stays put
+        if total > best_area * (1 + 1e-6) or (total > best_area * (1 - 1e-6) and candidate[2] / np.linalg.norm(candidate) < best[2] / np.linalg.norm(best)):
+            best, best_area = candidate, total
     return best / np.linalg.norm(best)
 
 
