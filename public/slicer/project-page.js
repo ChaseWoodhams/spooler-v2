@@ -22,6 +22,7 @@ let jobs = [];
 let printers = [];
 let awaiting = new Set();   // printer ids whose last print is waiting for an answer (OutcomePrompt)
 let focusedPrinter = false; // a push deep link (?printer=) is scrolled to once
+const focusPrinterId = new URLSearchParams(location.search).get("printer"); // read at load: opening a project rewrites the URL
 let selected = null;
 let timer = null;
 
@@ -147,7 +148,7 @@ async function refresh() {
     status = s; jobs = j.jobs; printers = p.filter(x => x.printer_type === "cc1");
     awaiting = new Set((await OutcomePrompt.awaiting()).map(a => a.printer_id));
     render();
-    const focus = new URLSearchParams(location.search).get("printer");
+    const focus = focusPrinterId;
     if (focus && !focusedPrinter) {   // opened from a push: bring that printer's card into view
       const card = document.getElementById(`pp-printer-${focus}`);
       if (card) { focusedPrinter = true; card.scrollIntoView({ block: "center" }); card.style.outline = "2px solid var(--accent, #ff6b2b)"; }

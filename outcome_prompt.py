@@ -78,7 +78,7 @@ def _names(record: dict) -> tuple:
 def deep_link(record: dict) -> str:
     """The project with the printer's card focused, or the printer's own page when the Print has no project."""
     if record.get("project_id"):
-        return f"/slicer.html?project={record['project_id']}&printer={urllib.parse.quote(record['printer_id'], safe='')}"
+        return f"/#projects={record['project_id']}&printer={urllib.parse.quote(record['printer_id'], safe='')}"
     return f"/#printer={urllib.parse.quote(record['printer_id'], safe='')}"
 
 

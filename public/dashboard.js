@@ -129,9 +129,11 @@ function syncShellView() {
     const frame = document.getElementById("projects-frame");
     const params = new URLSearchParams(hash.slice(1)); // #projects=<id>[&confirm=1] (confirm: straight after an import)
     const id = Number(params.get("projects")) || 0;
-    const target = id ? `/slicer.html?project=${id}${params.has("confirm") ? "&confirm=1" : ""}` : "/slicer.html";
-    if (!frame.getAttribute("src") || (id && frame.dataset.project !== String(id))) {
-      frame.dataset.project = id || "";
+    const printer = id ? params.get("printer") || "" : ""; // from a push: focus that printer's card on the project page
+    const target = id ? `/slicer.html?project=${id}${printer ? `&printer=${encodeURIComponent(printer)}` : ""}${params.has("confirm") ? "&confirm=1" : ""}` : "/slicer.html";
+    const route = `${id}|${printer}`;
+    if (!frame.getAttribute("src") || (id && frame.dataset.route !== route)) {
+      frame.dataset.route = route;
       frame.src = target;
     }
   } else {

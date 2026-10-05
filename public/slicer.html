@@ -12,6 +12,10 @@
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
+  <script>
+  // Old push links (/slicer.html?project=&printer=) land in the app shell on the same project and printer card.
+  (function () { const q = new URLSearchParams(location.search); if (window.self === window.top && q.get("project") && q.get("printer")) location.replace("/#projects=" + encodeURIComponent(q.get("project")) + "&printer=" + encodeURIComponent(q.get("printer"))); })();
+  </script>
   <script>if (window.self !== window.top) { document.body.classList.add("embedded"); const b = document.createElement("base"); b.target = "_top"; document.head.appendChild(b); }</script>
   <header class="slicer-top">
     <a href="/" class="slicer-home" title="Back to the dashboard"><img src="/icon.svg" alt="" /><span>Spooler</span></a>
@@ -245,6 +249,6 @@
 
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=1"></script>
-  <script type="module" src="slicer/main.js?v=18"></script>
+  <script type="module" src="slicer/main.js?v=19"></script>
 </body>
 </html>
