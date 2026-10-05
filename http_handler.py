@@ -629,8 +629,10 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._json(splits.status())
         elif self.path.startswith("/api/splits/"):
             self._handle_splits_get()
-        elif self.path == "/api/projects":
-            self._json({"projects": projects.list_projects()})
+        elif self.path.split("?", 1)[0] == "/api/projects":
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            include_quick = (query.get("include_quick") or [""])[0] in ("1", "true")
+            self._json({"projects": projects.list_projects(include_quick=include_quick)})
         elif self.path.startswith("/api/projects/"):
             self._handle_projects_get()
         elif self.path.startswith("/api/slicer/profiles/") and self.path.split("?", 1)[0].endswith("/settings"):
@@ -1236,7 +1238,8 @@ class SPHandler(SimpleHTTPRequestHandler):
         if new_project:
             self._splits_call(lambda: projects.create_project_from_upload(self.rfile, length, value("filename"),
                                                                           scale=value("scale") or 1.0, up=value("up") or "z",
-                                                                          bed=value("bed") or "textured"))
+                                                                          bed=value("bed") or "textured",
+                                                                          quick=value("quick") in ("1", "true")))
             return
         self._jobs_call(lambda: projects.import_model(self._job_id(), self.rfile, length, value("filename"),
                                                      scale=value("scale") or 1.0, up=value("up") or "z",

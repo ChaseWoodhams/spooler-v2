@@ -85,6 +85,56 @@ class SimplePrintApiTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         return project["id"]
 
+    async def quick_upload(self, data: bytes, filename="model.stl"):
+        status, project = self.call("POST", f"/api/projects/upload?filename={filename}&quick=1", raw=data)
+        self.assertEqual(status, 200, project)
+        await self.settle()
+        return project
+
+    async def test_a_quick_upload_makes_a_quick_project_with_its_intake_result(self):
+        project = await self.quick_upload(cube_stl(30), "cube.stl")
+        self.assertIs(project["quick"], True)
+        self.assertEqual(project["name"], "cube")
+        self.assertIsNotNone(project["split_id"])
+        intake = self.call("GET", f"/api/projects/{project['id']}/intake")[1]
+        self.assertEqual((intake["state"], intake["can_print"], intake["file"]), ("ready", True, "cube.stl"))
+        normal = await self.import_model(cube_stl(20), "normal.stl")
+        self.assertIs(self.call("GET", f"/api/projects/{normal}")[1]["quick"], False)
+
+    async def test_a_quick_project_stays_out_of_the_project_list_but_resolves_by_id(self):
+        quick = await self.quick_upload(cube_stl(30), "cube.stl")
+        normal = await self.import_model(cube_stl(20), "normal.stl")
+        listed = [p["id"] for p in self.call("GET", "/api/projects")[1]["projects"]]
+        self.assertEqual(listed, [normal])
+        everything = [p["id"] for p in self.call("GET", "/api/projects?include_quick=1")[1]["projects"]]
+        self.assertEqual(sorted(everything), sorted([quick["id"], normal]))
+        status, fetched = self.call("GET", f"/api/projects/{quick['id']}")
+        self.assertEqual((status, fetched["id"]), (200, quick["id"]))
+
+    async def test_a_quick_project_never_counts_as_an_active_project_on_the_dashboard(self):
+        quick = await self.quick_upload(cube_stl(30), "cube.stl")
+        self.assertEqual(self.call("POST", f"/api/projects/{quick['id']}/auto-place", {})[0], 200)
+        await self.settle()
+        self.assertEqual(self.call("POST", f"/api/projects/{quick['id']}/slice", {})[0], 200)
+        await self.settle()
+        self.assertEqual(projects.get_project(quick["id"])["slices"]["1"]["state"], "sliced")
+        status, dash = self.call("GET", "/api/dashboard")
+        self.assertEqual(status, 200)
+        self.assertEqual(dash["projects"], [])
+        normal = await self.import_model(cube_stl(20), "normal.stl")
+        self.call("POST", f"/api/projects/{normal}/auto-place", {})
+        self.call("POST", f"/api/projects/{normal}/slice", {})
+        await self.settle()
+        self.assertEqual([p["id"] for p in self.call("GET", "/api/dashboard")[1]["projects"]], [normal])
+
+    async def test_a_quick_projects_split_is_owned_not_loose(self):
+        quick = await self.quick_upload(cube_stl(30), "cube.stl")
+        status, loose = self.call("POST", "/api/splits/upload?filename=loose.stl", raw=cube_stl(25))
+        self.assertEqual(status, 200, loose)
+        by_id = {s["id"]: s for s in self.call("GET", "/api/splits")[1]["splits"]}
+        self.assertEqual(by_id[quick["split_id"]]["project_id"], quick["id"])
+        self.assertIsNone(by_id[loose["id"]]["project_id"])
+
     async def test_a_model_that_fits_the_bed_is_reported_with_its_size_and_volume(self):
         pid = await self.import_model(cube_stl(30), "cube.stl")
         status, intake = self.call("GET", f"/api/projects/{pid}/intake")

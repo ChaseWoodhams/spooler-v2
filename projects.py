@@ -152,6 +152,7 @@ def _to_project(row) -> dict:
     record["data"] = json.loads(record["data"] or "{}")
     record["models"] = json.loads(record["models"] or "[]")
     record["slices"] = json.loads(record["slices"] or "{}")
+    record["quick"] = bool(record.get("quick"))
     record["server_time"] = time.time()  # lets a browser with a different clock show how long a slice has been running
     for plate in record["data"].get("plates", []):
         entry = record["slices"].get(str(plate["id"]))
@@ -168,14 +169,16 @@ def get_project(project_id: int) -> dict:
     return _to_project(row)
 
 
-def list_projects() -> list:
+def list_projects(include_quick: bool = False) -> list:
+    """Projects, newest first. Quick projects (hidden behind Quick print) are left out unless `include_quick`."""
     with database.transaction() as conn:
-        rows = conn.execute("SELECT * FROM projects ORDER BY updated_at DESC, id DESC").fetchall()
+        rows = conn.execute("SELECT * FROM projects" + ("" if include_quick else " WHERE quick = 0")
+                            + " ORDER BY updated_at DESC, id DESC").fetchall()
     out = []
     for record in map(_to_project, rows):
         data = record["data"]
         out.append({"id": record["id"], "name": record["name"], "updated_at": record["updated_at"], "created_at": record["created_at"],
-                    "split_id": record.get("split_id"),
+                    "split_id": record.get("split_id"), "quick": record["quick"],
                     "plates": len(data.get("plates", [])), "objects": len(data.get("objects", [])), "models": len(record["models"]),
                     "busy": any(m["state"] == IMPORTING for m in record["models"])
                     or any(s.get("state") in (QUEUED, SLICING) for s in record["slices"].values())})
@@ -196,8 +199,9 @@ def _new_plate(plate_id: int, overrides: dict | None = None) -> dict:
     return {"id": plate_id, "name": f"Plate {plate_id}", "overrides": dict(overrides or {})}
 
 
-def create_project(name: str = "", split_id: int | None = None) -> dict:
-    """A project with one empty plate. With `split_id` it belongs to that split model and lays out its parts."""
+def create_project(name: str = "", split_id: int | None = None, quick: bool = False) -> dict:
+    """A project with one empty plate. With `split_id` it belongs to that split model and lays out its parts.
+    A `quick` project is hidden from project listings; it is reached by id."""
     if split_id is not None:
         splits.get_split(split_id)
     remembered = remembered_defaults.usable()
@@ -210,13 +214,13 @@ def create_project(name: str = "", split_id: int | None = None) -> dict:
             "plates": [plate], "objects": []}
     now = time.time()
     with database.transaction() as conn:
-        project_id = conn.execute("INSERT INTO projects (name, data, split_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                                  (_clean_name(name) or "Untitled project", json.dumps(data), split_id, now, now)).lastrowid
+        project_id = conn.execute("INSERT INTO projects (name, data, split_id, quick, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                  (_clean_name(name) or "Untitled project", json.dumps(data), split_id, int(bool(quick)), now, now)).lastrowid
     project_dir(project_id).mkdir(parents=True, exist_ok=True)
     return get_project(project_id)
 
 
-def create_project_from_gcode(stream, length: int, filename: str, bed: str = "textured") -> dict:
+def create_project_from_gcode(stream, length: int, filename: str, bed: str = "textured", quick: bool = False) -> dict:
     """A one-plate project with no objects whose plate holds the uploaded G-code as an imported (never outdated) Slice.
     `bed` is the plate side the file was sliced for; the file can't say."""
     if bed not in slicer.BED_TYPES:
@@ -229,7 +233,7 @@ def create_project_from_gcode(stream, length: int, filename: str, bed: str = "te
         raise jobs.JobError(f"The file is larger than {jobs.MAX_UPLOAD_BYTES // (1024 * 1024)} MB", 413)
     path = _spool(stream, length)
     try:
-        project = create_project(name.rsplit(".", 1)[0][:120])
+        project = create_project(name.rsplit(".", 1)[0][:120], quick=quick)
         try:
             work = plate_dir(project["id"], 1)
             work.mkdir(parents=True)
@@ -253,16 +257,16 @@ def create_project_from_gcode(stream, length: int, filename: str, bed: str = "te
         path.unlink(missing_ok=True)
 
 
-def create_project_from_upload(stream, length: int, filename: str, scale=1.0, up="z", bed: str = "textured") -> dict:
+def create_project_from_upload(stream, length: int, filename: str, scale=1.0, up="z", bed: str = "textured", quick: bool = False) -> dict:
     """Start the workflow from a model file: it's stored as a split model (analysed first) owned by a new project.
     A G-code file instead becomes a one-plate project holding it as an imported Slice."""
     if filename.lower().endswith(".gcode"):
-        return create_project_from_gcode(stream, length, filename, bed)
+        return create_project_from_gcode(stream, length, filename, bed, quick=quick)
     if filename.lower().endswith(".3mf"):  # an OrcaSlicer/BambuStudio project keeps its plates and settings
         path = _spool(stream, length)
         try:
             if orca_3mf.is_project(path):
-                project = create_project(Path(filename.replace("\\", "/")).stem[:120])
+                project = create_project(Path(filename.replace("\\", "/")).stem[:120], quick=quick)
                 try:
                     return import_orca_project(project["id"], path, fresh=True)
                 except BaseException:
@@ -272,9 +276,9 @@ def create_project_from_upload(stream, length: int, filename: str, scale=1.0, up
                 split = splits.create_split(fh, length, filename, {"scale": scale, "up": up})
         finally:
             path.unlink(missing_ok=True)
-        return create_project(Path(split["source_name"]).stem, split_id=split["id"])
+        return create_project(Path(split["source_name"]).stem, split_id=split["id"], quick=quick)
     split = splits.create_split(stream, length, filename, {"scale": scale, "up": up})
-    return create_project(Path(split["source_name"]).stem, split_id=split["id"])
+    return create_project(Path(split["source_name"]).stem, split_id=split["id"], quick=quick)
 
 
 def delete_project(project_id: int) -> None:

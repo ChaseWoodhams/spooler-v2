@@ -216,6 +216,10 @@ MIGRATIONS = [
         updated_at  REAL
     );
     """,
+    # 8 — Quick print (additive): a quick project is hidden from every project listing
+    """
+    ALTER TABLE projects ADD COLUMN quick INTEGER NOT NULL DEFAULT 0 CHECK (quick IN (0, 1));
+    """,
 ]
 
 _lock = threading.RLock()

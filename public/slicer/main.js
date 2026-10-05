@@ -371,7 +371,7 @@ async function openProject(id, { confirm = false, toPrinter = false } = {}) {
   resetEdits();
   state.jobs = [];
   state.assigning = null;
-  remember("slicer.project", String(id));
+  if (!project.quick) remember("slicer.project", String(id));   // a hidden quick project is never restored as the last-open project
   history.replaceState(null, "", `?project=${id}`);
   await bundleSettings(project.data.profile.bundle_id).catch(err => toast(err.message, true));
   if (project.split_id) await splitStep.open(project.split_id).catch(err => toast(err.message, true));
@@ -1652,8 +1652,7 @@ async function openProjectsDialog() {
   if (!dialog.open) dialog.showModal();
   try {
     const [{ projects }, { splits }] = await Promise.all([api("GET", "/api/projects"), api("GET", "/api/splits").catch(() => ({ splits: [] }))]);
-    const owned = new Set(projects.map(p => p.split_id).filter(Boolean));
-    const loose = splits.filter(s => !owned.has(s.id));
+    const loose = splits.filter(s => !s.project_id);   // the server marks splits owned by any project, hidden quick ones included
     $("project-list").innerHTML = (projects.length ? '<h4 class="slicer-list-heading">Your projects</h4>' : "") + projects.map(p => `
       <div class="slicer-project-row">
         <div><strong>${esc(p.name)}</strong>${p.split_id ? '<span class="slicer-tag">from a model upload</span>' : ""}
