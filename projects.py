@@ -1022,6 +1022,15 @@ def auto_place(project_id: int) -> dict:
     return {"placed": placed, "intake": info, "project": get_project(project_id)}
 
 
+def open_as_project(project_id: int) -> dict:
+    """Promote a quick project to a normal, visible Project (also the hand-off for a model too big for the bed).
+    Only the flag changes, so the model, plate and slice stay as they are; updated_at moves it to the top of the list."""
+    get_project(project_id)
+    with database.transaction() as conn:
+        conn.execute("UPDATE projects SET quick = 0, updated_at = ? WHERE id = ?", (time.time(), project_id))
+    return get_project(project_id)
+
+
 def fix_scale(project_id: int) -> dict:
     """Apply the suggested scale correction; the model is analysed again."""
     info = intake(project_id)

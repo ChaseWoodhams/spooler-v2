@@ -135,6 +135,36 @@ class SimplePrintApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_id[quick["split_id"]]["project_id"], quick["id"])
         self.assertIsNone(by_id[loose["id"]]["project_id"])
 
+    async def test_open_as_project_promotes_a_quick_project_with_its_model_plate_and_slice(self):
+        quick = await self.quick_upload(cube_stl(30), "cube.stl")
+        self.call("POST", f"/api/projects/{quick['id']}/auto-place", {})
+        self.call("POST", f"/api/projects/{quick['id']}/slice", {})
+        await self.settle()
+        before = self.call("GET", f"/api/projects/{quick['id']}")[1]
+        self.assertNotIn(quick["id"], [p["id"] for p in self.call("GET", "/api/projects")[1]["projects"]])
+        status, opened = self.call("POST", f"/api/projects/{quick['id']}/open-as-project", {})
+        self.assertEqual(status, 200, opened)
+        self.assertEqual((opened["id"], opened["quick"]), (quick["id"], False))
+        listed = self.call("GET", "/api/projects")[1]["projects"]
+        self.assertEqual(listed[0]["id"], quick["id"])
+        after = self.call("GET", f"/api/projects/{quick['id']}")[1]
+        self.assertIs(after["quick"], False)
+        self.assertEqual(after["models"], before["models"])
+        self.assertEqual(after["data"]["plates"], before["data"]["plates"])
+        self.assertEqual(after["slices"]["1"]["state"], "sliced")
+
+    async def test_open_as_project_hands_off_a_model_too_big_for_the_bed(self):
+        quick = await self.quick_upload(box_stl(self.dir / "long.stl", (400, 20, 20)), "long.stl")
+        await self.settle()
+        intake = self.call("GET", f"/api/projects/{quick['id']}/intake")[1]
+        self.assertFalse(intake["can_print"])
+        status, opened = self.call("POST", f"/api/projects/{quick['id']}/open-as-project", {})
+        self.assertEqual((status, opened["quick"]), (200, False))
+        self.assertIn(quick["id"], [p["id"] for p in self.call("GET", "/api/projects")[1]["projects"]])
+
+    async def test_open_as_project_on_an_unknown_project_is_a_404(self):
+        self.assertEqual(self.call("POST", "/api/projects/9999/open-as-project", {})[0], 404)
+
     async def test_a_model_that_fits_the_bed_is_reported_with_its_size_and_volume(self):
         pid = await self.import_model(cube_stl(30), "cube.stl")
         status, intake = self.call("GET", f"/api/projects/{pid}/intake")
