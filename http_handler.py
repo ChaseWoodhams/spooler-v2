@@ -21,6 +21,7 @@ import farm
 import health
 import jobs
 import preflight
+import remembered_defaults
 import print_history
 import projects
 import slicer
@@ -614,6 +615,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(slicer.stock_presets, broadcast=False)
         elif self.path == "/api/slicer/spools":
             self._jobs_call(farm.list_spools, broadcast=False)
+        elif self.path == "/api/defaults":
+            self._jobs_call(lambda: {"defaults": remembered_defaults.get()}, broadcast=False)
         elif self.path == "/api/slices":
             self._json({"slices": slicer.list_slices()})
         elif self.path == "/api/splits":
@@ -639,6 +642,9 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: preflight.printer_hardware(self._path_printer_id()), broadcast=False)
         elif self.path == "/api/prints" or self.path.startswith("/api/prints?"):
             self._jobs_call(lambda: print_history.search(**self._print_filters(paged=True)), broadcast=False)
+        elif self.path == "/api/failure-reasons":
+            self._json({"failure_reasons": list(print_history.FAILURE_REASONS),
+                        "cancel_reasons": list(print_history.CANCEL_REASONS)})
         elif self.path.startswith("/api/prints/export.csv"):
             self._send_prints_csv()
         elif self.path.startswith("/api/prints/"):
@@ -695,6 +701,9 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if self.path.startswith("/api/jobs/"):
             self._jobs_call(lambda: jobs.update_job(self._job_id(), self._json_body()))
+            return
+        if self.path == "/api/defaults":
+            self._jobs_call(lambda: {"defaults": remembered_defaults.save(self._json_body())}, broadcast=False)
             return
         if self.path.startswith("/api/prints/"):
             self._jobs_call(lambda: print_history.update_notes(self._job_id(), self._json_body().get("notes")),
@@ -1193,7 +1202,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             length = 0
         if new_project:
             self._splits_call(lambda: projects.create_project_from_upload(self.rfile, length, value("filename"),
-                                                                          scale=value("scale") or 1.0, up=value("up") or "z"))
+                                                                          scale=value("scale") or 1.0, up=value("up") or "z",
+                                                                          bed=value("bed") or "textured"))
             return
         self._jobs_call(lambda: projects.import_model(self._job_id(), self.rfile, length, value("filename"),
                                                      scale=value("scale") or 1.0, up=value("up") or "z",
@@ -1231,8 +1241,9 @@ class SPHandler(SimpleHTTPRequestHandler):
             except ValueError:
                 raise jobs.JobError(f"{key} must be a number")
 
-        filters = {"q": text("q"), "printer_id": text("printer_id") or None,
-                   "outcome": text("outcome") or None, "since": number("since"), "until": number("until")}
+        unconfirmed = text("unconfirmed").lower()
+        filters = {"q": text("q"), "unconfirmed": (unconfirmed in ("1", "true", "yes")) if unconfirmed else None,
+                   "printer_id": text("printer_id") or None, "outcome": text("outcome") or None, "since": number("since"), "until": number("until")}
         if paged:
             filters["limit"] = int(number("limit") or 50)
             filters["offset"] = int(number("offset") or 0)
@@ -1255,6 +1266,12 @@ class SPHandler(SimpleHTTPRequestHandler):
         parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'prints', <id>, <action>]
         if len(parts) == 5 and parts[4] == "repeat":
             self._jobs_call(lambda: print_history.repeat_print(self._job_id()))
+        elif len(parts) == 5 and parts[4] == "outcome":
+            def write():
+                body = self._json_body()
+                return print_history.set_outcome(self._job_id(), body.get("outcome"),
+                                                 body.get("failure_reasons"), body.get("notes"))
+            self._jobs_call(write)
         else:
             self._json({"error": "Not found"}, 404)
 

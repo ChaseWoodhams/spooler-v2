@@ -1919,3 +1919,7 @@ body.panel-open { overflow: hidden; }
   .detail-temperature-row { grid-template-columns: 1fr; }
   .temperature-target { justify-content: flex-end; }
 }
+
+.history-outcome-form { border: 1px solid var(--border, #444); border-radius: 8px; padding: 8px 10px; margin: 8px 0; display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
+.history-outcome-form .history-reasons { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.history-outcome-form [hidden] { display: none; }

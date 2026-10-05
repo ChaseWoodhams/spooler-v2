@@ -113,13 +113,30 @@ function remember(key, value) {
   return null;
 }
 
+// What the user last picked lives on the server (printer, profile, spool, plate side, send options), so every
+// browser starts a new project from it. Saving is best effort: a failure never interrupts the work.
+function rememberDefaults(change) {
+  api("PATCH", "/api/defaults", change).catch(() => {});
+}
+
+async function applySendDefaults() {
+  try {
+    const { options } = (await api("GET", "/api/defaults")).defaults;
+    $("send-leveling").checked = Boolean(options.leveling);
+    $("send-timelapse").checked = Boolean(options.timelapse);
+  } catch (_) { /* the checkboxes stay as they are */ }
+}
+
 const data = () => state.project.data;
 const plateById = id => data().plates.find(p => p.id === id) || null;
 const currentPlate = () => plateById(state.plate);
 const plateObjects = (plateId = state.plate) => data().objects.filter(o => o.plate === plateId);
 const selectedObject = () => data().objects.find(o => o.id === state.selected) || null;
 const sliceEntry = (plateId = state.plate) => state.project?.slices?.[String(plateId)] || null;
-const platesWithObjects = () => data().plates.filter(p => plateObjects(p.id).length);
+// A G-code import is a project whose plate has no objects, only an imported Slice: Model, Split, Plates and Slice don't apply.
+const isImportedPlate = plateId => !!sliceEntry(plateId)?.imported;
+const isGcodeProject = () => data().plates.some(p => isImportedPlate(p.id)) && !data().objects.length;
+const platesWithObjects = () => data().plates.filter(p => plateObjects(p.id).length || isImportedPlate(p.id));
 const isUpToDate = plateId => sliceEntry(plateId)?.state === "sliced" && !sliceEntry(plateId).outdated;
 const isBusy = plateId => ["queued", "slicing"].includes(sliceEntry(plateId)?.state);
 const plateImporting = plateId => plateObjects(plateId).some(o => state.project.models.find(m => m.id === o.model)?.state === "importing");
@@ -180,6 +197,7 @@ async function boot() {
   await loadPresets();
   loadSpools();
   loadPrinters();
+  applySendDefaults();
   const params = new URLSearchParams(location.search);
   const id = Number(params.get("project")) || (params.has("new") ? 0 : Number(remember("slicer.project")) || 0);
   if (id) {
@@ -288,6 +306,7 @@ async function chooseSpool(value) {
   if (!id) {
     for (const key of SPOOL_KEYS) delete profile.filament[key];
     profile.spool_id = null;
+    rememberDefaults({ spool: null });
     changed();
     renderAll();
     return;
@@ -302,6 +321,7 @@ async function chooseSpool(value) {
     for (const key of SPOOL_KEYS) delete data().profile.filament[key];
     Object.assign(data().profile.filament, match.changes);
     data().profile.spool_id = id;
+    rememberDefaults({ spool: id, profile: data().profile.bundle_id });
     changed();
     renderAll();
     toast(`Using ${match.spool.name}` + (match.preset ? "" : " — no stock preset for this material, so the preset's other settings are kept"));
@@ -399,6 +419,7 @@ function stepAvailable(step) {
   const project = state.project;
   if (!project) return false;
   const split = project.split_id ? splitStep.split : null;
+  if (isGcodeProject() && step !== "queue") return false;
   switch (step) {
     case "model":  return !!project.split_id;
     case "split":  return !!split?.analysis;
@@ -423,6 +444,7 @@ function stepDone(step) {
 }
 
 function defaultStep() {
+  if (isGcodeProject()) return "queue";
   if (state.project.split_id && !data().objects.length) return splitStep.split?.result ? "split" : "model";
   if (!data().objects.length) return "plates";
   if (state.jobs.some(j => OPEN_JOB_STATES.has(j.state))) return "queue";
@@ -431,7 +453,7 @@ function defaultStep() {
 
 async function setStep(step, { force = false } = {}) {
   if (!state.project || (!force && !stepAvailable(step))) return;
-  if (!stepAvailable(step)) step = stepAvailable("plates") ? "plates" : "model";
+  if (!stepAvailable(step)) step = isGcodeProject() ? "queue" : stepAvailable("plates") ? "plates" : "model";
   await flushSave();
   if (state.step !== step) document.querySelector(".slicer-sidebar").scrollTop = 0;
   state.step = step;
@@ -464,7 +486,7 @@ async function setStep(step, { force = false } = {}) {
 
 function renderSteps() {
   if (!state.project) { $("step-bar").innerHTML = ""; return; }
-  const steps = STEPS.filter(([id]) => state.project.split_id || (id !== "model" && id !== "split"));
+  const steps = STEPS.filter(([id]) => isGcodeProject() ? id === "queue" : state.project.split_id || (id !== "model" && id !== "split"));
   $("step-bar").innerHTML = steps.map(([id, label], index) => `${index ? '<span class="slicer-step-sep"></span>' : ""}
     <button class="slicer-step${id === state.step ? " active" : ""}${stepDone(id) ? " done" : ""}" type="button" data-step="${id}"
       ${stepAvailable(id) ? "" : " disabled"}><span class="num">${stepDone(id) && id !== state.step ? "✓" : index + 1}</span>${label}</button>`).join("");
@@ -703,6 +725,7 @@ async function choosePreset(kind, name) {
     await bundleSettings(bundle.id);
     const profile = data().profile;
     data().profile = { ...profile, bundle_id: bundle.id, [kind]: {}, ...(kind === "machine" ? { process: {}, filament: {} } : {}) };
+    rememberDefaults({ profile: bundle.id });
     changed();
     renderAll();
     toast(`Using ${bundle.label}`);
@@ -731,6 +754,7 @@ async function savePreset() {
     await loadBundles();
     await bundleSettings(bundle.id);
     data().profile = { ...data().profile, bundle_id: bundle.id, [kind]: {} };
+    rememberDefaults({ profile: bundle.id });
     $("dlg-save-profile").close();
     changed();
     renderAll();
@@ -1584,6 +1608,7 @@ async function sendBatch() {
   const repeats = chosen.filter(id => openJobPlates().has(id)).map(id => plateById(id).name);
   if (repeats.length && !confirm(`${listNames(repeats)} ${repeats.length === 1 ? "is" : "are"} already in the queue. Send another copy?`)) return;
   await flushSave();
+  rememberDefaults({ options: { leveling: $("send-leveling").checked, timelapse: $("send-timelapse").checked } });
   await withButton($("btn-send-batch"), async () => {
     const result = await api("POST", `/api/projects/${state.project.id}/queue`, {
       plates: chosen, leveling: $("send-leveling").checked, timelapse: $("send-timelapse").checked, again: repeats.length > 0 });
@@ -1639,7 +1664,7 @@ async function openProjectsDialog() {
 }
 
 async function uploadNewModel(file) {
-  if (!/\.(stl|obj|3mf)$/i.test(file.name)) { toast("Choose an STL, OBJ or 3MF model", true); return; }
+  if (!/\.(stl|obj|3mf|gcode)$/i.test(file.name)) { toast("Choose an STL, OBJ or 3MF model, or a G-code file", true); return; }
   const progress = $("new-upload-progress"), bar = progress.querySelector(".job-upload-bar");
   progress.hidden = false;
   bar.style.width = "0%";
@@ -1756,7 +1781,7 @@ function bindUi() {
   }
   $("btn-import-preset").addEventListener("click", () => $("preset-file").click());
   $("preset-file").addEventListener("change", e => { const [file] = e.target.files; e.target.value = ""; if (file) importPreset(file); });
-  $("bed-select").addEventListener("change", e => { data().bed = e.target.value; changed(); renderViewport(); });
+  $("bed-select").addEventListener("change", e => { data().bed = e.target.value; rememberDefaults({ plate_side: data().bed }); changed(); renderViewport(); });
 
   $("btn-save-profile-confirm").addEventListener("click", savePreset);
 
@@ -1916,6 +1941,7 @@ function bindUi() {
     const plate = currentPlate();
     if (!plate) return;
     plate.printer_id = e.target.value || null;
+    rememberDefaults({ printer: plate.printer_id });
     changed();
     renderFarm();
   });

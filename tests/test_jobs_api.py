@@ -137,6 +137,17 @@ class JobsApiTests(unittest.TestCase):
         status, job = self.call("POST", f"/api/prints/{print_id}/repeat", {})
         self.assertEqual((status, job["printer_file"], job["state"]), (200, "/local/benchy.gcode", "queued"))
 
+        status, unconfirmed = self.call("GET", "/api/prints?unconfirmed=1")
+        self.assertEqual((status, unconfirmed["total"]), (200, 1))
+        self.assertEqual(self.call("POST", f"/api/prints/{print_id}/outcome", {"outcome": "failed"})[0], 400)
+        status, fixed = self.call("POST", f"/api/prints/{print_id}/outcome",
+                                  {"outcome": "failed", "failure_reasons": ["spaghetti"]})
+        self.assertEqual((status, fixed["outcome"], fixed["failure_reasons"], fixed["outcome_unconfirmed"]),
+                         (200, "failed", ["spaghetti"], False))
+        self.assertEqual(self.call("GET", "/api/prints?unconfirmed=1")[1]["total"], 0)
+        status, reasons = self.call("GET", "/api/failure-reasons")
+        self.assertEqual((status, len(reasons["failure_reasons"])), (200, 9))
+
         self.assertEqual(self.call("GET", "/api/prints?outcome=exploded")[0], 400)
         self.assertEqual(self.call("GET", "/api/prints?since=yesterday")[0], 400)
         self.assertEqual(self.call("GET", "/api/prints/999")[0], 404)

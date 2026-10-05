@@ -27,6 +27,10 @@ from printers.protocol import (
 from spoolman import _printer_location, _spool_id_at_location, get_spoolman_url
 
 OUTCOMES       = ("completed", "cancelled", "failed", "unknown")
+# Failure reasons are data: ids stored on a print, labels live in the UI. Several per print are allowed.
+FAILURE_REASONS = ("adhesion", "spaghetti", "warping", "layer_shift", "clog", "filament", "surface_quality",
+                   "power_network", "other")
+CANCEL_REASONS  = FAILURE_REASONS + ("cancelled_on_purpose",)
 SEARCH_COLUMNS = ("file_name", "printer_name", "material", "filament_name", "vendor", "notes", "detail")
 PAGE_LIMIT_MAX = 200
 EXPORT_LIMIT   = 20000
@@ -130,8 +134,8 @@ def _close(printer_id: str, outcome: str, detail: str | None) -> dict | None:
     layer, total = entry["layers"]
     with database.transaction() as conn:
         conn.execute(
-            "UPDATE prints SET outcome = ?, detail = ?, ended_at = ?, duration_s = CAST(? - started_at AS INTEGER), "
-            "layer = ?, total_layers = COALESCE(NULLIF(?, 0), total_layers) WHERE id = ? AND outcome IS NULL",
+            "UPDATE prints SET outcome = ?, outcome_unconfirmed = 1, detail = ?, ended_at = ?, "
+            "duration_s = CAST(? - started_at AS INTEGER), layer = ?, total_layers = COALESCE(NULLIF(?, 0), total_layers) WHERE id = ? AND outcome IS NULL",
             (outcome, detail, now, now, layer, total, entry["id"]),
         )
         row = conn.execute("SELECT * FROM prints WHERE id = ?", (entry["id"],)).fetchone()
@@ -229,7 +233,7 @@ def record_usage(printer_id: str, filament_mm: float, density: float, spool_mm: 
 # ── Reading, notes, export, repeat ─────────────────────────────────────────────
 
 def _filters(q: str = "", printer_id: str | None = None, outcome: str | None = None,
-             since: float | None = None, until: float | None = None) -> tuple:
+             since: float | None = None, until: float | None = None, unconfirmed: bool | None = None) -> tuple:
     clauses, params = [], []
     q = (q or "").strip()
     if q:
@@ -246,6 +250,9 @@ def _filters(q: str = "", printer_id: str | None = None, outcome: str | None = N
             raise jobs.JobError(f"outcome must be one of: printing, {', '.join(OUTCOMES)}")
         clauses.append("outcome = ?")
         params.append(outcome)
+    if unconfirmed is not None:
+        clauses.append("outcome_unconfirmed = ?")
+        params.append(1 if unconfirmed else 0)
     if since is not None:
         clauses.append("started_at >= ?")
         params.append(since)
@@ -256,8 +263,9 @@ def _filters(q: str = "", printer_id: str | None = None, outcome: str | None = N
 
 
 def search(q: str = "", printer_id: str | None = None, outcome: str | None = None,
-           since: float | None = None, until: float | None = None, limit: int = 50, offset: int = 0) -> dict:
-    where, params = _filters(q, printer_id, outcome, since, until)
+           since: float | None = None, until: float | None = None, limit: int = 50, offset: int = 0,
+           unconfirmed: bool | None = None) -> dict:
+    where, params = _filters(q, printer_id, outcome, since, until, unconfirmed)
     limit = max(1, min(int(limit), PAGE_LIMIT_MAX))
     offset = max(0, int(offset))
     with database.transaction() as conn:
@@ -294,9 +302,33 @@ def update_notes(print_id: int, notes) -> dict:
     return get_print(print_id)
 
 
+def set_outcome(print_id: int, outcome, failure_reasons=None, note=None) -> dict:
+    """Record the user's answer for a finished print: it overrides what the printer reported and confirms it.
+    A failed print needs at least one failure reason; a cancelled one takes optional reasons, including
+    cancelled on purpose. A note, when given, replaces the print's notes."""
+    if outcome not in OUTCOMES:
+        raise jobs.JobError(f"outcome must be one of: {', '.join(OUTCOMES)}")
+    reasons = list(dict.fromkeys(failure_reasons or []))
+    allowed = {"failed": FAILURE_REASONS, "cancelled": CANCEL_REASONS}.get(outcome, ())
+    if any(r not in allowed for r in reasons):
+        raise jobs.JobError(f"failure reasons for a {outcome} print must be among: {', '.join(allowed) or 'none'}")
+    if outcome == "failed" and not reasons:
+        raise jobs.JobError("A failed print needs at least one failure reason")
+    with database.transaction() as conn:
+        row = conn.execute("SELECT outcome FROM prints WHERE id = ?", (print_id,)).fetchone()
+        if row is None:
+            raise jobs.JobError("Print not found", 404)
+        if row["outcome"] is None:
+            raise jobs.JobError("The print is still running", 409)
+        conn.execute("UPDATE prints SET outcome = ?, failure_reasons = ?, outcome_unconfirmed = 0, "
+                     "notes = COALESCE(?, notes) WHERE id = ?",
+                     (outcome, json.dumps(reasons), None if note is None else str(note)[:4000], print_id))
+    return get_print(print_id)
+
+
 CSV_COLUMNS = ("id", "started", "ended", "printer_name", "file_name", "outcome", "detail", "duration_s",
                "layer", "total_layers", "filament_g", "filament_mm", "material", "vendor", "filament_name",
-               "spool_id", "cost", "estimate_s", "estimate_g", "job_id", "notes")
+               "spool_id", "cost", "estimate_s", "estimate_g", "job_id", "notes", "failure_reasons", "outcome_unconfirmed")
 
 
 def export_csv(**filters) -> str:
@@ -309,7 +341,9 @@ def export_csv(**filters) -> str:
     writer.writerow(CSV_COLUMNS)
     stamp = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) if t else ""
     for row in rows:
-        record = dict(row, started=stamp(row["started_at"]), ended=stamp(row["ended_at"]))
+        record = dict(row, started=stamp(row["started_at"]), ended=stamp(row["ended_at"]),
+                      failure_reasons=", ".join(json.loads(row["failure_reasons"] or "[]")),
+                      outcome_unconfirmed="yes" if row["outcome_unconfirmed"] else "")
         writer.writerow([record[col] if record[col] is not None else "" for col in CSV_COLUMNS])
     return out.getvalue()
 
