@@ -18,6 +18,7 @@ import os
 import asyncio
 import backup
 import bed_cleared
+import dashboard
 import farm
 import health
 import jobs
@@ -606,6 +607,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._proxy_thumbnail()
         elif self.path == "/api/printers":
             self._json([p.to_dict() for p in state.printers.values()])
+        elif self.path == "/api/dashboard":
+            self._jobs_call(dashboard.snapshot, broadcast=False)
         elif self.path == "/api/system-status":
             self._json(health.snapshot())
         elif self.path == "/api/jobs":

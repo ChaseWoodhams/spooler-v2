@@ -515,6 +515,8 @@ function renderPrinter(printer) {
     </div>
     ` : ""}
 
+    ${typeof printerUpNext === "function" ? printerUpNext(printer) : ""}
+
     <!-- Spool (hidden for canvas printers — tray linking handles assignment) -->
     ${!printer.status?.canvas_info?.canvas_list?.length ? (() => {
       const s = spools.find(sp => printerByLocation(spoolAssignedTo(sp))?.id === printer.id);
@@ -728,7 +730,7 @@ function closePrinterDashboard() {
 }
 
 function returnToPrinterGrid() {
-  if (location.hash.startsWith("#printer=")) location.hash = "";
+  if (location.hash.length > 1) location.hash = ""; // a printer page or the Projects page: the hashchange closes it
   else closePrinterDashboard();
 }
 

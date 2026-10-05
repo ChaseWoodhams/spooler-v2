@@ -13,13 +13,14 @@ self.addEventListener("push", (e) => {
       body: data.body,
       icon: "/icon.svg",
       badge: "/icon.svg",
+      data: { url: data.url || "/" }, // e.g. "/#printer=<id>" opens straight onto that printer's card
     })
   );
 });
 
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
-  e.waitUntil(clients.openWindow("/"));
+  e.waitUntil(clients.openWindow((e.notification.data && e.notification.data.url) || "/"));
 });
 
 function _b64ToUint8Array(b64) {

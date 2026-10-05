@@ -8,10 +8,11 @@
   <meta name="theme-color" content="#0d0e12" />
   <link rel="stylesheet" href="style.css?v=53" />
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=22" />
+  <link rel="stylesheet" href="slicer.css?v=23" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
+  <script>if (window.self !== window.top) { document.body.classList.add("embedded"); const b = document.createElement("base"); b.target = "_top"; document.head.appendChild(b); }</script>
   <header class="slicer-top">
     <a href="/" class="slicer-home" title="Back to the dashboard"><img src="/icon.svg" alt="" /><span>Spooler</span></a>
     <div class="slicer-project">
@@ -26,6 +27,8 @@
       <span id="step-actions" class="slicer-step-actions"></span>
     </div>
   </header>
+
+  <p class="slicer-small-screen-note">Editing plates, split and slice settings is best on a larger screen.</p>
 
   <div class="slicer-body">
     <aside class="slicer-sidebar">

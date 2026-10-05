@@ -353,3 +353,8 @@ body.print-step .slicer-sidebar { display: none; }
 @media (max-width: 900px) { .pp-layout { grid-template-columns: 1fr; } .project-page { padding: 10px; } }
 .pp-printer .pp-chip { align-self: flex-start; }
 .pp-printon select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; font-size: 12px; }
+
+/* Inside the app shell the shell's own nav replaces the Spooler link. */
+body.embedded .slicer-home { display: none; }
+.slicer-small-screen-note { display: none; margin: 0; padding: 6px 14px; font-size: 12px; color: var(--text-muted); background: var(--surface2); border-bottom: 1px solid var(--border); }
+@media (max-width: 640px) { .slicer-small-screen-note { display: block; } }
