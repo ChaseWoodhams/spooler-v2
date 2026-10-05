@@ -344,6 +344,8 @@
     startPrinterWatch();
   }
 
+  /** A preset's own value the dialog can't express (manual supports, an inner brim): shown, never sent unless the user picks another. */
+  const presetChoice = current => (current === "preset" ? [["preset", "Preset's own", true]] : []);
   function selectOptions(list, current) {
     return list.map(([value, label, disabled]) => `<option value="${esc(value)}" ${String(value) === String(current) ? "selected" : ""} ${disabled ? "disabled" : ""}>${esc(label)}</option>`).join("");
   }
@@ -384,8 +386,8 @@
             <label class="qp-f">Layer height (mm)<select data-qp-k="layer_height">${selectOptions(layers.map(n => [n, String(n)]), v.layer_height)}</select></label>
             <label class="qp-f">Infill (%)<input type="number" min="0" max="100" step="5" inputmode="numeric" value="${esc(v.infill)}" data-qp-k="infill"></label>
             <label class="qp-f">Walls<input type="number" min="1" max="20" step="1" inputmode="numeric" value="${esc(v.walls)}" data-qp-k="walls"></label>
-            <label class="qp-f">Supports<select data-qp-k="supports">${selectOptions([["off", "Off"], ["normal", "Normal"], ["tree", "Tree"]], v.supports)}</select></label>
-            <label class="qp-f">Brim<select data-qp-k="brim">${selectOptions([["off", "Off"], ["auto", "Auto"], ["custom", "Custom"]], v.brim)}</select></label>
+            <label class="qp-f">Supports<select data-qp-k="supports">${selectOptions([["off", "Off"], ["normal", "Normal"], ["tree", "Tree"], ...presetChoice(v.supports)], v.supports)}</select></label>
+            <label class="qp-f">Brim<select data-qp-k="brim">${selectOptions([["off", "Off"], ["auto", "Auto"], ["custom", "Custom"], ...presetChoice(v.brim)], v.brim)}</select></label>
             <label class="qp-f" data-qp="brim-width" ${v.brim === "custom" ? "" : "hidden"}>Brim width (mm)<input type="number" min="1" max="20" step="1" inputmode="decimal" value="${esc(v.brim_width ?? 5)}" data-qp-k="brim_width"></label>
           </div>
         </fieldset>`}
@@ -517,7 +519,9 @@
   function fillOptions() {
     for (const key of OPTION_KEYS) {
       const input = $(`[data-qp-k="${key}"]`);
-      if (input && !S.dirty.has(key) && S.values[key] !== undefined) input.value = S.values[key];
+      if (!input || S.dirty.has(key) || S.values[key] === undefined) continue;
+      if (S.values[key] === "preset" && input.tagName === "SELECT" && ![...input.options].some(o => o.value === "preset")) input.insertAdjacentHTML("beforeend", selectOptions(presetChoice("preset"), ""));
+      input.value = S.values[key];
     }
     const w = $('[data-qp="brim-width"]');
     if (w) w.hidden = S.values.brim !== "custom";
@@ -526,8 +530,8 @@
   // ─── Slice & print ──────────────────────────────────────────────────────────
   function requestBody(extra = {}) {
     const c = S.choices, v = S.values, options = {};
-    for (const key of ["layer_height", "infill", "walls", "supports"]) if (S.dirty.has(key)) options[key] = v[key];
-    if (S.dirty.has("brim") || S.dirty.has("brim_width")) {
+    for (const key of ["layer_height", "infill", "walls", "supports"]) if (S.dirty.has(key) && v[key] !== "preset") options[key] = v[key];
+    if ((S.dirty.has("brim") || S.dirty.has("brim_width")) && v.brim !== "preset") {
       options.brim = v.brim;
       if (v.brim === "custom") options.brim_width = v.brim_width;
     }
@@ -539,8 +543,8 @@
 
   function validateFields() {
     const v = S.values;
-    if (!Number.isInteger(v.infill) || v.infill < 0 || v.infill > 100) return "Infill must be a whole percentage from 0 to 100";
-    if (!Number.isInteger(v.walls) || v.walls < 1 || v.walls > 20) return "Walls must be a whole number from 1 to 20";
+    if (S.dirty.has("infill") && (!Number.isInteger(v.infill) || v.infill < 0 || v.infill > 100)) return "Infill must be a whole percentage from 0 to 100";   // an untouched preset value (15.5) stays as it is
+    if (S.dirty.has("walls") && (!Number.isInteger(v.walls) || v.walls < 1 || v.walls > 20)) return "Walls must be a whole number from 1 to 20";
     if (v.brim === "custom" && !(v.brim_width > 0 && v.brim_width <= 20)) return "Brim width must be between 0 and 20 mm";
     return null;
   }
@@ -912,7 +916,7 @@
     if (box) box.innerHTML = message ? `<div class="qp-notice qp-bad" role="alert">${esc(message)}</div>` : "";
   }
 
-  /** Flush pending field edits and apply one panel change to the project, in order, on fresh data (never a stale copy). */
+  /** Flush pending field edits and apply one panel change to the project, in order, on fresh data (never outdated data). */
   function commitMore(mutate, resetKeys = []) {
     const session = S, m = S.more;
     m.queue = m.queue.then(async () => {

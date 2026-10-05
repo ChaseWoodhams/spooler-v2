@@ -201,10 +201,11 @@ async function boot() {
   loadPrinters();
   applySendDefaults();
   const params = new URLSearchParams(location.search);
-  const id = Number(params.get("project")) || (params.has("new") ? 0 : Number(remember("slicer.project")) || 0);
+  const asked = Number(params.get("project")) || 0;
+  const id = asked || (params.has("new") ? 0 : Number(remember("slicer.project")) || 0);
   if (id) {
     try {
-      await openProject(id, { toPrinter: !!params.get("printer") });
+      await openProject(id, { toPrinter: !!params.get("printer"), restoring: !asked });
       return;
     } catch (_) { /* fall through to the project list */ }
   }
@@ -357,8 +358,9 @@ async function bundleSettings(bundleId) {
   return state.bundleSettings.get(bundleId);
 }
 
-async function openProject(id, { toPrinter = false } = {}) {
+async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   const project = await api("GET", `/api/projects/${id}`);
+  if (restoring && project.quick) throw new Error("A hidden quick project is never reopened on its own");   // the caller falls back to the list
   clearTimeout(state.jobsTimer);
   state.clockSkew = project.server_time - Date.now() / 1000;
   state.project = project;
@@ -1696,7 +1698,7 @@ async function openSplitDialog() {
   dialog.showModal();
   try {
     const { splits } = await api("GET", "/api/splits");
-    const ready = splits.filter(s => s.parts && (s.state === "split" || s.state === "queued"));
+    const ready = splits.filter(s => s.parts && (s.state === "split" || s.state === "queued") && !s.project_quick);   // a hidden quick project's model is not a part source
     $("split-choices").innerHTML = ready.map(s => `
       <div class="slicer-project-row">
         <div><strong>${esc(s.source_name)}</strong><small>${plural(s.parts, "part")}</small></div>

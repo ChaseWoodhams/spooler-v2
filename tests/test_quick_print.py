@@ -134,6 +134,10 @@ class QuickPrintApiTests(unittest.IsolatedAsyncioTestCase):
         by_id = {s["id"]: s for s in self.call("GET", "/api/splits")[1]["splits"]}
         self.assertEqual(by_id[quick["split_id"]]["project_id"], quick["id"])
         self.assertIsNone(by_id[loose["id"]]["project_id"])
+        self.assertEqual((by_id[quick["split_id"]]["project_quick"], by_id[loose["id"]]["project_quick"]), (True, False))
+        normal = await self.import_model(cube_stl(20), "normal.stl")
+        owned = {s["id"]: s for s in self.call("GET", "/api/splits")[1]["splits"]}[projects.get_project(normal)["split_id"]]
+        self.assertEqual((owned["project_id"], owned["project_quick"]), (normal, False))
 
     async def test_open_as_project_promotes_a_quick_project_with_its_model_plate_and_slice(self):
         quick = await self.quick_upload(cube_stl(30), "cube.stl")
@@ -335,6 +339,19 @@ class QuickPrintApiTests(unittest.IsolatedAsyncioTestCase):
         project = self.call("GET", f"/api/projects/{pid}")[1]
         self.assertEqual(self.call("PATCH", f"/api/projects/{pid}", {"data": project["data"], "revision": project["revision"]})[0], 200)
         self.assertEqual(self.call("GET", f"/api/projects/{pid}/intake")[1]["size"], [100.0, 200.0, 20.0])
+
+    async def test_orientation_is_the_servers_alone_whatever_a_project_save_sends(self):
+        pid = await self.import_model(box_stl(self.dir / "slab.stl", (200, 100, 20)), "slab.stl")
+        self.call("POST", f"/api/projects/{pid}/rotate", {})
+        for sent in ({}, {"orientation": [0.0, 0.0, 0.0]}):                # a client that drops it, and one that forges it
+            project = self.call("GET", f"/api/projects/{pid}")[1]
+            data = {k: v for k, v in project["data"].items() if k != "orientation"} | sent
+            self.assertEqual(self.call("PATCH", f"/api/projects/{pid}", {"data": data, "revision": project["revision"]})[0], 200)
+            self.assertEqual(self.call("GET", f"/api/projects/{pid}")[1]["data"]["orientation"], [0.0, 0.0, 90.0])
+        # the dialog's own writes (printer, bed, options) keep it too
+        self.assertEqual(self.call("POST", f"/api/projects/{pid}/print", {"printer_id": "p1", "bed": "smooth", "review": True,
+                                                                          "options": {"walls": 4}})[0], 200)
+        self.assertEqual(self.call("GET", f"/api/projects/{pid}")[1]["data"]["orientation"], [0.0, 0.0, 90.0])
 
     async def test_slice_and_print_needs_a_printer(self):
         pid = await self.import_model(cube_stl(30), "cube.stl")

@@ -168,6 +168,52 @@ class QuickPrintSliceTests(unittest.IsolatedAsyncioTestCase):
         self.call("POST", f"/api/projects/{project['id']}/print", {"printer_id": "p1", "review": True, "options": {"walls": 5}})
         self.assertEqual(self.call("GET", f"/api/projects/{project['id']}/quick-options")[1]["options"]["walls"], 5)
 
+    async def preset_with(self, process):
+        project = await self.quick_upload(cube_stl(30), "cube.stl")
+        first = project["data"]["profile"]["bundle_id"]
+        return project, slicer.derive_bundle(first, {"process": process}, "Odd preset")["id"]
+
+    async def test_options_read_back_keep_the_presets_exact_values_and_do_not_pass_manual_for_auto(self):
+        project, odd = await self.preset_with({"sparse_infill_density": "15.5%", "enable_support": "1",
+                                               "support_type": "normal(manual)", "brim_type": "outer_and_inner"})
+        status, info = self.call("GET", f"/api/projects/{project['id']}/quick-options?preset={odd}")
+        self.assertEqual(status, 200, info)
+        self.assertEqual(info["options"]["infill"], 15.5)
+        self.assertEqual(info["options"]["supports"], "preset")        # manual supports are not the dialog's Normal
+        self.assertEqual(info["options"]["brim"], "preset")            # nor is an outer-and-inner brim its Custom
+        project, tree = await self.preset_with({"enable_support": "1", "support_type": "tree(manual)"})
+        self.assertEqual(self.call("GET", f"/api/projects/{project['id']}/quick-options?preset={tree}")[1]["options"]["supports"], "preset")
+
+    async def test_choosing_the_presets_own_value_is_not_something_the_dialog_can_send(self):
+        project = await self.quick_upload(cube_stl(30), "cube.stl")
+        for bad in ({"supports": "preset"}, {"brim": "preset"}):
+            status, error = self.call("POST", f"/api/projects/{project['id']}/print", {"printer_id": "p1", "options": bad})
+            self.assertEqual(status, 400, error)
+
+    async def test_an_untouched_preset_brim_and_supports_are_not_rewritten_by_other_options(self):
+        project, odd = await self.preset_with({"enable_support": "1", "support_type": "tree(manual)", "brim_type": "inner_only"})
+        status, result = self.call("POST", f"/api/projects/{project['id']}/print",
+                                   {"printer_id": "p1", "preset": odd, "options": {"walls": 4}})
+        self.assertEqual(status, 200, result)
+        await self.settle()
+        config = self.slice_config()
+        self.assertEqual((config["support_type"], config["brim_type"], config["wall_loops"]), ("tree(manual)", "inner_only", "4"))
+
+    async def test_a_gcode_quick_print_ignores_slicing_options_and_a_preset(self):
+        status, project = self.call("POST", "/api/projects/upload?filename=cube.gcode&quick=1", raw=GCODE)
+        self.assertEqual(status, 200, project)
+        before = self.call("GET", f"/api/projects/{project['id']}")[1]["data"]["profile"]
+        status, result = self.call("POST", f"/api/projects/{project['id']}/print",
+                                   {"printer_id": "p1", "options": {"walls": 9}, "preset": "nonexistent"})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.call("GET", f"/api/projects/{project['id']}")[1]["data"]["profile"], before)
+
+    async def test_a_quick_print_already_in_the_queue_is_refused_without_plate_wording(self):
+        pid = await self.print_with()
+        status, error = self.call("POST", f"/api/projects/{pid}/print", {"printer_id": "p1"})
+        self.assertEqual(status, 409, error)
+        self.assertIn("This print is already waiting in the queue", error["error"])
+        self.assertNotIn("Plate", error["error"])
 
     async def test_reprint_with_changes_reopens_the_saved_choices_and_queues_a_new_job(self):
         """History's Reprint with changes: the modal reads the project's saved choices back, then Slice & print queues a

@@ -68,6 +68,17 @@ class QuickHistoryTests(unittest.TestCase):
         self.assertEqual((queued["id"], queued["state"]), (job["id"], "queued"))
         self.assertEqual(self.entry()["job_id"], job["id"])
 
+    def test_the_failure_sheets_reprint_for_a_quick_print_requeues_the_print_itself(self):
+        self.make_quick()
+        job = self.printed(1, end=8)                       # cancelled on the printer
+        (awaiting,) = self.call("GET", "/api/outcome-prompts")[1]["awaiting"]
+        self.assertEqual((awaiting["quick"], awaiting["plate_name"]), (True, None))
+        status, result = self.call("POST", "/api/printers/p1/bed-cleared", {
+            "print_id": awaiting["print_id"], "outcome": "failed", "failure_reasons": ["adhesion"], "reprint": True})
+        self.assertEqual(status, 200, result)
+        self.assertIsNone(result["reprint_error"])
+        self.assertEqual((result["reprint"]["id"], result["reprint"]["state"]), (job["id"], "queued"))
+
     def test_a_job_still_in_the_queue_cannot_be_reprinted_again(self):
         self.make_quick()
         self.printed(1)

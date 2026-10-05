@@ -71,13 +71,15 @@ const OutcomePrompt = (() => {
   async function sheet(item) {
     let reasonList;
     try { reasonList = await failureReasons(); } catch (e) { say(`Couldn't load the failure reasons: ${e.message}`, true); return; }
-    const canReprint = !!(item.project_id && item.plate_id);
+    // A quick print has no plate the user knows of: its reprint is the Print itself (the server routes it), worded without "plate"
+    const what = item.quick ? "print" : "plate";
+    const canReprint = item.quick || !!(item.project_id && item.plate_id);
     show(`${heading(item)}
       <fieldset style="border:1px solid var(--border,#2a2d38);border-radius:8px"><legend>What went wrong? (pick at least one)</legend>
         ${reasonList.map(([id, label]) => `<label style="display:block;padding:4px 0"><input type="checkbox" data-reason value="${id}"> ${esc(label)}</label>`).join("")}</fieldset>
       <label>Note (optional) <textarea data-note rows="2" style="width:100%"></textarea></label>
       <label><input type="checkbox" data-bed checked> Bed cleared</label>
-      ${canReprint ? '<label><input type="checkbox" data-reprint> Reprint this plate next</label>' : ""}
+      ${canReprint ? `<label><input type="checkbox" data-reprint> Reprint this ${what} next</label>` : ""}
       <div style="display:flex;gap:8px"><button class="btn btn-primary" data-op="submit" style="flex:1;min-height:48px">Save failure</button>
         <button class="btn btn-secondary" data-op="back">Back</button></div>`);
     box.querySelector('[data-op="back"]').onclick = () => question(item);
@@ -95,12 +97,12 @@ const OutcomePrompt = (() => {
           await api("POST", `/api/prints/${item.print_id}/outcome`, { outcome: "failed", failure_reasons: reasons, notes: note });
           result = { reprint_error: null };
           if (reprint) {
-            try { await api("POST", `/api/projects/${item.project_id}/plates/${item.plate_id}/reprint`, {}); }
+            try { await api("POST", item.quick ? `/api/prints/${item.print_id}/reprint` : `/api/projects/${item.project_id}/plates/${item.plate_id}/reprint`, {}); }
             catch (e) { result.reprint_error = e.message; }
           }
         }
         close();
-        say(result.reprint_error ? `Failure saved, but the plate was not re-queued: ${result.reprint_error}` : "Failure saved" + (reprint ? ". Plate queued again" : ""),
+        say(result.reprint_error ? `Failure saved, but the ${what} was not re-queued: ${result.reprint_error}` : "Failure saved" + (reprint ? `. ${item.quick ? "Print" : "Plate"} queued again` : ""),
           !!result.reprint_error);
       } catch (e) { say(e.message, true); }
     };
