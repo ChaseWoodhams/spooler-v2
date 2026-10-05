@@ -2003,3 +2003,32 @@ body.import-dropping::after { content: "Drop to import"; position: fixed; inset:
   .qp-preview { height: 180px; }
   .qp-scrim { padding: 8px; }
 }
+
+/* Quick print: More settings panel (ticket 12). The settings panel's own classes, scoped to the modal so slicer.css keeps the project page */
+.qp-more { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; width: 100%; }
+.qp-more-tools { display: flex; gap: 8px; align-items: center; }
+.qp-more-tools input[type=search], .qp-more-tools select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+.qp-more-tools input[type=search] { flex: 1; min-width: 0; }
+.qp-more-pages { display: flex; gap: 2px; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.qp-more-pages button { background: transparent; border: 0; color: var(--text-muted); font-size: 12px; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+.qp-more-pages button.active { background: rgba(255, 107, 43, .12); color: var(--accent); }
+.qp-more-pages button .count { color: var(--accent); margin-left: 3px; }
+.qp-more-body { display: flex; flex-direction: column; gap: 10px; max-height: 340px; overflow-y: auto; padding-right: 4px; }
+.qp-more .set-note { font-size: 12px; color: var(--text-muted); margin: 0; }
+.qp-more .set-group h5 { font-size: 12px; font-weight: 600; margin: 4px 0; color: var(--text); }
+.qp-more .set-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) 18px; gap: 6px; align-items: center; padding: 3px 0; font-size: 12px; }
+.qp-more .set-row.disabled { opacity: .45; }
+.qp-more .set-label { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; cursor: help; }
+.qp-more .set-row.modified .set-label { color: var(--accent); }
+.qp-more .set-row.modified .set-label::before { content: "● "; font-size: 9px; }
+.qp-more .set-fields { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.qp-more .set-field { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.qp-more .set-field small { color: var(--text-muted); font-size: 10px; }
+.qp-more .set-fields input[type=text], .qp-more .set-fields select { width: 100%; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 3px 6px; font-size: 12px; }
+.qp-more .set-fields .set-field input[type=text] { width: 70px; }
+.qp-more .set-fields input[type=checkbox] { accent-color: var(--accent); }
+.qp-more .set-fields input.invalid { border-color: var(--red); }
+.qp-more .set-unit { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.qp-more .set-reset { background: transparent; border: 0; color: var(--accent); cursor: pointer; padding: 0; font-size: 13px; visibility: hidden; }
+.qp-more .set-row.modified .set-reset { visibility: visible; }
+@media (max-width: 760px) { .qp-more .set-fields input[type="text"], .qp-more .set-fields select { min-height: 44px; font-size: 16px; } .qp-more-pages button { min-height: 44px; } }

@@ -344,7 +344,7 @@
         </div>
         <fieldset class="qp-options" ${gcode ? "disabled" : ""}><legend>Options</legend>
           <div class="qp-grid3">
-            <label class="qp-f">Layer height (mm)<select data-qp-k="layer_height">${selectOptions(layers.map(n => [n, mm(n)]), v.layer_height)}</select></label>
+            <label class="qp-f">Layer height (mm)<select data-qp-k="layer_height">${selectOptions(layers.map(n => [n, String(n)]), v.layer_height)}</select></label>
             <label class="qp-f">Infill (%)<input type="number" min="0" max="100" step="5" inputmode="numeric" value="${esc(v.infill)}" data-qp-k="infill"></label>
             <label class="qp-f">Walls<input type="number" min="1" max="20" step="1" inputmode="numeric" value="${esc(v.walls)}" data-qp-k="walls"></label>
             <label class="qp-f">Supports<select data-qp-k="supports">${selectOptions([["off", "Off"], ["normal", "Normal"], ["tree", "Tree"]], v.supports)}</select></label>
@@ -742,6 +742,178 @@
     p.material.dispose();
     S.preview = null;
   }
+
+  // ─── More settings (ticket 12): the full settings panel, for this print only ─────────────────────
+  // Precedence. The Quick project's data.profile.process is the one home of this print's overrides, as on the project page.
+  //  - The five option fields are a view over it. Edits in them stay local (S.dirty) and go with the print request.
+  //  - An edit in the panel first flushes those pending field edits into data.profile.process (one PATCH, together with the
+  //    panel change), clears their dirty flags, then re-reads the fields from quick-options. Per setting the later edit
+  //    wins, and neither side overwrites the other: print-time `options` only hold field edits made since the last flush.
+  //  - While the panel is open it shows pending field edits as changed settings (pendingOverlay), so both views agree.
+  //  - The panel only writes the project's data.profile.process. Presets and the locked bundle are only read (the panel's
+  //    base is the bundle's flattened process settings). Any change alters the project fingerprint, so a slice is Outdated.
+  const PANEL_NOTE = "These changes apply to this print only. Presets are not changed.";
+  const QUICK_OF = { layer_height: ["layer_height"], sparse_infill_density: ["infill"], wall_loops: ["walls"], enable_support: ["supports"],
+    support_type: ["supports"], brim_type: ["brim", "brim_width"], brim_width: ["brim", "brim_width"] };
+  let settingsKit = null;
+
+  function loadSettingsKit() {
+    if (!settingsKit) {
+      settingsKit = Promise.all([import("/slicer/settings.js?v=4"), fetch("/orca/settings.json").then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })])
+        .then(([mod, schema]) => ({ SettingsPanel: mod.SettingsPanel, schema }))
+        .catch(err => { settingsKit = null; throw new Error(`Couldn't load the settings panel (${err.message})`); });
+    }
+    return settingsKit;
+  }
+
+  /** The dialog fields' unsaved edits as the Orca keys they would write (mirrors the server's _quick_overrides). */
+  function pendingOverlay() {
+    const v = S.values, d = S.dirty, process = {}, covers = [];
+    if (d.has("layer_height") && Number.isFinite(v.layer_height)) { process.layer_height = `${v.layer_height}`; covers.push("layer_height"); }
+    if (d.has("infill") && Number.isInteger(v.infill) && v.infill >= 0 && v.infill <= 100) { process.sparse_infill_density = `${v.infill}%`; covers.push("infill"); }
+    if (d.has("walls") && Number.isInteger(v.walls) && v.walls >= 1 && v.walls <= 20) { process.wall_loops = String(v.walls); covers.push("walls"); }
+    if (d.has("supports") && ["off", "normal", "tree"].includes(v.supports)) {
+      process.enable_support = v.supports === "off" ? "0" : "1";
+      if (v.supports !== "off") process.support_type = v.supports === "tree" ? "tree(auto)" : "normal(auto)";
+      covers.push("supports");
+    }
+    if (d.has("brim") || d.has("brim_width")) {
+      if (v.brim === "off") { process.brim_type = "no_brim"; covers.push("brim", "brim_width"); }
+      else if (v.brim === "auto") { process.brim_type = "auto_brim"; covers.push("brim", "brim_width"); }
+      else if (v.brim === "custom" && v.brim_width > 0 && v.brim_width <= 20) { process.brim_type = "outer_only"; process.brim_width = `${v.brim_width}`; covers.push("brim", "brim_width"); }
+    }
+    return { process, covers };
+  }
+
+  function projectProcess() { return S.project?.data?.profile?.process || {}; }
+
+  async function moreBase() {
+    const id = S.choices.preset || S.project?.data?.profile?.bundle_id;
+    if (!id) return null;
+    const m = S.more;
+    if (!m.bases[id]) m.bases[id] = await api("GET", `/api/slicer/profiles/${encodeURIComponent(id)}/settings`);
+    return m.bases[id];
+  }
+
+  function moreMode() { try { return localStorage.getItem("slicer.mode") || "simple"; } catch (_) { return "simple"; } }
+
+  /** Adds the More settings button (and reopens the panel after the form was rebuilt). Runs on every quickprint:intake. */
+  function mountMore() {
+    if (!S || !S.formBuilt || !S.intake || S.intake.kind === "gcode") return;
+    const m = S.more ||= { open: false, panel: null, bases: {}, queue: Promise.resolve() };
+    const slot = $('[data-qp-slot="more"]');
+    if (!slot) return;
+    if (!slot.firstElementChild) slot.innerHTML = `<button type="button" class="btn btn-secondary btn-sm" data-more-act="toggle" aria-expanded="${m.open}">More settings</button>`;
+    if (!S.moreBound) {
+      S.moreBound = true;
+      S.root.addEventListener("click", e => { if (e.target.closest('[data-more-act="toggle"]')) toggleMore(); });
+      S.root.addEventListener("change", onMoreFieldEdit);
+      S.root.addEventListener("input", e => { if (e.target.type === "number") onMoreFieldEdit(e); });
+    }
+    if (m.open && !$('[data-more="body"]')) openMore();
+  }
+
+  function toggleMore() {
+    const m = S.more;
+    m.open = !m.open;
+    $('[data-more-act="toggle"]')?.setAttribute("aria-expanded", String(m.open));
+    if (m.open) openMore();
+    else { const host = $('[data-qp-slot="more-panel"]'); if (host) host.innerHTML = ""; m.panel = null; }
+  }
+
+  async function openMore() {
+    const session = S, m = S.more, host = $('[data-qp-slot="more-panel"]');
+    if (!host) return;
+    host.innerHTML = `<div class="qp-more"><div class="qp-muted">Loading the settings…</div></div>`;
+    try {
+      const [kit, base] = await Promise.all([loadSettingsKit(), moreBase()]);
+      if (S !== session || !m.open || !host.isConnected) return;
+      if (!base) throw new Error("Choose a preset to see its settings");
+      host.innerHTML = `<div class="qp-more" data-more="box">
+        <div class="qp-more-tools"><input type="search" data-more="search" placeholder="Search settings" aria-label="Search settings">
+          <select data-more="mode" aria-label="Setting detail"><option value="simple">Simple</option><option value="advanced">Advanced</option><option value="expert">Expert</option></select></div>
+        <div data-more="tabs" hidden></div>
+        <div class="qp-more-pages" data-more="pages"></div>
+        <div class="qp-more-body" data-more="body"></div>
+        <div data-more="error"></div></div>`;
+      const q = name => host.querySelector(`[data-more="${name}"]`);
+      q("mode").value = moreMode();
+      q("mode").addEventListener("change", () => { try { localStorage.setItem("slicer.mode", q("mode").value); } catch (_) { /* storage blocked */ } });
+      m.panel = new kit.SettingsPanel({ tabs: q("tabs"), pages: q("pages"), body: q("body"), search: q("search"), mode: q("mode"),
+        onChange: (_target, key, value) => commitMore(process => { process[key] = value; }),
+        onReset: (_target, keys) => commitMore(process => { for (const key of keys) delete process[key]; }, keys) });
+      m.panel.setSchema(kit.schema);
+      showMore();
+    } catch (err) {
+      if (S === session && host.isConnected) host.innerHTML = `<div class="qp-notice qp-bad" role="alert">${esc(err.message)}</div>`;
+    }
+  }
+
+  async function showMore() {
+    const m = S?.more;
+    if (!m?.panel || !m.open) return;
+    const session = S, panel = m.panel;
+    const base = await moreBase().catch(() => null);
+    if (S !== session || m.panel !== panel || !base) return;
+    panel.show({ tab: "process", tabs: [{ id: "process", label: "Process" }], layout: "process", base: base.process,
+      changes: { ...projectProcess(), ...pendingOverlay().process }, target: { kind: "process" }, note: PANEL_NOTE });
+  }
+
+  function moreError(message) {
+    const box = $('[data-more="error"]');
+    if (box) box.innerHTML = message ? `<div class="qp-notice qp-bad" role="alert">${esc(message)}</div>` : "";
+  }
+
+  /** Flush pending field edits and apply one panel change to the project, in order, on fresh data (never a stale copy). */
+  function commitMore(mutate, resetKeys = []) {
+    const session = S, m = S.more;
+    m.queue = m.queue.then(async () => {
+      if (S !== session) return;
+      moreError(null);
+      const project = await api("GET", `/api/projects/${session.id}`);
+      const pending = pendingOverlay();
+      const data = project.data;
+      const process = { ...data.profile.process, ...pending.process };
+      mutate(process);
+      data.profile.process = process;
+      const saved = await api("PATCH", `/api/projects/${session.id}`, { data, revision: project.revision });
+      if (S !== session) return;
+      session.project = saved;
+      for (const key of pending.covers) session.dirty.delete(key);
+      for (const key of resetKeys) for (const quick of QUICK_OF[key] || []) session.dirty.delete(quick);
+      if (session.choices.preset) await loadChoices(session.choices.preset);
+      if (S !== session) return;
+      refreshFields();
+      showMore();
+    }).catch(err => {
+      if (S !== session) return;
+      moreError(err.message);
+      showMore();
+    });
+    return m.queue;
+  }
+
+  /** Show the values the project now has in the five fields (a value outside the layer-height list gets an entry). */
+  function refreshFields() {
+    const v = S.values;
+    const layer = $('[data-qp-k="layer_height"]');
+    if (layer && v.layer_height !== undefined && ![...layer.options].some(o => Number(o.value) === v.layer_height)) {
+      const sizes = [...layer.options].map(o => Number(o.value)).concat(v.layer_height).sort((a, b) => a - b);
+      layer.innerHTML = selectOptions(sizes.map(n => [n, String(n)]), v.layer_height);
+    }
+    fillOptions();
+    const exact = exactEstimate(), box = $('[data-qp="estimate"]'), i = S.intake;
+    if (box) box.textContent = exact || (i?.estimate && i.estimate.grams != null ? `≈ ${i.estimate.seconds ? duration(i.estimate.seconds) : "?"} · ${i.estimate.grams} g (rough, before slicing)` : "");
+  }
+
+  /** A field or preset change while the panel is open: the panel follows (pending edits show as changed settings). */
+  function onMoreFieldEdit(e) {
+    const key = e.target.dataset?.qpK;
+    if (!S?.more?.open || !key) return;
+    if (key === "preset" || OPTION_KEYS.includes(key)) showMore();
+  }
+
+  document.addEventListener("quickprint:intake", () => mountMore());
 
   // ─── Closing ────────────────────────────────────────────────────────────────
   function close({ silent = false } = {}) {
