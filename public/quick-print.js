@@ -101,7 +101,7 @@
     emit("open", { printerId });
     try {
       if (file) await upload(file);
-      if (session.closed) return;
+      if (session.closed || session.phase === "routed") return;
       await Promise.all([loadProject(), loadChoices(), loadLists()]);
       if (session.closed) return;
       await waitForIntake();
@@ -127,10 +127,10 @@
         session.id = body.id;
         if (body.routed || body.quick === false) {   // a multi-object or multi-plate 3MF: a normal Project, not a quick print
           const detail = { project: body, routed: body.routed || { to: "project" } };
+          session.phase = "routed";
+          session.routed = detail.routed;
           emit("routed", detail);
-          close({ silent: true });
-          location.hash = `#projects=${body.id}`;
-          say(detail.routed.reason || "This file opens as a project", false);
+          renderStatus();
           resolve();
           return;
         }
@@ -277,21 +277,53 @@
     } else if (phase === "queueing") {
       body.innerHTML = `<div class="qp-status"><div>Adding it to the queue…</div><div class="qp-bar qp-bar-busy"><i></i></div></div>`;
       foot.innerHTML = "";
+    } else if (phase === "routed") {
+      renderRouted(body, foot);
     } else if (phase === "error") {
       body.innerHTML = `<div class="qp-notice qp-bad" role="alert">${esc(S.error)}</div>`;
       foot.innerHTML = `<span class="qp-sp"></span>${S.intake?.state === "ready" ? `<button type="button" class="btn btn-secondary" data-qp-act="back">Back</button>` : ""}<button type="button" class="btn btn-primary" data-qp-act="close">Close</button>`;
     }
   }
 
+  /** A multi-object or multi-plate 3MF isn't a quick print: say so, then open it as a normal Project. */
+  function renderRouted(body, foot) {
+    const reason = S.routed?.reason || "This file holds more than one object or plate";
+    body.innerHTML = `<div class="qp-status"><div class="qp-notice" role="status"><strong>This 3MF opens as a project.</strong>
+      <div>${esc(reason)}. A Quick print handles one object on one plate, so the file has been imported as a Project where you can arrange, slice and print every plate.</div></div></div>`;
+    foot.innerHTML = `<span class="qp-sp"></span><button type="button" class="btn btn-secondary" data-qp-act="close">Not now</button>
+      <button type="button" class="btn btn-primary" data-qp-act="open-project">Open project</button>`;
+  }
+  function openRoutedProject() {
+    const id = S?.id;
+    if (!id) return;
+    close({ silent: true });
+    location.hash = `#projects=${id}`;
+  }
+
   function renderReview(body, foot) {
     const r = S.review || { warnings: [] };
     const name = printerName();
+    if (S.intake?.kind === "gcode") { renderGcodeReview(body, foot); return; }
     const est = exactEstimate();
     body.innerHTML = `<div class="qp-status"><div><strong>Sliced.</strong> ${est ? esc(est) : ""}</div>
       <div class="qp-notice qp-warn" role="alert">${r.warnings.map(w => `<div class="qp-warning"><strong>${esc(w.title)}</strong>${w.detail ? `<div class="qp-muted">${esc(w.detail)}</div>` : ""}</div>`).join("")}</div>
       ${S.error ? `<div class="qp-notice qp-bad" role="alert">${esc(S.error)}</div>` : ""}
       <label class="qp-check"><input type="checkbox" data-qp-act="ack" ${S.ack ? "checked" : ""}> I've seen these warnings</label></div>`;
     foot.innerHTML = `<span class="qp-muted">Queues on ${esc(name)}</span><span class="qp-sp"></span>
+      <button type="button" class="btn btn-secondary" data-qp-act="back">Back</button>
+      <button type="button" class="btn btn-primary" data-qp-act="queue" ${S.ack ? "" : "disabled"}>Queue print</button>`;
+  }
+
+  const CHECK_MARK = { pass: "OK", info: "Note", warn: "Warning", fail: "Blocked" };
+  function renderGcodeReview(body, foot) {
+    const r = S.review || { warnings: [], checks: [] };
+    const warned = !!r.warnings?.length;
+    const rows = (r.checks?.length ? r.checks : r.warnings || []).map(c => `<div class="qp-warning"><strong>${esc(CHECK_MARK[c.level] || c.level)}: ${esc(c.title)}</strong>${c.detail ? `<div class="qp-muted">${esc(c.detail)}</div>` : ""}</div>`).join("");
+    body.innerHTML = `<div class="qp-status"><div><strong>Preflight for ${esc(title())}</strong> on ${esc(printerName())}. Slicing was skipped: the file is already sliced.</div>
+      <div class="qp-notice ${warned ? "qp-warn" : ""}" role="status">${rows || "No checks to report."}</div>
+      ${S.error ? `<div class="qp-notice qp-bad" role="alert">${esc(S.error)}</div>` : ""}
+      ${warned ? `<label class="qp-check"><input type="checkbox" data-qp-act="ack" ${S.ack ? "checked" : ""}> I've seen these warnings</label>` : ""}</div>`;
+    foot.innerHTML = `<span class="qp-muted">Queues on ${esc(printerName())}</span><span class="qp-sp"></span>
       <button type="button" class="btn btn-secondary" data-qp-act="back">Back</button>
       <button type="button" class="btn btn-primary" data-qp-act="queue" ${S.ack ? "" : "disabled"}>Queue print</button>`;
   }
@@ -316,6 +348,10 @@
     return list.map(([value, label, disabled]) => `<option value="${esc(value)}" ${String(value) === String(current) ? "selected" : ""} ${disabled ? "disabled" : ""}>${esc(label)}</option>`).join("");
   }
 
+  function gcodeNote() {
+    return `<div class="qp-notice" data-qp="gcode-note" role="status"><strong>Already sliced.</strong> This G-code goes to the printer as it is: no slicing, and the preset and print options are fixed in the file. Choose the printer, spool and plate side it was sliced for; the preflight check comes next.</div>`;
+  }
+
   function buildForm() {
     const body = $('[data-qp="body"]'), foot = $('[data-qp="foot"]');
     const v = S.values, c = S.choices;
@@ -334,15 +370,16 @@
         <div class="qp-slot" data-qp-slot="placement"></div>
       </div>
       <div class="qp-right">
+        ${gcode ? gcodeNote() : ""}
         <div class="qp-notice" data-qp="notice" hidden><span data-qp="notice-text"></span> <span class="qp-slot" data-qp-slot="notice-actions"></span></div>
         <div data-qp="error"></div>
         <label class="qp-f">Printer<select data-qp-k="printer"></select></label>
         <div class="qp-grid3">
-          <label class="qp-f">Preset<select data-qp-k="preset" ${gcode ? "disabled" : ""}>${selectOptions(presetList, c.preset)}</select></label>
+          ${gcode ? "" : `<label class="qp-f">Preset<select data-qp-k="preset">${selectOptions(presetList, c.preset)}</select></label>`}
           <label class="qp-f">Spool<select data-qp-k="spool">${selectOptions(spoolList, c.spool)}</select></label>
           <label class="qp-f">Plate side<select data-qp-k="bed">${selectOptions(Object.entries(SIDES), c.bed)}</select></label>
         </div>
-        <fieldset class="qp-options" ${gcode ? "disabled" : ""}><legend>Options</legend>
+        ${gcode ? "" : `<fieldset class="qp-options"><legend>Options</legend>
           <div class="qp-grid3">
             <label class="qp-f">Layer height (mm)<select data-qp-k="layer_height">${selectOptions(layers.map(n => [n, String(n)]), v.layer_height)}</select></label>
             <label class="qp-f">Infill (%)<input type="number" min="0" max="100" step="5" inputmode="numeric" value="${esc(v.infill)}" data-qp-k="infill"></label>
@@ -351,7 +388,7 @@
             <label class="qp-f">Brim<select data-qp-k="brim">${selectOptions([["off", "Off"], ["auto", "Auto"], ["custom", "Custom"]], v.brim)}</select></label>
             <label class="qp-f" data-qp="brim-width" ${v.brim === "custom" ? "" : "hidden"}>Brim width (mm)<input type="number" min="1" max="20" step="1" inputmode="decimal" value="${esc(v.brim_width ?? 5)}" data-qp-k="brim_width"></label>
           </div>
-        </fieldset>
+        </fieldset>`}
         <div class="qp-row">
           <label class="qp-check"><input type="checkbox" data-qp-k="leveling" ${c.leveling ? "checked" : ""}> Bed leveling</label>
           <label class="qp-check"><input type="checkbox" data-qp-k="timelapse" ${c.timelapse ? "checked" : ""}> Timelapse</label>
@@ -374,6 +411,9 @@
     const badges = [];
     if (i.kind === "gcode") {
       badges.push(`<span class="qp-badge">G-code, already sliced</span>`);
+      const est = i.estimate || {};
+      if (est.seconds) badges.push(`<span class="qp-badge">${esc(duration(est.seconds))}</span>`);
+      if (est.grams != null) badges.push(`<span class="qp-badge">${esc(est.grams)} g</span>`);
     } else {
       badges.push(`<span class="qp-badge" title="Width × depth × height">${i.size.map(mm).join(" × ")} mm</span>`,
         `<span class="qp-badge">${Number(i.volume_cm3).toLocaleString(undefined, { maximumFractionDigits: 1 })} cm³</span>`);
@@ -390,7 +430,7 @@
     $('[data-qp="notice-text"]').textContent = i.reason ? `${i.reason}.` : "";
     const exact = exactEstimate();
     $('[data-qp="estimate"]').textContent = exact || (i.estimate && i.estimate.grams != null
-      ? `≈ ${i.estimate.seconds ? duration(i.estimate.seconds) : "?"} · ${i.estimate.grams} g (rough, before slicing)` : "");
+      ? `${i.estimate.rough === false ? "" : "≈ "}${i.estimate.seconds ? duration(i.estimate.seconds) : "?"} · ${i.estimate.grams} g${i.estimate.rough === false ? " (from the file)" : " (rough, before slicing)"}` : "");
     updateGo();
     loadPreview();
     emit("intake", { intake: i, project: S.project });
@@ -440,6 +480,7 @@
     else if (act === "go") go();
     else if (act === "back") { S.phase = "edit"; S.error = null; S.review = null; S.ack = false; buildForm(); renderIntake(); startPrinterWatch(); }
     else if (act === "queue") queue();
+    else if (act === "open-project") openRoutedProject();
   }
   function onChange(e) {
     if (e.target.dataset.qpAct === "ack") { S.ack = e.target.checked; renderReviewButtons(); return; }
@@ -515,7 +556,7 @@
     const problem = validateFields();
     if (problem) { showFormError(problem); return; }
     showFormError(null);
-    if (S.intake.kind === "gcode") { await queueDirect(); return; }
+    if (S.intake.kind === "gcode") { await reviewGcode(); return; }
     const session = S;
     session.phase = "slicing";
     session.sliceStarted = Date.now();
@@ -597,14 +638,21 @@
     }
   }
 
-  async function queueDirect() {
+  /** G-code is already sliced: fetch the preflight for the chosen printer and show it before anything is queued. */
+  async function reviewGcode() {
     const session = S;
     session.phase = "queueing";
     renderStatus();
     try {
-      await api("POST", `/api/projects/${session.id}/print`, requestBody());
+      const result = await api("POST", `/api/projects/${session.id}/print`, requestBody({ review: true }));
       if (S !== session) return;
-      await queued(session);
+      session.project = result;
+      session.review = result.review;
+      const failed = (result.review.checks || []).filter(c => c.level === "fail");
+      if (result.review.can_start === false) return sliceError(session, `It can't be printed: ${failed.map(c => c.title + (c.detail ? `: ${c.detail}` : "")).join("; ") || "a preflight check failed"}`);
+      session.phase = "review";
+      session.ack = !result.review.warnings?.length;   // only warnings need to be acknowledged
+      renderStatus();
     } catch (err) { sliceError(session, err.message); }
   }
 
@@ -931,6 +979,51 @@
     if (!silent) document.dispatchEvent(new CustomEvent("quickprint:close", { detail: { projectId } }));
     try { session.previouslyFocused?.focus?.(); } catch (_) { /* element gone */ }
   }
+
+  // ─── Placement and not-fit handling (ticket 11): fills the placement and notice-actions slots on every intake ──
+  async function placementAct(path, failure) {
+    const session = S;
+    if (!session) return;
+    const buttons = () => session.root.querySelectorAll("[data-qp-place], [data-qp-fix]");
+    buttons().forEach(b => { b.disabled = true; });
+    try {
+      let result = await api("POST", `/api/projects/${session.id}/${path}`);
+      for (let tries = 0; result.state === "analysing" && tries < 60 && S === session; tries++) {   // a scale fix re-analyses the model
+        await new Promise(resolve => setTimeout(resolve, 400));
+        result = await api("GET", `/api/projects/${session.id}/intake`);
+      }
+      if (S === session) await refresh();   // intake, project, badges, notice, estimate and preview follow
+    } catch (error) {
+      if (S === session) { say(`${failure}: ${error.message}`, true); await refresh().catch(() => {}); }
+    } finally {
+      buttons().forEach(b => { b.disabled = false; });
+    }
+  }
+  async function openAsProject() {
+    const session = S;
+    if (!session) return;
+    try {
+      await api("POST", `/api/projects/${session.id}/open-as-project`);
+    } catch (error) { say(`Couldn't open it as a project: ${error.message}`, true); return; }
+    close();
+    location.hash = `#projects=${session.id}`;   // an unplaced model lands on Model/Split (the stepper's default step)
+  }
+  function renderPlacementSlots() {
+    if (!S || S.phase !== "edit") return;
+    const i = S.intake, place = $('[data-qp-slot="placement"]'), actions = $('[data-qp-slot="notice-actions"]');
+    if (!i || !place || !actions) return;
+    const model = i.state === "ready" && i.kind !== "gcode";
+    place.innerHTML = model && !i.placed
+      ? `<button type="button" class="btn btn-secondary btn-sm" data-qp-place="lay-flat" title="Put the model on its largest flat face">Lay flat</button>
+         <button type="button" class="btn btn-secondary btn-sm" data-qp-place="rotate" title="Turn the model 90 degrees about the vertical axis">Rotate 90°</button>` : "";
+    const fixable = model && !i.scale_ok && i.scale_fix, tooBig = model && i.scale_ok && !i.fits;
+    actions.innerHTML = (fixable ? `<button type="button" class="btn btn-primary btn-sm" data-qp-fix="scale">${esc(i.scale_fix.label)}</button>` : "")
+      + (tooBig || (model && !i.scale_ok) ? `<button type="button" class="btn ${tooBig ? "btn-primary" : "btn-secondary"} btn-sm" data-qp-fix="project" title="Keep this model as a Project and continue in the Model and Split steps">Open as project</button>` : "");
+    place.querySelectorAll("[data-qp-place]").forEach(b => b.addEventListener("click", () => placementAct(b.dataset.qpPlace, b.dataset.qpPlace === "rotate" ? "Couldn't rotate" : "Couldn't lay it flat")));
+    actions.querySelector('[data-qp-fix="scale"]')?.addEventListener("click", () => placementAct("fix-scale", "Couldn't fix the scale"));
+    actions.querySelector('[data-qp-fix="project"]')?.addEventListener("click", openAsProject);
+  }
+  document.addEventListener("quickprint:intake", renderPlacementSlots);
 
   window.QuickPrint = {
     open, pick, close, refresh, isOpen: () => !!S,
