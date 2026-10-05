@@ -61,7 +61,7 @@ class OutcomePromptTests(unittest.TestCase):
         self.assertEqual(title, "Printer 1 finished SEAT · Plate 4")
         self.assertIn("completed", body)
         self.assertRegex(body, r"\d.* of .*\d")  # actual versus estimated time
-        self.assertEqual(data["url"], f"/slicer.html?project={self.plates.project_id}&printer=p1")
+        self.assertEqual(data["url"], f"/#projects={self.plates.project_id}&printer=p1")
         self.assertEqual(data["printer_id"], "p1")
         self.assertEqual(data["actions"], [{"action": "bed-cleared", "title": "Printed OK · Bed cleared"}])
         self.assertEqual(data["bed_cleared"], {"url": "/api/printers/p1/bed-cleared",

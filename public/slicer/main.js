@@ -204,7 +204,7 @@ async function boot() {
   const id = Number(params.get("project")) || (params.has("new") ? 0 : Number(remember("slicer.project")) || 0);
   if (id) {
     try {
-      await openProject(id, { confirm: params.get("confirm") === "1" });
+      await openProject(id, { confirm: params.get("confirm") === "1", toPrinter: !!params.get("printer") });
       return;
     } catch (_) { /* fall through to the project list */ }
   }
@@ -357,7 +357,7 @@ async function bundleSettings(bundleId) {
   return state.bundleSettings.get(bundleId);
 }
 
-async function openProject(id, { confirm = false } = {}) {
+async function openProject(id, { confirm = false, toPrinter = false } = {}) {
   stopSimple();
   const project = await api("GET", `/api/projects/${id}`);
   clearTimeout(state.jobsTimer);
@@ -381,7 +381,9 @@ async function openProject(id, { confirm = false } = {}) {
   await loadGeometry();
   state.viewport?.fit(state.viewport.objectsBox());
   const saved = remember(`slicer.step.${id}`);
-  await setStep(saved && stepAvailable(saved) ? saved : defaultStep(), { force: true });
+  // A push deep link (?printer=) lands on the Print step, where that printer's card is.
+  const landing = toPrinter && stepAvailable("print") ? "print" : saved && stepAvailable(saved) ? saved : defaultStep();
+  await setStep(landing, { force: true });
   schedulePoll();
   if (confirm && project.split_id && !isGcodeProject()) startSimple();
 }
