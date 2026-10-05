@@ -7,13 +7,40 @@ Subclasses (CC1Connection, CC2Connection, …) must implement:
 """
 
 import asyncio
+import random
 import time
 
+import jobs
+import print_history
 import state
-from persistence import FILAMENT_DENSITY, append_history, filament_mm_to_grams, save_printers
+from persistence import FILAMENT_DENSITY, filament_mm_to_grams, save_printers
 from printers.protocol import decode_printinfo
 from push import load_notif_settings, send_push_all
 from spoolman import get_spool_density, spoolman_deduct, spoolman_deduct_spool
+
+RECONNECT_BASE_S = 2    # delay after an established link drops
+RECONNECT_MAX_S  = 60   # ceiling for repeated connection failures
+STALE_LINK_S     = 65   # silence after which an open link is treated as dead
+
+
+def reconnect_delay(
+    attempts: int,
+    base: float = RECONNECT_BASE_S,
+    cap: float = RECONNECT_MAX_S,
+    jitter: float = 0.2,
+    rand=None,
+) -> float:
+    """Seconds to wait before the next connection attempt.
+
+    `attempts` counts consecutive failed attempts; 0 means an established link
+    just dropped and is retried quickly. Failures back off exponentially with
+    ±jitter so several printers don't retry in lockstep.
+    """
+    if attempts <= 0:
+        return base
+    rand = rand or random.random
+    delay = base * 2 ** min(attempts, 10)
+    return min(cap, delay * (1 - jitter + 2 * jitter * rand()))
 
 
 class PrinterConnection:
@@ -32,6 +59,12 @@ class PrinterConnection:
         self.mainboard_id = mainboard_id
         self.printer_type = printer_type
         self.access_code  = access_code
+        # Link telemetry for the health panel; the `connected` property keeps the timestamps current.
+        self.last_message_at: float | None = None
+        self.last_error: str | None = None
+        self.reconnect_attempts = 0
+        self.next_retry_at: float | None = None
+        self._links_opened = 0
         self.connected    = False
         self.status: dict = {}
         self.attrs: dict  = {}
@@ -90,6 +123,55 @@ class PrinterConnection:
             "filament_g":      filament_mm_to_grams(filament_mm, self.filament_density),
         }
 
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    @connected.setter
+    def connected(self, value: bool) -> None:
+        value = bool(value)
+        if value == getattr(self, "_connected", None):
+            return
+        self._connected = value
+        now = time.time()
+        if value:
+            self._links_opened     += 1
+            self.connected_since    = now
+            self.disconnected_since = None
+            self.next_retry_at      = None
+            self.last_error         = None
+        else:
+            self.connected_since    = None
+            self.disconnected_since = now
+
+    def _note_activity(self) -> None:
+        """Record that the printer sent something (feeds the stale-link watchdog)."""
+        self.last_message_at = time.time()
+
+    def link_silence_s(self, now: float | None = None) -> float:
+        """Seconds since the printer last sent anything on the current link."""
+        now = time.time() if now is None else now
+        return now - max(self.last_message_at or 0, self.connected_since or 0)
+
+    def link_is_stale(self, now: float | None = None) -> bool:
+        return self.connected and self.link_silence_s(now) > STALE_LINK_S
+
+    def link_status(self, now: float | None = None) -> dict:
+        now = time.time() if now is None else now
+        return {
+            "id":                 self.id,
+            "name":               self.name,
+            "printer_type":       self.printer_type,
+            "connected":          self.connected,
+            "connected_since":    self.connected_since,
+            "disconnected_since": self.disconnected_since,
+            "last_message_age_s": round(now - self.last_message_at, 1) if self.last_message_at else None,
+            "reconnect_attempts": self.reconnect_attempts,
+            "next_retry_in_s":    (max(0, round(self.next_retry_at - now))
+                                   if self.next_retry_at and not self.connected else None),
+            "last_error":         self.last_error,
+        }
+
     def stop(self) -> None:
         if self._task:
             self._task.cancel()
@@ -97,10 +179,19 @@ class PrinterConnection:
     async def start(self) -> None:
         try:
             while True:
+                links_before = self._links_opened
                 await self.connect()
-                if not self.connected:
-                    print(f"[Printer {self.name}] Retrying in 5 s …")
-                await asyncio.sleep(5)
+                if self._links_opened != links_before:
+                    self.reconnect_attempts = 0
+                else:
+                    self.reconnect_attempts += 1
+                delay = reconnect_delay(self.reconnect_attempts)
+                self.next_retry_at = time.time() + delay
+                if self.reconnect_attempts:
+                    print(f"[Printer {self.name}] Retrying in {delay:.0f} s (attempt {self.reconnect_attempts}) …")
+                else:
+                    print(f"[Printer {self.name}] Link closed — reconnecting in {delay:.0f} s …")
+                await asyncio.sleep(delay)
         except asyncio.CancelledError:
             pass
 
@@ -141,6 +232,10 @@ class PrinterConnection:
                     pass
         self._extrusion_snapshot = current_mm
         self._current_print_spool = new_spool_id
+
+    async def enable_camera(self) -> bool:
+        """Ask the printer to (re)start its video feed. False if the printer has no such command."""
+        return False
 
     async def request_file_list(self) -> bool:
         from printers.protocol import CMD_LIST_FILES
@@ -237,28 +332,14 @@ class PrinterConnection:
         if cur_status in (9, 8, 14, 0) and self._last_print_status in PRINTING | {5, 6}:
             filament_mm = pi.get("TotalExtrusion", 0) or 0
             filename    = pi.get("Filename", "")
-            print_time  = pi.get("PrintTime", 0) or 0
-            completed   = cur_status == 9
             if filament_mm > 0 or filename:
                 loop = asyncio.get_running_loop()
                 density    = await loop.run_in_executor(None, get_spool_density, self.id)
                 self.filament_density = density
                 filament_g = filament_mm_to_grams(filament_mm, density)
-                entry = {
-                    "timestamp":    time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "printer_id":   self.id,
-                    "printer_name": self.name,
-                    "filename":     filename,
-                    "filament_mm":  round(filament_mm, 1),
-                    "filament_g":   filament_g,
-                    "print_time_s": int(print_time),
-                    "completed":    completed,
-                }
-                await loop.run_in_executor(None, append_history, entry)
-                label = "Completed" if completed else "Cancelled"
-                print(f"[History] {label}: {filename} – {filament_mm:.0f}mm / {filament_g}g"
+                print(f"[History] Print ended: {filename} – {filament_mm:.0f}mm / {filament_g}g"
                       f" (density {density} g/cm³)")
-                await state.broadcast_to_browsers({"type": "history_entry", "entry": entry})
+                spool_mm: dict = {}
                 if filament_mm > 0:
                     # Flush + deduct the last active spool immediately
                     self._on_tray_change(None)
@@ -267,10 +348,19 @@ class PrinterConnection:
                         for spool_id, mm in self._spool_extrusion.items():
                             g = filament_mm_to_grams(mm, density)
                             print(f"[History] → spool {spool_id}: {mm:.0f}mm / {g}g")
+                        spool_mm = dict(self._spool_extrusion)
                     else:
                         # No per-tray mapping: fall back to printer-location lookup
                         loop.run_in_executor(
                             None, spoolman_deduct, self.id, filament_g, loop,
                         )
+                # Attached while the print's history record is still open (it closes below)
+                await loop.run_in_executor(
+                    None, print_history.record_usage, self.id, filament_mm, density, spool_mm,
+                )
 
+        jobs.on_printer_status(self)
+        record = print_history.on_printer_status(self)
+        if record is not None:
+            await state.broadcast_to_browsers({"type": "print_recorded", "print": record})
         self._last_print_status = cur_status

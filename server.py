@@ -48,6 +48,13 @@ except ImportError:
         ws_serve = None  # type: ignore
 
 import auth
+import backup
+import health
+import jobs
+import print_history
+import projects
+import slicer
+import splits
 import state
 from auth import AUTH_ENABLED, BCRYPT_AVAILABLE, session_cleanup_loop
 from http_handler import run_http, run_https
@@ -120,8 +127,30 @@ async def main() -> None:
         print(f"[Config] Loaded {len(state.printers)} saved printer(s)")
 
     state.tray_map = load_tray_map()
+    state.loop = asyncio.get_running_loop()
 
-    asyncio.create_task(session_cleanup_loop())
+    # Before any printer task runs, so status updates can follow jobs that were active at shutdown.
+    jobs.init()
+    print_history.init()
+    slicer.init()
+    splits.init()
+    projects.init()
+
+    # Hold references: the event loop keeps only weak references to tasks.
+    _background_tasks = [
+        *jobs.start_background(),
+        asyncio.create_task(slicer.worker_loop()),
+        asyncio.create_task(splits.worker_loop()),
+        asyncio.create_task(projects.worker_loop()),
+        asyncio.create_task(session_cleanup_loop()),
+        asyncio.create_task(health.loop_lag_monitor()),
+        asyncio.create_task(health.spoolman_monitor_loop()),
+        asyncio.create_task(health.status_broadcast_loop()),
+        asyncio.create_task(backup.backup_loop(on_complete=health.broadcast_status)),
+    ]
+    print(f"[Backup] Every {backup.BACKUP_INTERVAL_S / 3600:g} h to {backup.BACKUP_DIR} "
+          f"(keeping {backup.BACKUP_KEEP})"
+          + ("" if backup.SPOOLMAN_DB_FILE else " — SPOOLMAN_DB_FILE not set, Spoolman database not included"))
 
     http_thread = threading.Thread(target=run_http, args=(HTTP_PORT,), daemon=True)
     http_thread.start()

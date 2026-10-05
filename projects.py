@@ -1,0 +1,1516 @@
+"""
+Slicer workspace projects: models placed on plates, profile settings you can tweak, per-object setting
+overrides, slicing a plate with OrcaSlicer, and the sliced result for the layer-by-layer preview.
+
+Files (DATA_DIR/projects/<id>/)
+  models/<model id>/  source/<file>, job.json, model.npz, preview.bin, analysis.json — made by `split_engine.py analyze`
+  plates/<plate id>/  plate.3mf, profile/*.json, plate.gcode, analysis.json, toolpath.bin, slicer.log,
+                      plate.orca.gcode (OrcaSlicer's own G-code, when BrickLayers post-processed plate.gcode)
+
+Record
+  split_id  the split model the project was started from, if any; its parts (or the whole model) are laid out on plates
+  data    {"bed": "textured" | "smooth",
+           "profile": {"bundle_id", "process": {…changes}, "filament": {…changes}, "bricklayers": {…} | null},
+           "plates": [{"id", "name", "overrides": {…process changes for this plate}, "bricklayers": {…} | null}],
+           "objects": [{"id", "model", "name", "plate", "position": [x, y], "rotation": [x, y, z], "scale": [x, y, z],
+                        "overrides": {…process changes for this object}}]}
+  models  [{"id", "name", "file", "state": importing | ready | failed, "error", "size", "triangles", "volume_cm3", "sha256",
+            "split": {"id", "part" (0 = the whole model), "supports"} — models that came from a split}]
+  slices  {"<plate id>": {"state": queued | slicing | sliced | failed, "error", "fingerprint", "estimate_s", "estimate_g", …}}
+
+Settings stack: the locked profile, then the project's changes, the plate's, and the object's.
+Placing an object: the model is centred on its bounding box, scaled, rotated about X, then Y, then Z (degrees),
+lowered onto the bed, and moved so the centre of its footprint is at `position` (bed millimetres).
+BrickLayers (brick_post.py) optionally post-processes a plate's G-code; the plate's setting overrides the project's.
+A slice is outdated as soon as anything that affects the plate's G-code changes (its fingerprint).
+Sending plates to the queue makes one batch of jobs that remember their project and plate.
+"""
+
+import asyncio
+import hashlib
+import json
+import math
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import zipfile
+from pathlib import Path
+from xml.sax.saxutils import escape
+
+import brick_post
+import database
+import gcode_analysis
+import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
+import orca_3mf
+import packing
+import slicer
+import splits
+import state
+import thumbnails
+from gcode_meta import safe_gcode_name
+from persistence import DATA_DIR
+
+MAX_PLATES, MAX_OBJECTS = 50, 500
+# Plates sliced at the same time. Each OrcaSlicer process can use a few GB for a big plate, so the default is modest.
+SLICE_WORKERS = max(1, int(os.getenv("SLICE_WORKERS", str(max(1, min(2, (os.cpu_count() or 2) // 4))))))
+IMPORTING, READY, FAILED = "importing", "ready", "failed"
+QUEUED, SLICING, SLICED = "queued", "slicing", "sliced"
+DEFAULT_BED = (0.0, 0.0, 256.0, 256.0)
+DEFAULT_HEIGHT = 256.0
+DEFAULT_EXCLUDE = (246.0, 0.0, 256.0, 20.0)   # CC1 front-right nozzle purge area (x0, y0, x1, y1)
+SUPPORT_OVERRIDES = {"enable_support": "1", "support_type": "tree(auto)"}  # plates for split parts that need supports
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+CONTENT_TYPES = ('<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                 '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                 '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>')
+RELS = ('<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>')
+
+_data_dir: Path = DATA_DIR
+_wakeup: asyncio.Event | None = None
+
+
+def engine_command(stage: str, work: Path) -> list:
+    """The command that runs a split_engine stage (patched in tests)."""
+    return [sys.executable, str(splits.ENGINE), stage, str(work)]
+
+
+# ── Setup and paths ────────────────────────────────────────────────────────────
+
+def configure(data_dir: Path | None = None) -> None:
+    global _data_dir
+    _data_dir = Path(data_dir or DATA_DIR)
+
+
+def projects_dir() -> Path:
+    return _data_dir / "projects"
+
+
+def project_dir(project_id: int) -> Path:
+    return projects_dir() / str(int(project_id))
+
+
+def model_dir(project_id: int, model_id: int) -> Path:
+    return project_dir(project_id) / "models" / str(int(model_id))
+
+
+def plate_dir(project_id: int, plate_id: int) -> Path:
+    return project_dir(project_id) / "plates" / str(int(plate_id))
+
+
+def init() -> None:
+    """Migrate, and queue again any plate that was slicing when Spooler stopped."""
+    database.migrate()
+    with database.transaction() as conn:
+        for row in conn.execute("SELECT id, slices FROM projects").fetchall():
+            entries = json.loads(row["slices"] or "{}")
+            interrupted = [e for e in entries.values() if e.get("state") == SLICING]
+            for entry in interrupted:
+                entry["state"] = QUEUED
+            if interrupted:
+                conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(entries), row["id"]))
+
+
+# ── Records ────────────────────────────────────────────────────────────────────
+
+def fingerprint(record: dict, plate_id: int) -> str:
+    """Everything that affects a plate's G-code."""
+    data = record["data"]
+    models = {m["id"]: m for m in record["models"]}
+    objects = sorted((o for o in data.get("objects", []) if o["plate"] == plate_id), key=lambda o: o["id"])
+    payload = {
+        "bed": data.get("bed"),
+        "profile": {k: v for k, v in data["profile"].items() if k not in ("bricklayers", "spool_id")} if data.get("profile") else data.get("profile"),
+        "objects": [{"model": models.get(o["model"], {}).get("sha256"), "scale_up": models.get(o["model"], {}).get("import"),
+                     **{k: o[k] for k in ("position", "rotation", "scale", "overrides")}} for o in objects],
+    }
+    plate = next((p for p in data.get("plates", []) if p["id"] == plate_id), {})
+    if plate.get("overrides"):  # only when set, so plates sliced before plates had settings stay up to date
+        payload["plate"] = plate["overrides"]
+    bricks = plate_bricklayers(data, plate)
+    if bricks:  # likewise only when on, so plates sliced before BrickLayers existed stay up to date
+        payload["bricklayers"] = bricks
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def plate_bricklayers(data: dict, plate: dict) -> dict | None:
+    """The BrickLayers setting a plate slices with, or None when it's off."""
+    return brick_post.effective((data.get("profile") or {}).get("bricklayers"), plate.get("bricklayers"))
+
+
+def _to_project(row) -> dict:
+    record = dict(row)
+    record["data"] = json.loads(record["data"] or "{}")
+    record["models"] = json.loads(record["models"] or "[]")
+    record["slices"] = json.loads(record["slices"] or "{}")
+    record["server_time"] = time.time()  # lets a browser with a different clock show how long a slice has been running
+    for plate in record["data"].get("plates", []):
+        entry = record["slices"].get(str(plate["id"]))
+        if entry and entry.get("state") == SLICED:
+            entry["outdated"] = entry.get("fingerprint") != fingerprint(record, plate["id"])
+    return record
+
+
+def get_project(project_id: int) -> dict:
+    with database.transaction() as conn:
+        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    if row is None:
+        raise jobs.JobError("Project not found", 404)
+    return _to_project(row)
+
+
+def list_projects() -> list:
+    with database.transaction() as conn:
+        rows = conn.execute("SELECT * FROM projects ORDER BY updated_at DESC, id DESC").fetchall()
+    out = []
+    for record in map(_to_project, rows):
+        data = record["data"]
+        out.append({"id": record["id"], "name": record["name"], "updated_at": record["updated_at"], "created_at": record["created_at"],
+                    "split_id": record.get("split_id"),
+                    "plates": len(data.get("plates", [])), "objects": len(data.get("objects", [])), "models": len(record["models"]),
+                    "busy": any(m["state"] == IMPORTING for m in record["models"])
+                    or any(s.get("state") in (QUEUED, SLICING) for s in record["slices"].values())})
+    return out
+
+
+def _clean_name(value) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:120]
+
+
+def _default_bundle_id() -> str | None:
+    bundles = slicer.list_bundles() if slicer.orca_executable() else []
+    plain = [b for b in bundles if not b.get("overrides")] or bundles
+    return plain[0]["id"] if plain else None
+
+
+def _new_plate(plate_id: int, overrides: dict | None = None) -> dict:
+    return {"id": plate_id, "name": f"Plate {plate_id}", "overrides": dict(overrides or {})}
+
+
+def create_project(name: str = "", split_id: int | None = None) -> dict:
+    """A project with one empty plate. With `split_id` it belongs to that split model and lays out its parts."""
+    if split_id is not None:
+        splits.get_split(split_id)
+    data = {"bed": "textured", "profile": {"bundle_id": _default_bundle_id(), "process": {}, "filament": {}},
+            "plates": [_new_plate(1)], "objects": []}
+    now = time.time()
+    with database.transaction() as conn:
+        project_id = conn.execute("INSERT INTO projects (name, data, split_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                                  (_clean_name(name) or "Untitled project", json.dumps(data), split_id, now, now)).lastrowid
+    project_dir(project_id).mkdir(parents=True, exist_ok=True)
+    return get_project(project_id)
+
+
+def create_project_from_upload(stream, length: int, filename: str, scale=1.0, up="z") -> dict:
+    """Start the workflow from a model file: it's stored as a split model (analysed first) owned by a new project."""
+    if filename.lower().endswith(".3mf"):  # an OrcaSlicer/BambuStudio project keeps its plates and settings
+        path = _spool(stream, length)
+        try:
+            if orca_3mf.is_project(path):
+                project = create_project(Path(filename.replace("\\", "/")).stem[:120])
+                try:
+                    return import_orca_project(project["id"], path, fresh=True)
+                except BaseException:
+                    delete_project(project["id"])
+                    raise
+            with path.open("rb") as fh:
+                split = splits.create_split(fh, length, filename, {"scale": scale, "up": up})
+        finally:
+            path.unlink(missing_ok=True)
+        return create_project(Path(split["source_name"]).stem, split_id=split["id"])
+    split = splits.create_split(stream, length, filename, {"scale": scale, "up": up})
+    return create_project(Path(split["source_name"]).stem, split_id=split["id"])
+
+
+def delete_project(project_id: int) -> None:
+    """Delete the project and its files, and its split model unless another project uses that split too."""
+    record = get_project(project_id)
+    split_id = record.get("split_id")
+    with database.transaction() as conn:
+        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        shared = split_id is not None and conn.execute("SELECT 1 FROM projects WHERE split_id = ?", (split_id,)).fetchone()
+    shutil.rmtree(project_dir(project_id), ignore_errors=True)
+    if split_id is not None and not shared:
+        try:
+            splits.delete_split(split_id)
+        except jobs.JobError:
+            pass  # already deleted
+
+
+def _numbers(value, count: int, name: str, low: float, high: float) -> list:
+    if not isinstance(value, (list, tuple)) or len(value) != count:
+        raise jobs.JobError(f"{name} needs {count} numbers")
+    out = []
+    for item in value:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            raise jobs.JobError(f"{name} needs {count} numbers")
+        if not math.isfinite(number) or not low <= number <= high:
+            raise jobs.JobError(f"{name} must be between {low:g} and {high:g}")
+        out.append(round(number, 4))
+    return out
+
+
+def _spool_id(value) -> int | None:
+    """The Spoolman spool chosen as this project's filament (a reference for display and the amount check)."""
+    if value in (None, ""):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise jobs.JobError("spool_id must be a spool number")
+    if number < 1:
+        raise jobs.JobError("spool_id must be a spool number")
+    return number
+
+
+def validate_data(raw, record: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise jobs.JobError("Project data must be an object")
+    bed = raw.get("bed", "textured")
+    if bed not in slicer.BED_TYPES:
+        raise jobs.JobError(f"bed must be one of: {', '.join(slicer.BED_TYPES)}")
+
+    profile_raw = raw.get("profile") or {}
+    bundle_id = profile_raw.get("bundle_id") or None
+    base = slicer.bundle_settings(bundle_id) if bundle_id else None
+    changes = {"process": profile_raw.get("process") or {}, "filament": profile_raw.get("filament") or {}}
+    if base is None and (changes["process"] or changes["filament"]):
+        raise jobs.JobError("Choose a profile before changing settings")
+    normalized = slicer.normalize_overrides(changes, base) if base else {}
+    profile = {"bundle_id": bundle_id, "process": normalized.get("process", {}), "filament": normalized.get("filament", {}),
+               "bricklayers": brick_post.validate(profile_raw.get("bricklayers")), "spool_id": _spool_id(profile_raw.get("spool_id"))}
+
+    plates_raw = raw.get("plates")
+    if not isinstance(plates_raw, list) or not 1 <= len(plates_raw) <= MAX_PLATES:
+        raise jobs.JobError(f"A project has between 1 and {MAX_PLATES} plates")
+    plates, plate_ids = [], set()
+    for plate in plates_raw:
+        try:
+            plate_id = int(plate["id"])
+        except (TypeError, KeyError, ValueError):
+            raise jobs.JobError("Every plate needs an id")
+        if plate_id < 1 or plate_id in plate_ids:
+            raise jobs.JobError("Plate ids must be unique positive numbers")
+        plate_ids.add(plate_id)
+        overrides = plate.get("overrides") or {}
+        if overrides and base is None:
+            raise jobs.JobError("Choose a profile before changing a plate's settings")
+        plates.append({"id": plate_id, "name": _clean_name(plate.get("name")) or f"Plate {plate_id}",
+                       "overrides": slicer.normalize_overrides({"process": overrides}, base).get("process", {}) if overrides else {},
+                       "bricklayers": brick_post.validate(plate.get("bricklayers")),
+                       "printer_id": plate.get("printer_id") if plate.get("printer_id") in state.printers else None})
+
+    objects_raw = raw.get("objects") or []
+    if not isinstance(objects_raw, list) or len(objects_raw) > MAX_OBJECTS:
+        raise jobs.JobError(f"A project holds at most {MAX_OBJECTS} objects")
+    model_ids = {m["id"] for m in record["models"]}
+    objects, object_ids = [], set()
+    for obj in objects_raw:
+        try:
+            object_id, model_id, plate_id = int(obj["id"]), int(obj["model"]), int(obj["plate"])
+        except (TypeError, KeyError, ValueError):
+            raise jobs.JobError("Every object needs an id, a model and a plate")
+        if object_id < 1 or object_id in object_ids:
+            raise jobs.JobError("Object ids must be unique positive numbers")
+        if model_id not in model_ids:
+            raise jobs.JobError(f"Object {object_id} refers to a model that isn't in the project")
+        if plate_id not in plate_ids:
+            raise jobs.JobError(f"Object {object_id} is on a plate that doesn't exist")
+        object_ids.add(object_id)
+        overrides = obj.get("overrides") or {}
+        if overrides and base is None:
+            raise jobs.JobError("Choose a profile before changing an object's settings")
+        rotation = _numbers(obj.get("rotation", [0, 0, 0]), 3, "Rotation", -100000, 100000)
+        objects.append({
+            "id": object_id, "model": model_id, "plate": plate_id,
+            "name": _clean_name(obj.get("name")) or f"Object {object_id}",
+            "position": _numbers(obj.get("position", [128, 128]), 2, "Position", -1000, 3000),
+            "rotation": [round(r % 360, 4) for r in rotation],
+            "scale": _numbers(obj.get("scale", [1, 1, 1]), 3, "Scale", 0.01, 100),
+            "overrides": slicer.normalize_overrides({"process": overrides}, base).get("process", {}) if overrides else {},
+        })
+    return {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
+
+
+def update_project(project_id: int, body: dict) -> dict:
+    """Rename and/or replace the project data. Send `revision` to refuse overwriting a newer edit."""
+    record = get_project(project_id)
+    if "revision" in body and body["revision"] is not None and int(body["revision"]) != record["revision"]:
+        raise jobs.JobError("The project was changed elsewhere — reload it", 409)
+    name = _clean_name(body["name"]) or record["name"] if "name" in body else record["name"]
+    data = validate_data(body["data"], record) if "data" in body else record["data"]
+    with database.transaction() as conn:
+        current = conn.execute("SELECT revision, models FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if current is None:
+            raise jobs.JobError("Project not found", 404)
+        if json.loads(current["models"]) != record["models"] and "data" in body:
+            data = validate_data(body["data"], {**record, "models": json.loads(current["models"])})
+        conn.execute("UPDATE projects SET name = ?, data = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                     (name, json.dumps(data), time.time(), project_id))
+    return get_project(project_id)
+
+
+def _mutate(project_id: int, column: str, change, created_at: float | None = None) -> None:
+    """Apply change(value) to one JSON column inside a transaction. With `created_at`, only if the project is still
+    the one that was read then (SQLite hands a deleted project's id to the next new project)."""
+    with database.transaction() as conn:
+        row = conn.execute(f"SELECT {column}, created_at FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None or (created_at is not None and row["created_at"] != created_at):
+            return
+        value = json.loads(row[column] or ("[]" if column == "models" else "{}"))
+        change(value)
+        conn.execute(f"UPDATE projects SET {column} = ?, updated_at = ? WHERE id = ?", (json.dumps(value), time.time(), project_id))
+
+
+# ── Models ─────────────────────────────────────────────────────────────────────
+
+def _next_id(items) -> int:
+    return max((int(i["id"]) for i in items), default=0) + 1
+
+
+def _require_geometry() -> None:
+    missing = splits.missing_modules()
+    if missing:
+        raise jobs.JobError(f"Importing models needs {', '.join(missing)} installed on the Spooler computer", 503)
+
+
+def _store_source(project_id: int, model_id: int, name: str, write_source, scale: float, up: str) -> dict:
+    """Write a model's source file and import settings. Returns its record, waiting to be imported."""
+    folder = model_dir(project_id, model_id)
+    shutil.rmtree(folder, ignore_errors=True)
+    (folder / "source").mkdir(parents=True)
+    try:
+        size, digest = write_source(folder / "source" / name)
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    (folder / "job.json").write_text(json.dumps({"source": f"source/{name}", "scale": scale, "up": up}), encoding="utf-8")
+    return {"id": model_id, "name": Path(name).stem, "file": name, "state": IMPORTING, "error": None, "size_bytes": size,
+            "sha256": digest, "import": [scale, up]}
+
+
+def _copy_from(source: Path):
+    """A write_source for _store_source that copies an existing file."""
+    def write(path: Path) -> tuple:
+        shutil.copyfile(source, path)
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            while chunk := fh.read(1024 * 1024):
+                digest.update(chunk)
+        return path.stat().st_size, digest.hexdigest()
+    return write
+
+
+def _add_model(project_id: int, name: str, write_source, scale: float, up: str, plate_id: int | None) -> int:
+    _require_geometry()
+    record = get_project(project_id)
+    name = splits.safe_model_name(name)
+    import_settings = splits.normalize_settings({"scale": scale, "up": up})
+    model_id = _next_id(record["models"])
+    model = _store_source(project_id, model_id, name, write_source, import_settings["scale"], import_settings["up"])
+    with database.transaction() as conn:
+        row = conn.execute("SELECT data, models FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise jobs.JobError("Project not found", 404)
+        data, models = json.loads(row["data"]), json.loads(row["models"])
+        if plate_id not in {p["id"] for p in data["plates"]}:
+            plate_id = data["plates"][0]["id"]
+        if len(data["objects"]) >= MAX_OBJECTS:
+            raise jobs.JobError(f"A project holds at most {MAX_OBJECTS} objects")
+        models.append(model)
+        data["objects"].append({"id": _next_id(data["objects"]), "model": model_id, "name": model["name"], "plate": plate_id,
+                                "position": [128.0, 128.0], "rotation": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0], "overrides": {}})
+        conn.execute("UPDATE projects SET data = ?, models = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                     (json.dumps(data), json.dumps(models), time.time(), project_id))
+    notify_worker()
+    return model_id
+
+
+def import_model(project_id: int, stream, length: int, filename: str, scale=1.0, up="z", plate_id=None) -> dict:
+    if length <= 0:
+        raise jobs.JobError("The file is empty")
+    if length > splits.MAX_UPLOAD_BYTES:
+        raise jobs.JobError(f"The file is larger than {splits.MAX_UPLOAD_BYTES // (1024 * 1024)} MB", 413)
+    if filename.lower().endswith(".3mf"):
+        path = _spool(stream, length)
+        try:
+            if orca_3mf.is_project(path):
+                return import_orca_project(project_id, path)
+            _add_model(project_id, filename, _copy_from(path), scale, up, int(plate_id) if plate_id else None)
+            return get_project(project_id)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def write(path: Path) -> tuple:
+        digest, remaining = hashlib.sha256(), length
+        with path.open("wb") as fh:
+            while remaining:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise jobs.JobError("The upload was interrupted")
+                fh.write(chunk)
+                digest.update(chunk)
+                remaining -= len(chunk)
+        return length, digest.hexdigest()
+
+    _add_model(project_id, filename, write, scale, up, int(plate_id) if plate_id else None)
+    return get_project(project_id)
+
+
+# ── OrcaSlicer projects (3MF) ───────────────────────────────────────────────────
+
+BED_FROM_ORCA = {name: key for key, name in slicer.BED_TYPES.items()}
+
+
+def _spool(stream, length: int) -> Path:
+    """Stream an upload to a temporary file inside the data directory. The caller deletes it."""
+    if length <= 0:
+        raise jobs.JobError("The file is empty")
+    if length > splits.MAX_UPLOAD_BYTES:
+        raise jobs.JobError(f"The file is larger than {splits.MAX_UPLOAD_BYTES // (1024 * 1024)} MB", 413)
+    projects_dir().mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".upload-", suffix=".3mf", dir=projects_dir())
+    remaining = length
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            while remaining:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise jobs.JobError("The upload was interrupted")
+                fh.write(chunk)
+                remaining -= len(chunk)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
+    return Path(name)
+
+
+def _orca_profile(project: dict | None, notes: list) -> tuple:
+    """The profile (locked presets plus setting changes) and plate side an Orca project asks for.
+    Presets that aren't among the stock Elegoo ones fall back to the defaults, and every setting of the project that
+    differs from them is carried over as a change, so a user's own Orca presets still slice the same."""
+    default = {"bundle_id": _default_bundle_id(), "process": {}, "filament": {}, "bricklayers": None}
+    if not project or slicer.orca_executable() is None:
+        return default, "textured"
+    try:
+        stock = slicer.stock_presets()
+        machine = project.get("printer_settings_id")
+        if machine not in stock["machines"]:
+            machine = stock["defaults"]["machine"]
+            notes.append("The project's printer isn't a Centauri Carbon preset — using the default printer")
+        process = project.get("print_settings_id")
+        filament = (project.get("filament_settings_id") or [None])[0]
+        names = {"machine": machine,
+                 "process": process if process in stock["processes"][machine] else stock["defaults"]["process"],
+                 "filament": filament if filament in stock["filaments"][machine] else stock["defaults"]["filament"]}
+        bundle = slicer.create_bundle(**names)
+        base = slicer.bundle_settings(bundle["id"])
+        allowed = {kind: slicer._tab_keys(kind) - slicer.BLOCKED_SETTINGS for kind in ("process", "filament")}
+        wanted = orca_3mf.settings_changes(project, base, allowed)
+        changes = {}
+        for kind, values in wanted.items():
+            for key, value in values.items():
+                try:
+                    changes.setdefault(kind, {}).update(slicer.normalize_overrides({kind: {key: value}}, base).get(kind, {}))
+                except jobs.JobError:
+                    notes.append(f"Setting “{key}” from the project can't be used here and was left out")
+        profile = {"bundle_id": bundle["id"], "process": changes.get("process", {}), "filament": changes.get("filament", {}), "bricklayers": None}
+        if names["process"] != process or names["filament"] != filament:
+            notes.append(f"The project used “{process}” / “{filament}”; its differences are applied on top of "
+                         f"“{names['process']}” / “{names['filament']}”")
+        return profile, BED_FROM_ORCA.get(project.get("curr_bed_type"), "textured")
+    except jobs.JobError as e:
+        notes.append(f"The project's settings couldn't be applied: {e}")
+        return default, "textured"
+
+
+def import_orca_project(project_id: int, path: Path, fresh: bool = False) -> dict:
+    """Bring the plates, objects, per-object settings and (for a new project) the settings of an Orca/Bambu 3MF into a project.
+    With `fresh` the project's empty first plate is replaced; otherwise the file's plates are added after the existing ones."""
+    _require_geometry()
+    try:
+        parsed = orca_3mf.parse(path)
+    except orca_3mf.ThreeMFError as e:
+        raise jobs.JobError(str(e))
+    notes = list(parsed["warnings"])
+    record = get_project(project_id)
+    data = record["data"]
+    instances = sum(len(o["instances"]) for o in parsed["objects"])
+    if len(data["objects"]) + instances > MAX_OBJECTS:
+        raise jobs.JobError(f"A project holds at most {MAX_OBJECTS} objects")
+    if not fresh and len(data["plates"]) + len(parsed["plates"]) > MAX_PLATES:
+        raise jobs.JobError(f"A project has at most {MAX_PLATES} plates")
+    profile, bed = _orca_profile(parsed["project"], notes) if fresh else (data["profile"], data["bed"])
+    base = slicer.bundle_settings(profile["bundle_id"]) if profile.get("bundle_id") else None
+
+    def clean(settings: dict, label: str) -> dict:
+        kept = {}
+        for key, value in settings.items():
+            try:
+                if base is None:
+                    raise jobs.JobError("no profile")
+                kept.update(slicer.normalize_overrides({"process": {key: value}}, base).get("process", {}))
+            except jobs.JobError:
+                notes.append(f"{label}: setting “{key}” can't be used here and was left out")
+        return kept
+
+    model_ids, models = {}, []
+    next_model = _next_id(record["models"])
+    try:
+        for index, obj in enumerate(parsed["objects"]):
+            model_id = next_model + index
+            name = splits.safe_model_name(f"{obj['name']}.stl") if obj["name"].strip(". ") else f"object{index + 1}.stl"
+
+            def write(target: Path, verts=obj["verts"], tris=obj["tris"]) -> tuple:
+                write_stl(target, verts, tris)
+                return target.stat().st_size, hashlib.sha256(target.read_bytes()).hexdigest()
+            models.append(_store_source(project_id, model_id, name, write, 1.0, "z"))
+            model_ids[index] = model_id
+    except BaseException:
+        for model in models:
+            shutil.rmtree(model_dir(project_id, model["id"]), ignore_errors=True)
+        raise
+
+    with database.transaction() as conn:
+        row = conn.execute("SELECT data, models FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise jobs.JobError("Project not found", 404)
+        data, existing = json.loads(row["data"]), json.loads(row["models"])
+        if fresh:
+            data["plates"], data["objects"] = [], []
+            data["profile"], data["bed"] = profile, bed
+        first = _next_id(data["plates"])
+        plate_ids = {}
+        for number, plate in enumerate(parsed["plates"]):
+            plate_ids[plate["id"]] = first + number
+            data["plates"].append({"id": first + number, "name": plate["name"] or f"Plate {first + number}", "overrides": {}})
+        for index, obj in enumerate(parsed["objects"]):
+            overrides = clean(obj["settings"], obj["name"])
+            for copy, instance in enumerate(obj["instances"], start=1):
+                placed = orca_3mf.pose(obj["verts"], instance["matrix"], instance["shift"])
+                if placed["notes"]:
+                    notes.append(f"{obj['name']} is {' and '.join(placed['notes'])} in the project; it was placed unmirrored/unskewed")
+                data["objects"].append({
+                    "id": _next_id(data["objects"]), "model": model_ids[index], "plate": plate_ids.get(instance["plate"], first),
+                    "name": obj["name"] if copy == 1 else f"{obj['name']} ({copy})", "position": placed["position"],
+                    "rotation": placed["rotation"], "scale": placed["scale"], "overrides": dict(overrides)})
+        conn.execute("UPDATE projects SET data = ?, models = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                     (json.dumps(data), json.dumps(existing + models), time.time(), project_id))
+    notify_worker()
+    return {**get_project(project_id), "import_notes": list(dict.fromkeys(notes))}
+
+
+def export_orca_project(project_id: int) -> bytes:
+    """The whole project as an OrcaSlicer project 3MF: every plate, each object's placement and settings, the profile with
+    the project's changes. OrcaSlicer's own command line supplies the complete settings file the desktop app expects."""
+    import numpy as np
+    record = get_project(project_id)
+    data = record["data"]
+    models = {m["id"]: m for m in record["models"]}
+    if not data["objects"]:
+        raise jobs.JobError("The project has no objects to export", 409)
+    waiting = [o["name"] for o in data["objects"] if models.get(o["model"], {}).get("state") != READY]
+    if waiting:
+        raise jobs.JobError(f"Still importing: {', '.join(waiting)}", 409)
+    objects = []
+    for obj in data["objects"]:
+        verts, tris = load_mesh(project_id, obj["model"])
+        centre = (verts.min(axis=0) + verts.max(axis=0)) / 2
+        turn = rotation_matrix(obj["rotation"]) @ np.diag(np.asarray(obj["scale"], float))
+        matrix = turn.T                                  # 3MF's row-vector form
+        shift = place(verts, obj)[0] - (verts[0] - centre) @ matrix
+        objects.append({"name": obj["name"], "verts": verts - centre, "tris": tris, "matrix": matrix, "shift": shift,
+                        "plate": obj["plate"], "settings": obj.get("overrides") or {}})
+    config = {}
+    bundle_id = data["profile"].get("bundle_id")
+    if bundle_id:
+        settings = slicer.bundle_settings(bundle_id)
+        config = _orca_project_config(project_id, settings)
+        for kind in ("process", "filament"):
+            for key, value in (data["profile"].get(kind) or {}).items():
+                config[key] = value
+        config["curr_bed_type"] = slicer.BED_TYPES[data["bed"]]
+    return orca_3mf.build(objects, data["plates"], config)
+
+
+_IDENTITY_KEYS = {"name", "from", "instantiation", "type", "inherits", "setting_id", "compatible_printers", "filament_id"}
+
+
+def _orca_project_config(project_id: int, settings: dict) -> dict:
+    """A complete project_settings.config for a locked profile: what OrcaSlicer writes itself when it exports a 3MF with these
+    presets (639 settings), falling back to the presets' own settings when OrcaSlicer isn't available."""
+    merged = {}
+    for kind in slicer.PRESET_KINDS:
+        merged.update({k: v for k, v in settings[kind].items() if k not in _IDENTITY_KEYS})
+    names = {kind: settings[kind]["name"] for kind in slicer.PRESET_KINDS}
+    identity = {"from": "project", "name": "project_settings", "printer_settings_id": names["machine"],
+                "print_settings_id": names["process"], "filament_settings_id": [names["filament"]]}
+    import numpy as np
+    orca = slicer.orca_executable()
+    if orca is None:
+        return {**merged, **identity}
+    with tempfile.TemporaryDirectory(prefix=".export-", dir=project_dir(project_id)) as tmp:
+        tmp = Path(tmp)
+        for kind in slicer.PRESET_KINDS:
+            (tmp / f"{kind}.json").write_text(json.dumps(settings[kind]), encoding="utf-8")
+        write_stl(tmp / "template.stl", np.array([[0, 0, 0], [10, 0, 0], [0, 10, 0], [0, 0, 10]], float),
+                  np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]))
+        out = tmp / "template.3mf"
+        code, _ = slicer.runner([str(orca), "--datadir", str(_data_dir / "slicer-data"), "--arrange", "0",
+                                 "--load-settings", f"{tmp / 'machine.json'};{tmp / 'process.json'}",
+                                 "--load-filaments", str(tmp / "filament.json"), "--export-3mf", str(out), str(tmp / "template.stl")], 120)
+        try:
+            with zipfile.ZipFile(out) as archive:
+                template = json.loads(archive.read("Metadata/project_settings.config").decode("utf-8", "replace"))
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+            return {**merged, **identity}
+    return {**template, **{k: v for k, v in merged.items() if k in template}, **identity}
+
+
+def add_split_parts(project_id: int, split_id: int, numbers=None) -> dict:
+    """Bring the parts of any split model into the project, packed onto plates (see lay_out_split)."""
+    return lay_out_split(project_id, numbers, split_id=split_id)
+
+
+# ── Laying out plates ──────────────────────────────────────────────────────────
+
+def _machine_limits_for(record: dict) -> dict:
+    bundle_id = record["data"]["profile"]["bundle_id"]
+    if not bundle_id:
+        raise jobs.JobError("Choose a profile first", 409)
+    return machine_limits(slicer.bundle_settings(bundle_id)["machine"])
+
+
+def _gap_for(process: dict) -> float:
+    """Room to leave between parts printed with these process settings: supports need far more than the parts alone."""
+    return packing.SUPPORT_GAP_MM if str((process or {}).get("enable_support")) == "1" else packing.GAP_MM
+
+
+def _drop_split_models(data: dict, models: list, split_id: int) -> tuple:
+    """Remove a split's models, their objects and the plates that held only them (in place).
+    Returns (removed model ids, removed plate ids)."""
+    doomed = {m["id"] for m in models if (m.get("split") or {}).get("id") == split_id}
+    held = {o["plate"] for o in data["objects"] if o["model"] in doomed}
+    data["objects"] = [o for o in data["objects"] if o["model"] not in doomed]
+    remaining = {o["plate"] for o in data["objects"]}
+    removed_plates = [p["id"] for p in data["plates"] if p["id"] in held and p["id"] not in remaining]
+    data["plates"] = [p for p in data["plates"] if p["id"] not in removed_plates]
+    models[:] = [m for m in models if m["id"] not in doomed]
+    return sorted(doomed), removed_plates
+
+
+def _replace_split_models(project_id: int, split_id: int, new_models: list, layout: list) -> dict:
+    """Swap the split's models in the project for `new_models`, placed as `layout` says (packing.pack's plates, keyed
+    by part number). A project whose only plate is empty uses that plate first."""
+    by_part = {m["split"]["part"]: m for m in new_models}
+    try:
+        with database.transaction() as conn:
+            row = conn.execute("SELECT data, models, slices FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if row is None:
+                raise jobs.JobError("Project not found", 404)
+            data, models, slices = json.loads(row["data"]), json.loads(row["models"]), json.loads(row["slices"] or "{}")
+            dropped, removed_plates = _drop_split_models(data, models, split_id)
+            if len(data["objects"]) + len(new_models) > MAX_OBJECTS:
+                raise jobs.JobError(f"A project holds at most {MAX_OBJECTS} objects")
+            next_object = _next_id(data["objects"])
+            for index, plate in enumerate(layout):
+                overrides = SUPPORT_OVERRIDES if plate["group"] else {}
+                if index == 0 and len(data["plates"]) == 1 and not data["objects"]:
+                    target = data["plates"][0]
+                    target["overrides"] = dict(overrides)
+                else:
+                    if len(data["plates"]) >= MAX_PLATES:
+                        raise jobs.JobError(f"A project holds at most {MAX_PLATES} plates")
+                    target = _new_plate(_next_id(data["plates"]), overrides)
+                    data["plates"].append(target)
+                for item in plate["items"]:
+                    model = by_part[item["key"]]
+                    data["objects"].append({"id": next_object, "model": model["id"], "name": model["name"], "plate": target["id"],
+                                            "position": [round(item["center"][0], 3), round(item["center"][1], 3)],
+                                            "rotation": [0.0, 0.0, 90.0 if item["turned"] else 0.0], "scale": [1.0, 1.0, 1.0],
+                                            "overrides": {}})
+                    next_object += 1
+            models.extend(new_models)
+            for plate_id in removed_plates:
+                slices.pop(str(plate_id), None)
+            conn.execute("UPDATE projects SET data = ?, models = ?, slices = ?, split_id = COALESCE(split_id, ?), "
+                         "revision = revision + 1, updated_at = ? WHERE id = ?",
+                         (json.dumps(data), json.dumps(models), json.dumps(slices), split_id, time.time(), project_id))
+    except BaseException:
+        for model in new_models:
+            shutil.rmtree(model_dir(project_id, model["id"]), ignore_errors=True)
+        raise
+    for model_id in dropped:
+        shutil.rmtree(model_dir(project_id, model_id), ignore_errors=True)
+    for plate_id in removed_plates:
+        shutil.rmtree(plate_dir(project_id, plate_id), ignore_errors=True)
+    notify_worker()
+    return get_project(project_id)
+
+
+def _file_footprint(path: Path) -> tuple:
+    """Width and depth of a part file as it lies on the bed. (A split result's print_size is the oriented footprint,
+    smallest side first, which needn't line up with the file's X and Y.)"""
+    import numpy as np
+    data = path.read_bytes()
+    count = struct.unpack_from("<I", data, 80)[0] if len(data) >= 84 else -1
+    if len(data) == 84 + 50 * count:
+        records = np.frombuffer(data, dtype=[("normal", "<f4", 3), ("vertices", "<f4", (3, 3)), ("attr", "<u2")], count=count, offset=84)
+        verts = records["vertices"].reshape(-1, 3)
+    else:
+        import trimesh
+        verts = np.asarray(trimesh.load(path, force="mesh").vertices)
+    size = verts.max(axis=0) - verts.min(axis=0)
+    return float(size[0]), float(size[1])
+
+
+def lay_out_split(project_id: int, numbers=None, split_id: int | None = None) -> dict:
+    """Put a split model's parts on plates, packed onto as few as fit the printer profile's bed. Parts that need
+    supports get plates of their own with tree supports on. Laying out again replaces the parts placed before."""
+    _require_geometry()
+    record = get_project(project_id)
+    split_id = split_id if split_id is not None else record.get("split_id")
+    if split_id is None:
+        raise jobs.JobError("This project has no split model", 409)
+    split = splits.get_split(split_id, detail=True)
+    wanted = {int(n) for n in numbers} if numbers else None
+    parts = [p for p in (split.get("result") or {}).get("parts", []) if wanted is None or p["number"] in wanted]
+    if not parts:
+        raise jobs.JobError("Split the model before laying out its parts", 409)
+    limits = _machine_limits_for(record)
+    items = [{"key": p["number"], "size": _file_footprint(splits.work_dir(split_id) / "parts" / p["file"]),
+              "group": bool(p["needs_supports"])} for p in parts]
+    profile = record["data"]["profile"]["process"]
+    layout = [plate for supported in (False, True)   # plain plates first, then the ones with supports
+              for plate in packing.pack([i for i in items if i["group"] == supported], limits["bed"], limits["exclude"],
+                                        gap=_gap_for({**profile, **(SUPPORT_OVERRIDES if supported else {})}))]
+    stem, first_id, new_models = Path(split["source_name"]).stem, _next_id(record["models"]), []
+    try:
+        for offset, part in enumerate(parts):
+            model = _store_source(project_id, first_id + offset, splits.safe_model_name(f"{stem}_part{part['number']:02d}.stl"),
+                                  _copy_from(splits.work_dir(split_id) / "parts" / part["file"]), 1.0, "z")
+            model["split"] = {"id": split_id, "part": part["number"], "supports": bool(part["needs_supports"])}
+            new_models.append(model)
+    except BaseException:
+        for model in new_models:
+            shutil.rmtree(model_dir(project_id, model["id"]), ignore_errors=True)
+        raise
+    return _replace_split_models(project_id, split_id, new_models, layout)
+
+
+def place_whole_model(project_id: int) -> dict:
+    """Put the project's uploaded model on a plate in one piece, for a model that fits the printer without splitting."""
+    _require_geometry()
+    record = get_project(project_id)
+    split_id = record.get("split_id")
+    if split_id is None:
+        raise jobs.JobError("This project has no uploaded model", 409)
+    split = splits.get_split(split_id, detail=True)
+    if not split.get("analysis"):
+        raise jobs.JobError("Wait for the model to be analysed", 409)
+    x0, y0, x1, y1 = _machine_limits_for(record)["bed"]
+    model = _store_source(project_id, _next_id(record["models"]), split["source_name"],
+                          _copy_from(splits.work_dir(split_id) / split["source_file"]), split["settings"]["scale"], split["settings"]["up"])
+    model["split"] = {"id": split_id, "part": 0, "supports": False}
+    layout = [{"group": False, "items": [{"key": 0, "center": ((x0 + x1) / 2, (y0 + y1) / 2), "turned": False, "oversize": False}]}]
+    return _replace_split_models(project_id, split_id, [model], layout)
+
+
+def _footprint(project_id: int, obj: dict) -> tuple:
+    """Width and depth of an object on the bed at its current rotation and scale."""
+    verts, _ = load_mesh(project_id, obj["model"], preview=True)
+    placed = place(verts, {**obj, "position": [0.0, 0.0]})
+    size = placed.max(axis=0) - placed.min(axis=0)
+    return float(size[0]), float(size[1])
+
+
+def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, overrides_for) -> dict:
+    """Move objects as packing.pack's `layout` (keyed by object id) says, onto `plate_ids` in order and new plates
+    after them. Plates among `plate_ids` left empty are removed; plates still holding importing models are kept."""
+    data = json.loads(json.dumps(record["data"]))
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    busy = {o["plate"] for o in data["objects"] if o["plate"] in plate_ids and o["model"] not in ready}
+    free = [plate_id for plate_id in plate_ids if plate_id not in busy]
+    objects = {o["id"]: o for o in data["objects"]}
+    plates = {p["id"]: p for p in data["plates"]}
+    used = []
+    for index, plate in enumerate(layout):
+        if index < len(free):
+            target = plates[free[index]]
+            target["overrides"] = dict(overrides_for(plate["group"]))
+        else:
+            if len(data["plates"]) >= MAX_PLATES:
+                raise jobs.JobError(f"A project holds at most {MAX_PLATES} plates")
+            target = _new_plate(_next_id(data["plates"]), overrides_for(plate["group"]))
+            data["plates"].append(target)
+        used.append(target["id"])
+        for item in plate["items"]:
+            obj = objects[item["key"]]
+            obj["plate"] = target["id"]
+            obj["position"] = [round(item["center"][0], 3), round(item["center"][1], 3)]
+            if item["turned"]:
+                obj["rotation"][2] = round((obj["rotation"][2] + 90) % 360, 4)
+    emptied = [plate_id for plate_id in free if plate_id not in used]
+    data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
+    with database.transaction() as conn:
+        row = conn.execute("SELECT revision, slices FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise jobs.JobError("Project not found", 404)
+        if row["revision"] != record["revision"]:
+            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
+        slices = json.loads(row["slices"] or "{}")
+        for plate_id in emptied:
+            slices.pop(str(plate_id), None)
+        conn.execute("UPDATE projects SET data = ?, slices = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                     (json.dumps(data), json.dumps(slices), time.time(), project_id))
+    for plate_id in emptied:
+        shutil.rmtree(plate_dir(project_id, plate_id), ignore_errors=True)
+    return get_project(project_id)
+
+
+def pack_plates(project_id: int, plate_ids=None) -> dict:
+    """Repack the objects on these plates (all plates by default) onto as few plates as fit. Plates with different
+    settings aren't mixed, and plates left empty are removed."""
+    record = get_project(project_id)
+    plates = record["data"]["plates"]
+    if plate_ids is not None:
+        try:
+            wanted = {int(i) for i in plate_ids}
+        except (TypeError, ValueError):
+            raise jobs.JobError("plates must be a list of plate numbers")
+        plates = [p for p in plates if p["id"] in wanted]
+    order = [p["id"] for p in plates]
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    movable = sorted((o for o in record["data"]["objects"] if o["plate"] in order and o["model"] in ready),
+                     key=lambda o: order.index(o["plate"]))
+    if not movable:
+        return record
+    limits = _machine_limits_for(record)
+    group = {p["id"]: json.dumps(p.get("overrides") or {}, sort_keys=True) for p in plates}
+    items = [{"key": o["id"], "size": _footprint(project_id, o), "group": group[o["plate"]]} for o in movable]
+    profile = record["data"]["profile"]["process"]
+    layout = [plate for key in dict.fromkeys(i["group"] for i in items)   # each group of settings packs with its own gap
+              for plate in packing.pack([i for i in items if i["group"] == key], limits["bed"], limits["exclude"],
+                                        gap=_gap_for({**profile, **json.loads(key)}))]
+    return _apply_layout(project_id, record, order, layout, json.loads)
+
+
+def merge_plates(project_id: int, source_id: int, into_id: int) -> dict:
+    """Move everything on one plate onto another, packed to fit. The combined plate keeps the settings of `into_id`."""
+    record = get_project(project_id)
+    plates = {p["id"]: p for p in record["data"]["plates"]}
+    if source_id not in plates or into_id not in plates:
+        raise jobs.JobError("Plate not found", 404)
+    if source_id == into_id:
+        raise jobs.JobError("Choose another plate to merge into")
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    objects = [o for o in record["data"]["objects"] if o["plate"] in (into_id, source_id)]
+    if any(o["model"] not in ready for o in objects):
+        raise jobs.JobError("Wait for the models on these plates to finish importing", 409)
+    limits = _machine_limits_for(record)
+    gap = _gap_for({**record["data"]["profile"]["process"], **(plates[into_id].get("overrides") or {})})
+    layout = packing.pack([{"key": o["id"], "size": _footprint(project_id, o), "group": "merged"} for o in objects],
+                          limits["bed"], limits["exclude"], gap=gap) or [{"group": "merged", "items": []}]  # both plates empty
+    if len(layout) > 1 or any(item["oversize"] for plate in layout for item in plate["items"]):
+        raise jobs.JobError(f"Those objects don't fit on one plate — {plates[source_id]['name']} stays as it is", 409)
+    return _apply_layout(project_id, record, [into_id, source_id], layout, lambda _: plates[into_id].get("overrides") or {})
+
+
+def delete_model(project_id: int, model_id: int) -> dict:
+    record = get_project(project_id)
+    if not any(m["id"] == model_id for m in record["models"]):
+        raise jobs.JobError("Model not found", 404)
+    with database.transaction() as conn:
+        row = conn.execute("SELECT data, models FROM projects WHERE id = ?", (project_id,)).fetchone()
+        data, models = json.loads(row["data"]), json.loads(row["models"])
+        data["objects"] = [o for o in data["objects"] if o["model"] != model_id]
+        models = [m for m in models if m["id"] != model_id]
+        conn.execute("UPDATE projects SET data = ?, models = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                     (json.dumps(data), json.dumps(models), time.time(), project_id))
+    shutil.rmtree(model_dir(project_id, model_id), ignore_errors=True)
+    return get_project(project_id)
+
+
+def model_preview(project_id: int, model_id: int) -> Path:
+    record = get_project(project_id)
+    model = next((m for m in record["models"] if m["id"] == model_id), None)
+    path = model_dir(project_id, model_id) / "preview.bin"
+    if model is None or model["state"] != READY or not path.is_file():
+        raise jobs.JobError("Preview not available", 404)
+    return path
+
+
+def _run_import(project_id: int, model_id: int) -> dict:
+    folder = model_dir(project_id, model_id)
+    (folder / "error.json").unlink(missing_ok=True)
+    with (folder / "engine.log").open("a", encoding="utf-8") as log:
+        proc = subprocess.run(engine_command("analyze", folder), stdout=log, stderr=subprocess.STDOUT, cwd=str(splits.APP_DIR),
+                              timeout=splits.STAGE_TIMEOUT_S, creationflags=NO_WINDOW)
+    if proc.returncode != 0:
+        error = splits._read(folder, "error.json") or {}
+        raise jobs.JobError(error.get("error") or f"The model couldn't be imported (exit code {proc.returncode})")
+    analysis = splits._read(folder, "analysis.json") or {}
+    return {"state": READY, "error": None, "size": analysis.get("size"), "triangles": analysis.get("triangles"),
+            "volume_cm3": analysis.get("volume_cm3"), "repairs": analysis.get("repairs", [])}
+
+
+# ── Geometry ───────────────────────────────────────────────────────────────────
+
+def rotation_matrix(degrees):
+    import numpy as np
+    rx, ry, rz = (math.radians(float(d)) for d in degrees)
+    Rx = np.array([[1, 0, 0], [0, math.cos(rx), -math.sin(rx)], [0, math.sin(rx), math.cos(rx)]])
+    Ry = np.array([[math.cos(ry), 0, math.sin(ry)], [0, 1, 0], [-math.sin(ry), 0, math.cos(ry)]])
+    Rz = np.array([[math.cos(rz), -math.sin(rz), 0], [math.sin(rz), math.cos(rz), 0], [0, 0, 1]])
+    return Rz @ Ry @ Rx
+
+
+def read_mesh_bin(path: Path) -> list:
+    import numpy as np
+    data = path.read_bytes()
+    if data[:4] != b"SPV1":
+        raise jobs.JobError("Unexpected preview file")
+    meshes, offset = [], 8
+    for _ in range(struct.unpack_from("<I", data, 4)[0]):
+        vertices, triangles = struct.unpack_from("<II", data, offset)
+        offset += 8
+        verts = np.frombuffer(data, "<f4", vertices * 3, offset).reshape(-1, 3).astype(float)
+        offset += vertices * 12
+        tris = np.frombuffer(data, "<u4", triangles * 3, offset).reshape(-1, 3)
+        offset += triangles * 12
+        meshes.append((verts, tris))
+    return meshes
+
+
+def load_mesh(project_id: int, model_id: int, preview: bool = False) -> tuple:
+    import numpy as np
+    folder = model_dir(project_id, model_id)
+    if preview:
+        return read_mesh_bin(folder / "preview.bin")[0]
+    with np.load(folder / "model.npz") as data:
+        return data["verts"].astype(float), np.asarray(data["tris"])
+
+
+def place(verts, obj: dict):
+    """Model vertices → bed coordinates for an object (see the module docstring)."""
+    import numpy as np
+    lo, hi = verts.min(axis=0), verts.max(axis=0)
+    placed = ((verts - (lo + hi) / 2) * np.asarray(obj["scale"], float)) @ rotation_matrix(obj["rotation"]).T
+    lo, hi = placed.min(axis=0), placed.max(axis=0)
+    return placed + [obj["position"][0] - (lo[0] + hi[0]) / 2, obj["position"][1] - (lo[1] + hi[1]) / 2, -lo[2]]
+
+
+def machine_limits(machine: dict) -> dict:
+    def points(value):
+        out = []
+        for item in value or []:
+            try:
+                x, y = str(item).lower().split("x")
+                out.append((float(x), float(y)))
+            except ValueError:
+                continue
+        return out
+
+    area = points(machine.get("printable_area"))
+    exclude = points(machine.get("bed_exclude_area"))
+    try:
+        height = float(machine.get("printable_height") or DEFAULT_HEIGHT)
+    except ValueError:
+        height = DEFAULT_HEIGHT
+    bed = (min(p[0] for p in area), min(p[1] for p in area), max(p[0] for p in area), max(p[1] for p in area)) if area else DEFAULT_BED
+    excluded = (min(p[0] for p in exclude), min(p[1] for p in exclude), max(p[0] for p in exclude), max(p[1] for p in exclude)) \
+        if len(exclude) >= 3 else (DEFAULT_EXCLUDE if bed == DEFAULT_BED else None)
+    return {"bed": bed, "height": height, "exclude": excluded}
+
+
+def check_fit(name: str, verts, limits: dict) -> None:
+    lo, hi = verts.min(axis=0), verts.max(axis=0)
+    x0, y0, x1, y1 = limits["bed"]
+    if lo[0] < x0 - 0.01 or lo[1] < y0 - 0.01 or hi[0] > x1 + 0.01 or hi[1] > y1 + 0.01:
+        raise jobs.JobError(f"{name} reaches past the edge of the bed")
+    if hi[2] > limits["height"] + 0.01:
+        raise jobs.JobError(f"{name} is taller than the printer can print ({limits['height']:g} mm)")
+    if limits["exclude"]:
+        ex0, ey0, ex1, ey1 = limits["exclude"]
+        inside = (verts[:, 0] > ex0) & (verts[:, 0] < ex1) & (verts[:, 1] > ey0) & (verts[:, 1] < ey1)
+        if inside.any():
+            raise jobs.JobError(f"{name} is over the nozzle purge area in the front-right corner")
+
+
+def write_stl(path: Path, verts, tris) -> None:
+    import numpy as np
+    records = np.zeros(len(tris), dtype=[("normal", "<f4", 3), ("vertices", "<f4", (3, 3)), ("attr", "<u2")])
+    records["vertices"] = verts[tris]
+    with open(path, "wb") as fh:
+        fh.write(b"Spooler".ljust(80, b"\0") + struct.pack("<I", len(tris)))
+        fh.write(records.tobytes())
+
+
+def write_plate_3mf(path: Path, project_id: int, objects: list, limits: dict) -> None:
+    """One plate as a 3MF: vertices already in bed coordinates, per-object settings in model_settings.config.
+    (Don't add OrcaSlicer's Application metadata: the 2.4.2 CLI crashes on such files.)"""
+    import numpy as np
+    config = ['<?xml version="1.0" encoding="UTF-8"?>\n<config>\n']
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+        archive.writestr("[Content_Types].xml", CONTENT_TYPES)
+        archive.writestr("_rels/.rels", RELS)
+        with archive.open("3D/3dmodel.model", "w") as fh:
+            fh.write(b'<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" '
+                     b'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n<resources>\n')
+            for index, obj in enumerate(objects, start=1):
+                verts, tris = load_mesh(project_id, obj["model"])
+                placed = place(verts, obj)
+                check_fit(obj["name"], placed, limits)
+                fh.write(f'<object id="{index}" name={escape_attr(obj["name"])} type="model"><mesh><vertices>\n'.encode())
+                for chunk in np.array_split(placed, max(1, len(placed) // 50000)):
+                    fh.write("".join(f'<vertex x="{x:.4f}" y="{y:.4f}" z="{z:.4f}"/>' for x, y, z in chunk).encode())
+                fh.write(b"\n</vertices><triangles>\n")
+                for chunk in np.array_split(tris, max(1, len(tris) // 50000)):
+                    fh.write("".join(f'<triangle v1="{a}" v2="{b}" v3="{c}"/>' for a, b, c in chunk).encode())
+                fh.write(b"\n</triangles></mesh></object>\n")
+                config.append(f'  <object id="{index}">\n    <metadata key="name" value={escape_attr(obj["name"])}/>\n'
+                              '    <metadata key="extruder" value="1"/>\n')
+                for key, value in sorted((obj.get("overrides") or {}).items()):
+                    config.append(f'    <metadata key={escape_attr(key)} value={escape_attr(value)}/>\n')
+                config.append(f'    <part id="1" subtype="normal_part"><metadata key="name" value={escape_attr(obj["name"])}/></part>\n'
+                              '  </object>\n')
+            fh.write(b"</resources>\n<build>\n")
+            for index in range(1, len(objects) + 1):
+                fh.write(f'<item objectid="{index}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'.encode())
+            fh.write(b"</build>\n</model>\n")
+        config.append("</config>\n")
+        archive.writestr("Metadata/model_settings.config", "".join(config))
+
+
+def escape_attr(value) -> str:
+    return '"' + escape(str(value), {'"': "&quot;"}) + '"'
+
+
+# ── Arrange ────────────────────────────────────────────────────────────────────
+
+def arrange_plate(project_id: int, plate_id: int) -> dict:
+    """Let OrcaSlicer arrange a plate's objects (it knows the bed and its exclusion area). Blocking."""
+    record = get_project(project_id)
+    data = record["data"]
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    objects = [o for o in data["objects"] if o["plate"] == plate_id and o["model"] in ready]
+    if not objects:
+        raise jobs.JobError("There's nothing ready to arrange on this plate", 409)
+    orca = slicer.require_orca()
+    bundle_id = data["profile"]["bundle_id"]
+    if not bundle_id:
+        raise jobs.JobError("Choose a profile first", 409)
+    settings = slicer.bundle_settings(bundle_id)
+    with tempfile.TemporaryDirectory(prefix=".arrange-", dir=project_dir(project_id)) as tmp:
+        tmp = Path(tmp)
+        for kind in slicer.PRESET_KINDS:
+            (tmp / f"{kind}.json").write_text(json.dumps(settings[kind]), encoding="utf-8")
+        files = []
+        for obj in objects:
+            verts, tris = load_mesh(project_id, obj["model"], preview=True)
+            path = tmp / f"object{obj['id']}.stl"
+            write_stl(path, place(verts, {**obj, "position": [0.0, 0.0]}), tris)
+            files.append(str(path))
+        out = tmp / "arranged.3mf"
+        code, _ = slicer.runner([str(orca), "--datadir", str(_data_dir / "slicer-data"), "--arrange", "1",
+                                 "--load-settings", f"{tmp / 'machine.json'};{tmp / 'process.json'}",
+                                 "--load-filaments", str(tmp / "filament.json"), "--export-3mf", str(out), *files], 300)
+        code = code - (1 << 32) if code >= (1 << 31) else code
+        if code != 0 or not out.is_file():
+            raise jobs.JobError(slicer.explain_exit(code) if code else "OrcaSlicer didn't arrange the plate")
+        placements = read_arrangement(out)
+    with database.transaction() as conn:
+        row = conn.execute("SELECT data FROM projects WHERE id = ?", (project_id,)).fetchone()
+        current = json.loads(row["data"])
+        for obj in current["objects"]:
+            if obj["id"] in placements:
+                x, y, turn = placements[obj["id"]]
+                obj["position"] = [round(x, 3), round(y, 3)]
+                obj["rotation"][2] = round((obj["rotation"][2] + turn) % 360, 3)
+        conn.execute("UPDATE projects SET data = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                     (json.dumps(current), time.time(), project_id))
+    return get_project(project_id)
+
+
+def read_arrangement(path: Path) -> dict:
+    """object id → (x, y, extra rotation about Z in degrees) from a 3MF exported by `orca-slicer --export-3mf`."""
+    with zipfile.ZipFile(path) as archive:
+        main = archive.read("3D/3dmodel.model").decode("utf-8", "replace")
+    paths = {}
+    for obj in re.finditer(r'<object\b[^>]*\bid="(\d+)"[^>]*>(.*?)</object>', main, re.S):
+        source = re.search(r'object(\d+)\.stl', obj.group(0))
+        if source:
+            paths[obj.group(1)] = int(source.group(1))
+    placements = {}
+    for item in re.finditer(r'<item\b[^>]*objectid="(\d+)"[^>]*transform="([^"]+)"', main):
+        object_id = paths.get(item.group(1))
+        values = [float(v) for v in item.group(2).split()]
+        if object_id is None or len(values) != 12:
+            continue
+        placements[object_id] = (values[9], values[10], math.degrees(math.atan2(values[1], values[0])))
+    return placements
+
+
+# ── Slicing a plate ────────────────────────────────────────────────────────────
+
+def _queued_entry(previous: dict | None, queued_at: float, send: bool = False) -> dict:
+    """A plate waiting to be sliced. `last_duration_ms` (how long it took before) lets the page show an expected time."""
+    previous = previous or {}
+    last = previous.get("duration_ms", previous.get("last_duration_ms"))
+    return {"state": QUEUED, "queued_at": queued_at, **({"last_duration_ms": last} if last is not None else {}),
+            **({"auto_send": True} if send else {})}
+
+
+def _require_printers(record: dict, plate_ids) -> None:
+    """Slice & send needs a printer on every plate it will send."""
+    missing = [p["name"] for p in record["data"]["plates"] if p["id"] in plate_ids and not p.get("printer_id")]
+    if missing:
+        raise jobs.JobError(f"Choose a printer for {_names(missing)} first", 409)
+
+
+def _stage(project_id: int, plate_id: int, stage: str) -> None:
+    """Tell the page what a running slice is doing (preparing → slicing → post-processing → analysing)."""
+    def change(slices):
+        entry = slices.get(str(plate_id))
+        if entry and entry.get("state") == SLICING:
+            entry.update(stage=stage, stage_at=time.time())
+    _mutate(project_id, "slices", change)
+
+
+def request_slice(project_id: int, plate_id: int, send: bool = False) -> dict:
+    """Slice one plate. With `send`, the finished plate goes to the queue for its own printer."""
+    record = get_project(project_id)
+    if plate_id not in {p["id"] for p in record["data"]["plates"]}:
+        raise jobs.JobError("Plate not found", 404)
+    if not any(o["plate"] == plate_id for o in record["data"]["objects"]):
+        raise jobs.JobError("The plate is empty", 409)
+    if record["slices"].get(str(plate_id), {}).get("state") in (QUEUED, SLICING):
+        raise jobs.JobError("The plate is already being sliced", 409)
+    if send:
+        _require_printers(record, {plate_id})
+    _mutate(project_id, "slices", lambda s: s.__setitem__(str(plate_id), _queued_entry(s.get(str(plate_id)), time.time(), send)))
+    notify_worker()
+    return get_project(project_id)
+
+
+def _plate_list(plate_ids) -> set | None:
+    if plate_ids is None:
+        return None
+    try:
+        return {int(i) for i in plate_ids}
+    except (TypeError, ValueError):
+        raise jobs.JobError("plates must be a list of plate numbers")
+
+
+def request_slices(project_id: int, plate_ids=None, send: bool = False) -> dict:
+    """Slice every plate (or the listed plates) that has objects and isn't sliced up to date or slicing already."""
+    record = get_project(project_id)
+    wanted = _plate_list(plate_ids)
+    todo = []
+    for plate in record["data"]["plates"]:
+        entry = record["slices"].get(str(plate["id"])) or {}
+        if (wanted is None or plate["id"] in wanted) and any(o["plate"] == plate["id"] for o in record["data"]["objects"]) \
+                and entry.get("state") not in (QUEUED, SLICING) and not (entry.get("state") == SLICED and not entry.get("outdated")):
+            todo.append(plate["id"])
+    if not todo:
+        raise jobs.JobError("Nothing to slice — every plate is empty, already sliced or slicing", 409)
+    if send:
+        _require_printers(record, set(todo))
+    now = time.time()
+
+    def mark(slices):
+        for index, plate_id in enumerate(todo):
+            slices[str(plate_id)] = _queued_entry(slices.get(str(plate_id)), now + index / 1000, send)  # sliced in plate order
+    _mutate(project_id, "slices", mark)
+    notify_worker()
+    return get_project(project_id)
+
+
+def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
+    """Build the plate's 3MF and profile, slice it and analyse the G-code. Blocking.
+    Concurrent slices each get their own OrcaSlicer data directory (`slot`), so their caches and logs don't collide."""
+    record = get_project(project_id)
+    data = record["data"]
+    plate = next((p for p in data["plates"] if p["id"] == plate_id), None)
+    if plate is None:
+        raise jobs.JobError("The plate was removed")
+    models = {m["id"]: m for m in record["models"]}
+    objects = [o for o in data["objects"] if o["plate"] == plate_id]
+    if not objects:
+        raise jobs.JobError("The plate is empty")
+    waiting = [o["name"] for o in objects if models.get(o["model"], {}).get("state") != READY]
+    if waiting:
+        raise jobs.JobError(f"Still importing: {', '.join(waiting)}")
+    if not data["profile"]["bundle_id"]:
+        raise jobs.JobError("Choose a profile first")
+    _stage(project_id, plate_id, "preparing")
+    stamp = fingerprint(record, plate_id)
+    settings = slicer.bundle_settings(data["profile"]["bundle_id"])
+    slicer.verify_bundle(settings["bundle"])
+    orca = slicer.require_orca()
+    process = {**settings["process"], **data["profile"]["process"], **(plate.get("overrides") or {}),
+               "curr_bed_type": slicer.BED_TYPES[data["bed"]]}
+    bricks = plate_bricklayers(data, plate)
+    if bricks:
+        process.update(brick_post.REQUIRED_PROCESS)
+    filament = {**settings["filament"], **data["profile"]["filament"]}
+
+    work = plate_dir(project_id, plate_id)
+    shutil.rmtree(work, ignore_errors=True)
+    (work / "profile").mkdir(parents=True)
+    (work / "output").mkdir()
+    for kind, values in (("machine", settings["machine"]), ("process", process), ("filament", filament)):
+        (work / "profile" / f"{kind}.json").write_text(json.dumps(values, indent=1, sort_keys=True), encoding="utf-8")
+    write_plate_3mf(work / "plate.3mf", project_id, objects, machine_limits(settings["machine"]))
+
+    args = [str(orca), "--datadir", str(_data_dir / ("slicer-data" if slot == 0 else f"slicer-data-{slot}")), "--slice", "0", "--arrange", "0",
+            "--load-settings", f"{work / 'profile' / 'machine.json'};{work / 'profile' / 'process.json'}",
+            "--load-filaments", str(work / "profile" / "filament.json"), "--outputdir", str(work / "output"), str(work / "plate.3mf")]
+    _stage(project_id, plate_id, "slicing")
+    started = time.monotonic()
+    code, text = slicer.runner(args, slicer.SLICE_TIMEOUT_S)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    code = code - (1 << 32) if code >= (1 << 31) else code
+    (work / "slicer.log").write_text(f"$ {subprocess.list2cmdline(args)}\nexit code {code} after {duration_ms} ms\n{text}", encoding="utf-8")
+    if code != 0:
+        raise slicer.SliceError(slicer.explain_exit(code), code)
+    produced = sorted((work / "output").glob("plate_*.gcode"))
+    if not produced:
+        raise slicer.SliceError("OrcaSlicer finished without producing G-code", code)
+    gcode = work / "plate.gcode"
+    if bricks:
+        _stage(project_id, plate_id, "post-processing")
+        orca_gcode = work / "plate.orca.gcode"
+        os.replace(produced[0], orca_gcode)
+        started = time.monotonic()
+        try:
+            brick_args, brick_text = brick_post.run(orca_gcode, gcode, bricks)
+        finally:
+            duration_ms += int((time.monotonic() - started) * 1000)
+        with (work / "slicer.log").open("a", encoding="utf-8") as log:
+            log.write(f"\n$ {subprocess.list2cmdline(brick_args)}\n{brick_text}")
+    else:
+        os.replace(produced[0], gcode)
+    _stage(project_id, plate_id, "analysing")
+    add_thumbnails(project_id, objects, settings["machine"], gcode, work / "slicer.log")
+    analysis, toolpath = gcode_analysis.analyze(gcode)
+    (work / "toolpath.bin").write_bytes(toolpath)
+    (work / "analysis.json").write_text(json.dumps(analysis), encoding="utf-8")
+    estimates = analysis.get("estimates") or {}
+    return {"state": SLICED, "error": None, "fingerprint": stamp, "sliced_at": time.time(), "duration_ms": duration_ms,
+            "estimate_s": estimates.get("estimate_s"), "estimate_g": estimates.get("estimate_g"),
+            "layers": len(analysis["layers"]), "slicer": analysis.get("slicer"), "gcode_bytes": gcode.stat().st_size,
+            "bricklayers": bricks,
+            "findings": [f for f in analysis.get("findings", []) if f["level"] == "fail"][:5]}
+
+
+def add_thumbnails(project_id: int, objects: list, machine: dict, gcode: Path, log: Path) -> None:
+    """Embed the picture the printer shows for this G-code. A failure is logged, never fatal to the slice."""
+    try:
+        meshes = []
+        for obj in objects:
+            verts, tris = load_mesh(project_id, obj["model"], preview=True)
+            meshes.append((place(verts, obj), tris))
+        count = thumbnails.add_to_gcode(gcode, machine, meshes)
+        note = f"embedded {count} thumbnail(s)" if count else "no thumbnail embedded"
+    except Exception as e:  # the picture is a nicety
+        note = f"thumbnail failed: {e}"
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n[Spooler] {note}\n")
+
+
+def plate_file(project_id: int, plate_id: int, kind: str) -> Path:
+    record = get_project(project_id)
+    if record["slices"].get(str(plate_id), {}).get("state") != SLICED:
+        raise jobs.JobError("The plate hasn't been sliced", 404)
+    path = plate_dir(project_id, plate_id) / {"toolpath": "toolpath.bin", "gcode": "plate.gcode", "analysis": "analysis.json"}[kind]
+    if not path.is_file():
+        raise jobs.JobError("The sliced files are missing — slice the plate again", 404)
+    return path
+
+
+def plate_analysis(project_id: int, plate_id: int) -> dict:
+    analysis = json.loads(plate_file(project_id, plate_id, "analysis").read_text(encoding="utf-8"))
+    analysis.pop("occupancy", None)
+    return analysis
+
+
+def _names(names: list) -> str:
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _open_job_plates(project_id: int) -> set:
+    """Plates of this project with a job still waiting or printing in the queue."""
+    with database.transaction() as conn:
+        rows = conn.execute("SELECT plate_id FROM jobs WHERE project_id = ? AND state IN ('queued', 'starting', 'printing')",
+                            (project_id,)).fetchall()
+    return {r["plate_id"] for r in rows if r["plate_id"] is not None}
+
+
+def _send_plate(record: dict, plate: dict, body: dict, batch_id: str) -> dict:
+    entry = record["slices"][str(plate["id"])]
+    gcode = plate_file(record["id"], plate["id"], "gcode")
+    with gcode.open("rb") as fh:
+        job = jobs.create_upload_job(fh, gcode.stat().st_size, safe_gcode_name(f"{record['name']}_{plate['name']}.gcode"),
+                                     body.get("printer_id") or plate.get("printer_id") or None)
+    models = {m["id"]: m for m in record["models"]}
+    parts = sorted({((models.get(o["model"]) or {}).get("split") or {}).get("part") for o in record["data"]["objects"]
+                    if o["plate"] == plate["id"]} - {None, 0})
+    notes = f"{record['name']} — {plate['name']}" + (f": part{'s' if len(parts) != 1 else ''} {', '.join(map(str, parts))}" if parts else "")
+    options = {"smooth_plate": record["data"]["bed"] == "smooth", "leveling": bool(body.get("leveling")),
+               "timelapse": bool(body.get("timelapse"))}
+    jobs.update_job(job["id"], {"notes": notes, "print_opts": options})
+    with database.transaction() as conn:
+        conn.execute("UPDATE jobs SET project_id = ?, plate_id = ?, batch_id = ? WHERE id = ?", (record["id"], plate["id"], batch_id, job["id"]))
+    jobs.log_event(job["id"], "sliced", f"Slicer project “{record['name']}”, {plate['name']}, {entry.get('slicer') or 'OrcaSlicer'}")
+    return jobs.get_job(job["id"])
+
+
+def queue_plates(project_id: int, body: dict) -> dict:
+    """Send sliced plates — the listed ones, or every plate with objects — to the print queue as one batch.
+    Plates already waiting or printing in the queue are refused unless `again` is set (to print another copy)."""
+    record = get_project(project_id)
+    data = record["data"]
+    wanted = _plate_list(body.get("plates"))
+    if wanted is None:
+        plates = [p for p in data["plates"] if any(o["plate"] == p["id"] for o in data["objects"])]
+    else:
+        plates = [p for p in data["plates"] if p["id"] in wanted]
+        if len(plates) != len(wanted):
+            raise jobs.JobError("Plate not found", 404)
+    if not plates:
+        raise jobs.JobError("There are no plates with objects to send", 409)
+    if body.get("printer_id"):
+        jobs._require_printer(body["printer_id"])
+    unsliced = [p["name"] for p in plates if (record["slices"].get(str(p["id"])) or {}).get("state") != SLICED]
+    if unsliced:
+        raise jobs.JobError(f"Slice {_names(unsliced)} first", 409)
+    outdated = [p["name"] for p in plates if record["slices"][str(p["id"])].get("outdated")]
+    if outdated:
+        one = len(outdated) == 1
+        raise jobs.JobError(f"{_names(outdated)} changed after {'it was' if one else 'they were'} sliced — slice {'it' if one else 'them'} again", 409)
+    if not body.get("again"):
+        repeats = [p["name"] for p in plates if p["id"] in _open_job_plates(project_id)]
+        if repeats:
+            raise jobs.JobError(f"{_names(repeats)} {'is' if len(repeats) == 1 else 'are'} already in the queue — "
+                                "send again only to print another copy", 409)
+    batch_id = f"{project_id}-{int(time.time() * 1000)}"
+    return {"batch_id": batch_id, "jobs": [_send_plate(record, plate, body, batch_id) for plate in plates]}
+
+
+def queue_plate(project_id: int, plate_id: int, body: dict) -> dict:
+    """Put one sliced plate's G-code in the print queue."""
+    return queue_plates(project_id, {**body, "plates": [plate_id]})["jobs"][0]
+
+
+def project_jobs(project_id: int) -> list:
+    """Every queue job sent from this project, oldest first."""
+    get_project(project_id)
+    with database.transaction() as conn:
+        rows = conn.execute("SELECT * FROM jobs WHERE project_id = ? ORDER BY id", (project_id,)).fetchall()
+    return [jobs._to_job(row) for row in rows]
+
+
+# ── Background worker ──────────────────────────────────────────────────────────
+
+def _claim() -> tuple | None:
+    """The next import or slice to run, marked as running."""
+    with database.transaction() as conn:
+        rows = conn.execute("SELECT id, models, slices, created_at FROM projects ORDER BY updated_at, id").fetchall()
+        for row in rows:
+            for model in json.loads(row["models"] or "[]"):
+                if model["state"] == IMPORTING:
+                    return "import", row["id"], model["id"], row["created_at"]
+        for row in rows:
+            entries = json.loads(row["slices"] or "{}")
+            for plate_id, entry in sorted(entries.items(), key=lambda kv: kv[1].get("queued_at", 0)):
+                if entry.get("state") == QUEUED:
+                    entry.update(state=SLICING, started_at=time.time())
+                    conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(entries), row["id"]))
+                    return "slice", row["id"], int(plate_id), row["created_at"]
+    return None
+
+
+async def process_next(slot: int = 0) -> bool:
+    task = _claim()
+    if task is None:
+        return False
+    kind, project_id, item, created_at = task
+    loop = asyncio.get_running_loop()
+    if kind == "import":
+        try:
+            result = await loop.run_in_executor(None, _run_import, project_id, item)
+        except Exception as e:
+            result = {"state": FAILED, "error": str(e) or type(e).__name__}
+            print(f"[Projects] Import of model {item} in project {project_id} failed: {e}")
+
+        def update(models):
+            for model in models:
+                if model["id"] == item:
+                    model.update(result)
+        _mutate(project_id, "models", update, created_at)
+    else:
+        try:
+            auto = bool(get_project(project_id)["slices"].get(str(item), {}).get("auto_send"))
+        except jobs.JobError:
+            auto = False
+        try:
+            result = await loop.run_in_executor(None, _slice, project_id, item, slot)
+        except Exception as e:
+            result = {"state": FAILED, "error": str(e) or type(e).__name__, "finished_at": time.time()}
+            print(f"[Projects] Slicing plate {item} of project {project_id} failed: {e}")
+        if auto and result.get("state") == SLICED:
+            result["auto_send"] = True   # the page keeps checking until the plate is in the queue (or says why not)
+        _mutate(project_id, "slices", lambda s: s.__setitem__(str(item), result), created_at)
+        if auto and result.get("state") == SLICED:
+            await loop.run_in_executor(None, _auto_send, project_id, item, created_at)
+            await jobs.broadcast()
+    return True
+
+
+def _auto_send(project_id: int, plate_id: int, created_at: float) -> None:
+    """Slice & send: put the finished plate in the queue for its printer, and note the job (or why it couldn't be sent)."""
+    try:
+        job = queue_plate(project_id, plate_id, {})
+        outcome = {"sent_job": job["id"], "sent_to": job.get("printer_id")}
+    except jobs.JobError as e:
+        outcome = {"send_error": str(e)}
+        print(f"[Projects] Plate {plate_id} of project {project_id} sliced but not sent: {e}")
+    _mutate(project_id, "slices", lambda s: s.get(str(plate_id)) is not None and s[str(plate_id)].update(outcome), created_at)
+
+
+async def _slot_loop(slot: int) -> None:
+    while True:
+        _wakeup.clear()
+        try:
+            if await process_next(slot):
+                continue
+        except Exception as e:  # the worker must survive anything a single task throws
+            print(f"[Projects] Worker {slot} error: {e}")
+        try:
+            await asyncio.wait_for(_wakeup.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def worker_loop() -> None:
+    """Background workers: model imports and plate slices, SLICE_WORKERS at a time."""
+    global _wakeup
+    _wakeup = asyncio.Event()
+    if SLICE_WORKERS > 1:
+        print(f"[Projects] Slicing up to {SLICE_WORKERS} plates at once")
+    await asyncio.gather(*(_slot_loop(slot) for slot in range(SLICE_WORKERS)))
+
+
+def notify_worker() -> None:
+    loop = state.loop
+    if _wakeup is not None and loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(_wakeup.set)

@@ -4,10 +4,10 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir websockets aiomqtt bcrypt pywebpush
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py state.py auth.py persistence.py discovery.py spoolman.py \
-     ws_handler.py http_handler.py push.py ./
+COPY *.py ./
 COPY printers/ printers/
 COPY public/ public/
 

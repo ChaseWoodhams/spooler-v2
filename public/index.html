@@ -11,7 +11,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=29" />
+  <link rel="stylesheet" href="style.css?v=53" />
+  <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body>
   <header>
@@ -20,6 +21,10 @@
       <span>Spooler</span>
     </div>
     <div class="header-actions">
+      <button id="btn-system-health" class="health-pill" data-state="unknown" title="System health">
+        <span class="health-dot"></span>
+        <span id="health-pill-label" class="health-pill-label">Connecting…</span>
+      </button>
       <button id="btn-discover" class="btn btn-secondary" title="Auto-discover printers on network">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
@@ -34,16 +39,37 @@
       </button>
     </div>
   </header>
+  <div id="connection-banner" class="connection-banner" role="status" hidden></div>
 
   <div class="app-body">
 
   <nav class="sidenav">
-    <button id="btn-history" class="sidenav-item" title="Filament history">
+    <button id="btn-printers-nav" class="sidenav-item mobile-only" title="Printers">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>
+      </svg>
+      <span>Printers</span>
+    </button>
+    <button id="btn-history" class="sidenav-item" title="Print history">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
       </svg>
       <span>History</span>
     </button>
+    <button id="btn-queue" class="sidenav-item" title="Print queue">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <line x1="9" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="9" y1="18" x2="21" y2="18"/>
+        <line x1="4" y1="6" x2="4.01" y2="6"/><line x1="4" y1="12" x2="4.01" y2="12"/><line x1="4" y1="18" x2="4.01" y2="18"/>
+      </svg>
+      <span>Queue</span>
+      <span id="queue-count" class="sidenav-badge" hidden></span>
+    </button>
+    <a id="btn-slicer" class="sidenav-item" href="/slicer.html" title="Projects: upload a model, split it, lay out plates, slice and send to the queue">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round">
+        <path d="M3 8l5-3 3 1.8V19l-3 1.8-5-3z"/><path d="M13 6.8 16 5l5 3v9.8l-5 3-3-1.8z"/>
+      </svg>
+      <span>Projects</span>
+    </a>
     <button id="btn-spools" class="sidenav-item" title="Filament spools (Reel)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/>
@@ -68,7 +94,19 @@
       </svg>
       <span>Sign out</span>
     </button>
+    <button id="btn-mobile-more" class="sidenav-item mobile-only" type="button" title="More" aria-haspopup="menu" aria-expanded="false" aria-controls="mobile-more-menu">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>
+      </svg>
+      <span>More</span>
+    </button>
   </nav>
+
+  <div id="mobile-more-menu" class="mobile-more-menu" role="menu" aria-label="More navigation" hidden>
+    <button id="btn-mobile-history" type="button" role="menuitem">History</button>
+    <button id="btn-mobile-settings" type="button" role="menuitem">Settings</button>
+    <button id="btn-mobile-signout" type="button" role="menuitem">Sign out</button>
+  </div>
 
   <main id="main">
     <div id="empty-state" class="empty-state">
@@ -81,10 +119,11 @@
       <p>Click <strong>Discover</strong> to find printers on your network,<br/>or <strong>Add Printer</strong> to enter an IP address manually.</p>
     </div>
     <div id="printer-grid" class="printer-grid" style="display:none"></div>
+    <section id="printer-detail" class="printer-detail" hidden aria-live="polite"></section>
   </main>
 
   <!-- Printers panel (add + edit) -->
-  <div id="panel-printers" class="side-panel">
+  <div id="panel-printers" class="side-panel" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="printer-panel-title" inert>
     <div class="side-panel-header">
       <div class="title-row">
         <h3 id="printer-panel-title">Add Printer</h3>
@@ -144,35 +183,44 @@
   </div>
 
   <!-- History panel -->
-  <div id="panel-history" class="side-panel">
+  <div id="panel-history" class="side-panel" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="history-panel-title" inert>
     <div class="side-panel-header">
       <div class="title-row">
-        <h3>Filament History</h3>
-        <div class="history-totals" id="history-totals"></div>
+        <h3 id="history-panel-title">Print History</h3>
         <button id="btn-history-close" class="btn btn-secondary btn-sm">Close</button>
       </div>
+      <div class="history-filters">
+        <input id="history-search" type="search" placeholder="Search files, material, notes…" aria-label="Search history" />
+        <select id="history-printer" aria-label="Printer"><option value="">All printers</option></select>
+        <select id="history-outcome" aria-label="Outcome">
+          <option value="">All outcomes</option>
+          <option value="completed">Completed</option>
+          <option value="cancelled">Cancelled</option>
+          <option value="failed">Failed</option>
+          <option value="unknown">Outcome unknown</option>
+          <option value="printing">Printing now</option>
+        </select>
+        <select id="history-range" aria-label="Time range">
+          <option value="">All time</option>
+          <option value="7">Last 7 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="365">Last 12 months</option>
+        </select>
+        <button id="btn-history-export" class="btn btn-secondary btn-sm">Export CSV</button>
+      </div>
+      <div class="history-totals" id="history-totals"></div>
     </div>
     <div class="side-panel-body">
-      <table class="history-table" id="history-table">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Printer</th>
-            <th>File</th>
-            <th>Filament</th>
-            <th>Time</th>
-          </tr>
-        </thead>
-        <tbody id="history-tbody"></tbody>
-      </table>
-      <p id="history-empty" style="display:none;text-align:center;color:var(--text-muted);padding:40px">No prints logged yet.</p>
+      <div id="history-list" class="history-list"></div>
+      <p id="history-empty" class="queue-empty history-empty" hidden>No prints match these filters.</p>
+      <div class="history-more"><button id="btn-history-more" class="btn btn-secondary btn-sm" hidden>Load more</button></div>
     </div>
   </div>
   <!-- Spools panel -->
-  <div id="panel-spools" class="side-panel">
+  <div id="panel-spools" class="side-panel" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="spools-panel-title" inert>
     <div class="side-panel-header">
       <div class="title-row">
-        <h3>Filament Spools</h3>
+        <h3 id="spools-panel-title">Filament Spools</h3>
         <button id="btn-spools-close" class="btn btn-secondary btn-sm">Close</button>
       </div>
       <div class="action-row">
@@ -194,6 +242,37 @@
     <div class="side-panel-body">
       <div id="spools-list"></div>
       <p id="spools-empty" style="display:none;text-align:center;color:var(--text-muted);padding:40px">No spools yet. Click <strong>Add Spool</strong> to get started.</p>
+    </div>
+  </div>
+
+  <!-- Print queue panel -->
+  <div id="panel-queue" class="side-panel" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="queue-panel-title" inert>
+    <div class="side-panel-header">
+      <div class="title-row">
+        <h3 id="queue-panel-title">Print Queue</h3>
+        <button id="btn-queue-close" class="btn btn-secondary btn-sm">Close</button>
+      </div>
+      <div class="action-row">
+        <button id="btn-queue-add-model" class="btn btn-primary btn-sm" title="Upload an STL, 3MF, OBJ or STEP model and slice it with OrcaSlicer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
+            <path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/>
+          </svg>
+          Slice model
+        </button>
+        <input id="model-file-input" type="file" accept=".stl,.3mf,.obj,.step,.stp" hidden />
+        <button id="btn-queue-add" class="btn btn-secondary btn-sm">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+          Add G-code
+        </button>
+        <input id="queue-file-input" type="file" accept=".gcode" hidden />
+        <span class="queue-hint">Drop a model or .gcode file here, or use <strong>Queue</strong> in a printer's file browser.</span>
+      </div>
+    </div>
+    <div class="side-panel-body">
+      <div id="slice-body" class="slice-body"></div>
+      <div id="queue-body" class="queue-body"></div>
     </div>
   </div>
 
@@ -253,14 +332,14 @@
             <div class="print-opts-row">
               <span>Time-lapse</span>
               <label class="toggle-switch">
-                <input type="checkbox" id="print-opt-timelapse">
+                <input type="checkbox" id="print-opt-timelapse" role="switch" aria-label="Time-lapse">
                 <span class="toggle-slider"></span>
               </label>
             </div>
             <div class="print-opts-row">
               <span>Heated Bed Leveling</span>
               <label class="toggle-switch">
-                <input type="checkbox" id="print-opt-leveling">
+                <input type="checkbox" id="print-opt-leveling" role="switch" aria-label="Heated bed leveling">
                 <span class="toggle-slider"></span>
               </label>
             </div>
@@ -398,7 +477,7 @@
             </svg>
             <span>Light mode</span>
             <label class="toggle-switch" style="margin-left:auto">
-              <input type="checkbox" id="toggle-light-mode" />
+              <input type="checkbox" id="toggle-light-mode" role="switch" aria-label="Light mode" />
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -410,7 +489,7 @@
       <!-- Printers sub-page -->
       <div id="settings-printers" style="display:none">
         <div class="settings-subpage-header">
-          <button id="btn-settings-back-printers" class="settings-back-btn">
+          <button id="btn-settings-back-printers" class="settings-back-btn" aria-label="Back to Settings" title="Back">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
           <h3>Printers</h3>
@@ -434,7 +513,7 @@
       <!-- Printer edit sub-page -->
       <div id="settings-printer-edit" style="display:none">
         <div class="settings-subpage-header">
-          <button id="btn-settings-back-printer-edit" class="settings-back-btn">
+          <button id="btn-settings-back-printer-edit" class="settings-back-btn" aria-label="Back to Printers" title="Back">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
           <h3 id="settings-printer-edit-title">Edit Printer</h3>
@@ -470,7 +549,7 @@
       <!-- Notifications sub-page -->
       <div id="settings-notifications" style="display:none">
         <div class="settings-subpage-header">
-          <button id="btn-settings-back-notif" class="settings-back-btn">
+          <button id="btn-settings-back-notif" class="settings-back-btn" aria-label="Back to Settings" title="Back">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
           <h3>Notifications</h3>
@@ -483,7 +562,7 @@
               <span class="notif-desc">When a print finishes or is cancelled</span>
             </div>
             <label class="toggle-switch">
-              <input type="checkbox" id="notif-finished-on" />
+              <input type="checkbox" id="notif-finished-on" role="switch" aria-label="Print complete notifications" />
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -494,7 +573,7 @@
               <span class="notif-desc">When a specific layer number is reached</span>
             </div>
             <label class="toggle-switch">
-              <input type="checkbox" id="notif-layer-on" />
+              <input type="checkbox" id="notif-layer-on" role="switch" aria-label="Layer checkpoint notifications" />
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -508,7 +587,7 @@
               <span class="notif-desc">When the nozzle is above a set temperature while idle</span>
             </div>
             <label class="toggle-switch">
-              <input type="checkbox" id="notif-nozzle-idle-on" />
+              <input type="checkbox" id="notif-nozzle-idle-on" role="switch" aria-label="Nozzle still hot notifications" />
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -522,7 +601,7 @@
               <span class="notif-desc">When the nozzle exceeds a temperature during printing</span>
             </div>
             <label class="toggle-switch">
-              <input type="checkbox" id="notif-nozzle-printing-on" />
+              <input type="checkbox" id="notif-nozzle-printing-on" role="switch" aria-label="Nozzle overheat notifications" />
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -536,7 +615,7 @@
               <span class="notif-desc">When a spool drops below a set amount of filament</span>
             </div>
             <label class="toggle-switch">
-              <input type="checkbox" id="notif-spool-low-on" />
+              <input type="checkbox" id="notif-spool-low-on" role="switch" aria-label="Spool almost empty notifications" />
               <span class="toggle-slider"></span>
             </label>
           </div>
@@ -553,18 +632,18 @@
       <!-- Change password sub-page -->
       <div id="settings-change-password" style="display:none">
         <div class="settings-subpage-header">
-          <button id="btn-settings-back" class="settings-back-btn">
+          <button id="btn-settings-back" class="settings-back-btn" aria-label="Back to Settings" title="Back">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
           <h3>Change password</h3>
         </div>
         <label>
           New password
-          <input id="settings-new-password" type="password" placeholder="Min. 8 characters" />
+          <input id="settings-new-password" type="password" autocomplete="new-password" placeholder="Min. 8 characters" />
         </label>
         <label>
           Confirm password
-          <input id="settings-confirm-password" type="password" placeholder="Repeat password" />
+          <input id="settings-confirm-password" type="password" autocomplete="new-password" placeholder="Repeat password" />
         </label>
         <div class="modal-actions">
           <button id="btn-app-settings-save" class="btn btn-primary">Save</button>
@@ -584,12 +663,205 @@
     </div>
   </div>
 
+  <!-- System health modal -->
+  <div id="modal-system-health" class="modal">
+    <div class="modal-box modal-box-wide">
+      <h3>System health</h3>
+      <div id="system-health-body" class="health-body"></div>
+      <div class="modal-actions">
+        <button id="btn-backup-now" class="btn btn-secondary">Back up now</button>
+        <button id="btn-system-health-close" class="btn btn-primary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Queue job editor -->
+  <div id="modal-job" class="modal">
+    <div class="modal-box modal-box-wide">
+      <h3 id="job-modal-title">Add to queue</h3>
+      <p id="job-modal-file" class="job-modal-file"></p>
+      <label>
+        Name
+        <input id="job-input-name" type="text" maxlength="200" />
+      </label>
+      <label>
+        Printer
+        <select id="job-input-printer"></select>
+      </label>
+      <div class="print-opts-group">
+        <div class="print-opts-group-label">Build Plate</div>
+        <div class="print-plate-row">
+          <button id="job-plate-textured" type="button" class="btn btn-primary print-plate-btn">Textured (Side A)</button>
+          <button id="job-plate-smooth" type="button" class="btn btn-secondary print-plate-btn">Smooth (Side B)</button>
+        </div>
+      </div>
+      <div class="print-opts-group">
+        <div class="print-opts-group-label">Options</div>
+        <div class="print-opts-rows">
+          <div class="print-opts-row">
+            <span>Time-lapse</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="job-opt-timelapse" role="switch" aria-label="Time-lapse">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="print-opts-row">
+            <span>Heated Bed Leveling</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="job-opt-leveling" role="switch" aria-label="Heated bed leveling">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+      <label>
+        Notes
+        <textarea id="job-input-notes" rows="3" maxlength="2000" placeholder="Material, nozzle, anything to remember"></textarea>
+      </label>
+      <div id="job-upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
+      <div class="modal-actions">
+        <button id="btn-job-cancel" class="btn btn-secondary">Cancel</button>
+        <button id="btn-job-save" class="btn btn-primary">Add to queue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Slice model dialog -->
+  <div id="modal-slice" class="modal">
+    <div class="modal-box modal-box-wide">
+      <h3>Slice model</h3>
+      <p id="slice-modal-file" class="job-modal-file"></p>
+      <label>
+        Profile
+        <select id="slice-input-profile"></select>
+      </label>
+      <button id="btn-slice-new-profile" type="button" class="link-btn">Lock another stock profile…</button>
+      <div id="slice-profile-form" class="slice-profile-form" hidden>
+        <label>
+          Printer preset
+          <select id="slice-preset-machine"></select>
+        </label>
+        <label>
+          Process
+          <select id="slice-preset-process"></select>
+        </label>
+        <label>
+          Filament
+          <select id="slice-preset-filament"></select>
+        </label>
+        <div class="modal-actions">
+          <button id="btn-slice-lock-profile" type="button" class="btn btn-secondary btn-sm">Lock profile</button>
+        </div>
+      </div>
+      <div class="print-opts-group">
+        <div class="print-opts-group-label">Build Plate</div>
+        <div class="print-plate-row">
+          <button id="slice-plate-textured" type="button" class="btn btn-primary print-plate-btn">Textured (Side A)</button>
+          <button id="slice-plate-smooth" type="button" class="btn btn-secondary print-plate-btn">Smooth (Side B)</button>
+        </div>
+      </div>
+      <label>
+        Printer
+        <select id="slice-input-printer"></select>
+      </label>
+      <div class="print-opts-group">
+        <div class="print-opts-group-label">Options</div>
+        <div class="print-opts-rows">
+          <div class="print-opts-row">
+            <span>Time-lapse</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="slice-opt-timelapse" role="switch" aria-label="Time-lapse">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="print-opts-row">
+            <span>Heated Bed Leveling</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="slice-opt-leveling" role="switch" aria-label="Heated bed leveling">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+      <label>
+        Notes
+        <textarea id="slice-input-notes" rows="2" maxlength="2000" placeholder="Material, purpose, anything to remember"></textarea>
+      </label>
+      <p id="slice-unavailable" class="job-error" hidden></p>
+      <div id="slice-upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
+      <div class="modal-actions">
+        <button id="btn-slice-cancel" class="btn btn-secondary">Cancel</button>
+        <button id="btn-slice-save" class="btn btn-primary">Upload &amp; slice</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Job review: toolpath preview + preflight checks -->
+  <div id="modal-review" class="modal">
+    <div class="modal-box review-box">
+      <div class="review-header">
+        <div class="review-heading">
+          <h3 id="review-title">Review job</h3>
+          <p id="review-subtitle" class="job-modal-file"></p>
+        </div>
+        <span id="review-status" class="status-badge idle">Checking…</span>
+      </div>
+      <div class="review-body">
+        <div class="review-preview">
+          <canvas id="review-canvas" width="560" height="560" aria-label="Toolpath preview"></canvas>
+          <div id="review-view-toggle" class="review-view-toggle">
+            <button id="review-view-3d" type="button" class="btn btn-secondary btn-sm">3D</button>
+            <button id="review-view-layer" type="button" class="btn btn-secondary btn-sm">Layer</button>
+          </div>
+          <div id="review-layer-row" class="review-layer-row">
+            <input id="review-layer" type="range" min="0" max="0" value="0" aria-label="Layer" />
+            <span id="review-layer-label"></span>
+          </div>
+          <div id="review-legend" class="review-legend"></div>
+          <p id="review-no-preview" class="queue-empty" hidden>No toolpath preview — this file is stored on the printer.</p>
+        </div>
+        <div class="review-checks">
+          <label>
+            Printer
+            <select id="review-printer"></select>
+          </label>
+          <div id="review-summary" class="review-summary"></div>
+          <ul id="review-check-list" class="review-check-list"></ul>
+          <div id="review-nozzle" class="review-nozzle" hidden>
+            <span>Installed nozzle</span>
+            <select id="review-nozzle-size">
+              <option value="0.2">0.2 mm</option>
+              <option value="0.4" selected>0.4 mm</option>
+              <option value="0.6">0.6 mm</option>
+              <option value="0.8">0.8 mm</option>
+            </select>
+            <button id="btn-review-nozzle-save" type="button" class="btn btn-secondary btn-sm">Save</button>
+          </div>
+        </div>
+      </div>
+      <label class="review-ack">
+        <input type="checkbox" id="review-ack" />
+        <span id="review-ack-text">The build plate is clear and the right filament is loaded</span>
+      </label>
+      <div class="modal-actions">
+        <button id="btn-review-close" class="btn btn-secondary">Close</button>
+        <button id="btn-review-recheck" class="btn btn-secondary">Check again</button>
+        <button id="btn-review-start" class="btn btn-primary" disabled>Start print</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast notifications -->
   <div id="toast-area"></div>
 
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   <script src="/config.js"></script>
-  <script src="app.js?v=42"></script>
+  <script src="health.js?v=1"></script>
+  <script src="jobs.js?v=4"></script>
+  <script src="slices.js?v=1"></script>
+  <script src="preview.js?v=1"></script>
+  <script src="history.js?v=2"></script>
+  <script src="app.js?v=62"></script>
   <script>
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});

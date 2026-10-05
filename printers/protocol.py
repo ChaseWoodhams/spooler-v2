@@ -16,8 +16,30 @@ CMD_RESUME       = 131
 CMD_LIST_FILES   = 258
 CMD_DELETE_FILES = 259
 CMD_CAMERA       = 386
+CMD_MOVE_AXES    = 401
+CMD_HOME_AXES    = 402
 CMD_LIGHT        = 403
 CMD_CANVAS       = 324
+
+# ── PrintInfo.Status (CC1 values; the other backends report the same codes) ─────
+
+PRINT_IDLE      = 0
+PRINT_STOPPING  = 7
+PRINT_COMPLETE  = 9
+PRINT_CANCELLED = frozenset({8, 14})
+PRINT_ENDED     = frozenset({PRINT_IDLE, PRINT_COMPLETE, *PRINT_CANCELLED})
+PRINT_WORKING   = frozenset({1, 2, 3, 4, 5, 6, 10, 12, 13, 15, 16, 18, 19, 20, 21})
+
+
+def classify_print_end(code: int, layer: int = 0, total_layers: int = 0) -> tuple:
+    """(outcome, detail) for a print whose status has moved to one of PRINT_ENDED."""
+    if code == PRINT_COMPLETE:
+        return "completed", None
+    if code in PRINT_CANCELLED:
+        return "cancelled", "Print stopped"
+    if total_layers and layer >= total_layers:
+        return "completed", None
+    return "unknown", "The printer went idle without reporting how the print ended"
 
 
 def make_msg(cmd: int, data: dict, mainboard_id: str = "") -> dict:

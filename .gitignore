@@ -5,3 +5,6 @@ printers.json
 history.json
 /tmp/
 .env
+.venv/
+data/
+spooler.*.log

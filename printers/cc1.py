@@ -5,6 +5,7 @@ CC1 printer connection via WebSocket (SDCP protocol).
 import asyncio
 import json
 import re
+import time
 
 import state
 from printers.base import PrinterConnection
@@ -20,6 +21,7 @@ except ImportError:
     from websockets.client import connect as ws_connect
 
 PRINTER_PORT = 3030
+CAMERA_ENABLE_MIN_INTERVAL_S = 3  # collapse bursts of re-enable requests into one command
 
 _TIME_RE = re.compile(r'_(?:(\d+)h)?(\d+)m(?:(\d+)s)?\.[^.]+$')
 
@@ -42,6 +44,18 @@ class CC1Connection(PrinterConnection):
         self._cached_filename     = ""
         self._prev_active_tray_id = -2   # sentinel: not yet seen
         self._canvas_poll_task    = None
+        self._camera_enabled_at   = 0.0
+
+    async def enable_camera(self) -> bool:
+        # CC1 firmware switches its video feed off at some print-state changes (notably
+        # print start), leaving /video answering 500 until the camera is re-enabled.
+        now = time.monotonic()
+        if now - self._camera_enabled_at < CAMERA_ENABLE_MIN_INTERVAL_S:
+            return True
+        sent = await self.send_cmd(CMD_CAMERA, {"Enable": True})
+        if sent:
+            self._camera_enabled_at = now
+        return sent
 
     async def connect(self) -> None:
         self._prev_active_tray_id = -2
@@ -56,12 +70,14 @@ class CC1Connection(PrinterConnection):
             await self._broadcast_state()
             await self.send_cmd(CMD_ATTRS, {})
             await self.send_cmd(CMD_STATUS, {})
-            await self.send_cmd(CMD_CAMERA, {"Enable": True})
+            self._camera_enabled_at = 0.0
+            await self.enable_camera()
             await self.send_cmd(CMD_CANVAS, {})
             loop = asyncio.get_running_loop()
             loop.run_in_executor(None, self._sync_spoolman_locations)
         except Exception as e:
             print(f"[Printer {self.name}] Connection failed: {e}")
+            self.last_error = f"Connection failed: {e}"
             self.connected = False
             await self._broadcast_state()
             return
@@ -70,8 +86,10 @@ class CC1Connection(PrinterConnection):
         try:
             async for raw in self.ws:
                 await self._handle_message(raw)
+            self.last_error = self.last_error or "Printer closed the connection"
         except Exception as e:
             print(f"[Printer {self.name}] Disconnected: {e}")
+            self.last_error = self.last_error or f"Disconnected: {e}"
         finally:
             if self._canvas_poll_task:
                 self._canvas_poll_task.cancel()
@@ -87,6 +105,15 @@ class CC1Connection(PrinterConnection):
         while True:
             await asyncio.sleep(20)
             if not self.connected:
+                break
+            if self.link_is_stale():
+                # A half-open TCP link (printer rebooted, Wi-Fi dropped) never errors on its own;
+                # closing it ends the receive loop so start() reconnects.
+                silent = self.link_silence_s()
+                print(f"[Printer {self.name}] No data for {silent:.0f} s — dropping stale connection")
+                self.last_error = f"No response from printer for {silent:.0f} s"
+                if self.ws:
+                    await self.ws.close()
                 break
             await self.send_cmd(CMD_STATUS, {})
             if self.status.get("AmsConnectStatus"):
@@ -142,6 +169,7 @@ class CC1Connection(PrinterConnection):
             print(f"[Printer {self.name}] Active tray changed → {active_tray}, spool {spool_id}")
 
     async def _handle_message(self, raw: str) -> None:
+        self._note_activity()
         try:
             msg = json.loads(raw)
         except Exception:
@@ -157,6 +185,8 @@ class CC1Connection(PrinterConnection):
                 pi_decoded = decode_printinfo(self.status["PrintInfo"])
                 if not pi_decoded.get("Filename"):
                     self.status["PrintInfo"]["Filename"] = self._cached_filename
+            if self._decoded_printinfo().get("Status") != self._last_print_status:
+                await self.enable_camera()
             await self._check_print_transition()
             await self._broadcast_state()
             return

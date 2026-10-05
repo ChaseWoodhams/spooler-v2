@@ -5,7 +5,8 @@ const WS_URL  = location.protocol === "https:"
   ? `wss://${location.hostname}:${window.SPOOLER_WSS_PORT ?? 8766}`
   : `ws://${location.hostname}:${window.SPOOLER_WS_PORT ?? 8765}`;
 const SPOOLMAN_URL = "/api/spoolman/api/v1";
-const RECONNECT_DELAY = 3000;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS  = 15000;
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 (function () {
@@ -26,7 +27,6 @@ window.fetch = async function(url, options) {
 
 let ws       = null;
 let printers = {}; // id → printer data
-let history  = []; // print history log
 let spools   = []; // spool inventory from Spoolman
 let trayMap  = {}; // printer_id → { tray_id_str → spoolman_spool_id }
 let _prevActiveTray = {}; // printer_id → last seen active_tray_id
@@ -53,6 +53,8 @@ let currentPickerTrayId    = null; // non-null → picker is in tray-link mode
 let _currentFilePrinterId  = null;
 let _currentFileList       = []; // cached file objects for the open file browser
 let _materialDensityMap = {}; // material name → density g/cm³
+let _activePrinterId = null;
+let _detailJogStep = 1;
 
 // ─── Filament metadata (brands + materials from SpoolmanDB) ───────────────────
 async function loadFilamentMeta() {
@@ -92,13 +94,22 @@ async function loadFilamentMeta() {
 }
 
 // ─── WebSocket connection ──────────────────────────────────────────────────────
+let _wsConnected = false;
+let _wsAttempts  = 0;  // consecutive closed/failed connections since the last success
+let _wsRetryAt   = 0;
+
 function connect() {
   ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
     console.log("[WS] Connected");
+    _wsConnected = true;
+    _wsAttempts = 0;
+    renderSystemHealth();
     send({ action: "list_printers" });
     loadHistory();
+    loadJobs();
+    loadSlicer();
     fetchSpools();
   };
 
@@ -112,8 +123,15 @@ function connect() {
 
   ws.onclose = (ev) => {
     if (ev.code === 1008) { location.replace("/login"); return; }
-    console.warn("[WS] Disconnected, retrying…");
-    setTimeout(connect, RECONNECT_DELAY);
+    _wsConnected = false;
+    _wsAttempts++;
+    // Back off while Spooler is down (e.g. restarting) instead of hammering it every few seconds
+    const base  = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** (_wsAttempts - 1));
+    const delay = Math.round(base * (0.8 + Math.random() * 0.4));
+    _wsRetryAt = Date.now() + delay;
+    console.warn(`[WS] Disconnected, retrying in ${delay} ms…`);
+    renderSystemHealth();
+    setTimeout(connect, delay);
   };
 
   ws.onerror = () => ws.close();
@@ -128,9 +146,23 @@ function send(obj) {
 // ─── Message handling ──────────────────────────────────────────────────────────
 function handleMessage(msg) {
   switch (msg.type) {
+    case "system_status":
+      applySystemStatus(msg.status);
+      break;
+    case "jobs":
+      applyJobs(msg.jobs);
+      break;
+    case "slices":
+      applySlices(msg.slices);
+      break;
     case "printer_update":
+      const linkChanged = printers[msg.printer.id]?.connected !== msg.printer.connected;
       printers[msg.printer.id] = msg.printer;
+      if (linkChanged) renderSystemHealth();
+      refreshQueueSoon();  // live progress and start availability in the queue panel
       renderPrinter(msg.printer);
+      if (_activePrinterId === msg.printer.id) renderPrinterDetail(msg.printer);
+      else if (location.hash === `#printer=${encodeURIComponent(msg.printer.id)}`) _showPrinterDashboard(msg.printer.id);
       syncEmptyState();
       _checkActiveTrayChange(msg.printer);
       break;
@@ -138,6 +170,7 @@ function handleMessage(msg) {
       delete printers[msg.printer_id];
       const el = document.getElementById(`card-${CSS.escape(msg.printer_id)}`);
       if (el) el.remove();
+      if (_activePrinterId === msg.printer_id) closePrinterDashboard();
       syncEmptyState();
       break;
     case "info":
@@ -146,10 +179,8 @@ function handleMessage(msg) {
     case "error":
       toast(msg.message, true);
       break;
-    case "history_entry":
-      history.unshift(msg.entry);
-      renderHistory();
-      toast(`Print logged: ${msg.entry.filament_g}g used`);
+    case "print_recorded":
+      onPrintRecorded(msg.print);
       break;
     case "spool_empty":
       spools = spools.map(s => s.id === msg.spool.id ? msg.spool : s);
@@ -316,6 +347,63 @@ function tempColor(t) {
   return "cool";
 }
 
+// ─── Camera stream watchdog ───────────────────────────────────────────────────
+// An MJPEG <img> fires no event when its stream ends or stalls — it just keeps the
+// last frame (CC1 firmware drops its feed at print start). Sample each feed's pixels
+// and reconnect any whose picture hasn't changed for CAMERA_STALL_MS.
+const CAMERA_STALL_MS = 20000;
+const CAMERA_CHECK_MS = 5000;
+const _cameraProbe = document.createElement("canvas");
+_cameraProbe.width = 16;
+_cameraProbe.height = 12;
+const _cameraProbeCtx = _cameraProbe.getContext("2d", { willReadFrequently: true });
+
+function _cameraSignature(img) {
+  if (!img.complete || !img.naturalWidth) return null;
+  try {
+    _cameraProbeCtx.drawImage(img, 0, 0, _cameraProbe.width, _cameraProbe.height);
+    const px = _cameraProbeCtx.getImageData(0, 0, _cameraProbe.width, _cameraProbe.height).data;
+    let h = 2166136261;
+    for (let i = 0; i < px.length; i++) h = Math.imul(h ^ px[i], 16777619);
+    return h >>> 0;
+  } catch {
+    return null;
+  }
+}
+
+function _watchCameraStream(img, url) {
+  img.dataset.cameraSrc = url;
+  if (img._camCheckedAt == null) {
+    img._camSig = null;
+    img._camChangedAt = Date.now();
+    img._camCheckedAt = Date.now();
+  }
+}
+
+function _restartCameraStream(img) {
+  img._camSig = null;
+  img._camChangedAt = Date.now();
+  img.style.display = "";
+  img.src = `${img.dataset.cameraSrc}?t=${Date.now()}`;
+}
+
+setInterval(() => {
+  if (document.hidden) return;
+  const now = Date.now();
+  for (const img of document.querySelectorAll("img[data-camera-src]")) {
+    // Time spent hidden or detached doesn't count as a stall.
+    if (now - img._camCheckedAt > CAMERA_CHECK_MS * 2) img._camChangedAt = now;
+    img._camCheckedAt = now;
+    const sig = _cameraSignature(img);
+    if (sig !== null && sig !== img._camSig) {
+      img._camSig = sig;
+      img._camChangedAt = now;
+    } else if (now - img._camChangedAt > CAMERA_STALL_MS) {
+      _restartCameraStream(img);
+    }
+  }
+}, CAMERA_CHECK_MS);
+
 // ─── Rendering ─────────────────────────────────────────────────────────────────
 function renderPrinter(printer) {
   const grid = document.getElementById("printer-grid");
@@ -328,6 +416,18 @@ function renderPrinter(printer) {
     card.id = cardId;
     grid.appendChild(card);
   }
+  card.classList.add("printer-card-interactive");
+  card.tabIndex = 0;
+  card.setAttribute("aria-label", `Open controls for ${printer.name}`);
+  card.onclick = (event) => {
+    if (!event.target.closest("button, input, select, a, label")) openPrinterDashboard(printer.id);
+  };
+  card.onkeydown = (event) => {
+    if ((event.key === "Enter" || event.key === " ") && event.target === card) {
+      event.preventDefault();
+      openPrinterDashboard(printer.id);
+    }
+  };
 
   const status   = getPrintStatus(printer);
   const sc       = statusClass(status);
@@ -350,7 +450,7 @@ function renderPrinter(printer) {
   const filamentG  = printer.filament_g  ?? 0;
   const lightOn    = getLightOn(printer);
 
-  const cameraUrl = printer.connected && printer.camera_url
+  const cameraUrl = _activePrinterId !== printer.id && printer.connected && printer.camera_url
     ? `/api/camera/${encodeURIComponent(printer.id)}`
     : null;
 
@@ -367,6 +467,12 @@ function renderPrinter(printer) {
         <div class="card-subtitle">${escHtml(printer.ip)}${printer.attrs?.FirmwareVersion ? ` · fw ${escHtml(printer.attrs.FirmwareVersion)}` : ""}</div>
       </div>
       <span class="status-badge ${sc}">${status}</span>
+      <button class="card-files-btn" onclick="openPrinterDashboard('${escAttr(printer.id)}')" title="Open printer controls" aria-label="Open printer controls">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/>
+          <path d="M1 14h6M9 8h6M17 16h6"/>
+        </svg>
+      </button>
       <button class="card-files-btn" onclick="openFileBrowser('${escAttr(printer.id)}')" title="Browse files">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -514,7 +620,9 @@ function renderPrinter(printer) {
       <div class="controls-spacer"></div>
       <button class="btn btn-sm ${lightOn ? "btn-primary" : "btn-secondary"}"
               onclick="printerAction('${escAttr(printer.id)}','${lightOn ? "light_off" : "light_on"}')"
-              title=""
+              title="${lightOn ? "Turn chamber light off" : "Turn chamber light on"}"
+              aria-label="${escAttr(`${lightOn ? "Turn chamber light off" : "Turn chamber light on"} – ${printer.name}`)}"
+              aria-pressed="${lightOn}"
               ${!connected ? "disabled" : ""}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="5"/>
@@ -554,19 +662,295 @@ function renderPrinter(printer) {
       img.src = cameraUrl;
       img.alt = 'Camera feed';
       img._connected = connected;
-      img.addEventListener('load',  () => { placeholder.style.display = 'none'; });
-      img.addEventListener('error', () => { img.style.display = 'none'; placeholder.style.display = 'flex'; });
+      img.addEventListener('load',  () => { img.parentElement?.querySelector('.camera-placeholder')?.style.setProperty('display', 'none'); });
+      img.addEventListener('error', () => { img.style.display = 'none'; img.parentElement?.querySelector('.camera-placeholder')?.style.setProperty('display', 'flex'); });
+      _watchCameraStream(img, cameraUrl);
       cameraDiv.insertBefore(img, cameraDiv.firstChild);
     }
   }
+}
+
+function _printerCoords(printer) {
+  const raw = printer.status?.CurrenCoord ?? printer.status?.CurrentCoord;
+  const values = Array.isArray(raw) ? raw : String(raw || "").split(",");
+  const nums = values.slice(0, 3).map(value => Number.parseFloat(value));
+  return {
+    x: Number.isFinite(nums[0]) ? nums[0] : null,
+    y: Number.isFinite(nums[1]) ? nums[1] : null,
+    z: Number.isFinite(nums[2]) ? nums[2] : null,
+  };
+}
+
+function _coordText(value) {
+  return value == null ? "--" : value.toFixed(2);
+}
+
+function _fanSpeed(printer, key) {
+  const value = printer.status?.CurrentFanSpeed?.[key];
+  return Number.isFinite(Number(value)) ? Math.max(0, Math.min(100, Math.round(Number(value)))) : 0;
+}
+
+function openPrinterDashboard(printerId) {
+  if (!printers[printerId]) return;
+  const nextHash = `#printer=${encodeURIComponent(printerId)}`;
+  if (location.hash !== nextHash) location.hash = nextHash;
+  else _showPrinterDashboard(printerId);
+}
+
+function _showPrinterDashboard(printerId) {
+  const printer = printers[printerId];
+  if (!printer) return;
+  const previousPrinterId = _activePrinterId;
+  if (previousPrinterId && previousPrinterId !== printerId && printers[previousPrinterId]) {
+    _activePrinterId = null;
+    renderPrinter(printers[previousPrinterId]);
+  }
+  _activePrinterId = printerId;
+  document.getElementById("empty-state").style.display = "none";
+  document.getElementById("printer-grid").style.display = "none";
+  const detail = document.getElementById("printer-detail");
+  detail.hidden = false;
+  renderPrinterDetail(printer);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function closePrinterDashboard() {
+  const previousPrinterId = _activePrinterId;
+  _activePrinterId = null;
+  document.getElementById("printer-detail").hidden = true;
+  if (previousPrinterId && printers[previousPrinterId]) renderPrinter(printers[previousPrinterId]);
+  syncEmptyState();
+}
+
+function returnToPrinterGrid() {
+  if (location.hash.startsWith("#printer=")) location.hash = "";
+  else closePrinterDashboard();
+}
+
+function _syncPrinterRoute() {
+  if (!location.hash.startsWith("#printer=")) {
+    closePrinterDashboard();
+    return;
+  }
+  const printerId = decodeURIComponent(location.hash.slice("#printer=".length));
+  if (printers[printerId]) _showPrinterDashboard(printerId);
+}
+
+window.addEventListener("hashchange", _syncPrinterRoute);
+
+function renderPrinterDetail(printer) {
+  const detail = document.getElementById("printer-detail");
+  if (_activePrinterId !== printer.id || detail.hidden) return;
+
+  const activeInput = detail.contains(document.activeElement) ? document.activeElement : null;
+  const activeInputId = activeInput?.id;
+  const activeInputValue = activeInput?.value;
+  const detailCamera = detail.querySelector(".detail-camera img");
+  const previousCamera = (detailCamera?.dataset.printerId === printer.id ? detailCamera : null) ||
+    document.querySelector(`#card-${CSS.escape(printer.id)} .card-camera img`);
+  const status = getPrintStatus(printer);
+  const sc = statusClass(status);
+  const connected = printer.connected;
+  const idle = status === "idle";
+  const controlsEnabled = connected && idle && printer.printer_type === "cc1";
+  const coords = _printerCoords(printer);
+  const nozzle = Number(printer.status?.TempOfNozzle ?? printer.status?.NozzleTemp ?? 0);
+  const nozzleTarget = Number(printer.status?.TempTargetNozzle ?? printer.status?.NozzleTempTarget ?? 0);
+  const bed = Number(printer.status?.TempOfHotbed ?? printer.status?.BedTemp ?? 0);
+  const bedTarget = Number(printer.status?.TempTargetHotbed ?? printer.status?.BedTempTarget ?? 0);
+  const chamber = Number(printer.status?.TempOfBox ?? printer.status?.ChamberTemp ?? 0);
+  const modelFan = _fanSpeed(printer, "ModelFan");
+  const auxiliaryFan = _fanSpeed(printer, "AuxiliaryFan");
+  const chamberFan = _fanSpeed(printer, "BoxFan");
+  const lightOn = getLightOn(printer);
+  const printing = isActivelyPrinting(printer);
+  const paused = isPaused(printer);
+  const detailProgress = getProgress(printer);
+  const detailFilename = getFilename(printer);
+  const detailRemaining = Number(printer.status?.PrintInfo?.RemainTime ?? 0);
+  const speed = Number(printer.status?.PrintInfo?.PrintSpeedPct ?? 100);
+  const cameraUrl = connected && printer.camera_url ? `/api/camera/${encodeURIComponent(printer.id)}` : null;
+  const disableMotion = controlsEnabled ? "" : "disabled";
+  const disableConnected = connected && printer.printer_type === "cc1" ? "" : "disabled";
+  const stepButton = value => `<button class="detail-step ${_detailJogStep === value ? "active" : ""}" aria-pressed="${_detailJogStep === value}" onclick="setJogStep(${value})">${value} mm</button>`;
+  const fanControl = (key, label, value) => `
+    <div class="detail-control-row">
+      <div class="detail-control-label"><span>${label}</span><strong id="detail-${key}-value">${value}%</strong></div>
+      <input class="detail-slider" type="range" min="0" max="100" step="5" value="${value}" aria-label="${label}"
+             oninput="document.getElementById('detail-${key}-value').textContent=this.value+'%'"
+             onchange="setPrinterFan('${escAttr(printer.id)}','${key}',+this.value)" ${disableConnected}>
+    </div>`;
+
+  detail.innerHTML = `
+    <div class="detail-nav">
+      <button class="detail-back" onclick="returnToPrinterGrid()" aria-label="Back to all printers">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
+        All printers
+      </button>
+      <div class="detail-nav-title">
+        <div class="status-dot ${sc}"></div>
+        <div><h1>${escHtml(printer.name)}</h1><p>${escHtml(printer.ip)}${printer.attrs?.FirmwareVersion ? ` · firmware ${escHtml(printer.attrs.FirmwareVersion)}` : ""}</p></div>
+      </div>
+      <span class="status-badge ${sc}">${status}</span>
+    </div>
+
+    <div class="detail-layout">
+      <div class="detail-column">
+        <section class="detail-panel detail-motion-panel">
+          <div class="detail-panel-heading"><div><span class="detail-eyebrow">Motion</span><h2>Printer control</h2></div><span class="detail-safety ${controlsEnabled ? "ready" : ""}">${controlsEnabled ? "Ready to move" : connected ? `Locked while ${status}` : "Printer offline"}</span></div>
+          <div class="detail-coordinates">
+            <div><span>X</span><strong>${_coordText(coords.x)}</strong><small>mm</small></div>
+            <div><span>Y</span><strong>${_coordText(coords.y)}</strong><small>mm</small></div>
+            <div><span>Z</span><strong>${_coordText(coords.z)}</strong><small>mm</small></div>
+          </div>
+          <div class="detail-step-picker" role="group" aria-label="Jog distance">${[0.1, 1, 10].map(stepButton).join("")}</div>
+          <div class="motion-layout">
+            <div class="z-jog">
+              <button onclick="jogPrinter('${escAttr(printer.id)}','Z',1)" ${disableMotion} title="Move Z positive">Z+</button>
+              <button class="motion-home" onclick="homePrinter('${escAttr(printer.id)}','Z')" ${disableMotion} title="Home Z" aria-label="Home Z">⌂</button>
+              <button onclick="jogPrinter('${escAttr(printer.id)}','Z',-1)" ${disableMotion} title="Move Z negative">Z−</button>
+            </div>
+            <div class="xy-jog" role="group" aria-label="X and Y movement controls">
+              <button class="jog-y-plus" onclick="jogPrinter('${escAttr(printer.id)}','Y',1)" ${disableMotion} title="Move Y positive">Y+</button>
+              <button class="jog-x-minus" onclick="jogPrinter('${escAttr(printer.id)}','X',-1)" ${disableMotion} title="Move X negative">X−</button>
+              <button class="motion-home jog-home" onclick="homePrinter('${escAttr(printer.id)}','XY')" ${disableMotion} title="Home X and Y" aria-label="Home X and Y">⌂</button>
+              <button class="jog-x-plus" onclick="jogPrinter('${escAttr(printer.id)}','X',1)" ${disableMotion} title="Move X positive">X+</button>
+              <button class="jog-y-minus" onclick="jogPrinter('${escAttr(printer.id)}','Y',-1)" ${disableMotion} title="Move Y negative">Y−</button>
+            </div>
+            <div class="home-stack">
+              <button onclick="homePrinter('${escAttr(printer.id)}','X')" ${disableMotion}>Home X</button>
+              <button onclick="homePrinter('${escAttr(printer.id)}','Y')" ${disableMotion}>Home Y</button>
+              <button class="home-all" onclick="homePrinter('${escAttr(printer.id)}','XYZ')" ${disableMotion}>Home all</button>
+            </div>
+          </div>
+          <p class="detail-help">Motion controls are locked whenever a print is active. Start with 0.1 mm or 1 mm and keep the chamber clear.</p>
+        </section>
+
+        <section class="detail-panel detail-environment-panel">
+          <div class="detail-panel-heading"><div><span class="detail-eyebrow">Airflow & light</span><h2>Environment</h2></div></div>
+          <div class="fan-grid">
+            ${fanControl("model", "Model fan", modelFan)}
+            ${fanControl("auxiliary", "Side fan", auxiliaryFan)}
+            ${fanControl("chamber", "Chamber fan", chamberFan)}
+            <div class="detail-light-control">
+              <span>Chamber lighting</span>
+              <button class="detail-toggle ${lightOn ? "active" : ""}" onclick="printerAction('${escAttr(printer.id)}','${lightOn ? "light_off" : "light_on"}')" ${connected ? "" : "disabled"} aria-pressed="${lightOn}" aria-label="Chamber lighting"><span></span></button>
+            </div>
+          </div>
+          <div class="detail-speed-row">
+            <div class="detail-control-label"><span>Print speed</span><strong id="detail-speed-value">${speed}%</strong></div>
+            <input class="detail-slider" type="range" min="10" max="200" step="5" value="${speed}" aria-label="Print speed"
+                   ${printing || paused ? "" : 'title="Available while a print is running"'}
+                   oninput="document.getElementById('detail-speed-value').textContent=this.value+'%'"
+                   onchange="setSpeed('${escAttr(printer.id)}',+this.value)" ${printing || paused ? "" : "disabled"}>
+          </div>
+        </section>
+
+      </div>
+
+      <div class="detail-column detail-column-monitor">
+        <section class="detail-panel detail-camera-panel">
+          <div class="detail-panel-heading"><div><span class="detail-eyebrow">Live view</span><h2>Monitoring</h2></div><span class="live-chip${cameraUrl ? "" : " offline"}" id="detail-live-chip">${cameraUrl ? "● Live" : "○ No signal"}</span></div>
+          <div class="detail-camera"><div class="camera-placeholder" style="display:flex"><span>${connected ? "Camera unavailable" : "Printer offline"}</span></div></div>
+        </section>
+
+        <section class="detail-panel detail-temperature-panel">
+          <div class="detail-panel-heading"><div><span class="detail-eyebrow">Thermal</span><h2>Temperature</h2></div></div>
+          <div class="detail-temperature-list">
+            <div class="detail-temperature-row"><div><span>Nozzle</span><strong class="${tempColor(nozzle)}">${nozzle.toFixed(1)} °C</strong></div><div class="temperature-target"><input id="detail-nozzle-target" type="number" min="0" max="300" value="${Math.round(nozzleTarget)}" aria-label="Nozzle target temperature (°C)" ${disableConnected}><span>°C</span><button onclick="setPrinterTemperature('${escAttr(printer.id)}','nozzle','detail-nozzle-target')" aria-label="Apply nozzle target" ${disableConnected}>Apply</button></div></div>
+            <div class="detail-temperature-row"><div><span>Heated bed</span><strong class="${tempColor(bed)}">${bed.toFixed(1)} °C</strong></div><div class="temperature-target"><input id="detail-bed-target" type="number" min="0" max="110" value="${Math.round(bedTarget)}" aria-label="Heated bed target temperature (°C)" ${disableConnected}><span>°C</span><button onclick="setPrinterTemperature('${escAttr(printer.id)}','bed','detail-bed-target')" aria-label="Apply heated bed target" ${disableConnected}>Apply</button></div></div>
+            <div class="detail-temperature-row"><div><span>Chamber</span><strong class="${tempColor(chamber)}">${chamber.toFixed(1)} °C</strong></div><span class="temperature-readonly">Sensor only</span></div>
+          </div>
+          <p class="detail-help">Set a target to 0 °C to turn that heater off.</p>
+        </section>
+
+        <section class="detail-panel detail-files-panel">
+          <div class="detail-panel-heading"><div><span class="detail-eyebrow">Jobs</span><h2>Printer files</h2></div><button class="btn btn-primary" onclick="openFileBrowser('${escAttr(printer.id)}')">Browse & start print</button></div>
+          <p class="detail-help">Select a file already on this printer, review its print options, and start it from the existing protected workflow.</p>
+          ${(printing || paused) ? `
+            <div class="detail-active-job">
+              <div class="detail-active-job-heading">
+                <div><span class="detail-job-label">Current print</span><strong title="${escAttr(detailFilename)}">${escHtml(detailFilename || "Print in progress")}</strong></div>
+                <span class="detail-job-state ${paused ? "paused" : "printing"}">${paused ? "Paused" : "Printing"}</span>
+              </div>
+              <div class="detail-job-progress" role="progressbar" aria-label="Print progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${detailProgress ?? 0}"><span style="width:${detailProgress ?? 0}%"></span></div>
+              <div class="detail-job-meta"><span>${detailProgress == null ? "Progress unavailable" : `${detailProgress}% complete`}</span><span>${detailRemaining > 0 ? `${formatTime(detailRemaining)} remaining` : "Time remaining unavailable"}</span></div>
+            </div>
+            <div class="detail-job-actions">
+              ${printing ? `<button class="btn btn-secondary detail-job-primary" onclick="printerAction('${escAttr(printer.id)}','pause')">Pause print</button>` : `<button class="btn btn-primary detail-job-primary" onclick="printerAction('${escAttr(printer.id)}','resume')">Resume print</button>`}
+              <button class="btn btn-danger detail-job-stop" onclick="confirmStop('${escAttr(printer.id)}')">Stop print</button>
+            </div>` : ""}
+        </section>
+      </div>
+    </div>`;
+
+  const camera = detail.querySelector(".detail-camera");
+  const placeholder = camera.querySelector(".camera-placeholder");
+  if (cameraUrl) {
+    const img = previousCamera || document.createElement("img");
+    if (!previousCamera || img.dataset.printerId !== printer.id) img.src = cameraUrl;
+    img.alt = `${printer.name} camera feed`;
+    img.dataset.printerId = printer.id;
+    _watchCameraStream(img, cameraUrl);
+    const chip = detail.querySelector("#detail-live-chip");
+    const setLive = state => {   // "live" | "connecting" | "off"
+      chip.textContent = state === "live" ? "● Live" : state === "connecting" ? "○ Connecting…" : "○ No signal";
+      chip.classList.toggle("offline", state !== "live");
+    };
+    setLive("connecting");
+    img.addEventListener("load", () => { placeholder.style.display = "none"; setLive("live"); }, { once: true });
+    img.addEventListener("error", () => { img.style.display = "none"; placeholder.style.display = "flex"; setLive("off"); }, { once: true });
+    camera.insertBefore(img, camera.firstChild);
+    if (img.naturalWidth) { placeholder.style.display = "none"; setLive("live"); }
+  }
+
+  if (activeInputId) {
+    const restored = document.getElementById(activeInputId);
+    if (restored) {
+      restored.value = activeInputValue;
+      restored.focus();
+    }
+  }
+}
+
+function setJogStep(step) {
+  _detailJogStep = step;
+  if (_activePrinterId && printers[_activePrinterId]) renderPrinterDetail(printers[_activePrinterId]);
+}
+
+function jogPrinter(printerId, axis, direction) {
+  send({ action: "move_axis", printer_id: printerId, axis, step: _detailJogStep * direction });
+}
+
+function homePrinter(printerId, axis) {
+  const label = axis === "XYZ" ? "all axes" : axis === "XY" ? "the X and Y axes" : `the ${axis} axis`;
+  if (!confirm(`Home ${label}? Make sure the build chamber is clear before continuing.`)) return;
+  send({ action: "home_axes", printer_id: printerId, axis });
+}
+
+function setPrinterFan(printerId, fan, speed) {
+  send({ action: "set_fan", printer_id: printerId, fan, speed });
+}
+
+function setPrinterTemperature(printerId, target, inputId) {
+  const input = document.getElementById(inputId);
+  if (!input || input.value === "") return;
+  const value = Number(input.value);
+  if (value > 0 && !confirm(`Set the ${target} target to ${value} °C?`)) return;
+  send({ action: "set_temperature", printer_id: printerId, target, value });
 }
 
 function syncEmptyState() {
   const empty = document.getElementById("empty-state");
   const grid  = document.getElementById("printer-grid");
   const has   = Object.keys(printers).length > 0;
-  empty.style.display = has ? "none" : "";
-  grid.style.display  = has ? ""     : "none";
+  if (_activePrinterId) {
+    empty.style.display = "none";
+    grid.style.display = "none";
+  } else {
+    empty.style.display = has ? "none" : "";
+    grid.style.display  = has ? ""     : "none";
+  }
 }
 
 // ─── User actions ──────────────────────────────────────────────────────────────
@@ -582,6 +966,7 @@ function printerAction(id, action) {
   if (action === "light_on" || action === "light_off") {
     _lightPending[id] = { on: action === "light_on", until: Date.now() + 3000 };
     if (printers[id]) renderPrinter(printers[id]);
+    if (_activePrinterId === id && printers[id]) renderPrinterDetail(printers[id]);
   }
   send({ action, printer_id: id });
 }
@@ -647,6 +1032,95 @@ async function signOut() {
 }
 document.getElementById("btn-signout")?.addEventListener("click", signOut);
 document.getElementById("btn-signout-nav")?.addEventListener("click", signOut);
+
+const mobileMoreButton = document.getElementById("btn-mobile-more");
+const mobileMoreMenu = document.getElementById("mobile-more-menu");
+function closeMobileMore() {
+  if (!mobileMoreMenu || !mobileMoreButton) return;
+  mobileMoreMenu.hidden = true;
+  mobileMoreButton.setAttribute("aria-expanded", "false");
+}
+mobileMoreButton?.addEventListener("click", event => {
+  event.stopPropagation();
+  const opening = mobileMoreMenu.hidden;
+  mobileMoreMenu.hidden = !opening;
+  mobileMoreButton.setAttribute("aria-expanded", String(opening));
+});
+document.getElementById("btn-printers-nav")?.addEventListener("click", returnToPrinterGrid);
+document.getElementById("btn-mobile-history")?.addEventListener("click", () => {
+  closeMobileMore();
+  mobileMoreButton?.focus();
+  document.getElementById("btn-history")?.click();
+});
+document.getElementById("btn-mobile-settings")?.addEventListener("click", () => {
+  closeMobileMore();
+  mobileMoreButton?.focus();
+  document.getElementById("btn-app-settings")?.click();
+});
+document.getElementById("btn-mobile-signout")?.addEventListener("click", signOut);
+document.addEventListener("click", event => {
+  if (!mobileMoreMenu?.hidden && !mobileMoreMenu.contains(event.target) && event.target !== mobileMoreButton) closeMobileMore();
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") closeMobileMore();
+});
+
+const sidePanelFocus = new WeakMap();
+let activeSidePanel = null;
+const sidePanelFocusable = 'button:not([disabled]), a[href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+window.openSidePanel = function openSidePanel(panel, opener = document.activeElement) {
+  if (!panel) return;
+  if (activeSidePanel && activeSidePanel !== panel) window.closeSidePanel(activeSidePanel, false);
+  sidePanelFocus.set(panel, opener instanceof HTMLElement ? opener : null);
+  panel.inert = false;
+  panel.setAttribute("aria-hidden", "false");
+  panel.classList.add("open");
+  document.getElementById("panel-backdrop")?.classList.add("open");
+  document.body.classList.add("panel-open");
+  activeSidePanel = panel;
+  requestAnimationFrame(() => panel.querySelector(sidePanelFocusable)?.focus());
+};
+
+window.closeSidePanel = function closeSidePanel(panel, restoreFocus = true) {
+  if (!panel) return;
+  panel.classList.remove("open");
+  panel.setAttribute("aria-hidden", "true");
+  panel.inert = true;
+  if (activeSidePanel === panel) activeSidePanel = null;
+  if (!document.querySelector(".side-panel.open")) {
+    document.getElementById("panel-backdrop")?.classList.remove("open");
+    document.body.classList.remove("panel-open");
+  }
+  const opener = sidePanelFocus.get(panel);
+  sidePanelFocus.delete(panel);
+  if (restoreFocus && opener?.isConnected) opener.focus();
+};
+
+document.querySelectorAll(".side-panel").forEach(panel => {
+  panel.inert = true;
+  panel.setAttribute("aria-hidden", "true");
+});
+
+document.addEventListener("keydown", event => {
+  if (event.key !== "Tab" || !activeSidePanel) return;
+  const focusable = [...activeSidePanel.querySelectorAll(sidePanelFocusable)]
+    .filter(element => element.getClientRects().length && getComputedStyle(element).visibility !== "hidden");
+  if (!focusable.length) {
+    event.preventDefault();
+    activeSidePanel.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
 
 // ─── App settings ─────────────────────────────────────────────────────────────
 const _settingsModal          = document.getElementById("modal-app-settings");
@@ -1014,12 +1488,10 @@ inputType.addEventListener("change", () => {
 });
 
 const openPrinters = () => {
-  printersPanel.classList.add("open");
-  historyBackdrop.classList.add("open");
+  window.openSidePanel(printersPanel, document.activeElement);
 };
 const closePrinters = () => {
-  printersPanel.classList.remove("open");
-  historyBackdrop.classList.remove("open");
+  window.closeSidePanel(printersPanel);
   resetPrinterForm();
 };
 
@@ -1137,6 +1609,18 @@ function renderFileList(files, error) {
         openPrintOpts(filePath, fileName, meta);
       });
       actions.appendChild(btn);
+
+      if (printers[_currentFilePrinterId]?.printer_type === "cc1") {
+        const queueBtn = document.createElement("button");
+        queueBtn.className = "btn btn-secondary btn-sm";
+        queueBtn.textContent = "Queue";
+        queueBtn.title = "Add this file to the print queue";
+        queueBtn.addEventListener("click", () => {
+          const meta = _currentFileList.find(x => x.path === filePath) || { path: filePath };
+          queuePrinterFile(_currentFilePrinterId, meta);
+        });
+        actions.appendChild(queueBtn);
+      }
 
       const delBtn = document.createElement("button");
       delBtn.className = "btn btn-danger btn-sm";
@@ -1356,69 +1840,8 @@ function escAttr(s) {
 }
 
 // ─── History panel ────────────────────────────────────────────────────────────
-async function loadHistory() {
-  try {
-    const r = await fetch("/api/history");
-    history = (await r.json()).reverse(); // newest first
-    renderHistory();
-  } catch (e) { /* server may not be ready yet */ }
-}
-
-function renderHistory() {
-  const tbody  = document.getElementById("history-tbody");
-  const empty  = document.getElementById("history-empty");
-  const totals = document.getElementById("history-totals");
-
-  if (!history.length) {
-    tbody.innerHTML = "";
-    empty.style.display = "";
-    totals.innerHTML = "";
-    return;
-  }
-  empty.style.display = "none";
-
-  // Totals
-  const totalG  = history.reduce((s, e) => s + (e.filament_g  || 0), 0);
-  const totalMm = history.reduce((s, e) => s + (e.filament_mm || 0), 0);
-  totals.innerHTML = `
-    <span>${history.length} prints</span>
-    <span><strong>${(totalMm/1000).toFixed(1)} m</strong> total</span>
-    <span><strong>${totalG.toFixed(0)} g</strong> total</span>
-  `;
-
-  tbody.innerHTML = history.map(e => {
-    const date   = e.timestamp.replace("T", " ").slice(0, 16);
-    const m      = (e.filament_mm / 1000).toFixed(2);
-    const result = e.completed === false
-      ? `<span style="color:var(--red);font-size:11px">cancelled</span>`
-      : `<span style="color:var(--green);font-size:11px">done</span>`;
-    return `<tr>
-      <td class="col-date">${escHtml(date)}</td>
-      <td>${escHtml(e.printer_name)}</td>
-      <td class="col-file" title="${escAttr(e.filename)}">${escHtml(e.filename || "—")}</td>
-      <td class="col-filament">${m} m · ${e.filament_g} g</td>
-      <td>${formatTime(e.print_time_s)} ${result}</td>
-    </tr>`;
-  }).join("");
-}
-
-const historyPanel    = document.getElementById("panel-history");
+// Print history (loadHistory, openHistory, closeHistory) lives in history.js.
 const historyBackdrop = document.getElementById("panel-backdrop");
-const btnHistory      = document.getElementById("btn-history");
-
-const openHistory = () => {
-  historyPanel.classList.add("open");
-  historyBackdrop.classList.add("open");
-  btnHistory.classList.add("active");
-};
-const closeHistory = () => {
-  historyPanel.classList.remove("open");
-  historyBackdrop.classList.remove("open");
-  btnHistory.classList.remove("active");
-};
-
-btnHistory.addEventListener("click", openHistory);
-document.getElementById("btn-history-close").addEventListener("click", closeHistory);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeHistory(); closeSpools(); closePrinters(); closeFileBrowser(); closePrintOpts(); } });
 
 // ─── Spoolman / Spools ────────────────────────────────────────────────────────
@@ -1644,14 +2067,12 @@ const spoolsPanel = document.getElementById("panel-spools");
 const btnSpools   = document.getElementById("btn-spools");
 
 const openSpools = () => {
-  spoolsPanel.classList.add("open");
-  historyBackdrop.classList.add("open");
+  window.openSidePanel(spoolsPanel, document.activeElement);
   btnSpools.classList.add("active");
   fetchSpools();
 };
 const closeSpools = () => {
-  spoolsPanel.classList.remove("open");
-  historyBackdrop.classList.remove("open");
+  window.closeSidePanel(spoolsPanel);
   btnSpools.classList.remove("active");
 };
 

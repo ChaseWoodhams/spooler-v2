@@ -14,6 +14,9 @@ DEBUG: bool = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
 # { printer_id: PrinterConnection }
 printers: dict = {}
 
+# Main asyncio event loop (set by server.py) so worker threads can schedule coroutines
+loop = None
+
 # Connected browser WebSocket clients
 browser_clients: set = set()
 

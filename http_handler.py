@@ -4,6 +4,7 @@ HTTP request handler: static files + /api/ routes.
 
 import http.client
 import json
+import re
 import ssl
 import socket
 import subprocess
@@ -14,13 +15,24 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import os
+import asyncio
+import backup
+import farm
+import health
+import jobs
+import preflight
+import print_history
+import projects
+import slicer
+import splits
 import state
+import time
 from auth import (
     AUTH_ENABLED, BCRYPT_AVAILABLE, SECURE_COOKIES, SESSION_COOKIE,
     _auth_ok, _check_rate_limit, _create_session, _get_pw_hash, _get_username,
     _has_password, _invalidate_session, _parse_sid, _reset_rate_limit, _save_auth,
 )
-from persistence import DATA_DIR, load_history, save_printers
+from persistence import DATA_DIR, save_printers
 from push import (
     WEBPUSH_AVAILABLE, add_subscription, get_public_key, has_subscriptions,
     load_notif_settings, remove_subscription, save_notif_settings, send_push_all,
@@ -31,6 +43,9 @@ try:
     import bcrypt as _bcrypt
 except ImportError:
     _bcrypt = None  # type: ignore
+
+CAMERA_STALL_TIMEOUT_S  = 15   # close a proxied camera stream after this long without data
+CAMERA_REENABLE_SETTLE_S = 1   # CC1 needs a moment after re-enable before /video answers
 
 CERT_FILE = DATA_DIR / "cert.pem"
 KEY_FILE  = DATA_DIR / "key.pem"
@@ -79,6 +94,13 @@ class SPHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass  # silence access log
+
+    def end_headers(self):
+        # Static files (pages, scripts, styles) carry only Last-Modified, so browsers reused old copies for hours and could run
+        # a new script against an old module. "no-cache" makes them ask each time; unchanged files answer 304.
+        if not any(h.lower().startswith(b"cache-control") for h in getattr(self, "_headers_buffer", [])):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
 
     # ── Auth helpers ─────────────────────────────────────────────────────────
 
@@ -218,6 +240,29 @@ class SPHandler(SimpleHTTPRequestHandler):
 
     # ── Camera proxy ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _open_camera(camera_url: str):
+        parsed = urllib.parse.urlparse(camera_url)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=10)
+        conn.request("GET", path)
+        return conn, conn.getresponse()
+
+    @staticmethod
+    def _request_camera_enable(p, wait_s: float = 5) -> bool:
+        """Ask the printer to restart its video feed; waits up to wait_s when wait_s > 0."""
+        if state.loop is None:
+            return False
+        fut = asyncio.run_coroutine_threadsafe(p.enable_camera(), state.loop)
+        if wait_s <= 0:
+            return True
+        try:
+            return bool(fut.result(timeout=wait_s))
+        except Exception:
+            return False
+
     def _proxy_camera(self):
         printer_id = urllib.parse.unquote(self.path[len("/api/camera/"):].split("?")[0])
         p = state.printers.get(printer_id)
@@ -225,19 +270,21 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._json({"error": "Camera not available"}, 404)
             return
         conn = None
+        upstream_lost = False
         try:
-            parsed = urllib.parse.urlparse(p.camera_url)
-            path = parsed.path or "/"
-            if parsed.query:
-                path = f"{path}?{parsed.query}"
-            conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=10)
-            conn.request("GET", path)
-            upstream = conn.getresponse()
+            conn, upstream = self._open_camera(p.camera_url)
+            if upstream.status != 200 and self._request_camera_enable(p):
+                # The feed was switched off (CC1 does this at print start); retry once it is re-enabled.
+                conn.close()
+                time.sleep(CAMERA_REENABLE_SETTLE_S)
+                conn, upstream = self._open_camera(p.camera_url)
             if upstream.status != 200:
                 self._json({"error": f"camera returned {upstream.status}"}, 503)
                 return
             try:
-                conn.sock.settimeout(None)  # no per-read timeout — stream runs indefinitely
+                # A feed that goes silent ends the response, so the browser can reconnect
+                # instead of showing its last frame indefinitely.
+                conn.sock.settimeout(CAMERA_STALL_TIMEOUT_S)
             except Exception:
                 pass
             ct = upstream.getheader("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -246,8 +293,13 @@ class SPHandler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             while True:
-                chunk = upstream.read(8192)
+                try:
+                    chunk = upstream.read(8192)
+                except OSError:
+                    upstream_lost = True
+                    break
                 if not chunk:
+                    upstream_lost = True
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
@@ -261,6 +313,9 @@ class SPHandler(SimpleHTTPRequestHandler):
                     conn.close()
                 except Exception:
                     pass
+        if upstream_lost:
+            # Re-enable now so the browser's reconnect finds the feed running.
+            self._request_camera_enable(p, wait_s=0)
 
     # ── Thumbnail proxy ───────────────────────────────────────────────────────
     # CC1: http://{ip}:80/thumbnail/{bare_filename}  (no auth needed)
@@ -511,6 +566,13 @@ class SPHandler(SimpleHTTPRequestHandler):
         if PROXY_SPOOLMAN and self.path.startswith("/api/v1/"):
             self._proxy_spoolman_ui("GET", self.path)
             return
+        if self.path == "/api/health":
+            # Liveness probe for supervisor.py — unauthenticated, so it reveals nothing but up/down.
+            ok = health.event_loop_responsive()
+            self._json({"status": "ok" if ok else "unresponsive", "uptime_s": health.uptime_s()},
+                       200 if ok else 503)
+            return
+
         if self.path == "/api/auth-status":
             resp = {"setup_required": not _has_password()}
             if _auth_ok(self):
@@ -542,8 +604,45 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._proxy_thumbnail()
         elif self.path == "/api/printers":
             self._json([p.to_dict() for p in state.printers.values()])
-        elif self.path == "/api/history":
-            self._json(load_history())
+        elif self.path == "/api/system-status":
+            self._json(health.snapshot())
+        elif self.path == "/api/jobs":
+            self._json({"jobs": jobs.list_jobs()})
+        elif self.path == "/api/slicer":
+            self._json(slicer.status())
+        elif self.path == "/api/slicer/presets":
+            self._jobs_call(slicer.stock_presets, broadcast=False)
+        elif self.path == "/api/slicer/spools":
+            self._jobs_call(farm.list_spools, broadcast=False)
+        elif self.path == "/api/slices":
+            self._json({"slices": slicer.list_slices()})
+        elif self.path == "/api/splits":
+            self._json({"splits": splits.list_splits()})
+        elif self.path == "/api/splits/status":
+            self._json(splits.status())
+        elif self.path.startswith("/api/splits/"):
+            self._handle_splits_get()
+        elif self.path == "/api/projects":
+            self._json({"projects": projects.list_projects()})
+        elif self.path.startswith("/api/projects/"):
+            self._handle_projects_get()
+        elif self.path.startswith("/api/slicer/profiles/") and self.path.split("?", 1)[0].endswith("/settings"):
+            self._jobs_call(lambda: slicer.bundle_settings(self.path.split("?", 1)[0].split("/")[4]), broadcast=False)
+        elif self.path.startswith("/api/jobs/") and self.path.endswith("/events"):
+            self._jobs_call(lambda: {"events": jobs.job_events(self._job_id())}, broadcast=False)
+        elif self.path.startswith("/api/jobs/") and self.path.split("?", 1)[0].endswith("/preflight"):
+            printer_id = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("printer_id") or [""])[0]
+            self._jobs_call(lambda: preflight.check_job_id(self._job_id(), printer_id or None), broadcast=False)
+        elif self.path.startswith("/api/jobs/") and self.path.endswith("/toolpath"):
+            self._send_toolpath()
+        elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
+            self._jobs_call(lambda: preflight.printer_hardware(self._path_printer_id()), broadcast=False)
+        elif self.path == "/api/prints" or self.path.startswith("/api/prints?"):
+            self._jobs_call(lambda: print_history.search(**self._print_filters(paged=True)), broadcast=False)
+        elif self.path.startswith("/api/prints/export.csv"):
+            self._send_prints_csv()
+        elif self.path.startswith("/api/prints/"):
+            self._jobs_call(lambda: print_history.get_print(self._job_id()), broadcast=False)
         elif self.path.startswith("/api/lookup-ean"):
             qs     = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(qs)
@@ -594,6 +693,16 @@ class SPHandler(SimpleHTTPRequestHandler):
     def do_PATCH(self):
         if not self._check_auth():
             return
+        if self.path.startswith("/api/jobs/"):
+            self._jobs_call(lambda: jobs.update_job(self._job_id(), self._json_body()))
+            return
+        if self.path.startswith("/api/prints/"):
+            self._jobs_call(lambda: print_history.update_notes(self._job_id(), self._json_body().get("notes")),
+                            broadcast=False)
+            return
+        if self.path.startswith("/api/projects/") and len(self.path.split("?", 1)[0].split("/")) == 4:
+            self._jobs_call(lambda: projects.update_project(self._job_id(), self._json_body()), broadcast=False)
+            return
         if PROXY_SPOOLMAN and self.path.startswith("/api/v1/"):
             self._proxy_spoolman_ui("PATCH", self.path, self._read_body())
             return
@@ -604,6 +713,31 @@ class SPHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         if not self._check_auth():
+            return
+        if self.path.startswith("/api/jobs/"):
+            self._jobs_call(lambda: jobs.delete_job(self._job_id()))
+            return
+        if self.path.startswith("/api/slices/"):
+            self._slices_call(lambda: slicer.delete_slice(self._job_id()))
+            return
+        if self.path.startswith("/api/slicer/presets/"):
+            parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'slicer', 'presets', <kind>, <name>]
+            if len(parts) == 6:
+                self._jobs_call(lambda: slicer.delete_user_preset(parts[4], urllib.parse.unquote(parts[5])), broadcast=False)
+            else:
+                self._json({"error": "Not found"}, 404)
+            return
+        if self.path.startswith("/api/splits/"):
+            self._splits_call(lambda: splits.delete_split(self._job_id()))
+            return
+        if self.path.startswith("/api/projects/"):
+            parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'projects', <id>, 'models', <model id>]
+            if len(parts) == 6 and parts[4] == "models" and parts[5].isdigit():
+                self._jobs_call(lambda: projects.delete_model(self._job_id(), int(parts[5])), broadcast=False)
+            elif len(parts) == 4:
+                self._jobs_call(lambda: projects.delete_project(self._job_id()), broadcast=False)
+            else:
+                self._json({"error": "Not found"}, 404)
             return
         if PROXY_SPOOLMAN and self.path.startswith("/api/v1/"):
             self._proxy_spoolman_ui("DELETE", self.path)
@@ -640,6 +774,21 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._handle_push_test()
         elif self.path == "/api/import-filaments":
             self._handle_import_filaments()
+        elif self.path == "/api/backup":
+            self._handle_backup()
+        elif self.path == "/api/jobs" or self.path.startswith("/api/jobs/"):
+            self._handle_jobs_post()
+        elif self.path.startswith("/api/prints/"):
+            self._handle_prints_post()
+        elif self.path.startswith("/api/slices/") or self.path in ("/api/slicer/profiles", "/api/slicer/presets", "/api/slicer/presets/import", "/api/slicer/spool-match"):
+            self._handle_slicer_post()
+        elif self.path.startswith("/api/splits/"):
+            self._handle_splits_post()
+        elif self.path == "/api/projects" or self.path.startswith("/api/projects/"):
+            self._handle_projects_post()
+        elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
+            self._jobs_call(lambda: preflight.set_printer_hardware(
+                self._path_printer_id(), self._json_body().get("nozzle_diameter")), broadcast=False)
         elif self.path.startswith("/api/v1/"):
             self._proxy_spoolman_ui("POST", self.path, self._read_body())
         elif self.path.startswith("/api/spoolman"):
@@ -699,6 +848,426 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         send_push_all("Spooler — Test notification", "Push notifications are working!")
         self._json({"ok": True})
+
+    # ── Print-job queue ───────────────────────────────────────────────────────
+
+    def _job_id(self) -> int:
+        try:
+            return int(self.path.split("?", 1)[0].split("/")[3])
+        except (IndexError, ValueError):
+            raise jobs.JobError("Job not found", 404)
+
+    def _json_body(self) -> dict:
+        try:
+            body = json.loads(self._read_body() or b"{}")
+        except ValueError:
+            raise jobs.JobError("Request body must be JSON")
+        if not isinstance(body, dict):
+            raise jobs.JobError("Request body must be a JSON object")
+        return body
+
+    def _jobs_call(self, fn, *, coroutine: bool = False, broadcast: bool = True) -> None:
+        """Run a jobs operation and reply with its result, or with the JobError it raised.
+
+        Coroutines (starting and finishing jobs) run on the main event loop and
+        broadcast their own updates; plain calls are broadcast from here.
+        """
+        try:
+            if coroutine:
+                if state.loop is None:
+                    raise jobs.JobError("Spooler is still starting", 503)
+                # Starting a job analyses its G-code first, which takes a while for very large files
+                result = asyncio.run_coroutine_threadsafe(fn(), state.loop).result(timeout=180)
+            else:
+                result = fn()
+        except jobs.JobError as e:
+            self._json({"error": str(e)}, e.status)
+            return
+        if broadcast and not coroutine:
+            jobs.broadcast_threadsafe()
+        self._json(result if result is not None else {"ok": True})
+
+    def _path_printer_id(self) -> str:
+        parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'printers', <id>, 'hardware']
+        if len(parts) < 4 or not parts[3]:
+            raise jobs.JobError("Printer not found", 404)
+        return urllib.parse.unquote(parts[3])
+
+    def _send_toolpath(self):
+        try:
+            data = preflight.toolpath_file(self._job_id()).read_bytes()
+        except jobs.JobError as e:
+            self._json({"error": str(e)}, e.status)
+            return
+        except OSError:
+            self._json({"error": "Preview not available"}, 404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _handle_jobs_post(self):
+        path = self.path.split("?", 1)[0]
+        parts = path.split("/")  # ['', 'api', 'jobs', <id>, <action>]
+        action = parts[4] if len(parts) == 5 else None
+        if path == "/api/jobs/upload":
+            self._handle_job_upload()
+        elif path == "/api/jobs":
+            self._jobs_call(self._create_printer_file_job)
+        elif path == "/api/jobs/reorder":
+            self._jobs_call(lambda: jobs.reorder(self._json_body().get("order")))
+        elif path == "/api/jobs/assign":
+            def assign():
+                body = self._json_body()
+                return {"jobs": jobs.assign_printers(body.get("job_ids"), body.get("printer_ids"))}
+            self._jobs_call(assign)
+        elif action == "start":
+            def start():
+                body = self._json_body()
+                return jobs.start_job(self._job_id(), body.get("printer_id"),
+                                      acknowledge_warnings=bool(body.get("acknowledge_warnings")))
+            self._jobs_call(start, coroutine=True)
+        elif action == "finish":
+            self._jobs_call(lambda: jobs.finish_job(self._job_id(), self._json_body().get("outcome")),
+                            coroutine=True)
+        elif action == "requeue":
+            self._jobs_call(lambda: jobs.requeue(self._job_id()))
+        else:
+            self._json({"error": "Not found"}, 404)
+
+    def _handle_job_upload(self):
+        # The body is the raw G-code file, streamed to disk rather than held in memory.
+        self.close_connection = True  # an early rejection leaves the body unread
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+        self._jobs_call(lambda: jobs.create_upload_job(
+            self.rfile, length, query.get("filename", [""])[0], query.get("printer_id", [""])[0] or None))
+
+    def _create_printer_file_job(self) -> dict:
+        body = self._json_body()
+        return jobs.create_printer_file_job(body.get("printer_id"), body.get("printer_file"), body)
+
+    # ── Print history ─────────────────────────────────────────────────────────
+
+    # ── Slicing ───────────────────────────────────────────────────────────────
+
+    def _slices_call(self, fn) -> None:
+        self._jobs_call(fn, broadcast=False)
+        slicer.broadcast_threadsafe()
+
+    def _handle_slicer_post(self):
+        path = self.path.split("?", 1)[0]
+        parts = path.split("/")  # ['', 'api', 'slices', <id>, <action>]
+        if path == "/api/slices/upload":
+            self._handle_slice_upload()
+        elif path == "/api/slicer/profiles":
+            self._jobs_call(self._create_profile, broadcast=False)
+        elif path == "/api/slicer/spool-match":
+            def match():
+                body = self._json_body()
+                return farm.spool_match(body.get("spool_id"), str(body.get("bundle_id") or ""), str(body.get("bed") or "textured"))
+            self._jobs_call(match, broadcast=False)
+        elif path == "/api/slicer/presets":
+            self._jobs_call(self._save_preset, broadcast=False)
+        elif path == "/api/slicer/presets/import":
+            self._jobs_call(lambda: slicer.import_user_preset(self._json_body().get("preset"), self._json_body().get("name")),
+                            broadcast=False)
+        elif len(parts) == 5 and parts[2] == "slices" and parts[4] == "retry":
+            self._slices_call(lambda: slicer.retry_slice(self._job_id()))
+        else:
+            self._json({"error": "Not found"}, 404)
+
+    def _handle_slice_upload(self):
+        # The body is the raw model file, streamed to disk; options travel in the query string.
+        self.close_connection = True  # an early rejection leaves the body unread
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        def value(key: str) -> str:
+            return (query.get(key) or [""])[0]
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+        options = {"leveling": value("leveling") in ("1", "true"), "timelapse": value("timelapse") in ("1", "true")}
+        self._slices_call(lambda: slicer.create_slice(
+            self.rfile, length, value("filename"), value("bundle_id"), bed=value("bed") or "textured",
+            printer_id=value("printer_id") or None, print_opts=options, notes=value("notes")))
+
+    def _save_preset(self) -> dict:
+        body = self._json_body()
+        kind = str(body.get("kind") or "")
+        record = slicer.save_user_preset(kind, str(body.get("name") or ""), str(body.get("base") or ""), body.get("changes"))
+        return {"preset": record["name"], "type": kind}
+
+    def _create_profile(self) -> dict:
+        body = self._json_body()
+        if body.get("from_bundle"):  # a variant of a locked profile, e.g. with tree supports
+            return slicer.derive_bundle(str(body["from_bundle"]), body.get("overrides"), body.get("label"))
+        return slicer.create_bundle(str(body.get("machine") or ""), str(body.get("process") or ""),
+                                    str(body.get("filament") or ""), body.get("label"), body.get("overrides"))
+
+    # ── Splitting large models ────────────────────────────────────────────────
+
+    def _splits_call(self, fn, *, queue: bool = False) -> None:
+        self._jobs_call(fn, broadcast=False)
+        splits.broadcast_threadsafe()
+        if queue:
+            slicer.broadcast_threadsafe()
+
+    def _handle_splits_get(self):
+        parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'splits', <id>, <kind>, <file>]
+        try:
+            split_id = self._job_id()
+            if len(parts) == 4:
+                self._json(splits.get_split(split_id, detail=True))
+            elif len(parts) == 5 and parts[4] in ("preview", "parts-preview"):
+                self._send_file(splits.file_path(split_id, parts[4]), "application/octet-stream")
+            elif len(parts) == 6 and parts[4] == "parts" and parts[5].endswith(".stl") and parts[5][:-4].isdigit():
+                path, name = splits.part_path(split_id, int(parts[5][:-4]))
+                self._send_file(path, "model/stl", download_name=name)
+            else:
+                self._json({"error": "Not found"}, 404)
+        except jobs.JobError as e:
+            self._json({"error": str(e)}, e.status)
+
+    def _send_bytes(self, body: bytes, content_type: str, download_name: str | None = None) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if download_name:
+            self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_file(self, path: Path, content_type: str, download_name: str | None = None) -> None:
+        size = path.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "no-store")
+        if download_name:
+            self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+        self.end_headers()
+        with path.open("rb") as fh:
+            while chunk := fh.read(1024 * 1024):
+                self.wfile.write(chunk)
+
+    def _handle_splits_post(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/splits/upload":
+            self._handle_split_upload()
+            return
+        parts = path.split("/")  # ['', 'api', 'splits', <id>, <action>]
+        actions = {
+            "settings": lambda: splits.update_settings(self._job_id(), self._json_body()),
+            "plan":     lambda: splits.request_plan(self._job_id(), self._json_body()),
+            "cuts":     lambda: splits.save_cuts(self._job_id(), self._json_body()),
+            "split":    lambda: splits.request_split(self._job_id()),
+            "retry":    lambda: splits.retry(self._job_id()),
+            "queue":    lambda: splits.queue_parts(self._job_id(), self._json_body()),
+        }
+        action = parts[4] if len(parts) == 5 else None
+        if action not in actions:
+            self._json({"error": "Not found"}, 404)
+            return
+        self._splits_call(actions[action], queue=action == "queue")
+
+    # ── Slicer workspace projects ─────────────────────────────────────────────
+
+    def _handle_projects_get(self):
+        parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'projects', <id>, <section>, <item id>, <what>]
+        try:
+            project_id = self._job_id()
+            if len(parts) == 4:
+                self._json(projects.get_project(project_id))
+            elif len(parts) == 5 and parts[4] == "jobs":
+                self._json({"jobs": projects.project_jobs(project_id)})
+            elif len(parts) == 5 and parts[4] == "export.3mf":
+                record = projects.get_project(project_id)
+                name = re.sub(r'[^\w .-]+', "_", record["name"]).strip() or "project"
+                self._send_bytes(projects.export_orca_project(project_id), "model/3mf", download_name=f"{name}.3mf")
+            elif len(parts) == 7 and parts[4] == "models" and parts[6] == "preview":
+                self._send_file(projects.model_preview(project_id, int(parts[5])), "application/octet-stream")
+            elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "fit":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                self._json(farm.plate_fit(projects.get_project(project_id), int(parts[5]), (query.get("printer_id") or [None])[0]))
+            elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "analysis":
+                self._json(projects.plate_analysis(project_id, int(parts[5])))
+            elif len(parts) == 7 and parts[4] == "plates" and parts[6] in ("toolpath", "gcode"):
+                plate_id = int(parts[5])
+                path = projects.plate_file(project_id, plate_id, parts[6])
+                if parts[6] == "gcode":
+                    record = projects.get_project(project_id)
+                    plate = next((p for p in record["data"]["plates"] if p["id"] == plate_id), {"name": f"Plate {plate_id}"})
+                    name = re.sub(r'[^\w .-]+', "_", f"{record['name']}_{plate['name']}").strip() + ".gcode"
+                    self._send_file(path, "text/plain; charset=utf-8", download_name=name)
+                else:
+                    self._send_file(path, "application/octet-stream")
+            else:
+                self._json({"error": "Not found"}, 404)
+        except ValueError:
+            self._json({"error": "Not found"}, 404)
+        except jobs.JobError as e:
+            self._json({"error": str(e)}, e.status)
+
+    def _handle_projects_post(self):
+        path = self.path.split("?", 1)[0]
+        parts = path.split("/")  # ['', 'api', 'projects', <id>, <section>, <item id>, <action>]
+        if path == "/api/projects":
+            def create():
+                body = self._json_body()
+                try:
+                    split_id = int(body["split_id"]) if body.get("split_id") not in (None, "") else None
+                except (TypeError, ValueError):
+                    raise jobs.JobError("split_id must be a split number")
+                return projects.create_project(body.get("name", ""), split_id=split_id)
+            self._jobs_call(create, broadcast=False)
+            return
+        if path == "/api/projects/upload":
+            self._handle_project_upload(new_project=True)
+            return
+        if len(parts) == 5 and parts[4] in ("layout", "whole", "pack", "slice", "queue"):
+            actions = {
+                "layout": lambda: projects.lay_out_split(self._job_id(), self._json_body().get("parts")),
+                "whole":  lambda: projects.place_whole_model(self._job_id()),
+                "pack":   lambda: projects.pack_plates(self._job_id(), self._json_body().get("plates")),
+                "slice":  lambda: (lambda body: projects.request_slices(self._job_id(), body.get("plates"), bool(body.get("send"))))(self._json_body()),
+                "queue":  lambda: projects.queue_plates(self._job_id(), self._json_body()),
+            }
+            self._jobs_call(actions[parts[4]], broadcast=parts[4] == "queue")
+            return
+        if len(parts) == 6 and parts[4] == "models" and parts[5] == "upload":
+            self._handle_project_upload()
+            return
+        if len(parts) == 6 and parts[4] == "models" and parts[5] == "from-split":
+            def from_split():
+                body = self._json_body()
+                try:
+                    split_id = int(body.get("split_id"))
+                except (TypeError, ValueError):
+                    raise jobs.JobError("split_id must be a split number")
+                return projects.add_split_parts(self._job_id(), split_id, body.get("parts"))
+            self._jobs_call(from_split, broadcast=False)
+            return
+        if len(parts) == 7 and parts[4] == "plates" and parts[5].isdigit() and parts[6] in ("arrange", "slice", "queue", "merge"):
+            plate_id, action = int(parts[5]), parts[6]
+
+            def merge():
+                try:
+                    into = int(self._json_body().get("into"))
+                except (TypeError, ValueError):
+                    raise jobs.JobError("into must be a plate number")
+                return projects.merge_plates(self._job_id(), plate_id, into)
+            actions = {
+                "arrange": lambda: projects.arrange_plate(self._job_id(), plate_id),
+                "slice":   lambda: projects.request_slice(self._job_id(), plate_id, bool(self._json_body().get("send"))),
+                "queue":   lambda: projects.queue_plate(self._job_id(), plate_id, self._json_body()),
+                "merge":   merge,
+            }
+            self._jobs_call(actions[action], broadcast=action == "queue")
+            return
+        self._json({"error": "Not found"}, 404)
+
+    def _handle_project_upload(self, new_project: bool = False):
+        # The body is the raw model file, streamed to disk; scale, up axis and plate travel in the query string.
+        # new_project: the file starts a new project (stored as a split model, analysed before anything else).
+        self.close_connection = True  # an early rejection leaves the body unread
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        def value(key: str) -> str:
+            return (query.get(key) or [""])[0]
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+        if new_project:
+            self._splits_call(lambda: projects.create_project_from_upload(self.rfile, length, value("filename"),
+                                                                          scale=value("scale") or 1.0, up=value("up") or "z"))
+            return
+        self._jobs_call(lambda: projects.import_model(self._job_id(), self.rfile, length, value("filename"),
+                                                     scale=value("scale") or 1.0, up=value("up") or "z",
+                                                     plate_id=value("plate") or None), broadcast=False)
+
+    def _handle_split_upload(self):
+        # The body is the raw model file, streamed to disk; scale and up axis travel in the query string.
+        self.close_connection = True  # an early rejection leaves the body unread
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        def value(key: str) -> str:
+            return (query.get(key) or [""])[0]
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+        settings = {key: value(key) for key in ("scale", "up") if value(key)}
+        self._splits_call(lambda: splits.create_split(self.rfile, length, value("filename"), settings, notes=value("notes")))
+
+    # ── Print history ─────────────────────────────────────────────────────────
+
+    def _print_filters(self, paged: bool = False) -> dict:
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        def text(key: str) -> str:
+            return (query.get(key) or [""])[0].strip()
+
+        def number(key: str):
+            raw = text(key)
+            if not raw:
+                return None
+            try:
+                return float(raw)
+            except ValueError:
+                raise jobs.JobError(f"{key} must be a number")
+
+        filters = {"q": text("q"), "printer_id": text("printer_id") or None,
+                   "outcome": text("outcome") or None, "since": number("since"), "until": number("until")}
+        if paged:
+            filters["limit"] = int(number("limit") or 50)
+            filters["offset"] = int(number("offset") or 0)
+        return filters
+
+    def _send_prints_csv(self):
+        try:
+            body = print_history.export_csv(**self._print_filters()).encode("utf-8-sig")  # BOM for Excel
+        except jobs.JobError as e:
+            self._json({"error": str(e)}, e.status)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="spooler-prints-{time.strftime("%Y%m%d")}.csv"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_prints_post(self):
+        parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'prints', <id>, <action>]
+        if len(parts) == 5 and parts[4] == "repeat":
+            self._jobs_call(lambda: print_history.repeat_print(self._job_id()))
+        else:
+            self._json({"error": "Not found"}, 404)
+
+    def _handle_backup(self):
+        self._read_body()
+        try:
+            result = backup.run_backup("manual")
+        except backup.BackupInProgress:
+            self._json({"error": "A backup is already running"}, 409)
+            return
+        except Exception as e:
+            self._json({"error": f"Backup failed: {e}"}, 500)
+            return
+        health.broadcast_status_threadsafe()
+        self._json(result)
 
     def _handle_import_filaments(self):
         try:

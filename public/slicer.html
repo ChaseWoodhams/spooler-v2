@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Projects – Spooler</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <meta name="theme-color" content="#0d0e12" />
+  <link rel="stylesheet" href="style.css?v=53" />
+  <link rel="stylesheet" href="split.css?v=3" />
+  <link rel="stylesheet" href="slicer.css?v=20" />
+  <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
+</head>
+<body class="slicer-page">
+  <header class="slicer-top">
+    <a href="/" class="slicer-home" title="Back to the dashboard"><img src="/icon.svg" alt="" /><span>Spooler</span></a>
+    <div class="slicer-project">
+      <input id="project-name" class="slicer-project-name" aria-label="Project name" maxlength="120" />
+      <button id="btn-projects" class="btn btn-secondary btn-sm" type="button">Projects</button>
+      <button id="btn-export-3mf" class="btn btn-secondary btn-sm" type="button" title="Download the project as an OrcaSlicer project (3MF) with its plates, placements and settings">Export 3MF</button>
+      <span id="save-state" class="slicer-muted"></span>
+    </div>
+    <nav id="step-bar" class="slicer-steps" aria-label="Workflow steps"></nav>
+    <div class="slicer-top-actions">
+      <span id="slice-state" class="slicer-slice-state"></span>
+      <span id="step-actions" class="slicer-step-actions"></span>
+    </div>
+  </header>
+
+  <div class="slicer-body">
+    <aside class="slicer-sidebar">
+      <section id="empty-state" class="slicer-card">
+        <div class="slicer-card-head"><h4>No project open</h4></div>
+        <p class="slicer-muted">Open an existing project, or upload an STL, OBJ or 3MF to start a new one.</p>
+        <button id="btn-empty-projects" class="btn btn-primary" type="button">Open or create a project</button>
+      </section>
+      <div id="split-side" class="split-side" hidden></div>
+
+      <section class="slicer-card" data-steps="plates slice">
+        <div class="slicer-card-head"><h4>Printer and material</h4></div>
+        <div class="preset-row"><label for="preset-machine-select">Printer</label>
+          <select id="preset-machine-select"></select></div>
+        <div class="preset-row"><label for="preset-filament-select">Filament</label>
+          <select id="preset-filament-select"></select>
+          <button id="btn-save-filament" class="preset-btn" type="button" title="Save the filament changes as a preset" hidden>Save</button>
+          <button id="btn-delete-filament" class="preset-btn" type="button" title="Delete this saved preset" hidden>Delete</button></div>
+        <div class="preset-row"><label for="preset-process-select">Process</label>
+          <select id="preset-process-select"></select>
+          <button id="btn-save-process" class="preset-btn" type="button" title="Save the process changes as a preset" hidden>Save</button>
+          <button id="btn-delete-process" class="preset-btn" type="button" title="Delete this saved preset" hidden>Delete</button></div>
+        <div class="preset-row"><label for="btn-import-preset">Import</label>
+          <button id="btn-import-preset" class="btn btn-secondary btn-sm" type="button" title="Import an OrcaSlicer process or filament preset (.json)">Orca preset…</button>
+          <input id="preset-file" type="file" accept=".json" hidden /></div>
+        <label class="slicer-field">Build plate
+          <select id="bed-select"><option value="textured">Textured PEI (Side A)</option><option value="smooth">Smooth PEI (Side B)</option></select>
+        </label>
+        <div class="preset-row"><label for="spool-select">Spool</label>
+          <select id="spool-select" title="Use a Spoolman spool: its density, temperatures and cost are applied as filament settings"></select></div>
+        <p id="spool-note" class="slicer-muted" hidden></p>
+        <div class="preset-row"><label for="plate-printer-select">Print on</label>
+          <select id="plate-printer-select" title="The printer this plate is meant for"></select></div>
+        <div id="plate-fit" class="plate-fit"></div>
+        <div class="slicer-actions-row"><button id="btn-slice-send" class="btn btn-secondary btn-sm" type="button" disabled
+          title="Slice this plate and put it in the queue for its printer">Slice &amp; send</button></div>
+      </section>
+
+      <section class="slicer-card" data-steps="plates">
+        <div class="slicer-card-head">
+          <h4>Objects on this plate</h4>
+          <div class="slicer-actions-row">
+            <button id="btn-add-model" class="btn btn-primary btn-sm" type="button">Add model</button>
+            <button id="btn-add-split" class="btn btn-secondary btn-sm" type="button">Split parts</button>
+          </div>
+        </div>
+        <input id="model-input" type="file" accept=".stl,.obj,.3mf" multiple hidden />
+        <div id="upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
+        <div id="object-list" class="slicer-object-list"></div>
+      </section>
+
+      <section class="slicer-card" data-steps="slice">
+        <div class="slicer-card-head">
+          <h4>Plates</h4>
+          <div id="slicing-actions" class="slicer-actions-row"></div>
+        </div>
+        <div id="slicing-list" class="slicer-plate-rows"></div>
+        <div id="slicing-totals" class="slicer-muted"></div>
+      </section>
+
+      <section class="slicer-card" data-steps="slice">
+        <div class="slicer-card-head"><h4>BrickLayers interlocking walls</h4></div>
+        <div id="bricklayers" class="slicer-bricklayers"></div>
+      </section>
+
+      <section class="slicer-card" data-steps="queue">
+        <div class="slicer-card-head"><h4>Send to the queue</h4></div>
+        <div id="send-plates" class="slicer-plate-rows"></div>
+        <label class="slicer-check"><input type="checkbox" id="send-leveling" /> Level the bed before each plate</label>
+        <label class="slicer-check"><input type="checkbox" id="send-timelapse" /> Time-lapse</label>
+        <div class="slicer-actions-row"><button id="btn-send-batch" class="btn btn-primary" type="button" disabled>Send to the queue</button></div>
+        <p class="slicer-muted">Each plate becomes a job. Assign printers below, then start each one from the queue when that printer's bed is clear — every start runs the preflight checks.</p>
+      </section>
+
+      <section class="slicer-card" data-steps="queue">
+        <div class="slicer-card-head">
+          <h4>Jobs from this project</h4>
+          <a class="btn btn-secondary btn-sm" href="/?queue=1">Open the queue</a>
+        </div>
+        <div id="job-batches" class="slicer-batches"></div>
+      </section>
+
+      <section class="slicer-card slicer-settings" data-steps="plates slice">
+        <div id="settings-scope-toggle" class="scope-toggle" role="tablist" aria-label="Settings apply to">
+          <button type="button" data-scope-tab="global" role="tab">Global</button>
+          <button type="button" data-scope-tab="objects" role="tab">Objects</button>
+        </div>
+        <div id="settings-tabs" class="slicer-tabs" role="tablist" aria-label="Settings"></div>
+        <div id="settings-scope" class="slicer-actions-row" hidden></div>
+        <div class="slicer-settings-tools">
+          <input id="settings-search" type="search" placeholder="Search settings" aria-label="Search settings" />
+          <select id="settings-mode" aria-label="Setting detail" title="Which settings to show, as in OrcaSlicer's Simple / Advanced / Expert modes">
+            <option value="simple">Simple</option><option value="advanced">Advanced</option><option value="expert">Expert</option></select>
+        </div>
+        <div id="settings-pages" class="slicer-pages"></div>
+        <div id="settings-body" class="slicer-settings-body"></div>
+      </section>
+    </aside>
+
+    <main class="slicer-main">
+      <div id="plate-tabs" class="slicer-plates"></div>
+      <div id="viewport" class="slicer-viewport">
+        <div class="slicer-toolbar" id="prepare-tools">
+          <button class="btn btn-secondary btn-sm" type="button" data-tool="translate" title="Move (M)">Move</button>
+          <button class="btn btn-secondary btn-sm" type="button" data-tool="rotate" title="Rotate (R)">Rotate</button>
+          <button class="btn btn-secondary btn-sm" type="button" data-tool="scale" title="Scale, keeping proportions (S)">Scale</button>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-face" title="Lay a face flat: click it on the model (F)">Lay on face</button>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-arrange" title="Arrange this plate (A); Shift+A arranges every plate">Arrange</button>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-repack" title="Pack every plate's objects onto as few plates as fit">Repack plates</button>
+          <select id="merge-plate" class="slicer-toolbar-select" aria-label="Merge this plate into another"></select>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-fit" title="Fit the view (Z zooms to the selection; 0-6 pick a side)">Fit view</button>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-undo" title="Undo (Ctrl+Z)">Undo</button>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-redo" title="Redo (Ctrl+Y)">Redo</button>
+        </div>
+        <div class="slicer-toolbar" id="view-tools" hidden>
+          <div class="slicer-mode" role="tablist" aria-label="View">
+            <button id="mode-prepare" class="btn btn-sm" type="button" role="tab">Plate</button>
+            <button id="mode-preview" class="btn btn-sm" type="button" role="tab">Layer preview</button>
+          </div>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-fit-preview" title="Fit the view (F)">Fit view</button>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-printer" title="Show the Centauri Carbon around the bed (P)" aria-pressed="false">Printer</button>
+          <select id="printer-shell" class="slicer-toolbar-select" aria-label="Panels, door and lid" hidden>
+            <option value="glass">Panels see-through</option><option value="hidden">Panels hidden</option><option value="solid">Panels solid</option>
+          </select>
+        </div>
+        <div id="object-panel" class="slicer-float slicer-object-panel" hidden></div>
+        <div id="preview-panel" class="slicer-float slicer-preview-panel" hidden></div>
+        <div id="layer-box" class="slicer-layer-box" hidden>
+          <span id="layer-readout" class="slicer-layer-readout"></span>
+          <input id="layer-slider" class="slicer-layer-slider" type="range" min="0" max="0" value="0" aria-label="Layer" />
+        </div>
+        <div id="move-box" class="slicer-move-box" hidden>
+          <button id="btn-play" class="btn btn-secondary btn-sm" type="button" title="Play the print from this point (Space)">Play</button>
+          <select id="play-speed" class="slicer-toolbar-select" aria-label="Playback speed" title="Playback speed, assuming the head moves at about 250 mm/s">
+            <option value="1">1×</option><option value="5">5×</option><option value="25" selected>25×</option><option value="100">100×</option><option value="500">500×</option>
+          </select>
+          <input id="move-slider" type="range" min="0" max="1000" value="1000" aria-label="Moves in the top layer" />
+        </div>
+        <div id="viewport-message" class="slicer-viewport-message" hidden></div>
+      </div>
+      <div id="split-stage" class="split-viewer-wrap slicer-split-stage" hidden>
+        <div id="split-viewer" class="split-viewer"></div>
+        <div id="split-labels" class="split-labels"></div>
+        <div id="split-viewer-tools" class="split-viewer-tools" hidden>
+          <label>Explode <input id="split-explode" type="range" min="0" max="100" value="0" /></label>
+          <button id="btn-split-fit" class="btn btn-secondary btn-sm" type="button">Reset view</button>
+        </div>
+        <div id="split-progress" class="split-progress" hidden>
+          <div class="split-progress-text"></div>
+          <div class="job-progress"><div class="job-progress-bar"></div></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="dlg-projects" class="slicer-dialog">
+    <h3>Projects</h3>
+    <section class="slicer-new-model">
+      <h4>Start from a model</h4>
+      <p class="slicer-muted">Upload an STL, OBJ or 3MF (an OrcaSlicer project 3MF keeps its plates and settings). Spooler checks it, splits it if it's too big for the printer, packs the parts onto plates, slices them and sends them to the queue.</p>
+      <div class="slicer-new-row">
+        <label class="slicer-field">Units
+          <select id="new-scale"><option value="1">Millimetres</option><option value="10">Centimetres (×10)</option><option value="25.4">Inches (×25.4)</option><option value="1000">Metres (×1000)</option></select>
+        </label>
+        <label class="slicer-field">Up axis
+          <select id="new-up"><option value="z">Z (most slicers and CAD)</option><option value="y">Y (many sculpting and game tools)</option></select>
+        </label>
+        <button id="btn-new-upload" class="btn btn-primary" type="button">Upload model…</button>
+        <input id="new-model-input" type="file" accept=".stl,.obj,.3mf" hidden />
+      </div>
+      <div id="new-upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
+    </section>
+    <div id="project-list" class="slicer-project-list"></div>
+    <div class="slicer-dialog-actions">
+      <input id="new-project-name" placeholder="Empty project name" maxlength="120" />
+      <button id="btn-new-project" class="btn btn-secondary" type="button">New empty project</button>
+      <button class="btn btn-secondary" type="button" data-close>Close</button>
+    </div>
+  </dialog>
+
+  <dialog id="dlg-import" class="slicer-dialog">
+    <h3>Add models</h3>
+    <p id="import-files" class="slicer-muted"></p>
+    <label class="slicer-field">Units
+      <select id="import-scale"><option value="1">Millimetres</option><option value="10">Centimetres (×10)</option><option value="25.4">Inches (×25.4)</option><option value="1000">Metres (×1000)</option></select>
+    </label>
+    <label class="slicer-field">Up axis
+      <select id="import-up"><option value="z">Z (most slicers and CAD)</option><option value="y">Y (many sculpting and game tools)</option></select>
+    </label>
+    <div class="slicer-dialog-actions">
+      <button class="btn btn-secondary" type="button" data-close>Cancel</button>
+      <button id="btn-import" class="btn btn-primary" type="button">Add</button>
+    </div>
+  </dialog>
+
+  <dialog id="dlg-split" class="slicer-dialog">
+    <h3>Add split parts</h3>
+    <p class="slicer-muted">The parts are packed onto new plates in this project.</p>
+    <div id="split-choices" class="slicer-project-list"></div>
+    <div class="slicer-dialog-actions"><button class="btn btn-secondary" type="button" data-close>Close</button></div>
+  </dialog>
+
+  <dialog id="dlg-save-profile" class="slicer-dialog">
+    <h3 id="save-profile-title">Save as a preset</h3>
+    <p id="save-profile-summary" class="slicer-muted"></p>
+    <label class="slicer-field">Name <input id="save-profile-name" maxlength="120" /></label>
+    <div class="slicer-dialog-actions">
+      <button class="btn btn-secondary" type="button" data-close>Cancel</button>
+      <button id="btn-save-profile-confirm" class="btn btn-primary" type="button">Save preset</button>
+    </div>
+  </dialog>
+
+  <div id="toast-area"></div>
+  <script type="module" src="slicer/main.js?v=16"></script>
+</body>
+</html>

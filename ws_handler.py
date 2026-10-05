@@ -7,6 +7,8 @@ import ipaddress
 import json
 import uuid
 
+import health
+import jobs
 import state
 from auth import AUTH_ENABLED, _parse_sid, _validate_session
 from discovery import discover_cc2_printers, discover_printers
@@ -15,7 +17,7 @@ from printers import PRINTER_TYPES, make_printer
 from spoolman import spoolman_assign, spoolman_set_location
 from printers.protocol import (
     CMD_CAMERA, CMD_DELETE_FILES, CMD_LIGHT, CMD_LIST_FILES,
-    CMD_PAUSE, CMD_RESUME, CMD_STATUS, CMD_STOP,
+    CMD_HOME_AXES, CMD_MOVE_AXES, CMD_PAUSE, CMD_RESUME, CMD_STATUS, CMD_STOP,
 )
 
 MAX_WS_MSG = 1 * 1024 * 1024  # 1 MB
@@ -58,6 +60,19 @@ def _valid_ip_or_host(value: str) -> bool:
     return bool(value) and all(c in allowed for c in value) and not value.startswith(".")
 
 
+def _printer_is_idle(printer) -> bool:
+    """Manual motion is permitted only when both print and machine state are idle."""
+    status = printer.status or {}
+    print_status = (status.get("PrintInfo") or {}).get("Status")
+    machine_status = status.get("CurrentStatus") or []
+    machine_code = machine_status[0] if machine_status else 0
+    return print_status == 0 and machine_code == 0
+
+
+async def _send_control_error(ws, message: str) -> None:
+    await ws.send(json.dumps({"type": "error", "message": message}))
+
+
 async def browser_handler(websocket) -> None:
     if AUTH_ENABLED:
         try:
@@ -75,6 +90,7 @@ async def browser_handler(websocket) -> None:
     for p in state.printers.values():
         await websocket.send(json.dumps({"type": "printer_update", "printer": p.to_dict()}))
     await websocket.send(json.dumps({"type": "tray_map", "tray_map": state.tray_map}))
+    await websocket.send(json.dumps({"type": "system_status", "status": health.snapshot()}))
 
     try:
         async for raw in websocket:
@@ -118,9 +134,9 @@ async def handle_browser_message(ws, raw: str) -> None:
         new_count = 0
         for dev in cc1_found:
             pid = dev.get("MainboardID") or dev.get("SerialNumber") or dev.get("_ip")
-            if pid not in state.printers:
+            ip = dev.get("MainboardIP") or dev.get("_ip")
+            if pid not in state.printers and not any(p.ip == ip for p in state.printers.values()):
                 name = dev.get("Name") or dev.get("MachineName") or f"Printer {len(state.printers)+1}"
-                ip   = dev.get("MainboardIP") or dev.get("_ip")
                 pc   = make_printer("cc1", pid, ip, name, mainboard_id=pid)
                 state.printers[pid] = pc
                 pc._task = asyncio.create_task(pc.start())
@@ -236,6 +252,10 @@ async def handle_browser_message(ws, raw: str) -> None:
         return
 
     if action == "start_print":
+        active = jobs.active_job_for(printer.id)
+        if active:
+            await _send_control_error(ws, f"{printer.name} is running queued job #{active['id']} — wait for it to finish")
+            return
         filename = msg.get("filename", "").strip()
         if not filename:
             await ws.send(json.dumps({"type": "error", "message": "No filename specified"}))
@@ -287,6 +307,76 @@ async def handle_browser_message(ws, raw: str) -> None:
                 await printer.send_cmd(1031, {"speed": int(speed)})
             else:
                 await printer.send_cmd(CMD_LIGHT, {"PrintSpeedPct": int(speed)})
+        return
+
+    if action in ("move_axis", "home_axes"):
+        if printer.printer_type != "cc1":
+            await _send_control_error(ws, "Manual motion is currently available for CC1 printers only")
+            return
+        if not printer.connected:
+            await _send_control_error(ws, "Printer is offline")
+            return
+        if not _printer_is_idle(printer):
+            await _send_control_error(ws, "Manual motion is only available while the printer is idle")
+            return
+
+        axis = str(msg.get("axis", "")).upper()
+        if action == "home_axes":
+            if axis not in {"X", "Y", "Z", "XY", "XYZ"}:
+                await _send_control_error(ws, "Invalid homing axis")
+                return
+            ok = await printer.send_cmd(CMD_HOME_AXES, {"Axis": axis})
+        else:
+            step = msg.get("step")
+            if axis not in {"X", "Y", "Z"} or isinstance(step, bool) or not isinstance(step, (int, float)):
+                await _send_control_error(ws, "Invalid movement request")
+                return
+            step = round(float(step), 1)
+            if step == 0 or abs(step) not in {0.1, 1.0, 10.0}:
+                await _send_control_error(ws, "Movement step must be 0.1, 1, or 10 mm")
+                return
+            ok = await printer.send_cmd(CMD_MOVE_AXES, {"Axis": axis, "Step": step})
+
+        if not ok:
+            await _send_control_error(ws, "Printer did not accept the motion command")
+        return
+
+    if action == "set_fan":
+        if printer.printer_type != "cc1":
+            await _send_control_error(ws, "Fan control from this dashboard is currently available for CC1 printers only")
+            return
+        fan_names = {"model": "ModelFan", "auxiliary": "AuxiliaryFan", "chamber": "BoxFan"}
+        fan = fan_names.get(str(msg.get("fan", "")).lower())
+        speed = msg.get("speed")
+        if fan is None or isinstance(speed, bool) or not isinstance(speed, (int, float)):
+            await _send_control_error(ws, "Invalid fan request")
+            return
+        speed = int(speed)
+        if not 0 <= speed <= 100:
+            await _send_control_error(ws, "Fan speed must be between 0 and 100 percent")
+            return
+        if not await printer.send_cmd(CMD_LIGHT, {"TargetFanSpeed": {fan: speed}}):
+            await _send_control_error(ws, "Printer did not accept the fan command")
+        return
+
+    if action == "set_temperature":
+        if printer.printer_type != "cc1":
+            await _send_control_error(ws, "Temperature control from this dashboard is currently available for CC1 printers only")
+            return
+        target_name = str(msg.get("target", "")).lower()
+        value = msg.get("value")
+        limits = {"nozzle": ("TempTargetNozzle", 300), "bed": ("TempTargetHotbed", 110)}
+        target = limits.get(target_name)
+        if target is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+            await _send_control_error(ws, "Invalid temperature request")
+            return
+        value = int(value)
+        field, maximum = target
+        if not 0 <= value <= maximum:
+            await _send_control_error(ws, f"{target_name.title()} target must be between 0 and {maximum} °C")
+            return
+        if not await printer.send_cmd(CMD_LIGHT, {field: value}):
+            await _send_control_error(ws, "Printer did not accept the temperature command")
         return
 
     if action in cmd_map:

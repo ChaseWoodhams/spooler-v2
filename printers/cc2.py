@@ -142,6 +142,7 @@ class CC2Connection(PrinterConnection):
             raise
         except Exception as e:
             print(f"[Printer {self.name}] MQTT failed: {e}")
+            self.last_error = f"MQTT failed: {e}"
         finally:
             self._mqtt_client     = None
             self._mqtt_registered = False
@@ -187,6 +188,7 @@ class CC2Connection(PrinterConnection):
                 tick += 1
 
     async def _handle_mqtt_message(self, message) -> None:
+        self._note_activity()
         topic = str(message.topic)
 
         if "register_response" in topic:

@@ -11,6 +11,7 @@ import urllib.request
 import os
 
 import state as _state
+from outbox import PermanentError, outbox, post_use
 from persistence import FILAMENT_DENSITY
 from push import load_notif_settings, send_push_all
 from state import broadcast_to_browsers
@@ -153,47 +154,88 @@ def _notify_spool_level(
             )
 
 
+def _report_deduction(
+    result: dict,
+    amount_g: float,
+    printer_id: str,
+    loop: asyncio.AbstractEventLoop | None,
+) -> None:
+    name = result.get("filament", {}).get("name") or f"Spool {result.get('id', '?')}"
+    remaining = result.get("remaining_weight", 0)
+    print(f"[Spoolman] {amount_g}g deducted from '{name}' → {remaining}g left")
+    if loop is not None:
+        _notify_spool_level(result, printer_id, loop)
+
+
 def spoolman_deduct_spool(
     spool_id: int,
     amount_g: float,
     printer_id: str,
-    loop: asyncio.AbstractEventLoop,
+    loop: asyncio.AbstractEventLoop | None,
 ) -> None:
-    """Deduct filament from a specific spool by ID. Runs in a thread-pool executor."""
+    """Deduct filament from a specific spool by ID. Runs in a thread-pool executor.
+
+    If Spoolman cannot be reached the deduction is queued on disk and replayed
+    by flush_spoolman_outbox() once Spoolman answers again.
+    """
     try:
-        base = get_spoolman_url()
-        body = json.dumps({"use_weight": round(amount_g, 1)}).encode()
-        req = urllib.request.Request(
-            f"{base}/api/v1/spool/{spool_id}/use",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="PUT",
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            result = json.loads(resp.read())
-        name = result.get("filament", {}).get("name") or f"Spool {spool_id}"
-        remaining = result.get("remaining_weight", 0)
-        print(f"[Spoolman] {amount_g}g deducted from '{name}' → {remaining}g left")
-        _notify_spool_level(result, printer_id, loop)
+        result = post_use(get_spoolman_url(), spool_id, amount_g)
+    except PermanentError as e:
+        print(f"[Spoolman] Deduct rejected for spool {spool_id} ({e})")
+        return
     except Exception as e:
-        print(f"[Spoolman] Deduct skipped for spool {spool_id} ({e})")
+        outbox.enqueue(amount_g, printer_id, str(e), spool_id=spool_id)
+        print(f"[Spoolman] Unreachable — queued {round(amount_g, 1)}g for spool {spool_id} ({e})")
+        return
+    _report_deduction(result, amount_g, printer_id, loop)
 
 
-def spoolman_deduct(printer_id: str, amount_g: float, loop: asyncio.AbstractEventLoop) -> None:
+def _spool_id_at_location(location: str) -> int | None:
+    url = f"{get_spoolman_url()}/api/v1/spool?location={urllib.parse.quote(location)}"
+    with urllib.request.urlopen(url, timeout=3) as resp:
+        data = json.loads(resp.read())
+    return data[0]["id"] if data else None
+
+
+def spoolman_deduct(printer_id: str, amount_g: float, loop: asyncio.AbstractEventLoop | None) -> None:
     """Deduct filament from the spool assigned to this printer's location in Spoolman.
 
     Fallback for single-colour prints where no per-tray tracking is available.
+    If Spoolman is unreachable the deduction is queued against the printer's
+    location and resolved to a spool when it is replayed.
     Runs in a thread-pool executor.
     """
     loc = _printer_location(printer_id)
     try:
-        base = get_spoolman_url()
-        url = f"{base}/api/v1/spool?location={urllib.parse.quote(loc)}"
-        with urllib.request.urlopen(url, timeout=3) as resp:
-            data = json.loads(resp.read())
-        if not data:
-            return
-        spool_id = data[0]["id"]
-        spoolman_deduct_spool(spool_id, amount_g, printer_id, loop)
+        spool_id = _spool_id_at_location(loc)
     except Exception as e:
-        print(f"[Spoolman] Deduct skipped ({e})")
+        outbox.enqueue(amount_g, printer_id, str(e), location=loc)
+        print(f"[Spoolman] Unreachable — queued {round(amount_g, 1)}g for the spool at '{loc}' ({e})")
+        return
+    if spool_id is None:
+        return
+    spoolman_deduct_spool(spool_id, amount_g, printer_id, loop)
+
+
+def _replay_deduction(entry: dict) -> dict:
+    spool_id = entry.get("spool_id")
+    if spool_id is None:
+        spool_id = _spool_id_at_location(entry.get("location") or "")
+        if spool_id is None:
+            raise PermanentError(f"No spool is assigned to '{entry.get('location')}'")
+    return post_use(get_spoolman_url(), spool_id, entry["amount_g"])
+
+
+def flush_spoolman_outbox(loop: asyncio.AbstractEventLoop | None = None) -> dict:
+    """Replay deductions queued while Spoolman was unreachable. Blocking — run in an executor."""
+    if not outbox.pending_count():
+        return {"sent": [], "dropped": [], "remaining": 0}
+    report = outbox.flush(_replay_deduction)
+    for entry, result in report["sent"]:
+        _report_deduction(result, entry["amount_g"], entry["printer_id"], loop)
+    for entry in report["dropped"]:
+        print(f"[Spoolman] Dropped queued deduction of {entry['amount_g']}g ({entry['last_error']})")
+    if report["sent"]:
+        print(f"[Spoolman] Replayed {len(report['sent'])} queued deduction(s), "
+              f"{report['remaining']} still pending")
+    return report

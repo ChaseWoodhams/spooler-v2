@@ -2,9 +2,11 @@
 Authentication: sessions, password verification, rate limiting.
 """
 
+import hashlib
 import json
 import os
 import secrets
+import threading
 import time
 from pathlib import Path
 
@@ -24,7 +26,11 @@ SECURE_COOKIES  = os.getenv("SECURE_COOKIES", "false").lower() == "true"
 SESSION_COOKIE = "spooler_sid"
 SESSION_TTL    = 30 * 24 * 3600  # 30 days
 
-_sessions: dict = {}  # token → expiry (Unix epoch)
+# sha256(token) → expiry (Unix epoch). Only hashes are kept, and persisted to
+# sessions.json, so a restart keeps browsers signed in without the file being
+# usable as a set of login cookies.
+_sessions: dict = {}
+_sessions_lock = threading.Lock()
 
 # Rate limiting: ip → (attempt_count, window_start_timestamp)
 _login_attempts: dict = {}
@@ -33,10 +39,13 @@ LOGIN_WINDOW_S     = 300  # 5 minutes
 
 
 def set_auth_file(path: Path) -> None:
-    global _AUTH_FILE
+    global _AUTH_FILE, _SESSIONS_FILE
     _AUTH_FILE = path
+    _SESSIONS_FILE = path.with_name("sessions.json")
+    _load_sessions()
 
 _AUTH_FILE: Path = Path("auth.json")  # overridden by server.py at startup
+_SESSIONS_FILE: Path | None = None    # set alongside _AUTH_FILE
 
 
 def _load_auth() -> dict:
@@ -68,6 +77,40 @@ def _save_auth(username: str, pw_hash: str) -> None:
 
 # ── Session helpers ────────────────────────────────────────────────────────────
 
+def _token_key(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _load_sessions() -> None:
+    loaded = {}
+    if _SESSIONS_FILE is not None:
+        try:
+            data = json.loads(_SESSIONS_FILE.read_text())
+            now = time.time()
+            if isinstance(data, dict):
+                loaded = {
+                    k: float(v) for k, v in data.items()
+                    if isinstance(v, (int, float)) and v > now
+                }
+        except (OSError, ValueError):
+            pass
+    with _sessions_lock:
+        _sessions.clear()
+        _sessions.update(loaded)
+
+
+def _save_sessions() -> None:
+    if _SESSIONS_FILE is None:
+        return
+    with _sessions_lock:
+        tmp = _SESSIONS_FILE.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps(dict(_sessions)))
+            os.replace(tmp, _SESSIONS_FILE)
+        except OSError as e:
+            print(f"[Auth] Could not save sessions: {e}")
+
+
 def _parse_sid(cookie_header: str) -> str:
     for part in cookie_header.split(";"):
         name, _, val = part.strip().partition("=")
@@ -79,21 +122,25 @@ def _parse_sid(cookie_header: str) -> str:
 def _validate_session(token: str) -> bool:
     if not token:
         return False
-    expiry = _sessions.get(token, 0)
+    key = _token_key(token)
+    expiry = _sessions.get(key, 0)
     if time.time() > expiry:
-        _sessions.pop(token, None)
+        if _sessions.pop(key, None) is not None:
+            _save_sessions()
         return False
     return True
 
 
 def _create_session() -> str:
     token = secrets.token_urlsafe(32)
-    _sessions[token] = time.time() + SESSION_TTL
+    _sessions[_token_key(token)] = time.time() + SESSION_TTL
+    _save_sessions()
     return token
 
 
 def _invalidate_session(token: str) -> None:
-    _sessions.pop(token, None)
+    if _sessions.pop(_token_key(token), None) is not None:
+        _save_sessions()
 
 
 def _auth_ok(handler) -> bool:
@@ -131,6 +178,8 @@ async def session_cleanup_loop() -> None:
         expired = [t for t, exp in list(_sessions.items()) if now > exp]
         for t in expired:
             _sessions.pop(t, None)
+        if expired:
+            _save_sessions()
         old_ips = [ip for ip, (_, start) in list(_login_attempts.items())
                    if now - start > LOGIN_WINDOW_S * 2]
         for ip in old_ips:
