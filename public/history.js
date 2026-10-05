@@ -184,8 +184,19 @@ function quickPrintButtons(p) {
   const gone = "The hidden project for this quick print is gone";
   const reprintOff = !p.outcome ? "Still printing" : !p.reprint_available ? (p.project_available ? "The stored G-code for this print is gone" : gone) : "";
   const openOff = p.project_available ? "" : gone;
+  const changeOff = !p.outcome ? "Still printing" : p.project_available ? "" : gone;
   return `<button class="btn btn-secondary btn-sm" data-history-action="reprint" data-print-id="${p.id}"${reprintOff ? ` disabled title="${_histAttr(reprintOff)}"` : ""}>Reprint</button>
+      <button class="btn btn-secondary btn-sm" data-history-action="reprint-changes" data-print-id="${p.id}"${changeOff ? ` disabled title="${_histAttr(changeOff)}"` : ""}>Reprint with changes</button>
       <button class="btn btn-secondary btn-sm" data-history-action="open-project" data-print-id="${p.id}"${openOff ? ` disabled title="${_histAttr(openOff)}"` : ""}>Open as project</button>`;
+}
+
+// Reprint with changes reopens the Quick print modal on the Print's hidden project, which still holds the printer, preset,
+// spool, plate side and options that print used. Slice & print there queues a NEW Job; this Print is never touched.
+// Unchanged, the project's existing Slice is reused (same G-code, no re-slice); any changed option makes it Outdated, so it slices again.
+function reprintWithChanges(record) {
+  if (!window.QuickPrint) { toast("The Quick print window isn't loaded", true); return; }
+  closeHistory();
+  window.QuickPrint.open({ projectId: record.project_id, printerId: record.printer_id });
 }
 
 function historyOutcomeForm(p) {
@@ -255,6 +266,8 @@ document.getElementById("history-list").addEventListener("click", async (e) => {
       loadJobs();
       loadHistory();
       toastAction(`Queued ${job.name} again`, "Open queue", () => { closeHistory(); openQueue(); });
+    } else if (btn.dataset.historyAction === "reprint-changes") {
+      reprintWithChanges(record);
     } else if (btn.dataset.historyAction === "open-project") {
       const project = await jobsApi("POST", `/api/projects/${record.project_id}/open-as-project`, {});
       toastAction(`${project.name} is now a project`, "Open project", () => { location.href = `/slicer.html?project=${project.id}`; });

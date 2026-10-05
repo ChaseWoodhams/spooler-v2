@@ -169,5 +169,35 @@ class QuickPrintSliceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.call("GET", f"/api/projects/{project['id']}/quick-options")[1]["options"]["walls"], 5)
 
 
+    async def test_reprint_with_changes_reopens_the_saved_choices_and_queues_a_new_job(self):
+        """History's Reprint with changes: the modal reads the project's saved choices back, then Slice & print queues a
+        NEW Job. Unchanged, the existing Slice is reused (same G-code); a changed option makes it Outdated and slices again."""
+        import database
+        project_id = await self.print_with({"walls": 5}, spool_id=None, bed="smooth")
+        first = projects.project_jobs(project_id)
+        self.assertEqual(len(first), 1)
+        with database.transaction() as conn:         # the first Job finished: its Print stays as it was
+            conn.execute("UPDATE jobs SET state = 'completed' WHERE id = ?", (first[0]["id"],))
+        status, info = self.call("GET", f"/api/projects/{project_id}/quick-options")
+        self.assertEqual((info["options"]["walls"], info["bed"], info["printer_id"]), (5, "smooth", "p1"))
+        slices = len(self.runner.calls)
+        url = f"/api/projects/{project_id}/print"
+        status, result = self.call("POST", url, {"printer_id": "p1", "bed": "smooth", "review": True})   # unchanged reopen
+        self.assertEqual((status, result["review"]["state"]), (200, "ready"), result)    # reused: nothing to wait for
+        status, result = self.call("POST", url, {"printer_id": "p1", "bed": "smooth"})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(len(self.runner.calls), slices)
+        self.assertEqual(len(projects.project_jobs(project_id)), 2)
+        with database.transaction() as conn:
+            conn.execute("UPDATE jobs SET state = 'completed'")
+        status, result = self.call("POST", url, {"printer_id": "p1", "bed": "smooth", "review": True, "options": {"walls": 7}})
+        self.assertEqual((status, result["review"]["state"]), (200, "slicing"), result)   # changed: sliced again
+        await self.settle()
+        self.assertEqual(self.slice_config()["wall_loops"], "7")
+        status, result = self.call("POST", url, {"printer_id": "p1", "bed": "smooth", "options": {"walls": 7}})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(len(projects.project_jobs(project_id)), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
