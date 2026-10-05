@@ -327,6 +327,8 @@ def _reprint_problem(record: dict, project, job) -> tuple | None:
         return "The project this print came from is gone", 409
     if job is None:
         return "This print's queue job no longer exists", 409
+    if job["state"] not in jobs.FINAL:
+        return "This print's job is already waiting in the queue", 409
     if not job["stored_file"] or not (jobs._data_dir / job["stored_file"]).is_file():
         return "The G-code file for this print is no longer stored", 410
     return None
@@ -438,7 +440,7 @@ def reprint(print_id: int) -> dict:
         raise jobs.JobError("Print not found", 404)
     with database.transaction() as conn:
         project = conn.execute("SELECT id FROM projects WHERE id = ?", (record["project_id"],)).fetchone() if record["project_id"] else None
-        job = conn.execute("SELECT id, stored_file FROM jobs WHERE id = ?", (record["job_id"],)).fetchone() if record["job_id"] else None
+        job = conn.execute("SELECT id, state, stored_file FROM jobs WHERE id = ?", (record["job_id"],)).fetchone() if record["job_id"] else None
     problem = _reprint_problem(record, project, job)
     if problem:
         raise jobs.JobError(*problem)

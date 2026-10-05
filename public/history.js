@@ -118,7 +118,7 @@ function historyItem(p) {
     <button class="history-row" data-history-toggle="${p.id}" aria-expanded="${open}">
       <span class="history-date">${escHtml(when)}</span>
       <span class="history-file" title="${_histAttr(p.file_name)}">
-        ${p.color_hex ? `<span class="history-swatch" style="background:#${_safeColor(p.color_hex)}"></span>` : ""}${escHtml(p.file_name)}
+        ${p.quick && p.thumbnail ? `<img class="history-thumb" src="${_histAttr(p.thumbnail)}" alt="" loading="lazy" onerror="this.remove()">` : ""}${p.color_hex ? `<span class="history-swatch" style="background:#${_safeColor(p.color_hex)}"></span>` : ""}${escHtml(p.quick && p.project_name ? p.project_name : p.file_name)}${p.quick ? ` <span class="history-quick">Quick print</span>` : ""}
       </span>
       <span class="history-printer">${escHtml(p.printer_name)}</span>
       <span class="status-badge ${p.outcome ? PRINT_OUTCOME_CLASS[p.outcome] : "printing"}">${escHtml(printOutcomeLabel(p.outcome))}</span>
@@ -173,8 +173,19 @@ function historyDetail(p) {
     <div class="job-controls">
       <button class="btn btn-secondary btn-sm" data-history-action="save" data-print-id="${p.id}">Save notes</button>
       ${p.outcome ? `<button class="btn btn-primary btn-sm" data-history-action="repeat" data-print-id="${p.id}">Print again</button>` : ""}
+      ${p.quick ? quickPrintButtons(p) : ""}
     </div>
   </div>`;
+}
+
+// A quick print can be printed again exactly as it was, or promoted to a normal Project. Both need its hidden project
+// (and Reprint its stored G-code); without them the Print stays in History and the buttons are disabled.
+function quickPrintButtons(p) {
+  const gone = "The hidden project for this quick print is gone";
+  const reprintOff = !p.outcome ? "Still printing" : !p.reprint_available ? (p.project_available ? "The stored G-code for this print is gone" : gone) : "";
+  const openOff = p.project_available ? "" : gone;
+  return `<button class="btn btn-secondary btn-sm" data-history-action="reprint" data-print-id="${p.id}"${reprintOff ? ` disabled title="${_histAttr(reprintOff)}"` : ""}>Reprint</button>
+      <button class="btn btn-secondary btn-sm" data-history-action="open-project" data-print-id="${p.id}"${openOff ? ` disabled title="${_histAttr(openOff)}"` : ""}>Open as project</button>`;
 }
 
 function historyOutcomeForm(p) {
@@ -238,6 +249,15 @@ document.getElementById("history-list").addEventListener("click", async (e) => {
       Object.assign(record, updated);
       _historyDetails[id] = updated;
       toast("Outcome saved");
+      loadHistory();
+    } else if (btn.dataset.historyAction === "reprint") {
+      const job = await jobsApi("POST", `/api/prints/${id}/reprint`, {});
+      loadJobs();
+      loadHistory();
+      toastAction(`Queued ${job.name} again`, "Open queue", () => { closeHistory(); openQueue(); });
+    } else if (btn.dataset.historyAction === "open-project") {
+      const project = await jobsApi("POST", `/api/projects/${record.project_id}/open-as-project`, {});
+      toastAction(`${project.name} is now a project`, "Open project", () => { location.href = `/slicer.html?project=${project.id}`; });
       loadHistory();
     } else if (btn.dataset.historyAction === "repeat") {
       const job = await jobsApi("POST", `/api/prints/${id}/repeat`, {});

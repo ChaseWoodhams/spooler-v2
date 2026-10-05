@@ -747,6 +747,8 @@ body.panel-open { overflow: hidden; }
   border-radius: 50%;
   vertical-align: middle;
 }
+.history-thumb { width: 28px; height: 22px; margin-right: 8px; border-radius: 3px; object-fit: cover; vertical-align: middle; background: var(--surface2); }
+.history-quick { margin-left: 6px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); font-size: 11px; font-weight: 400; }
 .history-detail { display: flex; flex-direction: column; gap: 12px; padding: 4px 20px 16px; }
 .history-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; font-size: 12px; }
 .history-facts dt { color: var(--text-muted); }

@@ -73,6 +73,7 @@ class QuickHistoryTests(unittest.TestCase):
         self.printed(1)
         pid = self.entry()["id"]
         self.assertEqual(self.call("POST", f"/api/prints/{pid}/reprint", {})[0], 200)
+        self.assertFalse(self.entry()["reprint_available"])
         self.assertEqual(self.call("POST", f"/api/prints/{pid}/reprint", {})[0], 409)
 
     def test_with_the_hidden_project_gone_reprint_and_open_as_project_are_unavailable(self):
