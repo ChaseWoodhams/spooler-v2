@@ -5,7 +5,6 @@ and auto-start is off) plus Prints whose Outcome is still unconfirmed. A waiting
 that Print is not repeated in the unconfirmed list.
 """
 
-import database
 import jobs
 import print_history
 import projects
@@ -24,10 +23,8 @@ def needs_you() -> dict:
     for printer_id, printer in state.printers.items():
         if jobs.active_job_for(printer_id):
             continue
-        with database.transaction() as conn:
-            last = conn.execute("SELECT * FROM prints WHERE printer_id = ? ORDER BY id DESC LIMIT 1",
-                                (printer_id,)).fetchone()
-        if last is None or last["outcome"] is None:
+        record = print_history.latest_print(printer_id)
+        if record is None or record["outcome"] is None:
             continue
         next_job = next((_job_summary(j) for j in queued if j["printer_id"] == printer_id), None)
         if bed_cleared.status(printer_id)["valid"]:
@@ -36,7 +33,6 @@ def needs_you() -> dict:
             kind = "start_job"
         else:
             kind = "bed_cleared"
-        record = print_history._to_print(last)
         shown.add(record["id"])
         waiting.append({"printer_id": printer_id, "printer_name": printer.name, "kind": kind,
                         "print": record, "next_job": next_job})

@@ -1,5 +1,7 @@
 """Outcome prompt, push and reminders, tested through the backend HTTP API with Web Push mocked."""
+import http.server
 import json
+import threading
 import time
 import unittest
 import urllib.error
@@ -9,11 +11,14 @@ from unittest import mock
 import jobs
 import outcome_prompt
 import print_history
+import snapshots
 from tests import test_plate_status
 from tests.test_jobs import GCODE
 
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 FRAME = b"\xff\xd8\xff\xe0fakejpeg\xff\xd9"
+HEAD = b"--frame" + bytes([13, 10]) + b"Content-Type: image/jpeg" + bytes([13, 10, 13, 10])
+TAIL = bytes([255, 216]) + b"tail"
 
 
 class OutcomePromptTests(unittest.TestCase):
@@ -23,9 +28,10 @@ class OutcomePromptTests(unittest.TestCase):
         self.addCleanup(self.plates.tearDown)
         self.printer = self.plates.printer
         self.sent = []
+        self.no_camera = mock.patch.object(snapshots, "grab_frame", lambda url, timeout=8: None)
         for patcher in (mock.patch.object(outcome_prompt, "send_push", lambda title, body, data=None: self.sent.append((title, body, data))),
                         mock.patch.object(outcome_prompt, "run_in_background", lambda fn, *args: fn(*args)),
-                        mock.patch.object(outcome_prompt, "fetch_frame", lambda url: None)):
+                        self.no_camera):
             patcher.start()
             self.addCleanup(patcher.stop)
         outcome_prompt.init()
@@ -195,7 +201,7 @@ class OutcomePromptTests(unittest.TestCase):
 
     def test_end_snapshot_is_stored_on_the_print_and_shown_in_the_prompt(self):
         self.printer.camera_url = "http://10.0.0.5:8080/?action=stream"
-        with mock.patch.object(outcome_prompt, "fetch_frame", lambda url: FRAME if "10.0.0.5" in url else None):
+        with mock.patch.object(snapshots, "grab_frame", lambda url, timeout=8: FRAME if "10.0.0.5" in url else None):
             self.plate_print(4)
         (awaiting,) = self.prompts()
         self.assertEqual(awaiting["snapshot"], f"/api/prints/{awaiting['print_id']}/snapshot")
@@ -207,14 +213,32 @@ class OutcomePromptTests(unittest.TestCase):
         self.assertIsNone(self.prompts()[0]["snapshot"])
         self.assertEqual(self.call("GET", f"/api/prints/{self.prompts()[0]['print_id']}/snapshot")[0], 404)
         self.printer.camera_url = "http://10.0.0.5/stream"
-        with mock.patch.object(outcome_prompt, "fetch_frame", mock.Mock(side_effect=OSError("down"))):
+        with mock.patch.object(snapshots, "grab_frame", mock.Mock(side_effect=OSError("down"))):
             self.plate_print(5)
         self.assertEqual(len(self.sent), 2)  # the push still went out
 
-    def test_first_jpeg_frame_is_cut_from_a_multipart_stream(self):
-        stream = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + FRAME + b"\r\n--frame\r\nContent-Type: image/jpeg\r\n\r\n\xff\xd8tail"
-        self.assertEqual(outcome_prompt.first_jpeg(stream), FRAME)
-        self.assertIsNone(outcome_prompt.first_jpeg(b"--frame\r\n\xff\xd8 never ends"))
+    def test_the_end_snapshot_is_cut_from_a_real_multipart_camera_stream(self):
+        stream = HEAD + FRAME + HEAD + TAIL
+
+        class Camera(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.end_headers()
+                self.wfile.write(stream)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Camera)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.no_camera.stop()
+        self.printer.camera_url = f"http://127.0.0.1:{server.server_port}/?action=stream"
+        self.plate_print(4)
+        (awaiting,) = self.prompts()
+        self.assertEqual(self.call("GET", awaiting["snapshot"]), (200, FRAME))
 
 
 if __name__ == "__main__":
