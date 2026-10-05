@@ -620,6 +620,8 @@ function renderPrinter(printer) {
           Stop
         </button>
       ` : ""}
+      <button class="btn btn-secondary btn-sm" onclick="QuickPrint.pick({ printerId: '${escAttr(printer.id)}' })"
+              title="Pick a model or G-code file and print it on ${escAttr(printer.name)} without making a Project" ${!connected ? "disabled" : ""}>Quick print here</button>
       <div class="controls-spacer"></div>
       <button class="btn btn-sm ${lightOn ? "btn-primary" : "btn-secondary"}"
               onclick="printerAction('${escAttr(printer.id)}','${lightOn ? "light_off" : "light_on"}')"

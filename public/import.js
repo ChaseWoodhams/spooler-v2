@@ -1,4 +1,4 @@
-/* Import from the dashboard: one button (or a dropped file) takes an STL, OBJ, 3MF or G-code file, makes a Project of it
+/* Import from the dashboard: the Import button (a dropped file opens the Quick print modal instead) takes an STL, OBJ, 3MF or G-code file, makes a Project of it
    and opens it on the confirm screen. The Projects page does the same in slicer/main.js. */
 (() => {
   const input = document.getElementById("import-file");
@@ -60,6 +60,8 @@
     e.preventDefault();
     depth = 0;
     document.body.classList.remove("import-dropping");
-    importFile(e.dataTransfer.files[0]);
+    const file = e.dataTransfer.files[0];
+    if (window.QuickPrint) window.QuickPrint.open({ file }); // a dropped file is a Quick print; the Import button still makes a Project
+    else importFile(file);
   });
 })();
