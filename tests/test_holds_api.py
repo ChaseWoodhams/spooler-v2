@@ -165,6 +165,31 @@ class HoldsApiTests(unittest.TestCase):
         self.assertEqual(self.printer.started, [])
         self.assertEqual(len(self.notices), 1)
 
+    def test_an_accepted_warning_whose_number_changed_is_still_accepted(self):
+        job = self.queue()
+        low = lambda grams: {"spool": {"id": 7, "remaining_weight": grams, "filament": {"material": "PLA"}}}
+        with mock.patch("preflight.loaded_spool", lambda printer: low(1)):
+            _, result = self.acknowledge(job)
+        self.assertEqual(len(result["acknowledged"]), 1)  # Spool #7 has 1 g left; this print needs about N g
+        self.finish_a_print()
+        with mock.patch("preflight.loaded_spool", lambda printer: low(2)):  # the grams left changed since queueing
+            result = self.start_via_bed_cleared()
+        self.assertEqual((result["started"]["id"], result["start_error"]), (job["id"], None))
+        self.assertEqual(self.notices, [])
+
+    def test_a_different_warning_still_blocks_when_another_one_was_accepted(self):
+        job = self.queue()
+        low = {"spool": {"id": 7, "remaining_weight": 1, "filament": {"material": "PLA"}}}
+        with mock.patch("preflight.loaded_spool", lambda printer: low):
+            self.acknowledge(job)
+        self.finish_a_print()
+        petg = {"spool": {"id": 7, "remaining_weight": 1, "filament": {"material": "PETG"}}}
+        with mock.patch("preflight.loaded_spool", lambda printer: petg):
+            result = self.start_via_bed_cleared()
+        self.assertIsNone(result["started"])
+        self.assertIn("PETG", result["start_error"])
+        self.assertNotIn("g left", result["start_error"])
+
     def test_changed_gcode_blocks_the_start(self):
         job = self.queue()
         stored = self.api.dir / job["stored_file"]
