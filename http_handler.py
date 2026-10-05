@@ -19,9 +19,11 @@ import asyncio
 import backup
 import bed_cleared
 import dashboard
+import holds
 import farm
 import health
 import jobs
+import outcome_prompt
 import preflight
 import remembered_defaults
 import print_history
@@ -642,12 +644,19 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: preflight.check_job_id(self._job_id(), printer_id or None), broadcast=False)
         elif self.path.startswith("/api/jobs/") and self.path.endswith("/toolpath"):
             self._send_toolpath()
+        elif self.path.startswith("/api/jobs/") and self.path.split("?", 1)[0].endswith("/snapshot"):
+            self._send_job_snapshot()
         elif self.path.startswith("/api/printers/") and self.path.endswith("/bed-cleared"):
             self._jobs_call(lambda: bed_cleared.status(self._path_printer_id()), broadcast=False)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
             self._jobs_call(lambda: preflight.printer_hardware(self._path_printer_id()), broadcast=False)
         elif self.path == "/api/prints" or self.path.startswith("/api/prints?"):
             self._jobs_call(lambda: print_history.search(**self._print_filters(paged=True)), broadcast=False)
+        elif self.path == "/api/outcome-prompts":
+            self._jobs_call(lambda: {"awaiting": outcome_prompt.awaiting(), "reminder_delay_s": outcome_prompt.REMINDER_DELAY_S},
+                            broadcast=False)
+        elif self.path.startswith("/api/prints/") and self.path.split("?", 1)[0].endswith("/snapshot"):
+            self._send_print_snapshot()
         elif self.path == "/api/failure-reasons":
             self._json({"failure_reasons": list(print_history.FAILURE_REASONS),
                         "cancel_reasons": list(print_history.CANCEL_REASONS)})
@@ -729,6 +738,10 @@ class SPHandler(SimpleHTTPRequestHandler):
     def do_DELETE(self):
         if not self._check_auth():
             return
+        if self.path.startswith("/api/jobs/") and "/holds/" in self.path:
+            parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'jobs', <id>, 'holds', <hold id>]
+            self._jobs_call(lambda: holds.remove(self._job_id(), self._int(parts[5], "Hold not found")))
+            return
         if self.path.startswith("/api/jobs/"):
             self._jobs_call(lambda: jobs.delete_job(self._job_id()))
             return
@@ -805,7 +818,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             def confirm():
                 body = self._json_body()
                 return bed_cleared.confirm(self._path_printer_id(), body.get("print_id"), body.get("outcome"),
-                                           body.get("failure_reasons"), body.get("notes"))
+                                           body.get("failure_reasons"), body.get("notes"), bool(body.get("reprint")))
             self._jobs_call(confirm, coroutine=True)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/auto-start"):
             self._jobs_call(lambda: bed_cleared.set_auto_start(
@@ -881,6 +894,26 @@ class SPHandler(SimpleHTTPRequestHandler):
         except (IndexError, ValueError):
             raise jobs.JobError("Job not found", 404)
 
+    @staticmethod
+    def _int(value: str, message: str) -> int:
+        try:
+            return int(value)
+        except ValueError:
+            raise jobs.JobError(message, 404)
+
+    def _send_job_snapshot(self):
+        try:
+            data = jobs.snapshot_file(self._job_id()).read_bytes()
+        except jobs.JobError as e:
+            self._json({"error": str(e)}, e.status)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _json_body(self) -> dict:
         try:
             body = json.loads(self._read_body() or b"{}")
@@ -933,6 +966,22 @@ class SPHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_print_snapshot(self):
+        try:
+            data = outcome_prompt.snapshot_file(self._job_id()).read_bytes()
+        except jobs.JobError as e:
+            self._json({"error": str(e)}, e.status)
+            return
+        except OSError:
+            self._json({"error": "No snapshot for this print"}, 404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _handle_jobs_post(self):
         path = self.path.split("?", 1)[0]
         parts = path.split("/")  # ['', 'api', 'jobs', <id>, <action>]
@@ -959,6 +1008,11 @@ class SPHandler(SimpleHTTPRequestHandler):
                             coroutine=True)
         elif action == "requeue":
             self._jobs_call(lambda: jobs.requeue(self._job_id()))
+        elif action == "holds":
+            self._jobs_call(lambda: holds.add(self._job_id(), self._json_body()))
+        elif action == "acknowledge-warnings":
+            self._jobs_call(lambda: jobs.acknowledge_warnings(self._job_id(), self._json_body().get("printer_id")),
+                            broadcast=False)
         else:
             self._json({"error": "Not found"}, 404)
 
@@ -1116,6 +1170,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
                 self._json(projects.plate_status(project_id))
+            elif len(parts) == 5 and parts[4] == "intake":
+                self._json(projects.intake(project_id))
             elif len(parts) == 5 and parts[4] == "export.3mf":
                 record = projects.get_project(project_id)
                 name = re.sub(r'[^\w .-]+', "_", record["name"]).strip() or "project"
@@ -1159,6 +1215,14 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/projects/upload":
             self._handle_project_upload(new_project=True)
+            return
+        if len(parts) == 5 and parts[4] in ("auto-place", "fix-scale", "print"):
+            actions = {
+                "auto-place": lambda: projects.auto_place(self._job_id()),
+                "fix-scale":  lambda: projects.fix_scale(self._job_id()),
+                "print":      lambda: projects.slice_and_print(self._job_id(), self._json_body()),
+            }
+            self._jobs_call(actions[parts[4]], broadcast=False)
             return
         if len(parts) == 5 and parts[4] in ("layout", "whole", "pack", "slice", "queue"):
             actions = {

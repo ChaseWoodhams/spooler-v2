@@ -1961,3 +1961,6 @@ body.view-printer #needs-you, body.view-printer #dash-bar, body.view-printer #da
   .dash-project { grid-template-columns: 1fr auto; }
   .dash-project-bar { grid-column: 1 / -1; order: 3; }
 }
+/* Dropping a model file on the dashboard imports it */
+body.import-dropping::after { content: "Drop to import"; position: fixed; inset: 10px; z-index: 900; display: grid; place-items: center;
+  border: 2px dashed var(--accent); border-radius: 12px; background: rgba(13, 14, 18, .75); color: var(--text); font-size: 20px; pointer-events: none; }

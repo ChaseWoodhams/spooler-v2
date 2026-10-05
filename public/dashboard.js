@@ -127,8 +127,9 @@ function syncShellView() {
   document.getElementById("btn-printers-nav").classList.toggle("active", !projects);
   if (projects) {
     const frame = document.getElementById("projects-frame");
-    const id = Number(hash.split("=")[1]) || 0;
-    const target = id ? `/slicer.html?project=${id}` : "/slicer.html";
+    const params = new URLSearchParams(hash.slice(1)); // #projects=<id>[&confirm=1] (confirm: straight after an import)
+    const id = Number(params.get("projects")) || 0;
+    const target = id ? `/slicer.html?project=${id}${params.has("confirm") ? "&confirm=1" : ""}` : "/slicer.html";
     if (!frame.getAttribute("src") || (id && frame.dataset.project !== String(id))) {
       frame.dataset.project = id || "";
       frame.src = target;

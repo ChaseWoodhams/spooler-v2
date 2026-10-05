@@ -1816,6 +1816,11 @@ document.getElementById("modal-files").addEventListener("click", (e) => {
 // confirmed here; anything else is corrected in History), then releases the next job if auto-start is on.
 async function confirmBedCleared(printerId) {
   try {
+    // A print that ended and was never answered gets the outcome prompt (Printed OK · Bed cleared, or Failed…).
+    if ((await OutcomePrompt.awaiting()).some(a => a.printer_id === printerId && a.outcome_unconfirmed)) {
+      OutcomePrompt.open(printerId);
+      return;
+    }
     const body = {};
     const latest = await (await fetch(`/api/prints?printer_id=${encodeURIComponent(printerId)}&limit=1`)).json();
     const last = latest.prints && latest.prints[0];

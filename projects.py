@@ -853,6 +853,24 @@ def lay_out_split(project_id: int, numbers=None, split_id: int | None = None) ->
     return _replace_split_models(project_id, split_id, new_models, layout)
 
 
+def _whole_position(size, limits: dict):
+    """Where a model of this size (width, depth, height in mm) can sit on the bed clear of the nozzle purge area: the
+    middle if it is clear there, else against a corner. None when it can't be placed whole."""
+    width, depth, height = size
+    x0, y0, x1, y1 = limits["bed"]
+    if width > x1 - x0 + 0.01 or depth > y1 - y0 + 0.01 or height > limits["height"] + 0.01:
+        return None
+    corners = [(x0 + width / 2, y0 + depth / 2), (x0 + width / 2, y1 - depth / 2),
+               (x1 - width / 2, y0 + depth / 2), (x1 - width / 2, y1 - depth / 2)]
+    for cx, cy in [((x0 + x1) / 2, (y0 + y1) / 2)] + corners:
+        if limits["exclude"]:
+            ex0, ey0, ex1, ey1 = limits["exclude"]
+            if cx + width / 2 > ex0 and cx - width / 2 < ex1 and cy + depth / 2 > ey0 and cy - depth / 2 < ey1:
+                continue
+        return (cx, cy)
+    return None
+
+
 def place_whole_model(project_id: int) -> dict:
     """Put the project's uploaded model on a plate in one piece, for a model that fits the printer without splitting."""
     _require_geometry()
@@ -863,12 +881,113 @@ def place_whole_model(project_id: int) -> dict:
     split = splits.get_split(split_id, detail=True)
     if not split.get("analysis"):
         raise jobs.JobError("Wait for the model to be analysed", 409)
-    x0, y0, x1, y1 = _machine_limits_for(record)["bed"]
+    limits = _machine_limits_for(record)
+    x0, y0, x1, y1 = limits["bed"]
+    center = _whole_position(split["analysis"]["size"], limits) or ((x0 + x1) / 2, (y0 + y1) / 2)
     model = _store_source(project_id, _next_id(record["models"]), split["source_name"],
                           _copy_from(splits.work_dir(split_id) / split["source_file"]), split["settings"]["scale"], split["settings"]["up"])
     model["split"] = {"id": split_id, "part": 0, "supports": False}
-    layout = [{"group": False, "items": [{"key": 0, "center": ((x0 + x1) / 2, (y0 + y1) / 2), "turned": False, "oversize": False}]}]
+    layout = [{"group": False, "items": [{"key": 0, "center": center, "turned": False, "oversize": False}]}]
     return _replace_split_models(project_id, split_id, [model], layout)
+
+
+# ── Import and the simple print ────────────────────────────────────────────────
+
+PLAUSIBLE_MM = (5.0, 2000.0)   # the longest side of a model outside this is more likely a unit mistake than a real part
+SCALE_GUESSES = ((1000.0, "metres"), (25.4, "inches"), (10.0, "centimetres"), (100.0, "decimetres"),
+                 (0.001, "micrometres"), (0.0254, "thousandths of an inch"))
+ROUGH_G_PER_CM3 = 0.5      # PLA at 1.24 g/cm3 with walls and sparse infill: about 40% of the solid volume
+ROUGH_G_PER_HOUR = 15.0    # typical 0.2 mm layer print on this printer class
+
+
+def _scale_suggestion(longest: float, scale: float):
+    """A unit mix-up that would make `longest` (mm) a believable size, as a new scale for the model."""
+    for low, high in ((10.0, 300.0), (10.0, 1000.0)):
+        for factor, unit in SCALE_GUESSES:
+            if low <= longest * factor <= high:
+                return {"factor": factor, "scale": round(scale * factor, 6), "label": f"It's in {unit}: scale x{factor:g}"}
+    return None
+
+
+def intake(project_id: int) -> dict:
+    """What an imported model needs before it can print: analysed yet, repaired, whether it fits the bed whole (so Split
+    can be skipped), whether its size is plausible for its scale, and a rough estimate."""
+    record = get_project(project_id)
+    split_id = record.get("split_id")
+    if split_id is None:
+        return {"state": "none", "can_print": False, "reason": "This project has no uploaded model"}
+    split = splits.get_split(split_id, detail=True)
+    placed = any((m.get("split") or {}).get("id") == split_id for m in record["models"])
+    out = {"state": "analysing", "file": split["source_name"], "placed": placed, "can_print": False, "reason": None}
+    analysis = split.get("analysis")
+    if split["state"] == splits.FAILED and not analysis:
+        return {**out, "state": "failed", "reason": split.get("error") or "The model couldn't be read"}
+    if not analysis:
+        return {**out, "reason": "The model is still being checked"}
+    bundle_id = record["data"]["profile"].get("bundle_id")
+    limits = machine_limits(slicer.bundle_settings(bundle_id)["machine"] if bundle_id else {})
+    size = [float(x) for x in analysis["size"]]
+    scale = float(split["settings"]["scale"])
+    longest = max(analysis.get("raw_size") or size) * scale    # the rounded size reads 0.0 for a speck
+    doubtful = not PLAUSIBLE_MM[0] <= longest <= PLAUSIBLE_MM[1]
+    fix = _scale_suggestion(longest, scale) if doubtful else None
+    if doubtful:   # the analysis rounds to 0.1 mm, which reads 0 for a speck
+        size = [round(x * scale, 4) for x in analysis.get("raw_size") or size]
+    fits = _whole_position(size, limits) is not None
+    reason = None
+    if doubtful:
+        reason = f"The model is {' x '.join(f'{x:g}' for x in size)} mm (longest side {longest:.3g} mm), which looks like the wrong scale"
+    elif not fits:
+        reason = "The model doesn't fit the bed whole, so it needs the Model and Split steps"
+    grams = analysis["volume_cm3"] * ROUGH_G_PER_CM3
+    return {**out, "state": "ready", "size": size, "volume_cm3": analysis["volume_cm3"],
+            "repaired": bool(analysis.get("repairs")), "repairs": analysis.get("repairs") or [],
+            "scale": scale, "scale_ok": not doubtful, "scale_fix": fix,
+            "fits": fits, "can_print": reason is None, "reason": reason,
+            "estimate": {"grams": round(grams), "seconds": round(grams / ROUGH_G_PER_HOUR * 3600), "rough": True}}
+
+
+def auto_place(project_id: int) -> dict:
+    """Skip Split for a model that fits the bed: it lands on one auto plate. Nothing happens for a model that doesn't fit,
+    has a doubtful scale, or is already placed."""
+    info = intake(project_id)
+    placed = False
+    if info["can_print"] and not info["placed"]:
+        place_whole_model(project_id)
+        placed = True
+        info = intake(project_id)
+    return {"placed": placed, "intake": info, "project": get_project(project_id)}
+
+
+def fix_scale(project_id: int) -> dict:
+    """Apply the suggested scale correction; the model is analysed again."""
+    info = intake(project_id)
+    if info["state"] != "ready" or not info.get("scale_fix"):
+        raise jobs.JobError("There is no scale correction to apply", 409)
+    if info["placed"]:
+        raise jobs.JobError("The model is already on a plate; change its scale there", 409)
+    splits.update_settings(get_project(project_id)["split_id"], {"scale": info["scale_fix"]["scale"]})
+    return intake(project_id)
+
+
+def slice_and_print(project_id: int, body: dict) -> dict:
+    """One action: place the model whole if it isn't yet, slice the plate and queue it when it's done."""
+    info = intake(project_id)
+    if not info["can_print"]:
+        raise jobs.JobError(info["reason"] or "The model can't be printed yet", 409)
+    if body.get("printer_id"):
+        jobs._require_printer(body["printer_id"])
+        _mutate(project_id, "data", lambda d: d["plates"][0].__setitem__("printer_id", body["printer_id"]))
+    if not info["placed"]:
+        place_whole_model(project_id)
+    record = get_project(project_id)
+    plate_id = record["data"]["plates"][0]["id"]
+    entry = record["slices"].get(str(plate_id)) or {}
+    if entry.get("state") == SLICED and not entry.get("outdated"):
+        _require_printers(record, {plate_id})
+        queue_plate(project_id, plate_id, {"leveling": bool(body.get("leveling")), "timelapse": bool(body.get("timelapse"))})
+        return get_project(project_id)
+    return request_slice(project_id, plate_id, send=True)
 
 
 def _footprint(project_id: int, obj: dict) -> tuple:
@@ -1550,7 +1669,7 @@ def reprint_plate(project_id: int, plate_id: int) -> dict:
     if status[plate_id] != "failed":
         raise jobs.JobError("Only a failed plate can be reprinted", 409)
     with database.transaction() as conn:
-        row = conn.execute("SELECT id FROM jobs WHERE project_id = ? AND plate_id = ? AND state IN ('failed', 'cancelled') "
+        row = conn.execute("SELECT id FROM jobs WHERE project_id = ? AND plate_id = ? AND state IN ('failed', 'cancelled', 'completed') "
                            "ORDER BY COALESCE(finished_at, updated_at) DESC, id DESC LIMIT 1", (project_id, plate_id)).fetchone()
     if row is None:
         raise jobs.JobError("The G-code for this plate is no longer stored — slice it again", 410)

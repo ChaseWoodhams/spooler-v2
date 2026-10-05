@@ -96,7 +96,7 @@ def save_notif_settings(s: dict) -> None:
     NOTIF_SETTINGS_FILE.write_text(json.dumps(s))
 
 
-def send_push_all(title: str, body: str) -> None:
+def send_push_all(title: str, body: str, data: dict | None = None) -> None:
     if not WEBPUSH_AVAILABLE or _vapid is None or not _push_subs:
         return
     dead = []
@@ -104,7 +104,7 @@ def send_push_all(title: str, body: str) -> None:
         try:
             webpush(
                 subscription_info=sub,
-                data=json.dumps({"title": title, "body": body}),
+                data=json.dumps({"title": title, "body": body, "data": data or {}}),
                 vapid_private_key=_vapid,
                 vapid_claims={"sub": "mailto:tharje@gmail.com"},
             )

@@ -8,19 +8,41 @@ self.addEventListener("fetch", (e) => {
 self.addEventListener("push", (e) => {
   let data = { title: "Spooler", body: "" };
   try { data = e.data.json(); } catch {}
+  const extra = data.data || {};
   e.waitUntil(
     self.registration.showNotification(data.title, {
       body: data.body,
       icon: "/icon.svg",
       badge: "/icon.svg",
-      data: { url: data.url || "/" }, // e.g. "/#printer=<id>" opens straight onto that printer's card
+      // A reminder for the same print replaces its earlier notification and alerts again.
+      tag: extra.tag || undefined,
+      renotify: !!extra.tag,
+      // Android Chrome shows these buttons; iOS ignores them and just opens the app on tap.
+      actions: extra.actions || [],
+      data: extra,
     })
   );
 });
 
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
-  e.waitUntil(clients.openWindow((e.notification.data && e.notification.data.url) || "/"));
+  const extra = e.notification.data || {};
+  if (e.action === "bed-cleared" && extra.bed_cleared) {
+    // Printed OK · Bed cleared without opening the app: the same request the in-app prompt makes.
+    e.waitUntil(
+      fetch(extra.bed_cleared.url, {
+        method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(extra.bed_cleared.body),
+      }).then((r) => {
+        if (r.ok) return;
+        // Signed out or refused: fall back to opening the printer so the user can answer there.
+        return clients.openWindow(extra.url || "/");
+      }).catch(() => clients.openWindow(extra.url || "/"))
+    );
+    return;
+  }
+  e.waitUntil(clients.openWindow(extra.url || "/"));
 });
 
 function _b64ToUint8Array(b64) {
