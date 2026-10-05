@@ -18,6 +18,7 @@ import os
 import asyncio
 import backup
 import bed_cleared
+import holds
 import farm
 import health
 import jobs
@@ -639,6 +640,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: preflight.check_job_id(self._job_id(), printer_id or None), broadcast=False)
         elif self.path.startswith("/api/jobs/") and self.path.endswith("/toolpath"):
             self._send_toolpath()
+        elif self.path.startswith("/api/jobs/") and self.path.split("?", 1)[0].endswith("/snapshot"):
+            self._send_job_snapshot()
         elif self.path.startswith("/api/printers/") and self.path.endswith("/bed-cleared"):
             self._jobs_call(lambda: bed_cleared.status(self._path_printer_id()), broadcast=False)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
@@ -725,6 +728,10 @@ class SPHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         if not self._check_auth():
+            return
+        if self.path.startswith("/api/jobs/") and "/holds/" in self.path:
+            parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'jobs', <id>, 'holds', <hold id>]
+            self._jobs_call(lambda: holds.remove(self._job_id(), self._int(parts[5], "Hold not found")))
             return
         if self.path.startswith("/api/jobs/"):
             self._jobs_call(lambda: jobs.delete_job(self._job_id()))
@@ -878,6 +885,26 @@ class SPHandler(SimpleHTTPRequestHandler):
         except (IndexError, ValueError):
             raise jobs.JobError("Job not found", 404)
 
+    @staticmethod
+    def _int(value: str, message: str) -> int:
+        try:
+            return int(value)
+        except ValueError:
+            raise jobs.JobError(message, 404)
+
+    def _send_job_snapshot(self):
+        try:
+            data = jobs.snapshot_file(self._job_id()).read_bytes()
+        except jobs.JobError as e:
+            self._json({"error": str(e)}, e.status)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _json_body(self) -> dict:
         try:
             body = json.loads(self._read_body() or b"{}")
@@ -956,6 +983,11 @@ class SPHandler(SimpleHTTPRequestHandler):
                             coroutine=True)
         elif action == "requeue":
             self._jobs_call(lambda: jobs.requeue(self._job_id()))
+        elif action == "holds":
+            self._jobs_call(lambda: holds.add(self._job_id(), self._json_body()))
+        elif action == "acknowledge-warnings":
+            self._jobs_call(lambda: jobs.acknowledge_warnings(self._job_id(), self._json_body().get("printer_id")),
+                            broadcast=False)
         else:
             self._json({"error": "Not found"}, 404)
 

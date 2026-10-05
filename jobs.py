@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 import database
+import snapshots
 import state
 from gcode_meta import read_estimates, safe_gcode_name
 from persistence import DATA_DIR
@@ -45,6 +46,7 @@ QUEUE_PRINTER_TYPES = {"cc1"}
 PRINT_OPT_KEYS      = ("timelapse", "leveling", "smooth_plate")
 
 uploader = upload_file               # replaced in tests
+snapshotter = snapshots.grab_frame   # replaced in tests
 
 _data_dir: Path = DATA_DIR
 _active: dict = {}                   # printer_id → {"id", "state", "file_name", "last_code", "layers"}
@@ -100,10 +102,20 @@ def _to_job(row) -> dict:
     return job
 
 
+def _with_holds(listed: list) -> list:
+    """Add each job's dependency holds and whether it is still waiting on one."""
+    import holds  # imported here because holds imports this module
+    found = holds.for_jobs([job["id"] for job in listed])
+    for job in listed:
+        job["holds"] = found[job["id"]]
+        job["held"] = job["state"] == QUEUED and any(not h["satisfied"] for h in job["holds"])
+    return listed
+
+
 def get_job(job_id: int) -> dict | None:
     with database.transaction() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    return _to_job(row) if row else None
+    return _with_holds([_to_job(row)])[0] if row else None
 
 
 def list_jobs(recent: int = RECENT_LIMIT) -> list:
@@ -119,7 +131,7 @@ def list_jobs(recent: int = RECENT_LIMIT) -> list:
             "ORDER BY finished_at DESC, id DESC LIMIT ?",
             (*FINAL, recent),
         ).fetchall()
-    return [_to_job(r) for r in open_rows + done_rows]
+    return _with_holds([_to_job(r) for r in open_rows + done_rows])
 
 
 def job_events(job_id: int) -> list:
@@ -417,12 +429,60 @@ def _current_task():
         return None
 
 
-async def start_job(job_id: int, printer_id: str | None = None, acknowledge_warnings: bool = False) -> dict:
+def notifier(title: str, body: str) -> None:
+    """Tell the user something (push notification). Replaced in tests."""
+    try:
+        import push
+        push.send_push_all(title, body)
+    except Exception as e:
+        print(f"[Jobs] Notification failed: {e}")
+
+
+def acknowledged_warnings(job_id: int) -> list:
+    """The preflight warnings the user accepted when queueing the job (the latest acknowledgement)."""
+    with database.transaction() as conn:
+        row = conn.execute("SELECT detail FROM job_events WHERE job_id = ? AND event = 'warnings_acknowledged' "
+                           "ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    try:
+        return list(json.loads(row["detail"])) if row else []
+    except ValueError:
+        return []
+
+
+def acknowledge_warnings(job_id: int, printer_id: str | None = None) -> dict:
+    """Accept the job's current preflight warnings once, at queue time, so an automatic start can proceed on them."""
+    import preflight  # imported here because preflight imports this module
+    report = preflight.check_job_id(job_id, printer_id)
+    if not report["can_start"]:
+        raise JobError("Preflight failed: " + "; ".join(c["title"] for c in report["checks"] if c["level"] == "fail"), 409)
+    titles = [c["title"] for c in report["checks"] if c["level"] == "warn"]
+    log_event(job_id, "warnings_acknowledged", json.dumps(titles))
+    return {"job_id": job_id, "acknowledged": titles}
+
+
+async def start_job(job_id: int, printer_id: str | None = None, acknowledge_warnings: bool = False,
+                    unattended: bool = False) -> dict:
+    """Start a queued job. An unattended start (Bed cleared auto-start) that is refused leaves the job queued, records
+    why on its timeline and notifies the user."""
+    try:
+        return await _start_job(job_id, printer_id, acknowledge_warnings, unattended)
+    except JobError as e:
+        if unattended and e.status != 404:
+            log_event(job_id, "start_blocked", str(e))
+            await asyncio.get_running_loop().run_in_executor(None, notifier, "Spooler: automatic start blocked", str(e))
+        raise
+
+
+async def _start_job(job_id: int, printer_id: str | None, acknowledge_warnings: bool, unattended: bool) -> dict:
+    import holds  # imported here because holds imports this module
     job = get_job(job_id)
     if job is None:
         raise JobError("Job not found", 404)
     if job["state"] != QUEUED:
         raise JobError("Only queued jobs can be started", 409)
+    waiting = holds.waiting_on(job_id)
+    if waiting:
+        raise JobError("Waiting for " + ", ".join(waiting) + " to finish", 409)
     printer_id = printer_id or job["printer_id"]
     if not printer_id:
         raise JobError("Choose a printer for this job first")
@@ -440,8 +500,10 @@ async def start_job(job_id: int, printer_id: str | None = None, acknowledge_warn
     warnings = [c["title"] for c in report["checks"] if c["level"] == "warn"]
     if failed:
         raise JobError("Preflight failed: " + "; ".join(failed), 409)
-    if warnings and not acknowledge_warnings:
-        raise JobError("Review the preflight warnings before starting: " + "; ".join(warnings), 409)
+    new_warnings = [w for w in warnings if w not in acknowledged_warnings(job_id)]
+    if new_warnings and not acknowledge_warnings:
+        raise JobError(("New preflight warnings since this job was queued: " if unattended else
+                        "Review the preflight warnings before starting: ") + "; ".join(new_warnings), 409)
 
     try:
         with database.transaction() as conn:
@@ -464,10 +526,35 @@ async def start_job(job_id: int, printer_id: str | None = None, acknowledge_warn
     return get_job(job_id)
 
 
+async def _snapshot(job_id: int, printer) -> None:
+    """Keep a camera snapshot of the bed on the job's timeline. Skipped without a camera; never blocks the start."""
+    url = getattr(printer, "camera_url", None)
+    if not url:
+        return
+    try:
+        image = await asyncio.get_running_loop().run_in_executor(None, snapshotter, url)
+        if not image:
+            return
+        path = _jobs_dir() / str(job_id) / "start.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(image)
+        log_event(job_id, "snapshot", f"jobs/{job_id}/start.jpg")
+    except Exception as e:
+        print(f"[Jobs] Snapshot for job {job_id} skipped: {e}")
+
+
+def snapshot_file(job_id: int) -> Path:
+    path = _jobs_dir() / str(job_id) / "start.jpg"
+    if not path.is_file():
+        raise JobError("No snapshot for this job", 404)
+    return path
+
+
 async def _run_start(job_id: int, printer) -> None:
     loop = asyncio.get_running_loop()
     job = get_job(job_id)
     try:
+        await _snapshot(job_id, printer)
         if job["source"] == "upload":
             path = _data_dir / job["stored_file"]
             if not path.is_file():
