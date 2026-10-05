@@ -51,6 +51,7 @@ import auth
 import backup
 import health
 import jobs
+import outcome_prompt
 import print_history
 import projects
 import slicer
@@ -132,6 +133,7 @@ async def main() -> None:
     # Before any printer task runs, so status updates can follow jobs that were active at shutdown.
     jobs.init()
     print_history.init()
+    outcome_prompt.init()
     slicer.init()
     splits.init()
     projects.init()
@@ -146,6 +148,7 @@ async def main() -> None:
         asyncio.create_task(health.loop_lag_monitor()),
         asyncio.create_task(health.spoolman_monitor_loop()),
         asyncio.create_task(health.status_broadcast_loop()),
+        asyncio.create_task(outcome_prompt.reminder_loop()),
         asyncio.create_task(backup.backup_loop(on_complete=health.broadcast_status)),
     ]
     print(f"[Backup] Every {backup.BACKUP_INTERVAL_S / 3600:g} h to {backup.BACKUP_DIR} "

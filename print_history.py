@@ -36,6 +36,7 @@ PAGE_LIMIT_MAX = 200
 EXPORT_LIMIT   = 20000
 USAGE_WINDOW_S = 600  # usage reported this long after a print closed still attaches to it
 
+closed_hooks: list = []  # called with each Print that closes (outcome_prompt registers here)
 _open: dict = {}  # printer_id → {"id", "file_name", "layers": (layer, total)}
 
 
@@ -140,7 +141,13 @@ def _close(printer_id: str, outcome: str, detail: str | None) -> dict | None:
         )
         row = conn.execute("SELECT * FROM prints WHERE id = ?", (entry["id"],)).fetchone()
     print(f"[History] {row['printer_name']}: {row['file_name']} {outcome}" + (f" — {detail}" if detail else ""))
-    return _to_print(row)
+    record = _to_print(row)
+    for hook in list(closed_hooks):
+        try:
+            hook(record)
+        except Exception as e:
+            print(f"[History] closed hook failed: {e}")
+    return record
 
 
 # ── Filament, spools and cost ──────────────────────────────────────────────────
