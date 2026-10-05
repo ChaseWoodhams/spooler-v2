@@ -72,10 +72,11 @@ async def confirm(printer_id: str, print_id=None, outcome=None, failure_reasons=
 
     result = {**status(printer_id), "print": record, "started": None, "start_error": None}
     if result["auto_start"]:
-        queued = next((j for j in jobs.list_jobs() if j["state"] == jobs.QUEUED and j["printer_id"] == printer_id), None)
+        queued = next((j for j in jobs.list_jobs() if j["state"] == jobs.QUEUED and j["printer_id"] == printer_id
+                       and not j["held"]), None)
         if queued:
             try:
-                result["started"] = await jobs.start_job(queued["id"], printer_id)
+                result["started"] = await jobs.start_job(queued["id"], printer_id, unattended=True)
             except jobs.JobError as e:
                 result["start_error"] = str(e)
     return result
