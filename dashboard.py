@@ -13,8 +13,10 @@ import bed_cleared
 
 
 def _job_summary(job: dict) -> dict:
-    return {"id": job["id"], "file_name": job.get("file_name"), "project_id": job.get("project_id"),
-            "plate_id": job.get("plate_id")}
+    """A quick print's job carries no project or plate: its hidden project is never linked to."""
+    quick = job.get("project_quick")
+    return {"id": job["id"], "file_name": job.get("file_name"), "project_id": None if quick else job.get("project_id"),
+            "plate_id": None if quick else job.get("plate_id")}
 
 
 def needs_you() -> dict:
