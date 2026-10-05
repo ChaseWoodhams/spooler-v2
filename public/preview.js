@@ -89,8 +89,24 @@ async function startFromReview() {
   loadJobs();
 }
 
+async function acceptWarningsForLater() {
+  const review = _review;
+  if (!review?.report) return;
+  const btn = document.getElementById("btn-review-accept");
+  btn.disabled = true;
+  try {
+    const printerId = document.getElementById("review-printer").value || null;
+    const result = await jobsApi("POST", `/api/jobs/${review.job.id}/acknowledge-warnings`, printerId ? { printer_id: printerId } : {});
+    toast(`Accepted ${result.acknowledged.length} warning${result.acknowledged.length === 1 ? "" : "s"}: Bed cleared can start ${review.job.name} on them`);
+  } catch (err) {
+    toast(err.message, true);
+  }
+  btn.disabled = false;
+}
+
 function _updateReviewStart() {
   const report = _review?.report;
+  document.getElementById("btn-review-accept").hidden = !(report && report.can_start && report.needs_acknowledgement);
   document.getElementById("btn-review-start").disabled =
     !report || !report.can_start || !document.getElementById("review-ack").checked;
 }
@@ -291,6 +307,7 @@ document.getElementById("review-printer").addEventListener("change", runReview);
 document.getElementById("review-ack").addEventListener("change", _updateReviewStart);
 document.getElementById("btn-review-recheck").addEventListener("click", runReview);
 document.getElementById("btn-review-start").addEventListener("click", startFromReview);
+document.getElementById("btn-review-accept").addEventListener("click", acceptWarningsForLater);
 document.getElementById("btn-review-close").addEventListener("click", closeReview);
 document.getElementById("modal-review").addEventListener("click", (e) => {
   if (e.target.id === "modal-review") closeReview();
