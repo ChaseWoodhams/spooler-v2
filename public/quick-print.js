@@ -808,6 +808,51 @@
     try { session.previouslyFocused?.focus?.(); } catch (_) { /* element gone */ }
   }
 
+  // ─── Placement and not-fit handling (ticket 11): fills the placement and notice-actions slots on every intake ──
+  async function placementAct(path, failure) {
+    const session = S;
+    if (!session) return;
+    const buttons = () => session.root.querySelectorAll("[data-qp-place], [data-qp-fix]");
+    buttons().forEach(b => { b.disabled = true; });
+    try {
+      let result = await api("POST", `/api/projects/${session.id}/${path}`);
+      for (let tries = 0; result.state === "analysing" && tries < 60 && S === session; tries++) {   // a scale fix re-analyses the model
+        await new Promise(resolve => setTimeout(resolve, 400));
+        result = await api("GET", `/api/projects/${session.id}/intake`);
+      }
+      if (S === session) await refresh();   // intake, project, badges, notice, estimate and preview follow
+    } catch (error) {
+      if (S === session) { say(`${failure}: ${error.message}`, true); await refresh().catch(() => {}); }
+    } finally {
+      buttons().forEach(b => { b.disabled = false; });
+    }
+  }
+  async function openAsProject() {
+    const session = S;
+    if (!session) return;
+    try {
+      await api("POST", `/api/projects/${session.id}/open-as-project`);
+    } catch (error) { say(`Couldn't open it as a project: ${error.message}`, true); return; }
+    close();
+    location.hash = `#projects=${session.id}`;   // an unplaced model lands on Model/Split (the stepper's default step)
+  }
+  function renderPlacementSlots() {
+    if (!S || S.phase !== "edit") return;
+    const i = S.intake, place = $('[data-qp-slot="placement"]'), actions = $('[data-qp-slot="notice-actions"]');
+    if (!i || !place || !actions) return;
+    const model = i.state === "ready" && i.kind !== "gcode";
+    place.innerHTML = model && !i.placed
+      ? `<button type="button" class="btn btn-secondary btn-sm" data-qp-place="lay-flat" title="Put the model on its largest flat face">Lay flat</button>
+         <button type="button" class="btn btn-secondary btn-sm" data-qp-place="rotate" title="Turn the model 90 degrees about the vertical axis">Rotate 90°</button>` : "";
+    const fixable = model && !i.scale_ok && i.scale_fix, tooBig = model && i.scale_ok && !i.fits;
+    actions.innerHTML = (fixable ? `<button type="button" class="btn btn-primary btn-sm" data-qp-fix="scale">${esc(i.scale_fix.label)}</button>` : "")
+      + (tooBig || (model && !i.scale_ok) ? `<button type="button" class="btn ${tooBig ? "btn-primary" : "btn-secondary"} btn-sm" data-qp-fix="project" title="Keep this model as a Project and continue in the Model and Split steps">Open as project</button>` : "");
+    place.querySelectorAll("[data-qp-place]").forEach(b => b.addEventListener("click", () => placementAct(b.dataset.qpPlace, b.dataset.qpPlace === "rotate" ? "Couldn't rotate" : "Couldn't lay it flat")));
+    actions.querySelector('[data-qp-fix="scale"]')?.addEventListener("click", () => placementAct("fix-scale", "Couldn't fix the scale"));
+    actions.querySelector('[data-qp-fix="project"]')?.addEventListener("click", openAsProject);
+  }
+  document.addEventListener("quickprint:intake", renderPlacementSlots);
+
   window.QuickPrint = {
     open, pick, close, refresh, isOpen: () => !!S,
     current: () => (S ? { projectId: S.id, intake: S.intake, project: S.project, choices: { ...S.choices }, phase: S.phase } : null),
