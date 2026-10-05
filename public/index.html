@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=54" />
+  <link rel="stylesheet" href="style.css?v=55" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body>
@@ -31,7 +31,13 @@
         </svg>
         Discover
       </button>
-      <button id="btn-import" class="btn btn-primary" title="Import an STL, OBJ, 3MF or G-code file, or drop one anywhere on this page">
+      <button id="btn-quick-print" class="btn btn-primary" title="Quick print: pick a model or G-code file, choose a printer and print it. Nothing is saved as a Project">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>
+        </svg>
+        <span>Quick print</span>
+      </button>
+      <button id="btn-import" class="btn btn-secondary" title="Import an STL, OBJ, 3MF or G-code file, or drop one anywhere on this page">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>
         </svg>
@@ -793,8 +799,9 @@
   <script src="preview.js?v=1"></script>
   <script src="history.js?v=5"></script>
   <script src="outcome-prompt.js?v=2"></script>
-  <script src="app.js?v=64"></script>
-  <script src="import.js?v=2"></script>
+  <script src="app.js?v=65"></script>
+  <script src="quick-print.js?v=1"></script>
+  <script src="import.js?v=3"></script>
   <script src="dashboard.js?v=1"></script>
   <script>
     if ("serviceWorker" in navigator) {
