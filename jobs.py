@@ -26,6 +26,7 @@ from pathlib import Path
 import database
 import snapshots
 import state
+import time_estimate
 from gcode_meta import read_estimates, safe_gcode_name
 from persistence import DATA_DIR
 from printers.protocol import (
@@ -330,9 +331,10 @@ def assign_printers(job_ids: list, printer_ids: list) -> list:
         average = sum(known) / len(known) if known else 1
         load = {printer.id: 0.0 for printer in printers}
         now = time.time()
-        for row in sorted(movable, key=lambda r: -(r["estimate_s"] or average)):  # stable: equal jobs keep queue order
+        seconds = {r["id"]: r["estimate_s"] or average for r in movable}
+        for row in time_estimate.longest_first(movable, lambda r: {"seconds": seconds[r["id"]], "source": "slicer"}):  # equal jobs keep queue order
             printer = min(printers, key=lambda p: load[p.id])
-            load[printer.id] += row["estimate_s"] or average
+            load[printer.id] += seconds[row["id"]]
             conn.execute("UPDATE jobs SET printer_id = ?, updated_at = ? WHERE id = ?", (printer.id, now, row["id"]))
             _log(conn, row["id"], "edited", f"printer_id → {printer.name} (balanced with {len(movable) - 1} other job{'s' if len(movable) != 2 else ''})")
     return [get_job(r["id"]) for r in rows]

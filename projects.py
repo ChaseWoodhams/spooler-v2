@@ -2393,7 +2393,8 @@ def plate_status(project_id: int) -> dict:
                        "time_estimate": plate_time(project_id, record, n, entry)})
     total = len(plates)
     return {"project_id": project_id, "plates": plates,
-            "progress": {"total": total, "counts": counts, "printed_ok": counts["printed_ok"],
+            "print_order": [p["id"] for p in time_estimate.longest_first(plates, lambda p: p["time_estimate"])],
+            "progress":{"total": total, "counts": counts, "printed_ok": counts["printed_ok"],
                          "percent": round(100 * counts["printed_ok"] / total) if total else 0,
                          "filament_g": {"used": round(filament["used"], 1), "total": round(filament["total"], 1),
                                         "unknown_plates": filament["unknown_plates"], "spool": _spool_level(record),
