@@ -13,7 +13,9 @@ Record
            "profile": {"bundle_id", "process": {…changes}, "filament": {…changes}, "bricklayers": {…} | null},
            "plates": [{"id", "name", "overrides": {…process changes for this plate}, "bricklayers": {…} | null}],
            "objects": [{"id", "model", "name", "plate", "position": [x, y], "rotation": [x, y, z], "scale": [x, y, z],
-                        "overrides": {…process changes for this object}}]}
+                        "overrides": {…process changes for this object},
+                        "pinned": true — only when set: the planner leaves this object where it is}],
+           "filaments": {"<model id>": {"preset", "colour"}} — only models with a filament choice; the rest use the project's}
   models  [{"id", "name", "file", "state": importing | ready | failed, "error", "size", "triangles", "volume_cm3", "sha256",
             "split": {"id", "part" (0 = the whole model), "supports"} — models that came from a split}]
   slices  {"<plate id>": {"state": queued | slicing | sliced | failed, "error", "fingerprint", "estimate_s", "estimate_g", …}}
@@ -59,6 +61,7 @@ from gcode_meta import safe_gcode_name
 from persistence import DATA_DIR
 
 MAX_PLATES, MAX_OBJECTS = 50, 500
+MAX_FILAMENT_NAME, MAX_FILAMENT_COLOUR = 80, 40
 # Plates sliced at the same time. Each OrcaSlicer process can use a few GB for a big plate, so the default is modest.
 SLICE_WORKERS = max(1, int(os.getenv("SLICE_WORKERS", str(max(1, min(2, (os.cpu_count() or 2) // 4))))))
 IMPORTING, READY, FAILED = "importing", "ready", "failed"
@@ -320,6 +323,43 @@ def _spool_id(value) -> int | None:
     return number
 
 
+def _pinned(value) -> bool:
+    if not isinstance(value, bool):
+        raise jobs.JobError("pinned must be true or false")
+    return value
+
+
+def _filament_choice(value, model_id) -> dict:
+    """A model's filament choice: a material preset plus an optional colour label."""
+    if not isinstance(value, dict):
+        raise jobs.JobError(f"Model {model_id}'s filament choice needs a preset and an optional colour")
+    preset, colour = value.get("preset"), value.get("colour") or ""
+    if not isinstance(preset, str) or not preset.strip() or len(preset.strip()) > MAX_FILAMENT_NAME:
+        raise jobs.JobError(f"Model {model_id}'s filament choice needs a preset name of up to {MAX_FILAMENT_NAME} characters")
+    if not isinstance(colour, str) or len(colour.strip()) > MAX_FILAMENT_COLOUR:
+        raise jobs.JobError(f"Model {model_id}'s filament colour is a label of up to {MAX_FILAMENT_COLOUR} characters")
+    return {"preset": re.sub(r"\s+", " ", preset).strip(), "colour": re.sub(r"\s+", " ", colour).strip()}
+
+
+def _filament_choices(value, model_ids: set) -> dict:
+    """{"<model id>": choice}; a model without an entry (or with null) prints in the project's default filament."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise jobs.JobError("Filament choices are an object keyed by model id")
+    choices = {}
+    for key, choice in value.items():
+        try:
+            model_id = int(key)
+        except (TypeError, ValueError):
+            raise jobs.JobError("Filament choices are keyed by model id")
+        if model_id not in model_ids:
+            raise jobs.JobError(f"Filament choice for model {key}, which isn't in the project")
+        if choice is not None:
+            choices[str(model_id)] = _filament_choice(choice, model_id)
+    return choices
+
+
 def validate_data(raw, record: dict) -> dict:
     if not isinstance(raw, dict):
         raise jobs.JobError("Project data must be an object")
@@ -378,15 +418,21 @@ def validate_data(raw, record: dict) -> dict:
         if overrides and base is None:
             raise jobs.JobError("Choose a profile before changing an object's settings")
         rotation = _numbers(obj.get("rotation", [0, 0, 0]), 3, "Rotation", -100000, 100000)
+        pinned = _pinned(obj["pinned"]) if "pinned" in obj else False
         objects.append({
             "id": object_id, "model": model_id, "plate": plate_id,
+            **({"pinned": True} if pinned else {}),   # only when set, so projects saved before pinning stay as they were
             "name": _clean_name(obj.get("name")) or f"Object {object_id}",
             "position": _numbers(obj.get("position", [128, 128]), 2, "Position", -1000, 3000),
             "rotation": [round(r % 360, 4) for r in rotation],
             "scale": _numbers(obj.get("scale", [1, 1, 1]), 3, "Scale", 0.01, 100),
             "overrides": slicer.normalize_overrides({"process": overrides}, base).get("process", {}) if overrides else {},
         })
-    return {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
+    result = {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
+    filaments = _filament_choices(raw.get("filaments"), model_ids)
+    if filaments:  # likewise only when a model has a choice
+        result["filaments"] = filaments
+    return result
 
 
 def update_project(project_id: int, body: dict) -> dict:
@@ -1100,6 +1146,10 @@ def delete_model(project_id: int, model_id: int) -> dict:
         row = conn.execute("SELECT data, models FROM projects WHERE id = ?", (project_id,)).fetchone()
         data, models = json.loads(row["data"]), json.loads(row["models"])
         data["objects"] = [o for o in data["objects"] if o["model"] != model_id]
+        if data.get("filaments"):
+            data["filaments"].pop(str(model_id), None)
+            if not data["filaments"]:
+                del data["filaments"]
         models = [m for m in models if m["id"] != model_id]
         conn.execute("UPDATE projects SET data = ?, models = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
                      (json.dumps(data), json.dumps(models), time.time(), project_id))
