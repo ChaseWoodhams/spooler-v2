@@ -137,7 +137,27 @@ const sliceEntry = (plateId = state.plate) => state.project?.slices?.[String(pla
 const isImportedPlate = plateId => !!sliceEntry(plateId)?.imported;
 const isGcodeProject = () => data().plates.some(p => isImportedPlate(p.id)) && !data().objects.length;
 const platesWithObjects = () => data().plates.filter(p => plateObjects(p.id).length || isImportedPlate(p.id));
-const isUpToDate = plateId => sliceEntry(plateId)?.state === "sliced" && !sliceEntry(plateId).outdated;
+// Filament choice: a per-model preset plus colour label, absent meaning the project default (data().filaments["<model id>"])
+const filamentChoice = modelId => data().filaments?.[String(modelId)] || null;
+const choiceLabel = choice => choice ? `${choice.preset.replace(/ @.*$/, "")} ${choice.colour || ""}`.trim() : "the project default";
+// "Plate 3 mixes PETG grey and PLA white" when the plate's objects hold more than one filament choice, else ""
+function plateMix(plateId) {
+  const seen = new Map();
+  for (const o of plateObjects(plateId).sort((a, b) => a.id - b.id)) {
+    const choice = filamentChoice(o.model);
+    seen.set(choice ? `${choice.preset}\n${choice.colour || ""}` : "", choiceLabel(choice));
+  }
+  const labels = [...seen.values()];
+  return labels.length < 2 ? "" : `${plateById(plateId)?.name || `Plate ${plateId}`} mixes ${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
+}
+function setFilamentChoice(modelId, choice) {
+  const filaments = { ...(data().filaments || {}) };
+  if (choice) filaments[String(modelId)] = choice; else delete filaments[String(modelId)];
+  if (Object.keys(filaments).length) data().filaments = filaments; else delete data().filaments;
+  changed();
+  renderObjectPanel();
+}
+const isUpToDate = plateId =>sliceEntry(plateId)?.state === "sliced" && !sliceEntry(plateId).outdated;
 const isBusy = plateId => ["queued", "slicing"].includes(sliceEntry(plateId)?.state);
 const plateImporting = plateId => plateObjects(plateId).some(o => state.project.models.find(m => m.id === o.model)?.state === "importing");
 const openJobPlates = () => new Set(state.jobs.filter(j => OPEN_JOB_STATES.has(j.state)).map(j => j.plate_id));
@@ -898,7 +918,7 @@ function renderPlates() {
   const tabs = data().plates.map(plate => {
     const count = plateObjects(plate.id).length;
     return `<button class="slicer-plate-tab${plate.id === state.plate ? " active" : ""}" type="button" data-plate="${plate.id}"
-      title="${esc(plate.name)} · ${plural(count, "object")}"><span class="dot ${plateDot(plate.id)}"></span>${esc(plate.name)} <small>${count}</small>${plateBadge(plate)}</button>`;
+      title="${esc(plate.name)} · ${plural(count, "object")}${plateMix(plate.id) ? ` · ${esc(plateMix(plate.id))}` : ""}"><span class="dot ${plateDot(plate.id)}"></span>${esc(plate.name)} <small>${count}</small>${plateBadge(plate)}</button>`;
   });
   if (state.step === "plates") {
     tabs.push('<button class="slicer-plate-tab" type="button" data-plate="new" title="Add a plate">+ Plate</button>');
@@ -1131,6 +1151,8 @@ function renderObjectPanel() {
   const input = (field, index, value, step) =>
     `<input type="number" step="${step}" data-field="${field}" data-index="${index}" value="${Math.round(value * 1000) / 1000}">`;
   const uniform = object.scale.every(s => Math.abs(s - object.scale[0]) < 1e-9);
+  const copies = data().objects.filter(o => o.model === object.model).length;
+  const note = state.copiesNote?.model === object.model && state.copiesNote.count === copies ? state.copiesNote.text : "";
   panel.innerHTML = `
     <h5 title="${esc(object.name)}">${esc(object.name)}</h5>
     <div class="slicer-xyz"><span></span><span>X</span><span>Y</span><span>Z</span>
@@ -1140,6 +1162,9 @@ function renderObjectPanel() {
     </div>
     <label class="slicer-check"><input type="checkbox" id="scale-uniform"${uniform ? " checked" : ""}> Keep proportions</label>
     <label class="slicer-field">Plate <select id="object-plate">${data().plates.map(p => `<option value="${p.id}"${p.id === object.plate ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
+    <label class="slicer-field">Copies <input type="number" id="object-copies" min="1" max="500" step="1" value="${copies}" title="How many objects are made from this model, across all plates"></label>
+    ${note ? `<div class="slicer-muted" id="object-copies-note">${esc(note)}</div>` : ""}
+    ${filamentControls(object)}
     <div class="slicer-actions-row">
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="flat" title="Rotate so the largest flat face is on the bed">Lay flat</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="orient" title="Turn to the orientation that needs the least support (O)">Auto-orient</button>
@@ -1148,6 +1173,25 @@ function renderObjectPanel() {
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="settings">Settings</button>
     </div>`;
 }
+
+// The inspector's filament choice (shared by every copy of the model), colour label, pin, and the mixed-plate warning
+function filamentControls(object) {
+  const choice = filamentChoice(object.model);
+  const machine = currentPresets()?.machine;
+  let list = state.presets?.filaments?.[machine] || [];
+  if (choice && !list.includes(choice.preset)) list = [choice.preset, ...list];
+  const base = currentPresets()?.filament;
+  const mix = plateMix(object.plate);
+  return `
+    <label class="slicer-field">Filament <select id="object-filament">
+      <option value="">Project default${base ? ` (${esc(base.replace(/ @.*$/, ""))})` : ""}</option>
+      ${list.map(name => `<option value="${esc(name)}"${choice?.preset === name ? " selected" : ""}>${esc(name.replace(/ @.*$/, ""))}</option>`).join("")}
+    </select></label>
+    <label class="slicer-field"${choice ? "" : " hidden"}>Colour <input type="text" id="object-filament-colour" maxlength="${FILAMENT_COLOUR_MAX}" placeholder="e.g. grey" value="${esc(choice?.colour || "")}"></label>
+    <label class="slicer-check" title="The planner, Arrange and Orient leave a pinned object where it is; you can still move it by hand"><input type="checkbox" id="object-pinned"${object.pinned ? " checked" : ""}> Pin</label>
+    ${mix ? `<p class="slicer-warn" role="alert">${esc(mix)}. Slicing is refused until each plate holds one filament.</p>` : ""}`;
+}
+const FILAMENT_COLOUR_MAX = 40;
 
 function showMessage(text) {
   $("viewport-message").hidden = !text;
@@ -1274,6 +1318,25 @@ function pasteObject() {
   state.selected = copy.id;
   changed();
   renderAll();
+}
+
+// Copies: the number of objects made from the selected object's model, across all plates. The server adds or removes them.
+async function setCopies(object, asked) {
+  if (!Number.isInteger(asked) || asked < 1) { renderObjectPanel(); return toast("Copies must be a whole number, at least 1", true); }
+  await flushSave();
+  try {
+    const result = await api("POST", `/api/projects/${state.project.id}/copies`, { object: object.id, copies: asked });
+    applyProject(result);
+    const { model, count, pinned } = result.copies;
+    state.copiesNote = count > asked
+      ? { model, count, text: `Still ${count}: ${plural(pinned, "pinned object")} can't be removed. Unpin ${pinned === 1 ? "it" : "them"} to lower this.` }
+      : null;
+    recordEdit();
+    renderAll();
+  } catch (err) {
+    toast(err.message, true);
+    renderObjectPanel();
+  }
 }
 
 function removeSelected() {
@@ -2112,6 +2175,22 @@ function bindUi() {
       state.selected = null;
       changed();
       renderAll();
+      return;
+    }
+    if (e.target.id === "object-copies") { setCopies(object, Number(e.target.value)); return; }
+    if (e.target.id === "object-pinned") {
+      if (e.target.checked) object.pinned = true; else delete object.pinned;
+      changed();
+      return;
+    }
+    if (e.target.id === "object-filament") {
+      const preset = e.target.value;
+      setFilamentChoice(object.model, preset ? { preset, colour: filamentChoice(object.model)?.colour || "" } : null);
+      return;
+    }
+    if (e.target.id === "object-filament-colour") {
+      const current = filamentChoice(object.model);
+      if (current) setFilamentChoice(object.model, { ...current, colour: e.target.value.trim() });
       return;
     }
     if (!field) return;
