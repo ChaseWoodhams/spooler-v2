@@ -1131,6 +1131,7 @@ function renderTools() {
   $("merge-plate").disabled = !others.length;
   $("arrange-engine").value = data().arrange_engine === "orca" ? "orca" : "nester";
   $("btn-orient-all").disabled = !data().objects.length;
+  $("btn-plan-plates").disabled = !data().objects.length;
   $("btn-undo").disabled = !editLog.undo.length;
   $("btn-redo").disabled = !editLog.redo.length;
 }
@@ -1497,6 +1498,88 @@ async function mergeInto(targetId) {
     renderAll();
     state.viewport?.fit(state.viewport.objectsBox());
     toast(`${source.name} merged into ${target.name}`);
+  });
+}
+
+// ── Plan plates ─────────────────────────────────────────────────────────────────
+// The review sheet for the planner: POST /plan changes nothing; Accept applies it as one revision, so one Undo step reverses it.
+// The seed time coefficients still overshoot about 2x, so the time is hidden until that is settled: flip this to show "≈ 1 h 05 min".
+const SHOW_PLAN_SECONDS = false;
+const planTime = seconds => {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return `≈ ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+};
+
+// An object's footprint on the bed: its model size, scaled, turned by its rotation (degrees, about x then y, then z):
+// returns the half-sides of the box before the turn about z, and that angle
+function planFootprint(object) {
+  const model = state.project.models.find(m => m.id === object.model);
+  if (!model?.size) return null;
+  const scale = object.scale || [1, 1, 1];
+  const half = model.size.map((v, i) => v * (scale[i] ?? scale[0] ?? 1) / 2);
+  const [rx, ry, rz] = (object.rotation || [0, 0, 0]).map(v => v * Math.PI / 180);
+  const turn = ([x, y, z]) => {
+    [y, z] = [y * Math.cos(rx) - z * Math.sin(rx), y * Math.sin(rx) + z * Math.cos(rx)];
+    [x, z] = [x * Math.cos(ry) + z * Math.sin(ry), -x * Math.sin(ry) + z * Math.cos(ry)];
+    return [x, y];
+  };
+  const corners = [-1, 1].flatMap(a => [-1, 1].flatMap(b => [-1, 1].map(c => turn([a * half[0], b * half[1], c * half[2]]))));
+  return { half: [Math.max(...corners.map(c => Math.abs(c[0]))), Math.max(...corners.map(c => Math.abs(c[1])))], turn: rz * 180 / Math.PI };
+}
+
+function planMap(plate) {
+  const [x0, y0, x1, y1] = bedLimits(state.bundleSettings.get(data().profile.bundle_id)?.machine).bed;
+  const objects = plate.objects.map(object => {
+    const { half, turn } = planFootprint(object) || { half: [8, 8], turn: 0 };
+    const [x, y] = object.position, cy = y1 - y + y0;
+    return `<rect class="plan-object${object.pinned ? " pinned" : ""}" x="${(x - half[0]).toFixed(1)}" y="${(cy - half[1]).toFixed(1)}" width="${(half[0] * 2).toFixed(1)}" height="${(half[1] * 2).toFixed(1)}" transform="rotate(${(-turn).toFixed(1)} ${x.toFixed(1)} ${cy.toFixed(1)})"><title>${esc(object.name)}</title></rect>`;
+  }).join("");
+  return `<svg class="plan-map" viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" role="img" aria-label="${esc(plate.name)}: ${plural(plate.parts, "part")}"><rect class="plan-bed" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}"/>${objects}</svg>`;
+}
+
+function planSheetHtml(plan) {
+  const before = platesWithObjects().length;
+  const cards = plan.plates.map(plate => `<div class="plan-card">
+      <div class="plan-card-head"><b>${esc(plate.name)}</b>${plate.new ? ' <span class="slicer-muted">new</span>' : ""}</div>
+      ${planMap(plate)}
+      <div class="slicer-muted">${plural(plate.parts, "part")} · ${esc(plate.filament)}${plate.turned ? ` · ${plate.turned} turned` : ""}</div>
+      ${SHOW_PLAN_SECONDS && plate.time_estimate?.seconds ? `<div class="slicer-muted">${planTime(plate.time_estimate.seconds)}</div>` : ""}
+    </div>`).join("");
+  const kept = plan.kept.length ? `<h4>Kept as they are</h4><ul class="plan-kept">${plan.kept.map(k => `<li><b>${esc(k.name)}</b> <span class="slicer-muted">${esc(k.reason)}</span></li>`).join("")}</ul>` : "";
+  return `<p class="slicer-muted">Now ${plural(before, "plate")}. Plan: ${esc(plan.summary)}${plan.plates.length > 1 ? ", longest first" : ""}.</p>
+    ${plan.plates.length ? `<div class="plan-grid">${cards}</div>` : ""}${kept}`;
+}
+
+async function planPlates() {
+  await flushSave();
+  await withButton($("btn-plan-plates"), async () => {
+    const plan = await api("POST", `/api/projects/${state.project.id}/plan`, {});
+    state.plan = plan;
+    $("plan-body").innerHTML = planSheetHtml(plan);
+    $("plan-error").textContent = "";
+    $("plan-accept").disabled = !plan.plates.length;
+    $("dlg-plan").showModal();
+  });
+}
+
+async function acceptPlan() {
+  const plan = state.plan;
+  if (!plan) return;
+  await withButton($("plan-accept"), async () => {
+    try {
+      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision });
+      applyProject(result);
+      recordEdit();
+      state.plan = null;
+      $("dlg-plan").close();
+      renderAll();
+      state.viewport?.fit(state.viewport.objectsBox());
+      toast(`Planned: ${result.plan.summary}. Undo puts it back`);
+    } catch (err) {
+      if (err.status !== 409) throw err;
+      $("plan-error").textContent = "The project changed elsewhere, reload it";
+      state.plan = null;   // nothing to accept any more: Accept does nothing until the sheet is opened again
+    }
   });
 }
 
@@ -2289,6 +2372,8 @@ function bindUi() {
     changed();
   });
   $("btn-orient-all").addEventListener("click", e => orientAll(e.shiftKey));
+  $("btn-plan-plates").addEventListener("click", planPlates);
+  $("plan-accept").addEventListener("click", acceptPlan);
   $("merge-plate").addEventListener("change", e => {
     const target = Number(e.target.value);
     e.target.value = "";
