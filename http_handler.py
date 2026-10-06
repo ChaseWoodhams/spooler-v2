@@ -1181,13 +1181,13 @@ class SPHandler(SimpleHTTPRequestHandler):
             }
             self._jobs_call(actions[parts[4]], broadcast=False)
             return
-        if len(parts) == 5 and parts[4] in ("layout", "whole", "pack", "slice", "queue"):
+        if len(parts) == 5 and parts[4] in ("layout", "whole", "arrange", "slice", "queue"):
             actions = {
-                "layout": lambda: projects.lay_out_split(self._job_id(), self._json_body().get("parts")),
-                "whole":  lambda: projects.place_whole_model(self._job_id()),
-                "pack":   lambda: projects.pack_plates(self._job_id(), self._json_body().get("plates")),
-                "slice":  lambda: (lambda body: projects.request_slices(self._job_id(), body.get("plates"), bool(body.get("send"))))(self._json_body()),
-                "queue":  lambda: projects.queue_plates(self._job_id(), self._json_body()),
+                "layout":  lambda: projects.lay_out_split(self._job_id(), self._json_body().get("parts")),
+                "whole":   lambda: projects.place_whole_model(self._job_id()),
+                "arrange": lambda: (lambda body: projects.arrange(self._job_id(), body.get("plates"), body.get("engine")))(self._json_body()),
+                "slice":   lambda: (lambda body: projects.request_slices(self._job_id(), body.get("plates"), bool(body.get("send"))))(self._json_body()),
+                "queue":   lambda: projects.queue_plates(self._job_id(), self._json_body()),
             }
             self._jobs_call(actions[parts[4]], broadcast=parts[4] == "queue")
             return
@@ -1220,7 +1220,7 @@ class SPHandler(SimpleHTTPRequestHandler):
                     raise jobs.JobError("into must be a plate number")
                 return projects.merge_plates(self._job_id(), plate_id, into)
             actions = {
-                "arrange": lambda: projects.arrange_plate(self._job_id(), plate_id),
+                "arrange": lambda: projects.arrange_plate(self._job_id(), plate_id, self._json_body().get("engine")),
                 "slice":   lambda: projects.request_slice(self._job_id(), plate_id, bool(self._json_body().get("send"))),
                 "queue":   lambda: projects.queue_plate(self._job_id(), plate_id, self._json_body()),
                 "merge":   merge,
