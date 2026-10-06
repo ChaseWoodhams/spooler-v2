@@ -1625,7 +1625,7 @@ def _plan_data(project_id: int, record: dict) -> dict:
             obj["rotation"] = list(suggested[key]["rotation"])
     layout = arrange_layout(project_id, {**record, "data": data}, replannable)
     if not layout:
-        return {"data": record["data"], "plates": [], "kept": kept, "emptied": []}
+        return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "fingerprint": _plan_fingerprint(record["data"], [])}
     objects = {o["id"]: o for o in data["objects"]}
     plates = {p["id"]: p for p in data["plates"]}
     spare = [plate_id for plate_id in replannable if plate_id not in {p.get("plate") for p in layout}]
@@ -1678,7 +1678,12 @@ def _plan_data(project_id: int, record: dict) -> dict:
                  "objects": sorted((o for o in data["objects"] if o["plate"] == plate_id), key=lambda o: o["id"])} for plate_id in ordered]
     for entry in proposed:
         entry["turned"] = sum(1 for o in entry["objects"] if _turned(before[o["id"]], o["rotation"]))
-    return {"data": data, "plates": proposed, "kept": kept, "emptied": emptied}
+    return {"data": data, "plates": proposed, "kept": kept, "emptied": emptied, "fingerprint": _plan_fingerprint(data, emptied)}
+
+
+def _plan_fingerprint(data: dict, emptied: list) -> str:
+    """Identifies what a plan would do: the data it would leave and the plates it would remove."""
+    return hashlib.sha256(json.dumps({"data": data, "emptied": sorted(emptied)}, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def _plan_view(record: dict, planned: dict) -> dict:
@@ -1705,7 +1710,7 @@ def _plan_view(record: dict, planned: dict) -> dict:
             summary += f"; {_count(len(kept), 'plate')} kept as {'it is' if len(kept) == 1 else 'they are'}"
     else:
         summary = "Nothing to plan"
-    return {"revision": record["revision"], "plates": plates, "kept": kept, "summary": summary}
+    return {"revision": record["revision"], "fingerprint": planned["fingerprint"], "plates": plates, "kept": kept, "summary": summary}
 
 
 def plan_plates(project_id: int) -> dict:
@@ -1717,20 +1722,28 @@ def plan_plates(project_id: int) -> dict:
     return _plan_view(record, _plan_data(project_id, record))
 
 
-def accept_plan(project_id: int, plan) -> dict:
-    """Apply the plan as one change: `plan` is the revision it was made at, or the plan itself. A project that has changed
-    since is refused ("changed elsewhere"); the plan is worked out again at that revision, so it is what was shown. Slices of
+def accept_plan(project_id: int, plan, fingerprint=None) -> dict:
+    """Apply the plan as one change: `plan` is the revision it was made at, or the plan itself, and `fingerprint` the plan's
+    own (taken from `plan` when that is the plan). A project that has changed since is refused ("changed elsewhere"), and so
+    is a plan the server would now make differently ("The plan changed"): what is applied is what was reviewed. Slices of
     replanned plates become Outdated by their fingerprints; plates left empty go. Returns the project (one revision later,
     so the client records one undo step) plus "plan", the view of what was applied."""
-    revision = plan.get("revision") if isinstance(plan, dict) else plan
+    if isinstance(plan, dict):
+        revision, fingerprint = plan.get("revision"), plan.get("fingerprint") or fingerprint
+    else:
+        revision = plan
     try:
         revision = int(revision)
     except (TypeError, ValueError):
         raise jobs.JobError("Send the revision the plan was made at, or the plan itself")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise jobs.JobError("Send the fingerprint of the plan that was reviewed")
     record = get_project(project_id)
     if revision != record["revision"]:
         raise jobs.JobError("The project was changed elsewhere — reload it", 409)
     planned = _plan_data(project_id, record)
+    if planned["fingerprint"] != fingerprint:
+        raise jobs.JobError("The plan changed, review it again", 409)
     view = _plan_view(record, planned)
     if not planned["plates"]:
         return {**record, "plan": view}

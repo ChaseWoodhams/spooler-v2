@@ -1567,7 +1567,7 @@ async function acceptPlan() {
   if (!plan) return;
   await withButton($("plan-accept"), async () => {
     try {
-      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision });
+      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision, fingerprint: plan.fingerprint });
       applyProject(result);
       recordEdit();
       state.plan = null;
@@ -1577,7 +1577,7 @@ async function acceptPlan() {
       toast(`Planned: ${result.plan.summary}. Undo puts it back`);
     } catch (err) {
       if (err.status !== 409) throw err;
-      $("plan-error").textContent = "The project changed elsewhere, reload it";
+      $("plan-error").textContent = err.message;   // "changed elsewhere" or "The plan changed, review it again"
       state.plan = null;   // nothing to accept any more: Accept does nothing until the sheet is opened again
     }
   });

@@ -1192,7 +1192,7 @@ class SPHandler(SimpleHTTPRequestHandler):
         if len(parts) == 6 and parts[4] == "plan" and parts[5] == "accept":
             def accept():
                 body = self._json_body()
-                return projects.accept_plan(self._job_id(), body.get("plan") or body.get("revision"))
+                return projects.accept_plan(self._job_id(), body.get("plan") or body.get("revision"), body.get("fingerprint"))
             self._jobs_call(accept, broadcast=False)
             return
         if len(parts) == 5 and parts[4] == "orient-all":

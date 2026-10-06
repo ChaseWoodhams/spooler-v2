@@ -102,6 +102,9 @@ class PlanPlatesApiTests(unittest.TestCase):
         return self.call("POST", f"/api/projects/{project['id']}/plan", {})
 
     def accept(self, project, **body):
+        """Accept the plan as it is now; pass fingerprint= to send the one of an earlier plan."""
+        if "fingerprint" not in body:
+            body["fingerprint"] = self.plan(project)[1]["fingerprint"]
         return self.call("POST", f"/api/projects/{project['id']}/plan/accept", {"revision": project["revision"], **body})
 
     def print_on_record(self, project, plate_id, outcome="completed"):
@@ -172,6 +175,27 @@ class PlanPlatesApiTests(unittest.TestCase):
         self.assertEqual(status, 200, result)
         self.assertEqual([p["id"] for p in result["data"]["plates"]], [1])
         self.assertEqual(self.call("POST", f"/api/projects/{project['id']}/plan/accept", {})[0], 400)
+
+    def test_a_plan_that_changed_since_it_was_reviewed_is_refused(self):
+        project = self.project_with(cube_stl(20))
+        project = self.lay(project, [(1, n, (50 + n, 60), False) for n in range(1, 4)])
+        reviewed = self.plan(project)[1]
+        self.assertEqual(len(reviewed["plates"]), 1)
+        self.print_on_record(project, 3)             # no revision bump, but the plan the server would make now is different
+        status, refused = self.accept(project, fingerprint=reviewed["fingerprint"])
+        self.assertEqual(status, 409, refused)
+        self.assertEqual(refused["error"], "The plan changed, review it again")
+        self.assertEqual(self.call("GET", f"/api/projects/{project['id']}")[1]["revision"], project["revision"])
+        fresh = self.plan(project)[1]
+        self.assertNotEqual(fresh["fingerprint"], reviewed["fingerprint"])
+        self.assertEqual(self.accept(project, fingerprint=fresh["fingerprint"])[0], 200)
+
+    def test_accepting_needs_the_fingerprint_of_the_plan_reviewed(self):
+        project = self.project_with(cube_stl(20))
+        project = self.lay(project, [(1, 1, (50, 50), False), (1, 2, (50, 50), False)])
+        status, refused = self.call("POST", f"/api/projects/{project['id']}/plan/accept", {"revision": project["revision"]})
+        self.assertEqual(status, 400, refused)
+        self.assertEqual(self.call("GET", f"/api/projects/{project['id']}")[1]["revision"], project["revision"])
 
     def test_replanned_plates_slices_become_outdated(self):
         project = self.project_with(cube_stl(20))
