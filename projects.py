@@ -144,7 +144,42 @@ def fingerprint(record: dict, plate_id: int) -> str:
     bricks = plate_bricklayers(data, plate)
     if bricks:  # likewise only when on, so plates sliced before BrickLayers existed stay up to date
         payload["bricklayers"] = bricks
+    chosen = plate_filaments(data, plate_id)
+    if any(chosen):  # only when an object's model has a choice, so plates on the project default stay up to date
+        payload["filament"] = [{"preset": c["preset"], "colour": c.get("colour", "")} if c else None for c in chosen]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _choice_key(choice: dict | None) -> tuple | None:
+    return (choice["preset"], choice.get("colour", "")) if choice else None
+
+
+def choice_label(choice: dict | None) -> str:
+    """How a filament choice reads on the page: "PETG grey" (the preset without its @printer suffix, then the colour)."""
+    if not choice:
+        return "the project default"
+    return f"{choice['preset'].split(' @')[0]} {choice.get('colour', '')}".strip()
+
+
+def plate_filaments(data: dict, plate_id: int) -> list:
+    """The distinct filament choices of a plate's objects, in object order; None stands for the project default.
+    A plate's filament is derived here every time and never stored on the plate."""
+    choices = data.get("filaments") or {}
+    found = {}
+    for obj in sorted((o for o in data.get("objects", []) if o["plate"] == plate_id), key=lambda o: o["id"]):
+        choice = choices.get(str(obj["model"]))
+        found.setdefault(_choice_key(choice), choice)
+    return list(found.values())
+
+
+def plate_mix(data: dict, plate_id: int) -> str | None:
+    """"Plate 3 mixes PETG grey and PLA white" when the plate holds more than one filament choice, else None."""
+    found = plate_filaments(data, plate_id)
+    if len(found) < 2:
+        return None
+    plate = next((p for p in data.get("plates", []) if p["id"] == plate_id), {})
+    labels = [choice_label(c) for c in found]
+    return f"{plate.get('name') or f'Plate {plate_id}'} mixes {', '.join(labels[:-1])} and {labels[-1]}"
 
 
 def plate_bricklayers(data: dict, plate: dict) -> dict | None:
@@ -1550,6 +1585,15 @@ def _stage(project_id: int, plate_id: int, stage: str) -> None:
     _mutate(project_id, "slices", change)
 
 
+def _require_one_filament(record: dict, plate_ids) -> None:
+    """A plate that mixes filament choices can't be sliced."""
+    for plate in record["data"]["plates"]:
+        if plate["id"] in plate_ids:
+            mix = plate_mix(record["data"], plate["id"])
+            if mix:
+                raise jobs.JobError(mix, 409)
+
+
 def request_slice(project_id: int, plate_id: int, send: bool = False) -> dict:
     """Slice one plate. With `send`, the finished plate goes to the queue for its own printer."""
     record = get_project(project_id)
@@ -1559,6 +1603,7 @@ def request_slice(project_id: int, plate_id: int, send: bool = False) -> dict:
         raise jobs.JobError("The plate is empty", 409)
     if record["slices"].get(str(plate_id), {}).get("state") in (QUEUED, SLICING):
         raise jobs.JobError("The plate is already being sliced", 409)
+    _require_one_filament(record, {plate_id})
     if send:
         _require_printers(record, {plate_id})
     _mutate(project_id, "slices", lambda s: s.__setitem__(str(plate_id), _queued_entry(s.get(str(plate_id)), time.time(), send)))
@@ -1587,6 +1632,7 @@ def request_slices(project_id: int, plate_ids=None, send: bool = False) -> dict:
             todo.append(plate["id"])
     if not todo:
         raise jobs.JobError("Nothing to slice — every plate is empty, already sliced or slicing", 409)
+    _require_one_filament(record, set(todo))
     if send:
         _require_printers(record, set(todo))
     now = time.time()
@@ -1616,6 +1662,7 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
         raise jobs.JobError(f"Still importing: {', '.join(waiting)}")
     if not data["profile"]["bundle_id"]:
         raise jobs.JobError("Choose a profile first")
+    _require_one_filament(record, {plate_id})
     _stage(project_id, plate_id, "preparing")
     stamp = fingerprint(record, plate_id)
     settings = slicer.bundle_settings(data["profile"]["bundle_id"])
@@ -1627,6 +1674,12 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
     if bricks:
         process.update(brick_post.REQUIRED_PROCESS)
     filament = {**settings["filament"], **data["profile"]["filament"]}
+    chosen = next((c for c in plate_filaments(data, plate_id) if c), None)
+    if chosen:  # the profile's filament changes tweak the default preset, so they don't carry over to another one
+        filament, _ = slicer.flatten_preset(slicer._presets("filament", orca), chosen["preset"])
+        machine = settings["machine"]["name"]
+        if filament.get("type") != "filament" or not slicer._compatible(filament, machine):
+            raise jobs.JobError(f"“{chosen['preset']}” isn't a filament preset for {machine}")
 
     work = plate_dir(project_id, plate_id)
     shutil.rmtree(work, ignore_errors=True)
@@ -1857,6 +1910,7 @@ def plate_status(project_id: int) -> dict:
 
     plates, counts = [], {status: 0 for status in PLATE_STATUSES}
     filament = {"used": 0.0, "total": 0.0, "unknown_plates": 0}
+    by_choice = {}   # filament choice → its plates' totals; None is the project default
     for plate in record["data"]["plates"]:
         n = plate["id"]
         entry = record["slices"].get(str(n)) or {}
@@ -1875,15 +1929,25 @@ def plate_status(project_id: int) -> dict:
         counts[status] += 1
         sliced = entry.get("state") == SLICED
         grams = entry.get("estimate_g") if sliced else None
+        used = consumed[n] if n in consumed else (grams or 0.0) if status == "printed_ok" else 0.0   # what the printer counted wins;
+        # a plate printed OK with no count falls back to its estimate
         if grams:
             filament["total"] += grams
         else:
             filament["unknown_plates"] += 1  # not sliced yet, so its filament isn't in the total
-        # what the printer counted wins; a plate printed OK with no count falls back to its estimate
-        filament["used"] += consumed[n] if n in consumed else (grams or 0.0) if status == "printed_ok" else 0.0
+        filament["used"] += used
+        found = plate_filaments(record["data"], n)
+        mixed = plate_mix(record["data"], n)
+        if found and not mixed:   # a mixed plate belongs to no single choice
+            group = by_choice.setdefault(_choice_key(found[0]), {"choice": found[0], "total": 0.0, "used": 0.0, "plates": 0, "unknown_plates": 0})
+            group["plates"] += 1
+            group["total"] += grams or 0.0
+            group["used"] += used
+            group["unknown_plates"] += 0 if grams else 1
         job = open_job.get(n)
         plates.append({"id": n, "name": plate.get("name"), "status": status,
                        "outdated": bool(entry.get("outdated")) if sliced else False,
+                       "mixed": mixed, "filament": choice_label(found[0]) if found and not mixed else None,
                        "parts": parts.get(n, 0), "layout": fingerprint(record, n), "job_id": job["id"] if job else None,
                        "printer_id": (job["printer_id"] if job else None) or plate.get("printer_id"),
                        "estimate_s": entry.get("estimate_s") if sliced else None, "estimate_g": grams,
@@ -1893,7 +1957,13 @@ def plate_status(project_id: int) -> dict:
             "progress": {"total": total, "counts": counts, "printed_ok": counts["printed_ok"],
                          "percent": round(100 * counts["printed_ok"] / total) if total else 0,
                          "filament_g": {"used": round(filament["used"], 1), "total": round(filament["total"], 1),
-                                        "unknown_plates": filament["unknown_plates"], "spool": _spool_level(record)}}}
+                                        "unknown_plates": filament["unknown_plates"], "spool": _spool_level(record),
+                                        "by_filament": [{"label": choice_label(g["choice"]), "default": g["choice"] is None,
+                                                         "preset": g["choice"]["preset"] if g["choice"] else None,
+                                                         "colour": g["choice"].get("colour", "") if g["choice"] else None,
+                                                         "plates": g["plates"], "total": round(g["total"], 1), "used": round(g["used"], 1),
+                                                         "unknown_plates": g["unknown_plates"]}
+                                                        for g in sorted(by_choice.values(), key=lambda g: (g["choice"] is not None, choice_label(g["choice"])))]}}}
 
 
 def _spool_level(record: dict) -> dict | None:
