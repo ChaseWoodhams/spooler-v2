@@ -24,7 +24,7 @@ SUPPORT_CLEARANCE_MM = 22.0  # a part that needs tree supports in its orientatio
 EDGE_MARGIN_MM = 3.0         # brim and supports are clipped at the bed edge, so no more than today's margin
 ANGLES = tuple(range(0, 360, 15))
 _ROUND = 8                  # segments per quarter circle when growing an outline by its clearance
-_REACH = 1 / math.cos(math.pi / (4 * _ROUND))   # grow a little more so the polygon encloses the true circle
+_REACH = 1.012 / math.cos(math.pi / (4 * _ROUND))   # grow a little more so the polygon encloses the true circle; GEOS also simplifies a buffer by up to 1% of its distance
 _NUDGE = 1e-4               # clears an obstacle's edge so touching candidates aren't taken as overlapping
 _SLIDES = (16.0, 8.0, 4.0, 2.0, 1.0, 0.5, 0.25, 0.1)
 
@@ -38,8 +38,8 @@ def silhouette_outline(verts, tris, tolerance: float = 0.2) -> list:
     """Outline of a mesh seen from above, holes ignored, never inside the true outline. Pieces that don't touch are
     joined by their convex hull. `verts` are (x, y, z) rows, `tris` index triples."""
     xy = np.asarray(verts, float)[:, :2][np.asarray(tris)]                      # (triangles, 3, 2)
-    area = np.abs(np.cross(xy[:, 1] - xy[:, 0], xy[:, 2] - xy[:, 0]))
-    xy = xy[area > 1e-9]
+    a, b = xy[:, 1] - xy[:, 0], xy[:, 2] - xy[:, 0]
+    xy = xy[np.abs(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]) > 1e-9]   # drop triangles seen edge-on
     shape = shapely.union_all(shapely.polygons(np.concatenate([xy, xy[:, :1]], axis=1))).buffer(0.01)
     if shape.geom_type != "Polygon":
         shape = shape.convex_hull

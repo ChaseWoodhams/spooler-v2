@@ -1,9 +1,16 @@
+import json
+import sqlite3
 import unittest
+from contextlib import closing
+from pathlib import Path
 
+import numpy as np
 from shapely import affinity
 from shapely.geometry import Polygon, box
 
-from nesting import CLEARANCE_MM, EDGE_MARGIN_MM as EDGE, SUPPORT_CLEARANCE_MM, nest
+import projects
+from nesting import CLEARANCE_MM, EDGE_MARGIN_MM as EDGE, SUPPORT_CLEARANCE_MM, hull_outline, nest, silhouette_outline
+from packing import pack
 
 BED = (0.0, 0.0, 256.0, 256.0)
 PURGE = (246.0, 0.0, 256.0, 20.0)
@@ -98,6 +105,71 @@ class NestingTests(unittest.TestCase):
         self.assertEqual(len(plates), 2)
         big = next(p for p in plates if p["items"][0]["key"] == 1)
         self.assertEqual((len(big["items"]), big["items"][0]["oversize"], big["items"][0]["center"]), (1, True, (128.0, 128.0)))
+
+
+class OutlineTests(unittest.TestCase):
+    def test_a_silhouette_follows_a_concave_part_and_a_hull_fills_it_in(self):
+        # an L of 100 x 100 mm with 30 mm arms, as a flat mesh two triangles per rectangle, 5 mm tall
+        verts = [(x, y, z) for z in (0.0, 5.0) for x, y in ((0, 0), (100, 0), (100, 30), (30, 30), (30, 100), (0, 100))]
+        tris = [(0, 1, 2), (0, 2, 3), (0, 3, 4), (0, 4, 5)]
+        sil = Polygon(silhouette_outline(verts, tris))
+        hull = Polygon(hull_outline(verts))
+        l = Polygon(l_shape(100, 30))
+        self.assertTrue(sil.contains(l))                    # never inside the true outline
+        self.assertLess(sil.area, l.area * 1.1)             # and close to it
+        self.assertGreater(hull.area, l.area * 1.4)
+
+
+DATA = next((p / "data" for p in Path(__file__).resolve().parents if (p / "data" / "spooler.db").is_file()), None)
+
+
+@unittest.skipUnless(DATA and (DATA / "projects" / "2" / "models").is_dir(), "needs the saved project 2 (17 parts)")
+class ProjectTwoTests(unittest.TestCase):
+    """Project 2's 17 objects, read from the saved data without writing to it."""
+
+    @classmethod
+    def setUpClass(cls):
+        with closing(sqlite3.connect((DATA / "spooler.db").as_uri() + "?mode=ro", uri=True)) as db:
+            cls.objects = json.loads(db.execute("SELECT data FROM projects WHERE id = 2").fetchone()[0])["objects"]
+        cls.outlines, cls.sizes = {}, {}
+        for obj in cls.objects:
+            with np.load(DATA / "projects" / "2" / "models" / str(obj["model"]) / "model.npz") as z:
+                verts = z["verts"].astype(float)
+            # at the saved tilt, before any turn about Z: the nester chooses the turn
+            flat = projects.place(verts, {**obj, "rotation": [obj["rotation"][0], obj["rotation"][1], 0.0], "position": [0.0, 0.0]})
+            cls.outlines[obj["id"]] = hull_outline(flat[:, :2])
+            cls.sizes[obj["id"]] = tuple(float(v) for v in (flat.max(axis=0) - flat.min(axis=0))[:2])
+
+    def parts(self):
+        return {o["id"]: (self.outlines[o["id"]], CLEARANCE_MM) for o in self.objects}
+
+    def test_seventeen_parts_keep_their_clearance_and_use_no_more_plates_than_packing_pack(self):
+        parts = self.parts()
+        plates = nest([{"key": k, "outline": o, "clearance": b, "group": "plain"} for k, (o, b) in parts.items()], BED, PURGE)
+        NestingTests().check_plates(plates, parts)
+        packed = pack([{"key": k, "size": self.sizes[k], "group": "plain"} for k in parts], BED, PURGE)
+        self.assertEqual(sorted(i["key"] for p in plates for i in p["items"]), sorted(parts))
+        self.assertLessEqual(len(plates), len(packed))
+
+    def test_pinned_objects_keep_their_place_and_the_rest_pack_around_them(self):
+        parts = self.parts()
+        pins = []
+        for obj in [o for o in self.objects if o["plate"] == 1][:3]:
+            shape = affinity.rotate(Polygon(self.outlines[obj["id"]]), obj["rotation"][2], origin="centroid")
+            x0, y0, x1, y1 = shape.bounds
+            shape = affinity.translate(shape, obj["position"][0] - (x0 + x1) / 2, obj["position"][1] - (y0 + y1) / 2)
+            pins.append({"key": obj["id"], "group": "plain", "slot": 0, "clearance": CLEARANCE_MM, "polygon": list(shape.exterior.coords)[:-1]})
+        movable = {k: v for k, v in parts.items() if k not in {p["key"] for p in pins}}
+        plates = nest([{"key": k, "outline": o, "clearance": b, "group": "plain"} for k, (o, b) in movable.items()], BED, PURGE, fixed=pins)
+        self.assertEqual(sorted(plates[0]["fixed"]), sorted(p["key"] for p in pins))
+        self.assertTrue(plates[0]["items"])
+        for plate in plates:   # pinned shapes may sit closer to each other than the clearance; only the others are checked
+            shapes = [(i["key"], placed(i, movable[i["key"]][0])) for i in plate["items"]]
+            for key, poly in shapes:
+                for pin in pins if plate is plates[0] else ():
+                    self.assertGreaterEqual(poly.distance(Polygon(pin["polygon"])), CLEARANCE_MM - 1e-6, f"{key} is too near pinned {pin['key']}")
+                for other, opoly in shapes:
+                    self.assertTrue(key == other or poly.distance(opoly) >= CLEARANCE_MM - 1e-6)
 
 
 if __name__ == "__main__":
