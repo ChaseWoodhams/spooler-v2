@@ -4,7 +4,12 @@ A rough print time for a plate before it is sliced, and the features logged with
     time = a x layers + b x deposited volume + c x first-layer footprint
 
 The seeds below come from the one real Spooler-sliced plate (research/time-estimate.md): about 50 s per layer and about
-160 s per cm3, taken one at a time, so together they overshoot that plate. The footprint term has no seed yet. Nothing here
+160 s per cm3, each fitted on its own, so used together they overshoot. The footprint term has no seed yet.
+
+Checked on that plate (project 1 plate 1, two rear_base parts, OrcaSlicer 15260 s, 310 layers, 94.9 cm3 deposited):
+the estimate finds 310 layers and 96.2 cm3 (+1.3%) but 30886 s, +102% against the slicer, because both seeds are applied
+at once. Either seed alone lands within 2% (layers only 15500 s, volume only 15386 s), which says nothing yet about other
+plates. Fitting `COEFFICIENTS` from the log is what makes the seconds usable. Nothing here
 is trustworthy as a time until the log (table `slice_log`) holds enough slices to fit `COEFFICIENTS`; until then the rank
 (layers, then volume) is the useful part, and every figure is marked approximate.
 """
