@@ -149,6 +149,7 @@
             <option value="orca">OrcaSlicer</option>
           </select>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned part on this plate for the least support; Shift for every plate">Orient all</button>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-plan-plates" title="Plan plates: turn parts, pack them across plates by filament and order the plates. You review it first; Undo reverses it.">Plan plates</button>
           <select id="merge-plate" class="slicer-toolbar-select" aria-label="Merge this plate into another"></select>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-fit" title="Fit the view (Z zooms to the selection; 0-6 pick a side)">Fit view</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-undo" title="Undo (Ctrl+Z)">Undo</button>
@@ -231,6 +232,16 @@
     <div class="slicer-dialog-actions">
       <button class="btn btn-secondary" type="button" data-close>Cancel</button>
       <button id="btn-import" class="btn btn-primary" type="button">Add</button>
+    </div>
+  </dialog>
+
+  <dialog id="dlg-plan" class="slicer-dialog slicer-dialog-wide">
+    <h3>Plan plates</h3>
+    <div id="plan-body"></div>
+    <p id="plan-error" class="slicer-error" role="alert"></p>
+    <div class="slicer-dialog-actions">
+      <button class="btn btn-secondary" type="button" data-close>Cancel</button>
+      <button class="btn btn-primary" type="button" id="plan-accept">Accept</button>
     </div>
   </dialog>
 
