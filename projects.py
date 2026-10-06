@@ -1583,7 +1583,8 @@ _DEFAULT_PLATE_NAME = re.compile(r"^Plate (\d+)$")
 
 
 def _turned(before, after) -> bool:
-    return any(abs((a - b + 180) % 360 - 180) > 0.01 for a, b in zip(before, after))
+    """Whether the object now stands on another side: its X or Y rotation changed. A turn about Z only spins it on the bed."""
+    return any(abs((a - b + 180) % 360 - 180) > 0.01 for a, b in zip(before[:2], after[:2]))
 
 
 def _count(n: int, word: str) -> str:

@@ -21,6 +21,8 @@ import splits
 from tests.test_slicer import cube_stl, fake_runner, make_fake_orca
 
 GEOMETRY = not splits.missing_modules()
+if GEOMETRY:
+    from tests.test_orient import box, mushroom, stl_of
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 GREY = {"preset": "Elegoo PETG @ECC", "colour": "grey"}
 
@@ -175,6 +177,20 @@ class PlanPlatesApiTests(unittest.TestCase):
         self.assertEqual(status, 200, result)
         self.assertEqual([p["id"] for p in result["data"]["plates"]], [1])
         self.assertEqual(self.call("POST", f"/api/projects/{project['id']}/plan/accept", {})[0], 400)
+
+    def test_turned_counts_only_parts_stood_on_another_side_not_turns_about_z(self):
+        project = self.project_with(mushroom(), stl_of(box(150, 10, 5)))
+        def change(data):
+            data["objects"][0]["rotation"] = [180.0, 0.0, 0.0]    # standing on its post: orienting lays it back on its disc
+            data["objects"][1]["rotation"] = [0.0, 0.0, 45.0]     # a diagonal bar: the nester squares it up, a turn about Z only
+        project = self.save(project, change)
+        status, plan = self.plan(project)
+        self.assertEqual(status, 200, plan)
+        self.assertEqual([p["turned"] for p in plan["plates"]], [1])
+        self.assertIn("1 turned", plan["summary"])
+        result = self.accept(project)[1]
+        bar = next(o for o in result["data"]["objects"] if o["id"] == 2)
+        self.assertNotAlmostEqual(bar["rotation"][2] % 360, 45.0, places=0)   # it was turned about Z, and not counted
 
     def test_a_plan_that_changed_since_it_was_reviewed_is_refused(self):
         project = self.project_with(cube_stl(20))
