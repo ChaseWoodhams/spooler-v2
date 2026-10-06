@@ -2,7 +2,7 @@
    Model (analysis, units) → Split (cuts, parts) → Plates (parts packed onto plates; move, merge, settings for the
    project, a plate or an object) → Slice (every plate, layer preview) → Queue (send the plates as one batch, assign
    printers). Projects without an uploaded model start at Plates. Talks to /api/projects, /api/splits and /api/jobs. */
-import * as orient from "./orient.js?v=1";
+import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=4";
 import { splitStep } from "./split-step.js";
 import { projectPage } from "./project-page.js";
@@ -1130,6 +1130,7 @@ function renderTools() {
   $("merge-plate").innerHTML = `<option value="">Merge into…</option>${others.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}`;
   $("merge-plate").disabled = !others.length;
   $("arrange-engine").value = data().arrange_engine === "orca" ? "orca" : "nester";
+  $("btn-orient-all").disabled = !data().objects.length;
   $("btn-undo").disabled = !editLog.undo.length;
   $("btn-redo").disabled = !editLog.redo.length;
 }
@@ -1167,11 +1168,11 @@ function renderObjectPanel() {
     ${filamentControls(object)}
     <div class="slicer-actions-row">
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="flat" title="Rotate so the largest flat face is on the bed">Lay flat</button>
-      <button class="btn btn-secondary btn-sm" type="button" data-object-action="orient" title="Turn to the orientation that needs the least support (O)">Auto-orient</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-object-action="orient" title="Suggest an orientation, to accept or ignore (O)">Suggest orientation</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="reset">Reset rotation</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="duplicate">Duplicate</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="settings">Settings</button>
-    </div>`;
+    </div>${orientSuggestionHtml(object)}`;
 }
 
 // The inspector's filament choice (shared by every copy of the model), colour label, pin, and the mixed-plate warning
@@ -1290,14 +1291,60 @@ function faceClicked({ objectId, normal }) {
   renderAll({ geometry: false });
 }
 
-function autoOrient(object = selectedObject()) {
-  const geometry = object && state.viewport?.geometries.get(object.model);
-  if (!geometry) return toast("Select an object first", true);
-  const result = orient.bestOrientation(geometry, object.rotation);
-  if (JSON.stringify(result.rotation) === JSON.stringify(object.rotation)) return toast(`${object.name} is already in a good orientation`);
-  const saved = Math.round(result.current.overhang - result.overhang);
-  updateObject(object.id, { rotation: result.rotation });
-  toast(saved > 20 ? `Turned ${object.name} — about ${saved} mm² less needs support` : `Turned ${object.name} onto a flatter face`);
+// O: ask the server for an orientation (nothing changes until it is accepted)
+const ORIENT_MODES = { "least-support": "Least support", strength: "Strength (lie low)", looks: "Looks (front side)" };
+
+async function suggestOrientation(object = selectedObject(), mode = state.orientMode || "least-support") {
+  if (!object) return toast("Select an object first", true);
+  state.orientMode = mode;
+  await flushSave();
+  // Looks favours the side facing the viewer (the front of the bed), as the model sees it
+  const face = mode === "looks" ? `&face=${orient.toModelSpace([0, -1, 0], object.rotation).join(",")}` : "";
+  try {
+    const result = await api("GET", `/api/projects/${state.project.id}/objects/${object.id}/orientation?mode=${mode}${face}`);
+    state.orientSuggestion = { objectId: object.id, mode, result };
+  } catch (e) {
+    return toast(e.message, true);
+  }
+  renderObjectPanel();
+}
+
+function orientSuggestionHtml(object) {
+  const s = state.orientSuggestion;
+  if (!s || s.objectId !== object.id) return "";
+  const { current, suggested, changed } = s.result;
+  const area = m => `${Math.round(m.overhang_area / 10) / 10} cm²`;
+  const summary = !changed ? "Already the best of the orientations tried."
+    : `Needs support on ${area(suggested)} instead of ${area(current)}, ${Math.round(suggested.height)} mm tall instead of ${Math.round(current.height)} mm.`;
+  return `<div class="slicer-field" id="orient-suggestion">
+    <select data-orient-mode aria-label="What to favour">${Object.entries(ORIENT_MODES).map(([value, label]) =>
+      `<option value="${value}"${value === s.mode ? " selected" : ""}>${label}</option>`).join("")}</select>
+    <span>${summary}</span>
+    <div class="slicer-actions-row">
+      <button class="btn btn-secondary btn-sm" type="button" data-orient-accept${changed ? "" : " disabled"}>Accept</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-orient-ignore>Ignore</button>
+    </div>
+  </div>`;
+}
+
+function acceptOrientation() {
+  const s = state.orientSuggestion;
+  state.orientSuggestion = null;
+  if (s?.result.changed) updateObject(s.objectId, { rotation: s.result.rotation });
+  else renderObjectPanel();
+}
+
+async function orientAll(wholeProject = false) {
+  await flushSave();
+  await withButton($("btn-orient-all"), async () => {
+    const result = await api("POST", `/api/projects/${state.project.id}/orient-all`, wholeProject ? {} : { plate: state.plate });
+    const { oriented, unchanged, pinned } = result.orient;
+    state.orientSuggestion = null;
+    applyProject(result);
+    if (oriented.length) recordEdit();
+    renderAll();
+    toast(`Turned ${plural(oriented.length, "part")}, ${unchanged.length} already fine` + (pinned.length ? `, ${pinned.length} pinned left alone` : ""));
+  });
 }
 
 function copyObject() {
@@ -2163,6 +2210,7 @@ function bindUi() {
     const object = selectedObject();
     if (!object) return;
     const field = e.target.dataset.field;
+    if (e.target.matches("[data-orient-mode]")) return suggestOrientation(object, e.target.value);
     if (e.target.id === "object-plate") {
       object.plate = Number(e.target.value);
       state.selected = null;
@@ -2198,11 +2246,13 @@ function bindUi() {
     updateObject(object.id, { [field]: next });
   });
   $("object-panel").addEventListener("click", async e => {
+    if (e.target.closest("[data-orient-accept]")) return acceptOrientation();
+    if (e.target.closest("[data-orient-ignore]")) { state.orientSuggestion = null; return renderObjectPanel(); }
     const action = e.target.closest("[data-object-action]")?.dataset.objectAction;
     const object = selectedObject();
     if (!action || !object) return;
     if (action === "flat") await layFlat(object);
-    else if (action === "orient") autoOrient(object);
+    else if (action === "orient") suggestOrientation(object);
     else if (action === "reset") updateObject(object.id, { rotation: [0, 0, 0] });
     else if (action === "settings") { state.settingsTab = "object"; renderSettings(); }
     else if (action === "duplicate") {
@@ -2238,6 +2288,7 @@ function bindUi() {
     if (e.target.value === "orca") data().arrange_engine = "orca"; else delete data().arrange_engine;
     changed();
   });
+  $("btn-orient-all").addEventListener("click", e => orientAll(e.shiftKey));
   $("merge-plate").addEventListener("change", e => {
     const target = Number(e.target.value);
     e.target.value = "";
@@ -2292,7 +2343,7 @@ function bindUi() {
       else if (key === "s") { state.viewport?.setTool("scale"); renderTools(); }
       else if (key === "f") layOnFace(!state.layingOnFace);
       else if (key === "a") (e.shiftKey ? arrangeAll : arrange)();
-      else if (key === "o") autoOrient();
+      else if (key === "o") suggestOrientation();
       else if (key === "z") zoomToSelection();
       else if ("0123456".includes(e.key) && e.key !== "") state.viewport?.setView(["iso", "top", "bottom", "front", "back", "left", "right"][Number(e.key)]);
       else if (e.key === "Escape") { if (state.layingOnFace) layOnFace(false); else selectObject(null); }

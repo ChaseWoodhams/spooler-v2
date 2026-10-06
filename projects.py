@@ -1452,6 +1452,129 @@ def merge_plates(project_id: int, source_id: int, into_id: int) -> dict:
     return _apply_layout(project_id, record, [into_id, source_id], layout, lambda _: plates[into_id].get("overrides") or {})
 
 
+# ── Orientation ────────────────────────────────────────────────────────────────
+
+def _overhang_angle(record: dict, body: dict) -> float:
+    """Degrees from horizontal at or below which the profile prints supports (support_threshold_angle, 30 when unset)."""
+    import orientation
+    if body.get("overhang_angle") not in (None, ""):
+        try:
+            angle = float(body["overhang_angle"])
+        except (TypeError, ValueError):
+            angle = 0.0
+        if not 1 <= angle <= 89:
+            raise jobs.JobError("overhang_angle is a number of degrees from 1 to 89")
+        return angle
+    profile = record["data"]["profile"]
+    try:
+        process = {**slicer.bundle_settings(profile["bundle_id"])["process"], **profile.get("process", {})} if profile["bundle_id"] else {}
+        angle = float(process.get("support_threshold_angle") or 0)
+    except (jobs.JobError, TypeError, ValueError):
+        angle = 0.0
+    return angle if 1 <= angle <= 89 else orientation.DEFAULT_OVERHANG_ANGLE   # 0 is "automatic": use the usual angle
+
+
+def _bed_limits(record: dict) -> dict:
+    limits = _machine_limits_for(record)
+    x0, y0, x1, y1 = limits["bed"]
+    return {"height": limits["height"], "bed_x": x1 - x0, "bed_y": y1 - y0}
+
+
+def _orient_options(record: dict, body: dict) -> dict:
+    import orientation
+    mode = body.get("mode") or orientation.LEAST_SUPPORT
+    if mode not in orientation.MODES:
+        raise jobs.JobError(f"mode must be one of {', '.join(orientation.MODES)}")
+    options = {"mode": mode, "angle": _overhang_angle(record, body), "favoured": body.get("face")}
+    try:
+        options["limits"] = _bed_limits(record)
+    except jobs.JobError:
+        options["limits"] = None   # no profile chosen yet: orient without checking the bed
+    return options
+
+
+def _orientation_for(project_id: int, obj: dict, options: dict) -> dict:
+    import orientation
+    verts, tris = load_mesh(project_id, obj["model"], preview=True)
+    try:
+        return orientation.suggest(verts, tris, obj["scale"], obj["rotation"], **options)
+    except orientation.OrientError as e:
+        raise jobs.JobError(str(e))
+
+
+def _ready_object(record: dict, object_id) -> dict:
+    obj = next((o for o in record["data"]["objects"] if o["id"] == object_id), None)
+    if obj is None:
+        raise jobs.JobError("Object not found", 404)
+    if next((m["state"] for m in record["models"] if m["id"] == obj["model"]), None) != READY:
+        raise jobs.JobError("The model isn't ready yet", 409)
+    return obj
+
+
+def suggest_orientation(project_id: int, object_id: int, body: dict) -> dict:
+    """The orientation suggested for one object; changes nothing. `mode`: least-support (default), strength or looks
+    (which needs `face`, the side that should look best, as a direction in the model's own space)."""
+    record = get_project(project_id)
+    obj = _ready_object(record, object_id)
+    options = _orient_options(record, body)
+    suggestion = _orientation_for(project_id, obj, options)
+    return {"object": object_id, "mode": options["mode"], "overhang_angle": options["angle"],
+            "rotation_from": obj["rotation"], **suggestion}
+
+
+def _apply_rotations(project_id: int, record: dict, rotations: dict) -> dict:
+    with database.transaction() as conn:
+        row = conn.execute("SELECT data, revision FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise jobs.JobError("Project not found", 404)
+        if row["revision"] != record["revision"]:
+            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
+        data = json.loads(row["data"])
+        for obj in data["objects"]:
+            if obj["id"] in rotations:
+                obj["rotation"] = rotations[obj["id"]]
+        conn.execute("UPDATE projects SET data = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                     (json.dumps(data), time.time(), project_id))
+    return get_project(project_id)
+
+
+def orient_object(project_id: int, object_id: int, body: dict) -> dict:
+    """Accept the suggestion for one object. Works on a pinned object too: pinning only keeps the planner away."""
+    record = get_project(project_id)
+    obj = _ready_object(record, object_id)
+    suggestion = _orientation_for(project_id, obj, _orient_options(record, body))
+    return _apply_rotations(project_id, record, {object_id: suggestion["rotation"]}) if suggestion["changed"] else record
+
+
+def orient_all(project_id: int, body: dict) -> dict:
+    """Orient every unpinned, ready object on one plate (`plate`) or in the whole project. Pinned objects are left alone.
+    Returns the project plus "orient": {"oriented": [...], "unchanged": [...], "pinned": [...]} (object ids)."""
+    record = get_project(project_id)
+    plate_id = body.get("plate")
+    if plate_id is not None and plate_id not in {p["id"] for p in record["data"]["plates"]}:
+        raise jobs.JobError("Plate not found", 404)
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    if body.get("mode") == "looks":
+        raise jobs.JobError("Looks needs a favoured side, so it is chosen for one object at a time")
+    options = _orient_options(record, body)
+    summary = {"oriented": [], "unchanged": [], "pinned": []}
+    rotations = {}
+    for obj in record["data"]["objects"]:
+        if (plate_id is not None and obj["plate"] != plate_id) or obj["model"] not in ready:
+            continue
+        if obj.get("pinned"):
+            summary["pinned"].append(obj["id"])
+            continue
+        suggestion = _orientation_for(project_id, obj, options)
+        if suggestion["changed"]:
+            rotations[obj["id"]] = suggestion["rotation"]
+            summary["oriented"].append(obj["id"])
+        else:
+            summary["unchanged"].append(obj["id"])
+    result = _apply_rotations(project_id, record, rotations) if rotations else record
+    return {**result, "orient": summary}
+
+
 def delete_model(project_id: int, model_id: int) -> dict:
     record = get_project(project_id)
     if not any(m["id"] == model_id for m in record["models"]):
