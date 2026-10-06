@@ -32,6 +32,7 @@ import slicer
 import splits
 import state
 import time
+import time_estimate
 from auth import (
     AUTH_ENABLED, BCRYPT_AVAILABLE, SECURE_COOKIES, SESSION_COOKIE,
     _auth_ok, _check_rate_limit, _create_session, _get_pw_hash, _get_username,
@@ -650,6 +651,9 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: preflight.printer_hardware(self._path_printer_id()), broadcast=False)
         elif self.path == "/api/prints" or self.path.startswith("/api/prints?"):
             self._jobs_call(lambda: print_history.search(**self._print_filters(paged=True)), broadcast=False)
+        elif self.path == "/api/slice-log" or self.path.startswith("/api/slice-log?"):
+            project = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("project_id") or [""])[0]
+            self._jobs_call(lambda: time_estimate.slice_log(int(project) if project.isdigit() else None), broadcast=False)
         elif self.path == "/api/outcome-prompts":
             self._jobs_call(lambda: {"awaiting": outcome_prompt.awaiting(), "reminder_delay_s": outcome_prompt.REMINDER_DELAY_S},
                             broadcast=False)
@@ -1197,6 +1201,12 @@ class SPHandler(SimpleHTTPRequestHandler):
                 "queue":  lambda: projects.queue_plates(self._job_id(), self._json_body()),
             }
             self._jobs_call(actions[parts[4]], broadcast=parts[4] == "queue")
+            return
+        if len(parts) == 5 and parts[4] == "copies":
+            def copies():
+                body = self._json_body()
+                return projects.set_copies(self._job_id(), body.get("object"), body.get("copies"), body.get("revision"))
+            self._jobs_call(copies, broadcast=False)
             return
         if len(parts) == 6 and parts[4] == "models" and parts[5] == "upload":
             self._handle_project_upload()

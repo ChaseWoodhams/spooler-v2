@@ -1132,6 +1132,8 @@ function renderObjectPanel() {
   const input = (field, index, value, step) =>
     `<input type="number" step="${step}" data-field="${field}" data-index="${index}" value="${Math.round(value * 1000) / 1000}">`;
   const uniform = object.scale.every(s => Math.abs(s - object.scale[0]) < 1e-9);
+  const copies = data().objects.filter(o => o.model === object.model).length;
+  const note = state.copiesNote?.model === object.model && state.copiesNote.count === copies ? state.copiesNote.text : "";
   panel.innerHTML = `
     <h5 title="${esc(object.name)}">${esc(object.name)}</h5>
     <div class="slicer-xyz"><span></span><span>X</span><span>Y</span><span>Z</span>
@@ -1141,6 +1143,8 @@ function renderObjectPanel() {
     </div>
     <label class="slicer-check"><input type="checkbox" id="scale-uniform"${uniform ? " checked" : ""}> Keep proportions</label>
     <label class="slicer-field">Plate <select id="object-plate">${data().plates.map(p => `<option value="${p.id}"${p.id === object.plate ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
+    <label class="slicer-field">Copies <input type="number" id="object-copies" min="1" max="500" step="1" value="${copies}" title="How many objects are made from this model, across all plates"></label>
+    ${note ? `<div class="slicer-muted" id="object-copies-note">${esc(note)}</div>` : ""}
     <div class="slicer-actions-row">
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="flat" title="Rotate so the largest flat face is on the bed">Lay flat</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="orient" title="Suggest an orientation, to accept or ignore (O)">Suggest orientation</button>
@@ -1321,6 +1325,25 @@ function pasteObject() {
   state.selected = copy.id;
   changed();
   renderAll();
+}
+
+// Copies: the number of objects made from the selected object's model, across all plates. The server adds or removes them.
+async function setCopies(object, asked) {
+  if (!Number.isInteger(asked) || asked < 1) { renderObjectPanel(); return toast("Copies must be a whole number, at least 1", true); }
+  await flushSave();
+  try {
+    const result = await api("POST", `/api/projects/${state.project.id}/copies`, { object: object.id, copies: asked });
+    applyProject(result);
+    const { model, count, pinned } = result.copies;
+    state.copiesNote = count > asked
+      ? { model, count, text: `Still ${count}: ${plural(pinned, "pinned object")} can't be removed. Unpin ${pinned === 1 ? "it" : "them"} to lower this.` }
+      : null;
+    recordEdit();
+    renderAll();
+  } catch (err) {
+    toast(err.message, true);
+    renderObjectPanel();
+  }
 }
 
 function removeSelected() {
@@ -2162,6 +2185,7 @@ function bindUi() {
       renderAll();
       return;
     }
+    if (e.target.id === "object-copies") { setCopies(object, Number(e.target.value)); return; }
     if (!field) return;
     const value = Number(e.target.value);
     if (!Number.isFinite(value)) return;
