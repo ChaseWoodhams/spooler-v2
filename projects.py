@@ -1575,6 +1575,181 @@ def orient_all(project_id: int, body: dict) -> dict:
     return {**result, "orient": summary}
 
 
+# ── Plan plates ────────────────────────────────────────────────────────────────
+
+KEPT_REASONS = {"queued": "In the print queue", "waiting": "In the print queue, waiting on a hold", "printing": "Printing now",
+                "printed_ok": "Printed", "failed": "A print of it is on record, and it didn't finish"}
+_DEFAULT_PLATE_NAME = re.compile(r"^Plate (\d+)$")
+
+
+def _turned(before, after) -> bool:
+    return any(abs((a - b + 180) % 360 - 180) > 0.01 for a, b in zip(before, after))
+
+
+def _count(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _plan_data(project_id: int, record: dict) -> dict:
+    """The project data as Plan plates would leave it, changing nothing. Plates that are queued, printing, have a Print on
+    record, or hold a model still importing are kept as they are. On the others, every unpinned object is oriented
+    (in memory, as Orient all would) and packed with `arrange_layout` (a pinned object keeps its plate and place; a plate
+    never mixes filament choices), then the plates are ordered longest first by `time_estimate.rank_key`; plates keep their
+    ids, which are what slices and jobs follow, while the order and the default names ("Plate 3") follow the plan, filling
+    the numbers the kept plates leave free. Returns {"data", "plates": [{"id", "new", "objects", "turned", "features"}],
+    "kept": [{"id", "name", "reason"}], "emptied": [plate ids removed]}; "plates" is empty when there is nothing to plan."""
+    data = json.loads(json.dumps(record["data"]))
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    importing = {o["plate"] for o in data["objects"] if o["model"] not in ready}
+    status = {p["id"]: p["status"] for p in plate_status(project_id)["plates"]}
+    kept, replannable = [], []
+    for plate in data["plates"]:
+        reason = KEPT_REASONS.get(status.get(plate["id"])) or ("Its models are still importing" if plate["id"] in importing else None)
+        if reason:
+            kept.append({"id": plate["id"], "name": plate["name"], "reason": reason})
+        else:
+            replannable.append(plate["id"])
+    before = {o["id"]: list(o["rotation"]) for o in data["objects"]}
+    options = _orient_options(record, {})
+    suggested = {}
+    for obj in data["objects"]:
+        if obj["plate"] not in replannable or obj.get("pinned"):
+            continue
+        key = (obj["model"], tuple(obj["scale"]), tuple(obj["rotation"]))
+        if key not in suggested:
+            try:
+                suggested[key] = _orientation_for(project_id, obj, options)
+            except jobs.JobError:
+                suggested[key] = None   # nothing to suggest for it: it stays as it is
+        if suggested[key] and suggested[key]["changed"]:
+            obj["rotation"] = list(suggested[key]["rotation"])
+    layout = arrange_layout(project_id, {**record, "data": data}, replannable)
+    if not layout:
+        return {"data": record["data"], "plates": [], "kept": kept, "emptied": []}
+    objects = {o["id"]: o for o in data["objects"]}
+    plates = {p["id"]: p for p in data["plates"]}
+    spare = [plate_id for plate_id in replannable if plate_id not in {p.get("plate") for p in layout}]
+    used = []
+    for plate in layout:
+        if plate.get("plate") is not None:
+            target = plates[plate["plate"]]
+        elif spare:
+            target = plates[spare.pop(0)]
+            target["overrides"] = dict(json.loads(plate["group"])["overrides"])
+        else:
+            if len(data["plates"]) >= MAX_PLATES:
+                raise jobs.JobError(f"A project holds at most {MAX_PLATES} plates")
+            target = _new_plate(_next_id(data["plates"]), json.loads(plate["group"])["overrides"])
+            data["plates"].append(target)
+            plates[target["id"]] = target
+        used.append(target["id"])
+        for item in plate["items"]:
+            obj = objects[item["key"]]
+            obj["plate"] = target["id"]
+            obj["position"] = [round(item["center"][0], 3), round(item["center"][1], 3)]
+            turn = item["angle"] if "angle" in item else 90 if item["turned"] else 0
+            if turn:
+                obj["rotation"][2] = round((obj["rotation"][2] + turn) % 360, 4)
+    emptied = [plate_id for plate_id in replannable if plate_id not in used]
+    data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
+    existing = {p["id"] for p in record["data"]["plates"]}
+    features = {plate_id: plate_features(project_id, {**record, "data": data}, plate_id) for plate_id in used}
+    ordered = (sorted((p for p in used if features[p]), key=lambda p: time_estimate.rank_key(features[p]), reverse=True)
+               + [p for p in used if not features[p]])
+    kept_ids = {k["id"] for k in kept}
+    kept_at = {p["id"]: i for i, p in enumerate(record["data"]["plates"]) if p["id"] in kept_ids}   # kept plates keep their place
+    order, queue, later = [], list(ordered), sorted(kept_at, key=kept_at.get)
+    for index in range(len(kept) + len(ordered)):
+        holder = next((k for k in later if kept_at[k] == index), None)
+        if holder is not None:
+            order.append(holder)
+            later.remove(holder)
+        elif queue:
+            order.append(queue.pop(0))
+    order += later
+    taken = {int(m.group(1)) for p in data["plates"] if p["id"] in kept_ids and (m := _DEFAULT_PLATE_NAME.match(p["name"] or ""))}
+    free = (n for n in range(1, 10000) if n not in taken)
+    plates = {p["id"]: p for p in data["plates"]}
+    for plate_id in ordered:   # default names follow the plan; a name the user gave stays
+        if not plates[plate_id]["name"] or _DEFAULT_PLATE_NAME.match(plates[plate_id]["name"]):
+            plates[plate_id]["name"] = f"Plate {next(free)}"
+    data["plates"] = [plates[plate_id] for plate_id in order]
+    proposed = [{"id": plate_id, "new": plate_id not in existing, "features": features[plate_id],
+                 "objects": sorted((o for o in data["objects"] if o["plate"] == plate_id), key=lambda o: o["id"])} for plate_id in ordered]
+    for entry in proposed:
+        entry["turned"] = sum(1 for o in entry["objects"] if _turned(before[o["id"]], o["rotation"]))
+    return {"data": data, "plates": proposed, "kept": kept, "emptied": emptied}
+
+
+def _plan_view(record: dict, planned: dict) -> dict:
+    """What a plan shows: the proposed plates in plan order, the plates kept as they are, and a one-line summary."""
+    data = planned["data"]
+    names = {p["id"]: p["name"] for p in data["plates"]}
+    plates = []
+    for entry in planned["plates"]:
+        found = plate_filaments(data, entry["id"])
+        features = entry["features"]
+        estimate = ({"layers": features["layers"], "volume_cm3": features["volume_cm3"], "approximate": True, "source": "model",
+                     "seconds": time_estimate.predict_seconds(features["layers"], features["volume_cm3"], features["first_layer_cm2"])}
+                    if features else None)
+        plates.append({"id": entry["id"], "name": names[entry["id"]], "new": entry["new"],
+                       "filament": choice_label(found[0]) if found else None, "parts": len(entry["objects"]),
+                       "turned": entry["turned"], "time_estimate": estimate,
+                       "objects": [{"id": o["id"], "name": o.get("name"), "model": o["model"], "position": o["position"],
+                                    "rotation": o["rotation"], "pinned": bool(o.get("pinned"))} for o in entry["objects"]]})
+    kept = planned["kept"]
+    if plates:
+        summary = (f"{_count(len(plates), 'plate')} (was {len(record['data']['plates']) - len(kept)}), "
+                   f"{_count(sum(p['parts'] for p in plates), 'part')}, {sum(p['turned'] for p in plates)} turned")
+        if kept:
+            summary += f"; {_count(len(kept), 'plate')} kept as {'it is' if len(kept) == 1 else 'they are'}"
+    else:
+        summary = "Nothing to plan"
+    return {"revision": record["revision"], "plates": plates, "kept": kept, "summary": summary}
+
+
+def plan_plates(project_id: int) -> dict:
+    """Plan the project's plates and change nothing: {"revision", "plates": [{"id", "name", "new", "filament", "parts",
+    "turned", "time_estimate" (approximate seconds, layers, volume_cm3), "objects"}] in plan order (longest first by
+    layers, then volume), "kept": [{"id", "name", "reason"}] (plates with a Job or a Print on record, which are never
+    touched), "summary"}. `accept_plan` applies it."""
+    record = get_project(project_id)
+    return _plan_view(record, _plan_data(project_id, record))
+
+
+def accept_plan(project_id: int, plan) -> dict:
+    """Apply the plan as one change: `plan` is the revision it was made at, or the plan itself. A project that has changed
+    since is refused ("changed elsewhere"); the plan is worked out again at that revision, so it is what was shown. Slices of
+    replanned plates become Outdated by their fingerprints; plates left empty go. Returns the project (one revision later,
+    so the client records one undo step) plus "plan", the view of what was applied."""
+    revision = plan.get("revision") if isinstance(plan, dict) else plan
+    try:
+        revision = int(revision)
+    except (TypeError, ValueError):
+        raise jobs.JobError("Send the revision the plan was made at, or the plan itself")
+    record = get_project(project_id)
+    if revision != record["revision"]:
+        raise jobs.JobError("The project was changed elsewhere — reload it", 409)
+    planned = _plan_data(project_id, record)
+    view = _plan_view(record, planned)
+    if not planned["plates"]:
+        return {**record, "plan": view}
+    with database.transaction() as conn:
+        row = conn.execute("SELECT revision, slices FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise jobs.JobError("Project not found", 404)
+        if row["revision"] != record["revision"]:
+            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
+        slices = json.loads(row["slices"] or "{}")
+        for plate_id in planned["emptied"]:
+            slices.pop(str(plate_id), None)
+        conn.execute("UPDATE projects SET data = ?, slices = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                     (json.dumps(planned["data"]), json.dumps(slices), time.time(), project_id))
+    for plate_id in planned["emptied"]:
+        shutil.rmtree(plate_dir(project_id, plate_id), ignore_errors=True)
+    return {**get_project(project_id), "plan": view}
+
+
 def delete_model(project_id: int, model_id: int) -> dict:
     record = get_project(project_id)
     if not any(m["id"] == model_id for m in record["models"]):
