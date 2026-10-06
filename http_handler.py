@@ -1191,6 +1191,12 @@ class SPHandler(SimpleHTTPRequestHandler):
             }
             self._jobs_call(actions[parts[4]], broadcast=parts[4] == "queue")
             return
+        if len(parts) == 5 and parts[4] == "copies":
+            def copies():
+                body = self._json_body()
+                return projects.set_copies(self._job_id(), body.get("object"), body.get("copies"), body.get("revision"))
+            self._jobs_call(copies, broadcast=False)
+            return
         if len(parts) == 6 and parts[4] == "models" and parts[5] == "upload":
             self._handle_project_upload()
             return
