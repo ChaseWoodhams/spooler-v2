@@ -149,7 +149,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         changed = self.edit(project, plates=[{**project["data"]["plates"][0], "overrides": {"wall_loops": "5"}}])
         self.assertTrue(changed["slices"]["1"]["outdated"])
 
-    async def test_merging_and_repacking_plates(self):
+    async def test_merging_and_arranging_plates(self):
         project = projects.create_project("Cubes")
         for size in (20, 30, 40):
             data = cube_stl(size)
@@ -163,7 +163,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         merged = projects.merge_plates(project["id"], 2, 1)
         self.assertEqual(([p["id"] for p in merged["data"]["plates"]], sorted(o["plate"] for o in merged["data"]["objects"])),
                          ([1, 3], [1, 1, 3]))
-        packed = projects.pack_plates(merged["id"])
+        packed = projects.arrange(merged["id"])
         self.assertEqual((len(packed["data"]["plates"]), {o["plate"] for o in packed["data"]["objects"]}), (1, {1}))
         projects.request_slices(packed["id"])
         await self.settle()
@@ -325,7 +325,7 @@ class WorkflowApiTests(unittest.TestCase):
         self.assertEqual(self.call("POST", f"/api/projects/{pid}/layout")[0], 409)       # not split yet
         self.assertEqual(self.call("POST", f"/api/projects/{pid}/slice")[0], 409)        # nothing on the plates
         self.assertEqual(self.call("POST", f"/api/projects/{pid}/queue")[0], 409)
-        self.assertEqual(self.call("POST", f"/api/projects/{pid}/pack")[1]["id"], pid)
+        self.assertEqual(self.call("POST", f"/api/projects/{pid}/arrange")[1]["id"], pid)
         self.assertEqual(self.call("POST", f"/api/projects/{pid}/plates/1/merge", {"into": "x"})[0], 400)
         self.assertEqual(self.call("POST", "/api/jobs/assign", {"job_ids": [], "printer_ids": ["nope"]})[0], 404)
         status, other = self.call("POST", "/api/projects", {"name": "Again", "split_id": project["split_id"]})

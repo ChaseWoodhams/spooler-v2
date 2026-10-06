@@ -143,8 +143,11 @@
           <button class="btn btn-secondary btn-sm" type="button" data-tool="rotate" title="Rotate (R)">Rotate</button>
           <button class="btn btn-secondary btn-sm" type="button" data-tool="scale" title="Scale, keeping proportions (S)">Scale</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-face" title="Lay a face flat: click it on the model (F)">Lay on face</button>
-          <button class="btn btn-secondary btn-sm" type="button" id="btn-arrange" title="Arrange this plate (A); Shift+A arranges every plate">Arrange</button>
-          <button class="btn btn-secondary btn-sm" type="button" id="btn-repack" title="Pack every plate's objects onto as few plates as fit">Repack plates</button>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-arrange" title="Arrange this plate (A); Shift+A arranges every plate onto as few as fit. Pinned objects stay put and plates never mix filaments.">Arrange</button>
+          <select id="arrange-engine" class="slicer-toolbar-select" aria-label="What arranges the plates" title="The nester keeps room for each object's supports and brim. OrcaSlicer's own arranger is a fallback: it ignores pins, filaments and supports.">
+            <option value="nester">Nester</option>
+            <option value="orca">OrcaSlicer</option>
+          </select>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned part on this plate for the least support; Shift for every plate">Orient all</button>
           <select id="merge-plate" class="slicer-toolbar-select" aria-label="Merge this plate into another"></select>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-fit" title="Fit the view (Z zooms to the selection; 0-6 pick a side)">Fit view</button>

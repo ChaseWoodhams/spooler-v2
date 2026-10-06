@@ -1129,7 +1129,7 @@ function renderTools() {
   const others = data().plates.filter(p => p.id !== state.plate);
   $("merge-plate").innerHTML = `<option value="">Merge into…</option>${others.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}`;
   $("merge-plate").disabled = !others.length;
-  $("btn-repack").disabled = !data().objects.length;
+  $("arrange-engine").value = data().arrange_engine === "orca" ? "orca" : "nester";
   $("btn-orient-all").disabled = !data().objects.length;
   $("btn-undo").disabled = !editLog.undo.length;
   $("btn-redo").disabled = !editLog.redo.length;
@@ -1453,43 +1453,36 @@ async function sliceplates(plateIds) {
   toast(`Slicing ${plural(queued || plateIds?.length || 1, "plate")}…`);
 }
 
+// One Arrange: A does this plate, Shift+A every plate (onto as few as fit). The nester keeps each object's clearance,
+// leaves pinned objects where they are and never mixes filaments on a plate; the engine select can switch to OrcaSlicer's.
 async function arrange() {
   await flushSave();
   const button = $("btn-arrange");
   await withButton(button, async () => {
-    applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${state.plate}/arrange`));
+    const before = data().plates.length;
+    applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${state.plate}/arrange`, { engine: arrangeEngine() }));
     recordEdit();
     renderAll();
-    toast("Plate arranged");
+    const added = data().plates.length - before;
+    toast(added > 0 ? `Plate arranged; objects that didn't fit or differ in filament went on ${plural(added, "new plate")}` : "Plate arranged");
   });
 }
 
 async function arrangeAll() {
   await flushSave();
   await withButton($("btn-arrange"), async () => {
-    let count = 0;
-    for (const plate of platesWithObjects()) {
-      applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${plate.id}/arrange`));
-      count += 1;
-    }
-    recordEdit();
-    renderAll();
-    toast(count ? `Arranged ${plural(count, "plate")}` : "Nothing to arrange");
-  });
-}
-
-async function repack() {
-  await flushSave();
-  await withButton($("btn-repack"), async () => {
+    if (!platesWithObjects().length) { toast("Nothing to arrange"); return; }
     const before = data().plates.length;
-    applyProject(await api("POST", `/api/projects/${state.project.id}/pack`, {}));
+    applyProject(await api("POST", `/api/projects/${state.project.id}/arrange`, { engine: arrangeEngine() }));
     recordEdit();
     renderAll();
     state.viewport?.fit(state.viewport.objectsBox());
     const after = data().plates.length;
-    toast(after < before ? `Packed onto ${plural(after, "plate")} (was ${before})` : `Repacked — still ${plural(after, "plate")}`);
+    toast(after < before ? `Arranged onto ${plural(after, "plate")} (was ${before})` : `Arranged — ${plural(after, "plate")}`);
   });
 }
+
+const arrangeEngine = () => $("arrange-engine").value === "orca" ? "orca" : "nester";
 
 async function mergeInto(targetId) {
   const source = currentPlate(), target = plateById(targetId);
@@ -2291,7 +2284,10 @@ function bindUi() {
   $("btn-face").addEventListener("click", () => layOnFace(!state.layingOnFace));
   $("btn-undo").addEventListener("click", undo);
   $("btn-redo").addEventListener("click", redo);
-  $("btn-repack").addEventListener("click", repack);
+  $("arrange-engine").addEventListener("change", e => {
+    if (e.target.value === "orca") data().arrange_engine = "orca"; else delete data().arrange_engine;
+    changed();
+  });
   $("btn-orient-all").addEventListener("click", e => orientAll(e.shiftKey));
   $("merge-plate").addEventListener("change", e => {
     const target = Number(e.target.value);
