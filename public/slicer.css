@@ -382,6 +382,7 @@ body.print-step .slicer-sidebar { display: none; }
 .pp-bar-filament { height: 6px; }
 .pp-bar-filament i { display: block; height: 100%; background: var(--accent, #d67634); }
 .pp-warn { color: #d9534f; }
+.slicer-warn { color: #d9534f; font-size: 12px; margin: 4px 0; }
 .pp-preview { width: 100%; max-width: 320px; height: auto; align-self: center; border-radius: 8px; background: var(--surface2); }
 
 
