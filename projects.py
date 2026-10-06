@@ -35,6 +35,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -57,6 +58,7 @@ import splits
 import spoolman
 import state
 import thumbnails
+import time_estimate
 from gcode_meta import safe_gcode_name
 from persistence import DATA_DIR
 
@@ -1046,6 +1048,65 @@ def _footprint(project_id: int, obj: dict) -> tuple:
     return float(size[0]), float(size[1])
 
 
+# ── Rough print time before slicing ───────────────────────────────────────────
+
+_estimate_cache: dict = {}   # (project id, plate fingerprint) → plate features; only complete answers are kept
+
+
+def _plate_process(record: dict, plate: dict) -> dict:
+    """The process settings a plate slices with, as far as they can be told without slicing."""
+    data = record["data"]
+    try:
+        base = slicer.bundle_settings(data["profile"]["bundle_id"])["process"]
+    except jobs.JobError:
+        base = {}
+    return {**base, **data["profile"].get("process", {}), **(plate.get("overrides") or {})}
+
+
+def plate_features(project_id: int, record: dict, plate_id: int) -> dict | None:
+    """What a plate's print time is estimated from: layers, deposited volume (cm3) and first-layer footprint (cm2), the
+    first-layer footprint being the objects' bounding boxes on the bed. None while a model's geometry isn't available."""
+    plate = next((p for p in record["data"]["plates"] if p["id"] == plate_id), None)
+    objects = [o for o in record["data"]["objects"] if o["plate"] == plate_id]
+    if plate is None or not objects:
+        return None
+    key = (project_id, fingerprint(record, plate_id))
+    if key in _estimate_cache:
+        return _estimate_cache[key]
+    settings = time_estimate.settings_from(_plate_process(record, plate))
+    height = volume = footprint = 0.0
+    try:
+        for obj in objects:
+            analysis = splits._read(model_dir(project_id, obj["model"]), "analysis.json") or {}
+            verts, _ = load_mesh(project_id, obj["model"], preview=True)
+            placed = place(verts, {**obj, "position": [0.0, 0.0]})
+            size = placed.max(axis=0) - placed.min(axis=0)
+            factor = abs(float(obj["scale"][0]) * float(obj["scale"][1]) * float(obj["scale"][2]))
+            volume += time_estimate.deposited_cm3(float(analysis["volume_cm3"]) * factor,
+                                                  float(analysis.get("surface_cm2") or 0) * factor ** (2 / 3),
+                                                  float(size[2]), settings)
+            height = max(height, float(size[2]))
+            footprint += float(size[0] * size[1]) / 100
+    except (OSError, KeyError, TypeError, ValueError, jobs.JobError):
+        return None   # the model isn't imported (yet): no estimate, which is better than a wrong one
+    features = {"layers": time_estimate.layer_count(height, settings["layer_height"]),
+                "volume_cm3": round(volume, 2), "first_layer_cm2": round(footprint, 2)}
+    _estimate_cache[key] = features
+    return features
+
+
+def plate_time(project_id: int, record: dict, plate_id: int, entry: dict) -> dict | None:
+    """A plate's time: the slicer's figure while its slice is current, otherwise the rough estimate marked approximate."""
+    features = plate_features(project_id, record, plate_id)
+    out = {"layers": features["layers"], "volume_cm3": features["volume_cm3"]} if features else {}
+    if entry.get("state") == SLICED and not entry.get("outdated") and entry.get("estimate_s"):
+        return {**out, "seconds": entry["estimate_s"], "approximate": False, "source": "slicer"}
+    if not features:
+        return None
+    seconds = time_estimate.predict_seconds(features["layers"], features["volume_cm3"], features["first_layer_cm2"])
+    return {**out, "seconds": seconds, "approximate": True, "source": "model"}
+
+
 def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, overrides_for) -> dict:
     """Move objects as packing.pack's `layout` (keyed by object id) says, onto `plate_ids` in order and new plates
     after them. Plates among `plate_ids` left empty are removed; plates still holding importing models are kept."""
@@ -1523,6 +1584,10 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
     (work / "toolpath.bin").write_bytes(toolpath)
     (work / "analysis.json").write_text(json.dumps(analysis), encoding="utf-8")
     estimates = analysis.get("estimates") or {}
+    try:
+        time_estimate.record_slice(project_id, plate_id, plate_features(project_id, record, plate_id), analysis)
+    except sqlite3.Error as e:   # the log must never fail a slice
+        print(f"[Projects] Could not log the slice of plate {plate_id} of project {project_id}: {e}")
     return {"state": SLICED, "error": None, "fingerprint": stamp, "sliced_at": time.time(), "duration_ms": duration_ms,
             "estimate_s": estimates.get("estimate_s"), "estimate_g": estimates.get("estimate_g"),
             "layers": len(analysis["layers"]), "slicer": analysis.get("slicer"), "gcode_bytes": gcode.stat().st_size,
@@ -1735,7 +1800,8 @@ def plate_status(project_id: int) -> dict:
                        "outdated": bool(entry.get("outdated")) if sliced else False,
                        "parts": parts.get(n, 0), "layout": fingerprint(record, n), "job_id": job["id"] if job else None,
                        "printer_id": (job["printer_id"] if job else None) or plate.get("printer_id"),
-                       "estimate_s": entry.get("estimate_s") if sliced else None, "estimate_g": grams})
+                       "estimate_s": entry.get("estimate_s") if sliced else None, "estimate_g": grams,
+                       "time_estimate": plate_time(project_id, record, n, entry)})
     total = len(plates)
     return {"project_id": project_id, "plates": plates,
             "progress": {"total": total, "counts": counts, "printed_ok": counts["printed_ok"],
