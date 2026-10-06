@@ -99,7 +99,7 @@ class AdditiveSchemaTests(unittest.TestCase):
         self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], len(database.MIGRATIONS))
         settings = dict(conn.execute("SELECT printer_id, auto_start FROM printer_settings"))
         self.assertEqual(settings, {"p1": 1, "p2": 1})  # on where a printer already has history
-        for table in ("bed_cleared", "job_holds", "remembered_defaults"):
+        for table in ("bed_cleared", "job_holds", "remembered_defaults", "slice_log"):
             self.assertEqual(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
         self.assertEqual(conn.execute("SELECT count(*) FROM slices WHERE imported = 1").fetchone()[0], 0)
         conn.close()

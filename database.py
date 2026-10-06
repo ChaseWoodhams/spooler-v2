@@ -216,6 +216,26 @@ MIGRATIONS = [
         updated_at  REAL
     );
     """,
+    # 8 — slice log (additive): the features and slicer estimate of every project plate slice, to fit a time model later
+    """
+    CREATE TABLE slice_log (
+        id              INTEGER PRIMARY KEY,
+        project_id      INTEGER REFERENCES projects (id) ON DELETE SET NULL,
+        plate_id        INTEGER,
+        slicer          TEXT,
+        layers          INTEGER,
+        volume_cm3      REAL,
+        first_layer_cm2 REAL,
+        support         INTEGER NOT NULL DEFAULT 0 CHECK (support IN (0, 1)),
+        brim            INTEGER NOT NULL DEFAULT 0 CHECK (brim IN (0, 1)),
+        estimate_s      INTEGER,
+        estimate_g      REAL,
+        deposited_cm3   REAL,
+        model_s         INTEGER,
+        created_at      REAL    NOT NULL
+    );
+    CREATE INDEX slice_log_by_project ON slice_log (project_id, plate_id);
+    """,
 ]
 
 _lock = threading.RLock()

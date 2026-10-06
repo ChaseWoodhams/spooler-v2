@@ -32,6 +32,7 @@ import slicer
 import splits
 import state
 import time
+import time_estimate
 from auth import (
     AUTH_ENABLED, BCRYPT_AVAILABLE, SECURE_COOKIES, SESSION_COOKIE,
     _auth_ok, _check_rate_limit, _create_session, _get_pw_hash, _get_username,
@@ -650,6 +651,9 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: preflight.printer_hardware(self._path_printer_id()), broadcast=False)
         elif self.path == "/api/prints" or self.path.startswith("/api/prints?"):
             self._jobs_call(lambda: print_history.search(**self._print_filters(paged=True)), broadcast=False)
+        elif self.path == "/api/slice-log" or self.path.startswith("/api/slice-log?"):
+            project = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("project_id") or [""])[0]
+            self._jobs_call(lambda: time_estimate.slice_log(int(project) if project.isdigit() else None), broadcast=False)
         elif self.path == "/api/outcome-prompts":
             self._jobs_call(lambda: {"awaiting": outcome_prompt.awaiting(), "reminder_delay_s": outcome_prompt.REMINDER_DELAY_S},
                             broadcast=False)
