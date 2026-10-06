@@ -21,6 +21,12 @@ export function layOnFace(normal, rotation) {
   return rotationOf(turn.multiply(flip));
 }
 
+/** A direction in the world (x right, y back, z up) as it reads in the model's own space for an object turned by `rotation`. */
+export function toModelSpace(direction, rotation) {
+  const v = new THREE.Vector3(...direction).applyMatrix4(matrixOf(rotation).invert());
+  return [v.x, v.y, v.z].map(n => Math.round(n * 1e6) / 1e6);
+}
+
 /** Support needed and contact with the bed for a geometry turned by `matrix`. Areas in mm², weighted by triangle area. */
 export function measure(geometry, matrix, sampleEvery = 1) {
   const positions = geometry.getAttribute("position");

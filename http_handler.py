@@ -1129,6 +1129,11 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._send_bytes(projects.export_orca_project(project_id), "model/3mf", download_name=f"{name}.3mf")
             elif len(parts) == 7 and parts[4] == "models" and parts[6] == "preview":
                 self._send_file(projects.model_preview(project_id, int(parts[5])), "application/octet-stream")
+            elif len(parts) == 7 and parts[4] == "objects" and parts[6] == "orientation":
+                query = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}
+                if query.get("face"):
+                    query["face"] = [float(x) for x in query["face"].split(",")]   # "x,y,z", a direction in the model's space
+                self._json(projects.suggest_orientation(project_id, int(parts[5]), query))
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "fit":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 self._json(farm.plate_fit(projects.get_project(project_id), int(parts[5]), (query.get("printer_id") or [None])[0]))
@@ -1176,6 +1181,12 @@ class SPHandler(SimpleHTTPRequestHandler):
                 "print":      lambda: projects.slice_and_print(self._job_id(), self._json_body()),
             }
             self._jobs_call(actions[parts[4]], broadcast=False)
+            return
+        if len(parts) == 5 and parts[4] == "orient-all":
+            self._jobs_call(lambda: projects.orient_all(self._job_id(), self._json_body()), broadcast=False)
+            return
+        if len(parts) == 7 and parts[4] == "objects" and parts[5].isdigit() and parts[6] == "orient":
+            self._jobs_call(lambda: projects.orient_object(self._job_id(), int(parts[5]), self._json_body()), broadcast=False)
             return
         if len(parts) == 5 and parts[4] in ("layout", "whole", "pack", "slice", "queue"):
             actions = {
