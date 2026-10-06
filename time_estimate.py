@@ -66,6 +66,17 @@ def rank_key(estimate: dict) -> tuple:
     return (estimate["layers"], estimate["volume_cm3"])
 
 
+def longest_first(items: list, time_of=lambda item: item) -> list:
+    """`items` longest print first. `time_of(item)` is the item's time ({"seconds", "source", "layers", "volume_cm3"}) or None.
+    Seconds are compared only while every timed item has the same source, since the model's seconds run high next to a real
+    slicer figure; with mixed sources the ranking falls back to rank_key. Untimed items go last; ties keep their order."""
+    times = [time_of(item) for item in items]
+    known = [t for t in times if t]
+    by_seconds = len({t.get("source") for t in known}) <= 1 or not all("layers" in t and "volume_cm3" in t for t in known)
+    keys = [(0,) if not t else (1, t.get("seconds") or 0) if by_seconds else (1, *rank_key(t)) for t in times]
+    return [items[i] for i in sorted(range(len(items)), key=lambda i: keys[i], reverse=True)]
+
+
 def deposited_from_filament(filament_mm, diameter_mm) -> float | None:
     """cm3 of plastic from the filament length the slicer reports."""
     if not filament_mm:

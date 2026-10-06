@@ -104,7 +104,8 @@ function plateMap() {
 }
 
 function nextUp() {
-  const next = status.plates.filter(p => ["queued", "waiting", "sliced"].includes(p.status)).slice(0, NEXT_UP);
+  const rank = id => { const at = (status.print_order || []).indexOf(id); return at < 0 ? Infinity : at; };   // longest by the best available time; names stay as planned
+  const next = status.plates.filter(p => ["queued", "waiting", "sliced"].includes(p.status)).sort((a, b) => rank(a.id) - rank(b.id)).slice(0, NEXT_UP);
   const queued = jobs.filter(j => j.state === "queued");
   const canAssign = queued.length > 1 && printers.some(p => p.connected);
   return `<div class="pp-card"><b>Next up</b>
