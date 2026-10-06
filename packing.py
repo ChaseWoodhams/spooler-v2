@@ -96,3 +96,21 @@ def pack(items: list, bed, exclude=None, gap: float = GAP_MM, margin: float = MA
                                "turned": turned, "oversize": False})
     plates.sort(key=lambda p: groups.index(p["group"]))
     return [{"group": p["group"], "items": p["items"]} for p in plates]
+
+
+def find_spot(size, bed, exclude, occupied, gap: float = GAP_MM, margin: float = MARGIN_MM):
+    """Where a part of `size` (width, depth) fits on a plate that already holds `occupied` parts, each (centre x, centre y,
+    width, depth). Returns ((centre x, centre y), turned) or None. Bed and exclude as in `pack`."""
+    bx0, by0, bx1, by1 = bed
+    ox, oy = bx0 + margin, by0 + margin
+    blocked = []
+    if exclude:
+        ex0, ey0, ex1, ey1 = exclude
+        blocked.append((ex0 - ox, ey0 - oy, ex1 - ex0 + gap, ey1 - ey0 + gap))
+    blocked += [(cx - w / 2 - ox, cy - d / 2 - oy, w + gap, d + gap) for cx, cy, w, d in occupied]
+    free = _Bin(bx1 - bx0 - 2 * margin + gap, by1 - by0 - 2 * margin + gap, blocked)
+    found = free.find(float(size[0]) + gap, float(size[1]) + gap)
+    if found is None:
+        return None
+    (x, y, w, d), turned = found
+    return (ox + x + (w - gap) / 2, oy + y + (d - gap) / 2), turned
