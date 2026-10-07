@@ -39,6 +39,8 @@ const state = {
   playing: null,        // { frame } while the preview plays the print
   hiddenFeatures: new Set(),
   problems: new Map(),
+  serverProblems: [],   // the server's list of problem objects (GET /status): off the bed, over the purge area, overlaps, failed model
+  problemReasons: {},   // plate id → why the server says that plate has a problem
   importFiles: [],
   jobs: [],             // queue jobs sent from this project
   printers: [],
@@ -131,6 +133,45 @@ const data = () => state.project.data;
 const plateById = id => data().plates.find(p => p.id === id) || null;
 const currentPlate = () => plateById(state.plate);
 const plateObjects = (plateId = state.plate) => data().objects.filter(o => o.plate === plateId);
+
+// One definition of a problem object: the server's list (loadProblems), with the viewport's live measure on top while an
+// object is being dragged. The viewport already folds the server list in, so its answer wins where it has one.
+function objectIssues(objectId) {
+  const live = state.problems.get(objectId);
+  if (live) return live.issues;
+  return state.serverProblems.filter(p => p.key === objectId).map(p => p.problem);
+}
+const plateHasProblem = plateId => plateObjects(plateId).some(o => objectIssues(o.id).length);
+const anyProblem = () => state.project ? data().objects.some(o => objectIssues(o.id).length) : false;
+
+async function loadProblems() {
+  if (!state.project) return;
+  const revision = state.project.revision;
+  let status = null;
+  try {
+    status = await api("GET", `/api/projects/${state.project.id}/status`);
+  } catch { /* the viewport's own measure still marks what it can */ }
+  if (!state.project || state.project.revision !== revision) return;   // edited meanwhile: the next save asks again
+  state.serverProblems = status ? status.plates.flatMap(p => p.problems || []) : [];
+  state.problemReasons = status ? Object.fromEntries(status.plates.map(p => [p.id, p.problem_reason])) : {};
+  const byObject = new Map();
+  for (const p of state.serverProblems) byObject.set(p.key, [...(byObject.get(p.key) || []), p.problem]);
+  state.viewport?.setServerIssues(byObject);
+  renderObjects();
+  renderSteps();
+  renderSliceState();
+}
+
+// Select the first problem object (this plate's first) so the person sees what to fix.
+async function showProblem() {
+  const mine = plateObjects().find(o => objectIssues(o.id).length);
+  const target = mine || data().objects.find(o => objectIssues(o.id).length);
+  if (!target) return;
+  if (state.step !== "plates") await setStep("plates");
+  if (target.plate !== state.plate) await selectPlate(target.plate);
+  selectObject(target.id);
+  state.viewport?.fit(state.viewport.objectBox(target.id));
+}
 const selectedObject = () => data().objects.find(o => o.id === state.selected) || null;
 const sliceEntry = (plateId = state.plate) => state.project?.slices?.[String(plateId)] || null;
 // A G-code import is a project whose plate has no objects, only an imported Slice: Model, Split, Plates and Slice don't apply.
@@ -171,7 +212,7 @@ async function boot() {
       onSelect: id => selectObject(id),
       onFace: face => faceClicked(face),
       onTransform: (id, change) => updateObject(id, change),
-      onProblems: problems => { state.problems = problems; renderObjects(); renderSliceState(); },
+      onProblems: problems => { state.problems = problems; renderObjects(); renderSteps(); renderSliceState(); },
     });
   } catch (err) {
     showMessage(`The 3D view isn't available in this browser: ${err.message}`);
@@ -405,6 +446,7 @@ async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   // A push deep link (?printer=) lands on the Print step, where that printer's card is.
   const landing = toPrinter && stepAvailable("print") ? "print" : saved && stepAvailable(saved) ? saved : defaultStep();
   await setStep(landing, { force: true });
+  loadProblems();
   schedulePoll();
 }
 
@@ -462,7 +504,7 @@ function stepDone(step) {
   switch (step) {
     case "model":  return !!split?.analysis;
     case "split":  return !!split?.result || data().objects.some(o => state.project.models.find(m => m.id === o.model)?.split?.part === 0);
-    case "plates": return data().objects.length > 0;
+    case "plates": return data().objects.length > 0 && !anyProblem();   // no check mark while a problem object remains
     case "slice":  return platesWithObjects().length > 0 && platesWithObjects().every(p => isUpToDate(p.id));
     case "queue":  return state.jobs.length > 0;
   }
@@ -605,6 +647,7 @@ async function save() {
     applyProject(project, { keepLocalData: localChangedMeanwhile });
     if (localChangedMeanwhile) state.project.revision = project.revision;
     $("save-state").textContent = "Saved";
+    loadProblems();
   } catch (err) {
     $("save-state").textContent = "Not saved";
     toast(err.message, true);
@@ -654,6 +697,7 @@ function schedulePoll() {
       const sliceChanged = JSON.stringify(fresh.slices) !== JSON.stringify(before.slices);
       state.project = { ...before, models: fresh.models, slices: fresh.slices };
       if (!state.saving && !state.saveTimer && fresh.revision !== before.revision) applyProject(fresh);
+      if (newModels.length || fresh.models.some((m, i) => m.state !== before.models[i]?.state)) loadProblems();   // a model failed or finished
       if (newModels.length) {
         await loadGeometry();
         // placeholders were fitted while importing; the real parts are usually far bigger
@@ -936,7 +980,7 @@ function renderObjects() {
   const models = state.project.models;
   const rows = plateObjects().map(object => {
     const model = models.find(m => m.id === object.model);
-    const issues = state.problems.get(object.id)?.issues || [];
+    const issues = objectIssues(object.id);
     const status = model?.state === "importing" ? '<small>importing…</small>'
       : model?.state === "failed" ? `<small class="bad" title="${esc(model.error || "")}">Couldn't import — ${esc(shortReason(model.error))}</small>`
       : issues.length ? `<small class="bad">${esc(issues.join(", "))}</small>`
@@ -1011,9 +1055,10 @@ function renderSliceState() {
   const el = $("slice-state");
   if (state.step !== "plates" && state.step !== "slice") { el.textContent = ""; return; }
   const status = plateStatus(state.plate);
-  const blocked = [...state.problems.values()].some(p => p.issues.length);
-  const text = blocked && status.cls !== "bad" ? "Fix the objects marked in red first" : `${currentPlate()?.name}: ${status.text}`;
-  el.textContent = text;
+  const blocked = anyProblem();
+  const reason = state.problemReasons[state.plate] || "Fix the objects marked in red first";
+  const text = blocked && status.cls !== "bad" ? reason : `${currentPlate()?.name}: ${status.text}`;
+  el.innerHTML = esc(text) + (blocked ? ' <button class="btn btn-secondary btn-sm" type="button" data-show-problem>Show</button>' : "");
   el.title = text;
   el.className = `slicer-slice-state ${blocked ? "bad" : status.cls}`;
 }
@@ -1927,6 +1972,9 @@ function bindUi() {
   $("step-bar").addEventListener("click", e => {
     const btn = e.target.closest("[data-step]");
     if (btn && !btn.disabled) setStep(btn.dataset.step);
+  });
+  $("slice-state").addEventListener("click", e => {
+    if (e.target.closest("[data-show-problem]")) showProblem();
   });
   $("step-actions").addEventListener("click", e => {
     const btn = e.target.closest("[data-go]");
