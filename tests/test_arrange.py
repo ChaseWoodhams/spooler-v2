@@ -272,6 +272,40 @@ class ArrangeApiTests(unittest.TestCase):
             self.assertEqual(len(runner.calls), 2)                                  # the nester didn't need OrcaSlicer
         self.assertEqual(self.arrange(project, engine="magic")[0], 400)
 
+    def test_merging_plates_of_different_filaments_is_refused_like_a_mixed_plate(self):
+        project = self.project_with(cube_stl(20), cube_stl(30))
+        project = self.lay(project, [(1, 1, (50, 50), False), (2, 2, (50, 50), False)])
+        project = self.save(project, lambda d: d.update(filaments={"2": GREY}))
+        status, refused = self.call("POST", f"/api/projects/{project['id']}/plates/2/merge", {"into": 1})
+        self.assertEqual(status, 409, refused)
+        self.assertIn("mix the project default and Elegoo PETG grey", refused["error"])
+        self.assertEqual(self.call("GET", f"/api/projects/{project['id']}")[1]["revision"], project["revision"])
+
+    def test_merged_plates_are_packed_with_the_nesters_clearance(self):
+        project = self.project_with(cube_stl(20))
+        project = self.lay(project, [(1, 1, (50, 50), False), (1, 2, (50, 50), False), (1, 2, (50, 50), False), (1, 2, (50, 50), False)])
+        project = self.save(project, lambda d: d["plates"][0].update(overrides={"enable_support": "1"}))
+        status, merged = self.call("POST", f"/api/projects/{project['id']}/plates/2/merge", {"into": 1})
+        self.assertEqual(status, 200, merged)
+        objects = merged["data"]["objects"]
+        gaps = sorted(max(abs(a["position"][0] - b["position"][0]), abs(a["position"][1] - b["position"][1])) - 20
+                      for i, a in enumerate(objects) for b in objects[i + 1:])
+        self.assertGreaterEqual(gaps[0], 6 - 0.01)
+        self.assertLess(gaps[0], 12)
+
+    def test_orca_is_refused_on_a_plate_holding_pinned_objects(self):
+        project = self.project_with(cube_stl(20))
+        project = self.lay(project, [(1, 1, (50, 50), False), (1, 1, (120, 120), True), (1, 2, (50, 50), False)])
+        runner = arrange_runner([(70.0, 70.0, 0.0)])
+        with mock.patch.object(slicer, "runner", runner):
+            status, refused = self.arrange(project, plate=1, engine="orca")
+            self.assertEqual(status, 400, refused)
+            self.assertIn("pinned", refused["error"])
+            self.assertEqual(self.arrange(project, plate=2, engine="orca")[0], 200)   # a plate without pins is fine
+        after = self.call("GET", f"/api/projects/{project['id']}")[1]
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual({o["id"]: o["position"] for o in after["data"]["objects"] if o["id"] in (1, 2)}, {1: [50.0, 50.0], 2: [120.0, 120.0]})
+
     def test_orca_arranges_each_plate_when_asked_for_all(self):
         project = self.project_with(cube_stl(20))
         project = self.lay(project, [(1, 1, (50, 50), False), (1, 2, (50, 50), False)])

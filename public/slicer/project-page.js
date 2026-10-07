@@ -119,7 +119,7 @@ function detail() {
   const plate = plateOf(selected);
   if (!plate) return `<div class="pp-card slicer-muted">Select a plate.</div>`;
   const slicing = ["queued", "slicing"].includes(host.sliceState(plate.id));
-  const facts = [plural(plate.parts, "part"), duration(plate.estimate_s), plate.estimate_g ? `${Math.round(plate.estimate_g)} g` : ""].filter(Boolean).join(" · ");
+  const facts = [plural(plate.parts, "object"), duration(plate.estimate_s), plate.estimate_g ? `${Math.round(plate.estimate_g)} g` : ""].filter(Boolean).join(" · ");
   const editable = ["unsliced", "sliced", "waiting", "queued", "failed"].includes(plate.status);
   const options = ['<option value="">Next free printer</option>', ...printers.map(p =>
     `<option value="${esc(p.id)}"${p.id === plate.printer_id ? " selected" : ""}>${esc(p.name)}${p.connected ? "" : " (offline)"}</option>`)].join("");

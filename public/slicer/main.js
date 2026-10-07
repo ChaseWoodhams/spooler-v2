@@ -1344,7 +1344,7 @@ async function orientAll(wholeProject = false) {
     applyProject(result);
     if (oriented.length) recordEdit();
     renderAll();
-    toast(`Turned ${plural(oriented.length, "part")}, ${unchanged.length} already fine` + (pinned.length ? `, ${pinned.length} pinned left alone` : ""));
+    toast(`Turned ${plural(oriented.length, "object")}, ${unchanged.length} already fine` + (pinned.length ? `, ${pinned.length} pinned left alone` : ""));
   });
 }
 
@@ -1534,7 +1534,7 @@ function planMap(plate) {
     const [x, y] = object.position, cy = y1 - y + y0;
     return `<rect class="plan-object${object.pinned ? " pinned" : ""}" x="${(x - half[0]).toFixed(1)}" y="${(cy - half[1]).toFixed(1)}" width="${(half[0] * 2).toFixed(1)}" height="${(half[1] * 2).toFixed(1)}" transform="rotate(${(-turn).toFixed(1)} ${x.toFixed(1)} ${cy.toFixed(1)})"><title>${esc(object.name)}</title></rect>`;
   }).join("");
-  return `<svg class="plan-map" viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" role="img" aria-label="${esc(plate.name)}: ${plural(plate.parts, "part")}"><rect class="plan-bed" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}"/>${objects}</svg>`;
+  return `<svg class="plan-map" viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" role="img" aria-label="${esc(plate.name)}: ${plural(plate.parts, "object")}"><rect class="plan-bed" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}"/>${objects}</svg>`;
 }
 
 function planSheetHtml(plan) {
@@ -1542,7 +1542,7 @@ function planSheetHtml(plan) {
   const cards = plan.plates.map(plate => `<div class="plan-card">
       <div class="plan-card-head"><b>${esc(plate.name)}</b>${plate.new ? ' <span class="slicer-muted">new</span>' : ""}</div>
       ${planMap(plate)}
-      <div class="slicer-muted">${plural(plate.parts, "part")} · ${esc(plate.filament)}${plate.turned ? ` · ${plate.turned} turned` : ""}</div>
+      <div class="slicer-muted">${plural(plate.parts, "object")} · ${esc(plate.filament)}${plate.turned ? ` · ${plate.turned} turned` : ""}</div>
       ${SHOW_PLAN_SECONDS && plate.time_estimate?.seconds ? `<div class="slicer-muted">${planTime(plate.time_estimate.seconds)}</div>` : ""}
     </div>`).join("");
   const kept = plan.kept.length ? `<h4>Kept as they are</h4><ul class="plan-kept">${plan.kept.map(k => `<li><b>${esc(k.name)}</b> <span class="slicer-muted">${esc(k.reason)}</span></li>`).join("")}</ul>` : "";
@@ -1567,7 +1567,7 @@ async function acceptPlan() {
   if (!plan) return;
   await withButton($("plan-accept"), async () => {
     try {
-      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision });
+      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision, fingerprint: plan.fingerprint });
       applyProject(result);
       recordEdit();
       state.plan = null;
@@ -1577,7 +1577,7 @@ async function acceptPlan() {
       toast(`Planned: ${result.plan.summary}. Undo puts it back`);
     } catch (err) {
       if (err.status !== 409) throw err;
-      $("plan-error").textContent = "The project changed elsewhere, reload it";
+      $("plan-error").textContent = err.message;   // "changed elsewhere" or "The plan changed, review it again"
       state.plan = null;   // nothing to accept any more: Accept does nothing until the sheet is opened again
     }
   });

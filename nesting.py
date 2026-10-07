@@ -1,14 +1,14 @@
 """
-Nesting parts onto build plates by outline.
+Nesting objects onto build plates by outline.
 
-Where packing.py places footprint rectangles, this places each part's outline (a convex hull or the true
-silhouette from above) turned to many angles. Every part has a clearance `b`, the reach of its supports beyond its
-outline (research/brim-support-measurements.md): the nester keeps two parts at least max(b_i, b_j) apart, a part
+Where packing.py places footprint rectangles, this places each object's outline (a convex hull or the true
+silhouette from above) turned to many angles. Every object has a clearance `b`, the reach of its supports beyond its
+outline (research/brim-support-measurements.md): the nester keeps two objects at least max(b_i, b_j) apart, an object
 EDGE_MARGIN_MM from the bed edge and b from the purge area. Pinned objects are fixed outlines on a plate that others pack around. Plates come out in the shape
-packing.pack returns, so a part that fits nowhere on an empty plate gets a plate of its own, marked oversize.
+packing.pack returns, so an object that fits nowhere on an empty plate gets a plate of its own, marked oversize.
 
-Placement tries a few hundred bottom-left candidate positions per part and angle, then slides the best one left and
-down until it touches, so concave parts can tuck into each other's gaps.
+Placement tries a few hundred bottom-left candidate positions per object and angle, then slides the best one left and
+down until it touches, so concave objects can tuck into each other's gaps.
 """
 
 import math
@@ -17,11 +17,11 @@ import numpy as np
 import shapely
 from shapely.geometry import MultiPoint, Polygon, box
 
-from packing import GAP_MM
+from packing import GAP_MM, MARGIN_MM, SUPPORT_GAP_MM
 
-CLEARANCE_MM = GAP_MM        # a plain part's clearance; the pair rule is max, so two plain parts keep today's 6 mm
-SUPPORT_CLEARANCE_MM = 22.0  # a part that needs tree supports in its orientation: measured reach 21 mm plus margin
-EDGE_MARGIN_MM = 3.0         # brim and supports are clipped at the bed edge, so no more than today's margin
+CLEARANCE_MM = GAP_MM        # a plain object's clearance; the pair rule is max, so two plain objects keep today's 6 mm
+SUPPORT_CLEARANCE_MM = SUPPORT_GAP_MM   # an object that needs tree supports in its orientation
+EDGE_MARGIN_MM = MARGIN_MM   # brim and supports are clipped at the bed edge, so no more than the packer's margin
 ANGLES = tuple(range(0, 360, 15))
 _ROUND = 8                  # segments per quarter circle when growing an outline by its clearance
 _REACH = 1.012 / math.cos(math.pi / (4 * _ROUND))   # grow a little more so the polygon encloses the true circle; GEOS also simplifies a buffer by up to 1% of its distance
@@ -52,13 +52,13 @@ def _grow(poly, distance: float):
 
 
 class _Plate:
-    """One plate: the polygons on it, and for each clearance the region a new part's outline must stay out of."""
+    """One plate: the polygons on it, and for each clearance the region a new object's outline must stay out of."""
 
     def __init__(self, bed, purge):
         self.bed = bed
         self.purge = box(*purge) if purge else None
         self.shapes = []        # (polygon, clearance) of everything placed or fixed
-        self.keys = []          # keys of the movable parts placed here
+        self.keys = []          # keys of the movable objects placed here
         self.fixed = []         # keys of the pinned objects on it
         self.items = []
         self.reach = {}         # clearance -> (prepared union of grown obstacles, [their bounds])
@@ -88,7 +88,7 @@ class _Plate:
         return x, y
 
     def place(self, shape, b: float):
-        """Best spot for a part, as (x, y, angle) of its bounding box corner, or None if it fits nowhere."""
+        """Best spot for an object, as (x, y, angle) of its bounding box corner, or None if it fits nowhere."""
         union, bounds = self.keep_out(b)
         bx0, by0, bx1, by1 = self.bed
         px, py = self.pile()
@@ -117,7 +117,7 @@ class _Plate:
 
     @staticmethod
     def _slide(union, coords, x, y, lo_x, lo_y):
-        """Move left and down in shrinking steps while the part stays clear."""
+        """Move left and down in shrinking steps while the object stays clear."""
         for _ in range(2):
             for axis in (0, 1):
                 for step in _SLIDES:
@@ -155,13 +155,13 @@ def _rotations(outline, angles) -> list:
 
 def nest(items: list, bed, exclude=None, fixed=(), angles=ANGLES) -> list:
     """items: [{"key", "outline": [(x, y), …] in mm, "clearance": mm (default CLEARANCE_MM; SUPPORT_CLEARANCE_MM
-    for a part that needs tree supports), "group"}]; bed and
+    for an object that needs tree supports), "group"}]; bed and
     exclude: (x0, y0, x1, y1) in bed millimetres. fixed: pinned objects as [{"key", "group", "slot", "polygon":
     corners in bed mm, "clearance"}]; `slot` counts plates of the group from 0, and every slot up to the highest
     gets a plate. Returns plates in group order (groups in order of first appearance) as
     [{"group", "fixed": [keys], "items": [{"key", "center": (x, y), "turned": False, "angle": degrees, "oversize"}]}]
     where `center` is the middle of the turned outline's bounding box and `angle` is how far it was turned
-    counter-clockwise about Z. A part that can't fit even on an empty plate gets a plate of its own, centred,
+    counter-clockwise about Z. An object that can't fit even on an empty plate gets a plate of its own, centred,
     marked oversize."""
     groups = list(dict.fromkeys([i["group"] for i in items] + [f["group"] for f in fixed]))
     plates = []   # [{"group", "plate": _Plate | None}]
@@ -190,7 +190,7 @@ def nest(items: list, bed, exclude=None, fixed=(), angles=ANGLES) -> list:
             plates.append(entry)
             spot = entry["plate"].place(shapes[outline], b)
             if spot is None:
-                entry["plate"] = None   # nothing else goes on an oversize part's plate
+                entry["plate"] = None   # nothing else goes on an oversize object's plate
                 entry["oversize"] = {"key": item["key"], "center": ((bed[0] + bed[2]) / 2, (bed[1] + bed[3]) / 2),
                                      "turned": False, "angle": 0.0, "oversize": True}
                 continue

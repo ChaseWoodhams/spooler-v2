@@ -18,9 +18,12 @@ import jobs
 import projects
 import slicer
 import splits
+import state
 from tests.test_slicer import cube_stl, fake_runner, make_fake_orca
 
 GEOMETRY = not splits.missing_modules()
+if GEOMETRY:
+    from tests.test_orient import box, mushroom, stl_of
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 GREY = {"preset": "Elegoo PETG @ECC", "colour": "grey"}
 
@@ -102,6 +105,9 @@ class PlanPlatesApiTests(unittest.TestCase):
         return self.call("POST", f"/api/projects/{project['id']}/plan", {})
 
     def accept(self, project, **body):
+        """Accept the plan as it is now; pass fingerprint= to send the one of an earlier plan."""
+        if "fingerprint" not in body:
+            body["fingerprint"] = self.plan(project)[1]["fingerprint"]
         return self.call("POST", f"/api/projects/{project['id']}/plan/accept", {"revision": project["revision"], **body})
 
     def print_on_record(self, project, plate_id, outcome="completed"):
@@ -173,6 +179,57 @@ class PlanPlatesApiTests(unittest.TestCase):
         self.assertEqual([p["id"] for p in result["data"]["plates"]], [1])
         self.assertEqual(self.call("POST", f"/api/projects/{project['id']}/plan/accept", {})[0], 400)
 
+    def test_turned_counts_only_parts_stood_on_another_side_not_turns_about_z(self):
+        project = self.project_with(mushroom(), stl_of(box(150, 10, 5)))
+        def change(data):
+            data["objects"][0]["rotation"] = [180.0, 0.0, 0.0]    # standing on its post: orienting lays it back on its disc
+            data["objects"][1]["rotation"] = [0.0, 0.0, 45.0]     # a diagonal bar: the nester squares it up, a turn about Z only
+        project = self.save(project, change)
+        status, plan = self.plan(project)
+        self.assertEqual(status, 200, plan)
+        self.assertEqual([p["turned"] for p in plan["plates"]], [1])
+        self.assertIn("1 turned", plan["summary"])
+        result = self.accept(project)[1]
+        bar = next(o for o in result["data"]["objects"] if o["id"] == 2)
+        self.assertNotAlmostEqual(bar["rotation"][2] % 360, 45.0, places=0)   # it was turned about Z, and not counted
+
+    def test_a_replanned_plate_whose_objects_changed_loses_its_printer_and_the_others_keep_theirs(self):
+        project = self.project_with(cube_stl(20), cube_stl(30))
+        with mock.patch.dict(state.printers, {"p1": object()}):
+            project = self.lay(project, [(1, 1, (50, 50), False), (2, 2, (50, 50), False), (1, 3, (50, 50), False), (1, 4, (50, 50), False)],
+                               filaments={"2": GREY})
+            project = self.save(project, lambda d: [p.update(printer_id="p1") for p in d["plates"]])
+        self.assertEqual([p["printer_id"] for p in project["data"]["plates"]], ["p1"] * 4)
+        self.print_on_record(project, 3)
+        result = self.accept(project)[1]
+        plates = {p["id"]: p for p in result["data"]["plates"]}
+        self.assertEqual(sorted(plates), [1, 2, 3])                            # plate 4 was folded into plate 1
+        self.assertEqual({o["plate"] for o in result["data"]["objects"] if o["id"] in (1, 4)}, {1})
+        self.assertIsNone(plates[1].get("printer_id"))                          # it now holds another object
+        self.assertEqual(plates[2]["printer_id"], "p1")                         # replanned onto itself: same objects
+        self.assertEqual(plates[3]["printer_id"], "p1")                         # kept as it is
+
+    def test_a_plan_that_changed_since_it_was_reviewed_is_refused(self):
+        project = self.project_with(cube_stl(20))
+        project = self.lay(project, [(1, n, (50 + n, 60), False) for n in range(1, 4)])
+        reviewed = self.plan(project)[1]
+        self.assertEqual(len(reviewed["plates"]), 1)
+        self.print_on_record(project, 3)             # no revision bump, but the plan the server would make now is different
+        status, refused = self.accept(project, fingerprint=reviewed["fingerprint"])
+        self.assertEqual(status, 409, refused)
+        self.assertEqual(refused["error"], "The plan changed, review it again")
+        self.assertEqual(self.call("GET", f"/api/projects/{project['id']}")[1]["revision"], project["revision"])
+        fresh = self.plan(project)[1]
+        self.assertNotEqual(fresh["fingerprint"], reviewed["fingerprint"])
+        self.assertEqual(self.accept(project, fingerprint=fresh["fingerprint"])[0], 200)
+
+    def test_accepting_needs_the_fingerprint_of_the_plan_reviewed(self):
+        project = self.project_with(cube_stl(20))
+        project = self.lay(project, [(1, 1, (50, 50), False), (1, 2, (50, 50), False)])
+        status, refused = self.call("POST", f"/api/projects/{project['id']}/plan/accept", {"revision": project["revision"]})
+        self.assertEqual(status, 400, refused)
+        self.assertEqual(self.call("GET", f"/api/projects/{project['id']}")[1]["revision"], project["revision"])
+
     def test_replanned_plates_slices_become_outdated(self):
         project = self.project_with(cube_stl(20))
         project = self.lay(project, [(1, 1, (50, 50), False), (1, 2, (50, 50), False)])
@@ -207,6 +264,13 @@ class PlanPlatesApiTests(unittest.TestCase):
         project = self.project_with(cube_stl(20))
         project = self.lay(project, [(1, 1, (50, 50), False), (1, 2, (50, 50), False)])
         self.print_on_record(project, 2, "failed")
+        plan = self.plan(project)[1]
+        self.assertEqual([k["id"] for k in plan["kept"]], [2])
+
+    def test_a_plate_whose_only_print_is_unknown_is_kept_too(self):
+        project = self.project_with(cube_stl(20))
+        project = self.lay(project, [(1, 1, (50, 50), False), (1, 2, (50, 50), False)])
+        self.print_on_record(project, 2, "unknown")
         plan = self.plan(project)[1]
         self.assertEqual([k["id"] for k in plan["kept"]], [2])
 
