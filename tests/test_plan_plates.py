@@ -299,6 +299,95 @@ class PlanPlatesApiTests(unittest.TestCase):
         models = {o["plate"]: o["model"] for o in record["data"]["objects"]}
         self.assertEqual([(names[j["plate_id"]], models[j["plate_id"]]) for j in sent["jobs"]], [("Plate 1", 2), ("Plate 2", 1)])
 
+    def problems(self, project_id):
+        return projects.placement_problems(project_id, projects.get_project(project_id))
+
+    def tilted_bar(self):
+        """A bar 60 x 20 x 8 mm baked into its model at 30 degrees about Y: laying it on a face needs a tilt that is not a quarter turn."""
+        return stl_of(box(60, 20, 8).rotate([0, 30, 0]))
+
+    def test_a_tilt_beyond_flat_on_a_face_is_left_out_of_the_plan_unless_the_user_opts_in(self):
+        project = self.project_with(self.tilted_bar())
+        status, plan = self.plan(project)
+        self.assertEqual(status, 200, plan)
+        self.assertEqual([p["turned"] for p in plan["plates"]], [0])
+        self.assertEqual(plan["plates"][0]["objects"][0]["rotation"][:2], [0.0, 0.0])
+        self.assertIn("tilt", plan["summary"])
+        self.assertEqual(plan["tilts_withheld"], 1)
+        result = self.accept(project)[1]
+        self.assertEqual(result["data"]["objects"][0]["rotation"][:2], [0.0, 0.0])
+        self.assertEqual(result["plan"]["summary"], plan["summary"])
+
+    def test_opting_in_to_tilts_applies_them_and_the_summary_counts_them(self):
+        project = self.project_with(self.tilted_bar())
+        status, plan = self.call("POST", f"/api/projects/{project['id']}/plan", {"allow_tilt": True})
+        self.assertEqual(status, 200, plan)
+        self.assertEqual([p["turned"] for p in plan["plates"]], [1])
+        self.assertNotIn("tilt", plan["summary"])
+        status, result = self.call("POST", f"/api/projects/{project['id']}/plan/accept",
+                                   {"revision": project["revision"], "fingerprint": plan["fingerprint"], "allow_tilt": True})
+        self.assertEqual(status, 200, result)
+        angle = result["data"]["objects"][0]["rotation"][1] % 90
+        self.assertGreater(min(angle, 90 - angle), 5)   # tilted off every quarter turn
+        self.assertEqual(self.problems(project["id"]), [])
+        self.assertEqual(result["plan"]["summary"], plan["summary"])
+
+    def test_an_opt_in_plan_is_not_the_plan_that_was_reviewed_without_it(self):
+        project = self.project_with(self.tilted_bar())
+        reviewed = self.plan(project)[1]
+        status, result = self.call("POST", f"/api/projects/{project['id']}/plan/accept",
+                                   {"revision": project["revision"], "fingerprint": reviewed["fingerprint"], "allow_tilt": True})
+        self.assertEqual(status, 409, result)
+
+    def test_a_plan_that_leaves_an_object_off_the_bed_is_not_offered_and_says_why(self):
+        project = self.project_with(cube_stl(20), cube_stl(300))
+        project = self.lay(project, [(1, 1, (50, 50), False), (2, 1, (50, 50), False)])
+        status, plan = self.plan(project)
+        self.assertEqual(status, 200, plan)
+        self.assertEqual(plan["plates"], [])
+        self.assertIn("off the bed", plan["refused"])
+        self.assertIn("Object 2", plan["refused"])
+        self.assertIn("off the bed", plan["summary"])
+        self.assertEqual({p["key"] for p in plan["problems"]}, {2})
+        self.assertIn("off the bed", {p["problem"] for p in plan["problems"]})
+        status, result = self.accept(project)
+        self.assertEqual(status, 409, result)
+        after = self.call("GET", f"/api/projects/{project['id']}")[1]
+        self.assertEqual((after["revision"], after["data"]), (project["revision"], project["data"]))
+
+    def test_an_accepted_plan_leaves_nothing_off_the_bed_or_overlapping_and_its_summary_is_what_was_reviewed(self):
+        project = self.project_with(cube_stl(60), cube_stl(40), mushroom())
+        project = self.lay(project, [(1, 1, (50, 50), False)] * 3 + [(2, 2, (50, 50), False)] * 4 + [(3, 3, (50, 50), False)] * 2)
+        status, plan = self.plan(project)
+        self.assertEqual(status, 200, plan)
+        status, result = self.accept(project)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.problems(project["id"]), [])
+        self.assertEqual(result["plan"]["summary"], plan["summary"])
+        self.assertEqual(len(result["data"]["plates"]), len(plan["plates"]))
+        self.assertEqual(len(result["data"]["objects"]), sum(p["parts"] for p in plan["plates"]))
+        after = sorted(result["data"]["objects"], key=lambda o: o["id"])
+        turned = sum(1 for before, now in zip(project["data"]["objects"], after) if projects._turned(before["rotation"], now["rotation"]))
+        self.assertEqual(turned, sum(p["turned"] for p in plan["plates"]))
+
+    def test_the_whole_daz_shifter_set_plans_to_a_valid_layout_with_no_tilt_beyond_flat_on_a_face(self):
+        project = projects.create_project("Daz shifter")
+        for path in sorted((Path(__file__).parent / "fixtures" / "daz_shifter").glob("*.stl")):
+            data = path.read_bytes()
+            projects.import_model(project["id"], io.BytesIO(data), len(data), path.name)
+        self.settle()
+        project = projects.get_project(project["id"])
+        status, plan = self.plan(project)
+        self.assertEqual(status, 200, plan)
+        self.assertIsNone(plan["refused"], plan["summary"])
+        status, result = self.accept(project)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(len(result["data"]["objects"]), 19)
+        self.assertEqual(self.problems(project["id"]), [])
+        for o in result["data"]["objects"]:
+            self.assertTrue(projects._flat_on_face(o["rotation"]), o["rotation"])
+        self.assertEqual(result["plan"]["summary"], plan["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

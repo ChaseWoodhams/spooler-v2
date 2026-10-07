@@ -2074,7 +2074,33 @@ def _count(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def _plan_data(project_id: int, record: dict) -> dict:
+def _flat_on_face(rotation) -> bool:
+    """Whether an orientation stands the part on a side of its own box: X and Y are quarter turns (a degree of slack).
+    Any other tilt leans it on an angled face, which Plan plates only does when the user opts in."""
+    return all(abs((r + 45) % 90 - 45) <= 1.0 for r in rotation[:2])
+
+
+def _plan_problems(project_id: int, record: dict, data: dict, plate_ids) -> list:
+    """What is wrong with the plan's layout on these plates, by the one validity check (`placement_problems`). A pinned object
+    stays where its owner put it, so a problem that only involves pinned objects is not the plan's doing and is left out."""
+    pinned = {o["id"] for o in data["objects"] if o.get("pinned")}
+    return [p for p in placement_problems(project_id, {**record, "data": data}, plate_ids)
+            if not (p["key"] in pinned and (p["other"] is None or p["other"] in pinned))]
+
+
+def _refusal(data: dict, problems: list) -> str:
+    """Why a plan is not offered, naming the objects: "2 objects would be off the bed (cover, knob); 1 object would overlap …"."""
+    names = {o["id"]: o.get("name") or f"Object {o['id']}" for o in data["objects"]}
+    parts = []
+    for kind, wording in (("off the bed", "off the bed"), ("over the purge area", "over the purge area"), ("overlaps", "overlapping another")):
+        keys = sorted({p["key"] for p in problems if p["problem"] == kind})
+        if keys:
+            shown = ", ".join(names.get(k, f"Object {k}") for k in keys[:5]) + (", …" if len(keys) > 5 else "")
+            parts.append(f"{_count(len(keys), 'object')} would be {wording} ({shown})")
+    return "; ".join(parts)
+
+
+def _plan_data(project_id: int, record: dict, allow_tilt: bool = False) -> dict:
     """The project data as Plan plates would leave it, changing nothing. Plates that are queued, printing, have a Print on
     record, or hold a model still importing are kept as they are. On the others, every unpinned object is oriented
     (in memory, as Orient all would) and packed with `arrange_layout` (a pinned object keeps its plate and place; a plate
@@ -2099,7 +2125,7 @@ def _plan_data(project_id: int, record: dict) -> dict:
             replannable.append(plate["id"])
     before = {o["id"]: list(o["rotation"]) for o in data["objects"]}
     options = _orient_options(record, {})
-    suggested = {}
+    suggested, withheld = {}, 0
     for obj in data["objects"]:
         if obj["plate"] not in replannable or obj.get("pinned") or obj["model"] not in ready:
             continue
@@ -2110,11 +2136,18 @@ def _plan_data(project_id: int, record: dict) -> dict:
             except jobs.JobError:
                 suggested[key] = None   # nothing to suggest for it: it stays as it is
         if suggested[key] and suggested[key]["changed"]:
-            obj["rotation"] = list(suggested[key]["rotation"])
+            if allow_tilt or _flat_on_face(suggested[key]["rotation"]):
+                obj["rotation"] = list(suggested[key]["rotation"])
+            else:
+                withheld += 1   # it would lean on an angled face: left as it is unless the user opts in
     layout = arrange_layout(project_id, {**record, "data": data}, replannable)
     if not layout:
         return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "fingerprint": _plan_fingerprint(record["data"], [])}
     used = _place_layout(data, replannable, layout, lambda group: json.loads(group)["overrides"])
+    problems = _plan_problems(project_id, record, data, used)
+    if problems:   # a plan that is not valid is not offered: nothing is proposed and the reason is said
+        return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "problems": problems,
+                "refused": _refusal(data, problems), "fingerprint": _plan_fingerprint(record["data"], [])}
     holding = {o["plate"] for o in data["objects"] if o["model"] in failed}
     for plate in data["plates"]:   # a plate left holding only a failed model's objects stays as it is
         if plate["id"] in replannable and plate["id"] not in used and plate["id"] in holding:
@@ -2152,7 +2185,8 @@ def _plan_data(project_id: int, record: dict) -> dict:
                                    key=lambda o: o["id"])} for plate_id in ordered]
     for entry in proposed:
         entry["turned"] = sum(1 for o in entry["objects"] if _turned(before[o["id"]], o["rotation"]))
-    return {"data": data, "plates": proposed, "kept": kept, "emptied": emptied, "fingerprint": _plan_fingerprint(data, emptied)}
+    return {"data": data, "plates": proposed, "kept": kept, "emptied": emptied, "tilts_withheld": withheld,
+            "fingerprint": _plan_fingerprint(data, emptied)}
 
 
 def _plan_fingerprint(data: dict, emptied: list) -> str:
@@ -2177,28 +2211,36 @@ def _plan_view(record: dict, planned: dict) -> dict:
                        "objects": [{"id": o["id"], "name": o.get("name"), "model": o["model"], "position": o["position"],
                                     "rotation": o["rotation"], "pinned": bool(o.get("pinned"))} for o in entry["objects"]]})
     kept = planned["kept"]
-    if plates:
+    if planned.get("refused"):
+        summary = f"No valid plan: {planned['refused']}"
+    elif plates:
         summary = (f"{_count(len(plates), 'plate')} (was {len(record['data']['plates']) - len(kept)}), "
                    f"{_count(sum(p['parts'] for p in plates), 'object')}, {sum(p['turned'] for p in plates)} turned")
         if kept:
             summary += f"; {_count(len(kept), 'plate')} kept as {'it is' if len(kept) == 1 else 'they are'}"
+        if planned.get("tilts_withheld"):
+            summary += f"; {_count(planned['tilts_withheld'], 'tilt')} left out (allow tilting to include)"
     else:
         summary = "Nothing to plan"
     summary += _skipped_failed(record)
     return {"revision": record["revision"], "fingerprint": planned["fingerprint"], "plates": plates, "kept": kept,
-            "summary": summary, "outcome": summary}
+            "summary": summary, "outcome": summary, "tilts_withheld": planned.get("tilts_withheld", 0),
+            "problems": planned.get("problems", []), "refused": planned.get("refused")}
 
 
-def plan_plates(project_id: int) -> dict:
+def plan_plates(project_id: int, allow_tilt: bool = False) -> dict:
     """Plan the project's plates and change nothing: {"revision", "plates": [{"id", "name", "new", "filament", "parts" (how many
     objects it holds; the key keeps its name), "turned", "time_estimate" (approximate seconds, layers, volume_cm3), "objects"}] in plan order (longest first by
     layers, then volume), "kept": [{"id", "name", "reason"}] (plates with a Job or a Print on record, which are never
-    touched), "summary"}. `accept_plan` applies it."""
+    touched), "summary", "tilts_withheld", "problems", "refused"}. Only orientations that stand a part on a side of its own box
+    are planned; a tilt onto an angled face needs `allow_tilt`. A plan whose layout would leave an object off the bed, over
+    the purge area or overlapping is not offered: "plates" is empty, "refused" says why and "problems" lists them.
+    `accept_plan` applies it."""
     record = get_project(project_id)
-    return _plan_view(record, _plan_data(project_id, record))
+    return _plan_view(record, _plan_data(project_id, record, allow_tilt))
 
 
-def accept_plan(project_id: int, plan, fingerprint=None) -> dict:
+def accept_plan(project_id: int, plan, fingerprint=None, allow_tilt: bool = False) -> dict:
     """Apply the plan as one change: `plan` is the revision it was made at, or the plan itself, and `fingerprint` the plan's
     own (taken from `plan` when that is the plan). A project that has changed since is refused ("changed elsewhere"), and so
     is a plan the server would now make differently ("The plan changed"): what is applied is what was reviewed. Slices of
@@ -2217,10 +2259,12 @@ def accept_plan(project_id: int, plan, fingerprint=None) -> dict:
     record = get_project(project_id)
     if revision != record["revision"]:
         raise jobs.JobError("The project was changed elsewhere — reload it", 409)
-    planned = _plan_data(project_id, record)
+    planned = _plan_data(project_id, record, allow_tilt)
     if planned["fingerprint"] != fingerprint:
         raise jobs.JobError("The plan changed, review it again", 409)
     view = _plan_view(record, planned)
+    if planned.get("refused"):
+        raise jobs.JobError(view["summary"], 409)
     if not planned["plates"]:
         return {**record, "plan": view}
     _save_data(project_id, record, planned["data"], planned["emptied"])
