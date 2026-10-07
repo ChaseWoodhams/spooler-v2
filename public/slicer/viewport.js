@@ -323,7 +323,8 @@ export class Viewport {
     const out = new Map();
     const [x0, y0, x1, y1] = this.limits.bed;
     for (const [id, entry] of this.holders) {
-      const box = new THREE.Box3().setFromObject(entry.holder, false);
+      // by the mesh's own vertices, as _place centres it: the box of the turned bounding box is bigger for any part turned off the axes, so Arrange's valid layouts showed red
+      const box = new THREE.Box3().setFromObject(entry.holder, !!entry.geometry);
       const issues = [];
       if (entry.failed) issues.push("import failed");
       if (box.min.x < x0 - 0.01 || box.min.y < y0 - 0.01 || box.max.x > x1 + 0.01 || box.max.y > y1 + 0.01) issues.push("off the bed");

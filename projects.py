@@ -1639,6 +1639,27 @@ class _Shapes:
         return self.nesting.hull_outline(place(self.mesh(obj["model"])[0], obj)[:, :2])
 
 
+def placement_problems(project_id: int, record: dict, plate_ids=None) -> list:
+    """Whether the ready objects on these plates (all by default) are placed validly, by the one definition every layout
+    is held to (`nesting.placement_problems`): on the bed, clear of the purge area, and as far apart as Arrange keeps them
+    (the larger of their two clearances). Judged on each object's real outline where it stands, not on its bounding box.
+    Returns [{"key": object id, "plate", "problem": "off the bed" | "over the purge area" | "overlaps", "other": object id
+    or None}], empty when all is well. Objects of models that failed or are still importing have no outline and are left
+    out."""
+    try:
+        import nesting
+    except ImportError:
+        raise _nest_error()
+    data = record["data"]
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    covered = None if plate_ids is None else set(plate_ids)
+    shapes = _Shapes(project_id, record, data)
+    placed = [{"key": o["id"], "plate": o["plate"], "polygon": shapes.polygon(o), "clearance": shapes.outline_and_clearance(o)[1]}
+              for o in data["objects"] if o["model"] in ready and (covered is None or o["plate"] in covered)]
+    limits = _machine_limits_for(record)
+    return nesting.placement_problems(placed, limits["bed"], limits["exclude"])
+
+
 def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
     """Where the nester would put the unpinned objects on these plates (all by default), changing nothing. Each object
     is nested by the hull of the shape it has now, turned about Z, with its own clearance (SUPPORT_CLEARANCE_MM when it
@@ -1696,7 +1717,26 @@ def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
         held = slots.get(plate["group"], [])
         layout.append({"group": plate["group"], "plate": held[index] if index < len(held) else None,
                        "overrides": overrides[plate["group"]], "fixed": plate["fixed"], "items": plate["items"]})
+    occupied = [p for p in order if any(o["plate"] == p for o in objects)]
+    if len(layout) > len(occupied):   # the nester is greedy: don't make an arrangement that already holds worse by adding a plate
+        standing = _standing_layout(project_id, record, objects, occupied, group_of, overrides)
+        if standing:
+            return standing
     return layout
+
+
+def _standing_layout(project_id: int, record: dict, objects: list, occupied: list, group_of, overrides: dict) -> list:
+    """The objects as they stand, as a layout (see `arrange_layout`), when that is a valid one: every object on the bed and
+    clear of the others, no plate mixing groups. Else []."""
+    if any(len({group_of(o) for o in objects if o["plate"] == plate_id}) > 1 for plate_id in occupied):
+        return []
+    if placement_problems(project_id, record, occupied):
+        return []
+    return [{"group": (group := group_of(next(o for o in objects if o["plate"] == plate_id))), "plate": plate_id,
+             "overrides": overrides[group], "fixed": [o["id"] for o in objects if o["plate"] == plate_id and o.get("pinned")],
+             "items": [{"key": o["id"], "center": tuple(o["position"]), "turned": False, "angle": 0.0, "oversize": False}
+                       for o in objects if o["plate"] == plate_id and not o.get("pinned")]}
+            for plate_id in occupied]
 
 
 def _set_arrange_engine(project_id: int, record: dict, engine: str) -> dict:
@@ -1718,8 +1758,18 @@ def _skipped_failed(record: dict, plate_ids=None) -> str:
     return f"; {_count(n, 'object')} skipped (their model failed to import)" if n else ""
 
 
-def _arranged_outcome(before: dict, after: dict, skipped: str) -> str:
-    """The one-line outcome every Arrange of ready objects carries."""
+def _too_big_for_the_bed(after: dict, plate_ids: list) -> str:
+    """"; N objects are bigger than the bed (left centred on a plate of its own)" for the unpinned ready objects still off
+    the bed after an Arrange of these plates, which only a part too big for any plate can be; else "". A pinned object
+    stays where its owner put it, so it is not counted."""
+    pinned = {o["id"] for o in after["data"]["objects"] if o.get("pinned")}
+    big = {p["key"] for p in placement_problems(after["id"], after, plate_ids) if p["problem"] == "off the bed"} - pinned
+    return f"; {_count(len(big), 'object')} {'is' if len(big) == 1 else 'are'} bigger than the bed (left centred on a plate of its own)" if big else ""
+
+
+def _arranged_outcome(before: dict, after: dict, skipped: str, too_big: str = "") -> str:
+    """The one-line outcome every Arrange of ready objects carries, then what could not be done: `too_big` (objects that fit
+    no plate) and `skipped` (objects of failed models)."""
     def stand(record):
         return [(o["id"], o["plate"], o["position"], o["rotation"]) for o in record["data"]["objects"]]
     added = len(after["data"]["plates"]) - len(before["data"]["plates"])
@@ -1731,7 +1781,7 @@ def _arranged_outcome(before: dict, after: dict, skipped: str) -> str:
         text = f"Arranged onto {_count(len(after['data']['plates']), 'plate')} (was {len(before['data']['plates'])})"
     else:
         text = "Arranged"
-    return text + skipped
+    return text + too_big + skipped
 
 
 def arrange(project_id: int, plate_ids=None, engine: str | None = None) -> dict:
@@ -1744,7 +1794,7 @@ def arrange(project_id: int, plate_ids=None, engine: str | None = None) -> dict:
     skipped = _skipped_failed(after, order)
     if not any(o["plate"] in order and o["model"] in ready for o in after["data"]["objects"]):
         return {**after, "outcome": "Nothing ready to arrange" + skipped}
-    return {**after, "outcome": _arranged_outcome(before, after, skipped)}
+    return {**after, "outcome": _arranged_outcome(before, after, skipped, _too_big_for_the_bed(after, order))}
 
 
 def _arrange(project_id: int, plate_ids=None, engine: str | None = None) -> dict:
