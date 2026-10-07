@@ -926,6 +926,11 @@ function renderPlates() {
   $("plate-tabs").innerHTML = tabs.join("");
 }
 
+function shortReason(error) {
+  const text = String(error || "the file couldn't be read").replace(/\s+/g, " ").trim();
+  return text.length > 60 ? `${text.slice(0, 57)}…` : text;
+}
+
 function renderObjects() {
   if (!state.project) return;
   const models = state.project.models;
@@ -933,13 +938,14 @@ function renderObjects() {
     const model = models.find(m => m.id === object.model);
     const issues = state.problems.get(object.id)?.issues || [];
     const status = model?.state === "importing" ? '<small>importing…</small>'
-      : model?.state === "failed" ? `<small class="bad" title="${esc(model.error)}">failed</small>`
+      : model?.state === "failed" ? `<small class="bad" title="${esc(model.error || "")}">Couldn't import — ${esc(shortReason(model.error))}</small>`
       : issues.length ? `<small class="bad">${esc(issues.join(", "))}</small>`
       : `<small>${(model?.size || []).map(v => Math.round(v * (object.scale[0] || 1))).join(" × ")} mm</small>`;
     const overrides = Object.keys(object.overrides || {}).length;
-    return `<div class="slicer-object${object.id === state.selected ? " selected" : ""}" data-object="${object.id}">
+    return `<div class="slicer-object${object.id === state.selected ? " selected" : ""}${model?.state === "failed" ? " failed" : ""}" data-object="${object.id}">
       <div class="slicer-object-name" title="${esc(object.name)}">${esc(object.name)}<br>${status}</div>
-      ${overrides ? `<span class="slicer-badge" title="Settings changed for this object">${overrides}</span>` : "<span></span>"}
+      ${model?.state === "failed" ? `<button class="btn btn-secondary btn-sm slicer-retry-btn" type="button" data-retry-model="${model.id}" title="Try importing this model again">Retry</button>`
+        : overrides ? `<span class="slicer-badge" title="Settings changed for this object">${overrides}</span>` : "<span></span>"}
       <button class="slicer-icon-btn" type="button" data-remove-object="${object.id}" title="Remove from the plate">✕</button>
     </div>`;
   });
@@ -2013,7 +2019,21 @@ function bindUi() {
     }
   });
 
-  $("object-list").addEventListener("click", e => {
+  $("object-list").addEventListener("click", async e => {
+    const retry = e.target.closest("[data-retry-model]");
+    if (retry) {
+      retry.disabled = true;
+      try {
+        const fresh = await api("POST", `/api/projects/${state.project.id}/models/${retry.dataset.retryModel}/retry`);
+        state.project = { ...state.project, models: fresh.models };
+        renderAll();
+        schedulePoll();
+      } catch (err) {
+        toast(err.message, true);
+        retry.disabled = false;
+      }
+      return;
+    }
     const remove = e.target.closest("[data-remove-object]");
     if (remove) {
       const id = Number(remove.dataset.removeObject);
