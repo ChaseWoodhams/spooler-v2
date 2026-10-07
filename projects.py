@@ -1653,6 +1653,9 @@ def _plan_data(project_id: int, record: dict) -> dict:
                 obj["rotation"][2] = round((obj["rotation"][2] + turn) % 360, 4)
     emptied = [plate_id for plate_id in replannable if plate_id not in used]
     data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
+    for plate_id in used:   # a plate that now holds other objects isn't the plate the printer was chosen for
+        if {o["id"] for o in data["objects"] if o["plate"] == plate_id} != {o["id"] for o in record["data"]["objects"] if o["plate"] == plate_id}:
+            plates[plate_id].pop("printer_id", None)
     existing = {p["id"] for p in record["data"]["plates"]}
     features = {plate_id: plate_features(project_id, {**record, "data": data}, plate_id) for plate_id in used}
     ordered = (sorted((p for p in used if features[p]), key=lambda p: time_estimate.rank_key(features[p]), reverse=True)

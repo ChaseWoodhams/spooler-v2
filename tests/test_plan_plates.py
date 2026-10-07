@@ -18,6 +18,7 @@ import jobs
 import projects
 import slicer
 import splits
+import state
 from tests.test_slicer import cube_stl, fake_runner, make_fake_orca
 
 GEOMETRY = not splits.missing_modules()
@@ -191,6 +192,22 @@ class PlanPlatesApiTests(unittest.TestCase):
         result = self.accept(project)[1]
         bar = next(o for o in result["data"]["objects"] if o["id"] == 2)
         self.assertNotAlmostEqual(bar["rotation"][2] % 360, 45.0, places=0)   # it was turned about Z, and not counted
+
+    def test_a_replanned_plate_whose_objects_changed_loses_its_printer_and_the_others_keep_theirs(self):
+        project = self.project_with(cube_stl(20), cube_stl(30))
+        with mock.patch.dict(state.printers, {"p1": object()}):
+            project = self.lay(project, [(1, 1, (50, 50), False), (2, 2, (50, 50), False), (1, 3, (50, 50), False), (1, 4, (50, 50), False)],
+                               filaments={"2": GREY})
+            project = self.save(project, lambda d: [p.update(printer_id="p1") for p in d["plates"]])
+        self.assertEqual([p["printer_id"] for p in project["data"]["plates"]], ["p1"] * 4)
+        self.print_on_record(project, 3)
+        result = self.accept(project)[1]
+        plates = {p["id"]: p for p in result["data"]["plates"]}
+        self.assertEqual(sorted(plates), [1, 2, 3])                            # plate 4 was folded into plate 1
+        self.assertEqual({o["plate"] for o in result["data"]["objects"] if o["id"] in (1, 4)}, {1})
+        self.assertIsNone(plates[1].get("printer_id"))                          # it now holds another object
+        self.assertEqual(plates[2]["printer_id"], "p1")                         # replanned onto itself: same objects
+        self.assertEqual(plates[3]["printer_id"], "p1")                         # kept as it is
 
     def test_a_plan_that_changed_since_it_was_reviewed_is_refused(self):
         project = self.project_with(cube_stl(20))
