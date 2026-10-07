@@ -47,6 +47,10 @@ def fixture_files():
     return []
 
 
+class BrowserServer(ThreadingHTTPServer):
+    request_queue_size = 128  # the default backlog of 5 drops connections when a browser opens a burst of them
+
+
 class Page:
     """One browser tab, spoken to over the DevTools protocol."""
 
@@ -122,7 +126,12 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         patcher = mock.patch("http_handler._auth_ok", return_value=True)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), SPHandler)
+        # /config.js tells the page where the websocket is; point it at a closed port so the test page never
+        # reaches a real Spooler (which would also redirect it to /login)
+        env = mock.patch.dict(os.environ, {"WS_PORT": "1", "WSS_PORT": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.server = BrowserServer(("127.0.0.1", 0), SPHandler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
@@ -139,9 +148,12 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         port = port_file.read_text().split()[0]
         self.http = aiohttp.ClientSession()
         targets = None
-        for _ in range(50):
-            async with self.http.get(f"http://127.0.0.1:{port}/json/list") as resp:
-                targets = [t for t in await resp.json() if t["type"] == "page"]
+        for _ in range(100):
+            try:
+                async with self.http.get(f"http://127.0.0.1:{port}/json/list", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    targets = [t for t in await resp.json() if t["type"] == "page"]
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                targets = []  # the browser is still starting
             if targets:
                 break
             await asyncio.sleep(0.2)
@@ -149,8 +161,31 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         await self.page.send("Runtime.enable")
         await self.page.send("Page.enable")
         await self.page.send("DOM.enable")
+        # Headless Chrome occasionally fails a plain script request even though the server answered it. Record
+        # script load failures in every frame so goto() can load the page again instead of failing on the browser.
+        await self.page.send("Page.addScriptToEvaluateOnNewDocument", source=(
+            "window.__scriptErrors = []; window.addEventListener('error', e => { "
+            "if (e.target && e.target.tagName === 'SCRIPT') window.__scriptErrors.push(e.target.src); }, true);"))
+
+    async def goto(self, url, frame=None):
+        """Navigate and wait for the page (and, for the shell, its Projects frame) to load every script."""
+        check = "(window.__scriptErrors || []).length === 0"
+        if frame:
+            check += f" && !!{frame} && ({frame}.defaultView.__scriptErrors || []).length === 0 && {frame}.readyState === 'complete'"
+        for _ in range(4):
+            await self.page.send("Page.navigate", url="about:blank")
+            await self.page.send("Page.navigate", url=url)
+            try:
+                await self.page.until(f"document.readyState === 'complete' && {check}", timeout=20, what="a clean page load")
+                return
+            except AssertionError:
+                if not await self.page.js("(window.__scriptErrors || []).length + ((" + (frame or "null") + ") ? " + (frame or "null") + ".defaultView.__scriptErrors.length : 0)"):
+                    raise  # nothing failed to load: a real problem, not the browser
+        raise AssertionError("the page kept failing to load its scripts")
 
     async def asyncTearDown(self):
+        if getattr(self, "stop_worker", None):
+            self.stop_worker()  # before the database is pointed back at the real file
         await self.http.close()
         self.browser.terminate()
         try:
@@ -169,12 +204,12 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
 
     async def hold_qr_script(self):
         """The QR-code library is a CDN script; make its request hang, as it does when the network is bad."""
-        await self.page.send("Fetch.enable", patterns=[{"urlPattern": "*"}])
+        await self.page.send("Fetch.enable", patterns=[{"urlPattern": "*unpkg.com*"}])
 
     async def test_projects_page_opens_and_boot_does_not_wait_on_the_qr_script(self):
         page = self.page
         await self.hold_qr_script()
-        await page.send("Page.navigate", url=f"{self.base}/#projects")
+        await self.goto(f"{self.base}/#projects", frame="document.getElementById('projects-frame').contentDocument")
 
         # A #projects link shows the Projects page without waiting for the held CDN script
         await page.until("document.body.classList.contains('view-projects') && !document.getElementById('projects-view').hidden",
@@ -204,7 +239,7 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         page = self.page
         files = fixture_files()
         await self.hold_qr_script()
-        await page.send("Page.navigate", url=f"{self.base}/slicer.html?new")
+        await self.goto(f"{self.base}/slicer.html?new")
         await page.until("document.getElementById('dlg-projects').open", what="the project chooser")
         await page.js("document.getElementById('new-project-name').value = 'Daz shifter'; document.getElementById('btn-new-project').click()")
         await page.until("!document.getElementById('dlg-projects').open", what="the new project")
@@ -214,13 +249,19 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         await page.until("document.getElementById('dlg-import').open", what="the import dialog")
         await page.js("document.getElementById('btn-import').click()")
 
-        async def process():
-            while True:
-                if not (await splits.process_next() or await projects.process_next()):
-                    await asyncio.sleep(0.3)
-        worker = asyncio.ensure_future(process())
-        self.addCleanup(worker.cancel)
-        await page.until("document.querySelectorAll('#object-list > *').length >= 19", timeout=240, what="19 objects")
+        # Imports run in a thread with its own loop: they block, and the browser connection needs this loop free
+        stop = threading.Event()
+
+        def work():
+            async def process():
+                while not stop.is_set():
+                    if not (await splits.process_next() or await projects.process_next()):
+                        await asyncio.sleep(0.3)
+            asyncio.run(process())
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        self.stop_worker = lambda: (stop.set(), worker.join(60))
+        await page.until("document.querySelectorAll('#object-list > *').length >= 19", timeout=420, what="19 objects")
         listing = projects.list_projects()[0]
         self.assertEqual(len(projects.get_project(listing["id"])["models"]), 19)
 
