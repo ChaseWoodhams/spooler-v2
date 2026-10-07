@@ -2147,6 +2147,25 @@ def delete_model(project_id: int, model_id: int) -> dict:
     return get_project(project_id)
 
 
+def retry_model(project_id: int, model_id: int) -> dict:
+    """Re-queue a failed import. The model goes back to importing with no claim, so the workers take it under the
+    same atomic rule as a fresh upload."""
+    record = get_project(project_id)
+    model = next((m for m in record["models"] if m["id"] == model_id), None)
+    if model is None:
+        raise jobs.JobError("Model not found", 404)
+    if model["state"] != FAILED:
+        raise jobs.JobError("Only a model that failed to import can be retried", 409)
+
+    def requeue(models):
+        for m in models:
+            if m["id"] == model_id and m["state"] == FAILED:
+                m.update(state=IMPORTING, error=None)
+                m.pop("claimed_at", None)
+    _mutate(project_id, "models", requeue, record["created_at"])
+    return get_project(project_id)
+
+
 def model_preview(project_id: int, model_id: int) -> Path:
     record = get_project(project_id)
     model = next((m for m in record["models"] if m["id"] == model_id), None)
