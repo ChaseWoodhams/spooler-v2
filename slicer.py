@@ -75,7 +75,7 @@ CLI_ERRORS = {
     -65:  "Some settings don't work with spiral vase mode",
     -100: "The slicer failed while slicing",
     -101: "Toolpaths conflict with each other — objects on the plate are too close for their supports or brims; "
-          "move them apart or use Repack plates",
+          "move them apart or use Arrange",
     -102: "Toolpaths reach into an unprintable area of the bed",
 }
 
