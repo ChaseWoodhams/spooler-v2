@@ -1603,9 +1603,12 @@ def _plan_data(project_id: int, record: dict) -> dict:
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
     importing = {o["plate"] for o in data["objects"] if o["model"] not in ready}
     status = {p["id"]: p["status"] for p in plate_status(project_id)["plates"]}
+    with database.transaction() as conn:   # a Print whose outcome is unknown still counts as on record
+        recorded = {r["plate_id"] for r in conn.execute("SELECT DISTINCT plate_id FROM prints WHERE project_id = ? AND plate_id IS NOT NULL", (project_id,))}
     kept, replannable = [], []
     for plate in data["plates"]:
-        reason = KEPT_REASONS.get(status.get(plate["id"])) or ("Its models are still importing" if plate["id"] in importing else None)
+        reason = (KEPT_REASONS.get(status.get(plate["id"])) or ("A print of it is on record" if plate["id"] in recorded else None)
+                  or ("Its models are still importing" if plate["id"] in importing else None))
         if reason:
             kept.append({"id": plate["id"], "name": plate["name"], "reason": reason})
         else:

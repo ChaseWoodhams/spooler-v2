@@ -267,6 +267,13 @@ class PlanPlatesApiTests(unittest.TestCase):
         plan = self.plan(project)[1]
         self.assertEqual([k["id"] for k in plan["kept"]], [2])
 
+    def test_a_plate_whose_only_print_is_unknown_is_kept_too(self):
+        project = self.project_with(cube_stl(20))
+        project = self.lay(project, [(1, 1, (50, 50), False), (1, 2, (50, 50), False)])
+        self.print_on_record(project, 2, "unknown")
+        plan = self.plan(project)[1]
+        self.assertEqual([k["id"] for k in plan["kept"]], [2])
+
     def test_a_pinned_object_keeps_its_plate_and_place_and_others_pack_around_it(self):
         project = self.project_with(cube_stl(20))
         project = self.lay(project, [(1, 1, (60, 60), False), (1, 2, (140, 140), True), (1, 3, (30, 200), False)])
