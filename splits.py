@@ -201,6 +201,9 @@ def _to_split(row, conn) -> dict:
     record["settings"] = json.loads(record["settings"] or "{}")
     record["progress"] = _progress.get(record["id"]) if record["state"] in STAGE_FOR else None
     record["queue"] = _queue_summary(conn, record["id"])
+    owner = conn.execute("SELECT id, quick FROM projects WHERE split_id = ? ORDER BY id LIMIT 1", (record["id"],)).fetchone()
+    record["project_id"] = owner["id"] if owner else None  # the project that owns this split, quick or not
+    record["project_quick"] = bool(owner and owner["quick"])  # a hidden quick project's: never offered as parts to add
     return record
 
 

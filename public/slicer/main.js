@@ -201,10 +201,11 @@ async function boot() {
   loadPrinters();
   applySendDefaults();
   const params = new URLSearchParams(location.search);
-  const id = Number(params.get("project")) || (params.has("new") ? 0 : Number(remember("slicer.project")) || 0);
+  const asked = Number(params.get("project")) || 0;
+  const id = asked || (params.has("new") ? 0 : Number(remember("slicer.project")) || 0);
   if (id) {
     try {
-      await openProject(id, { confirm: params.get("confirm") === "1", toPrinter: !!params.get("printer") });
+      await openProject(id, { toPrinter: !!params.get("printer"), restoring: !asked });
       return;
     } catch (_) { /* fall through to the project list */ }
   }
@@ -357,9 +358,9 @@ async function bundleSettings(bundleId) {
   return state.bundleSettings.get(bundleId);
 }
 
-async function openProject(id, { confirm = false, toPrinter = false } = {}) {
-  stopSimple();
+async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   const project = await api("GET", `/api/projects/${id}`);
+  if (restoring && project.quick) throw new Error("A hidden quick project is never reopened on its own");   // the caller falls back to the list
   clearTimeout(state.jobsTimer);
   state.clockSkew = project.server_time - Date.now() / 1000;
   state.project = project;
@@ -371,7 +372,7 @@ async function openProject(id, { confirm = false, toPrinter = false } = {}) {
   resetEdits();
   state.jobs = [];
   state.assigning = null;
-  remember("slicer.project", String(id));
+  if (!project.quick) remember("slicer.project", String(id));   // a hidden quick project is never restored as the last-open project
   history.replaceState(null, "", `?project=${id}`);
   await bundleSettings(project.data.profile.bundle_id).catch(err => toast(err.message, true));
   if (project.split_id) await splitStep.open(project.split_id).catch(err => toast(err.message, true));
@@ -385,7 +386,6 @@ async function openProject(id, { confirm = false, toPrinter = false } = {}) {
   const landing = toPrinter && stepAvailable("print") ? "print" : saved && stepAvailable(saved) ? saved : defaultStep();
   await setStep(landing, { force: true });
   schedulePoll();
-  if (confirm && project.split_id && !isGcodeProject()) startSimple();
 }
 
 function applyProject(project, { keepLocalData = false } = {}) {
@@ -679,7 +679,6 @@ function renderAll({ geometry = true } = {}) {
   if (geometry) renderViewport();
   renderTools();
   renderObjectPanel();
-  renderSimple();
 }
 
 const PRESET_KINDS = ["machine", "filament", "process"];
@@ -1652,8 +1651,7 @@ async function openProjectsDialog() {
   if (!dialog.open) dialog.showModal();
   try {
     const [{ projects }, { splits }] = await Promise.all([api("GET", "/api/projects"), api("GET", "/api/splits").catch(() => ({ splits: [] }))]);
-    const owned = new Set(projects.map(p => p.split_id).filter(Boolean));
-    const loose = splits.filter(s => !owned.has(s.id));
+    const loose = splits.filter(s => !s.project_id);   // the server marks splits owned by any project, hidden quick ones included
     $("project-list").innerHTML = (projects.length ? '<h4 class="slicer-list-heading">Your projects</h4>' : "") + projects.map(p => `
       <div class="slicer-project-row">
         <div><strong>${esc(p.name)}</strong>${p.split_id ? '<span class="slicer-tag">from a model upload</span>' : ""}
@@ -1683,8 +1681,8 @@ async function uploadNewModel(file) {
     const params = new URLSearchParams({ filename: file.name, scale: $("new-scale").value, up: $("new-up").value });
     const project = await upload(`/api/projects/upload?${params}`, file, pct => { bar.style.width = `${pct}%`; });
     $("dlg-projects").close();
-    await openProject(project.id, { confirm: true });
-    toast(`Imported ${file.name} — checking the model`);
+    await openProject(project.id);
+    toast(`Imported ${file.name}`);
     showImportNotes(project);
   } catch (err) {
     toast(err.message, true);
@@ -1700,7 +1698,7 @@ async function openSplitDialog() {
   dialog.showModal();
   try {
     const { splits } = await api("GET", "/api/splits");
-    const ready = splits.filter(s => s.parts && (s.state === "split" || s.state === "queued"));
+    const ready = splits.filter(s => s.parts && (s.state === "split" || s.state === "queued") && !s.project_quick);   // a hidden quick project's model is not a part source
     $("split-choices").innerHTML = ready.map(s => `
       <div class="slicer-project-row">
         <div><strong>${esc(s.source_name)}</strong><small>${plural(s.parts, "part")}</small></div>
@@ -1712,201 +1710,13 @@ async function openSplitDialog() {
   }
 }
 
-// ── Simple print (the confirm screen) ───────────────────────────────────────────
-// A model that fits the bed skips Split: the server puts it on one plate and this card asks only for the printer,
-// profile, spool and plate side. "Advanced" drops the card and opens the full stepper with everything already set.
+// A model that fits the bed can go on one plate whole ("Put it on a plate" on the Model step), and then Split is shown as not needed
 const modelOnPlateWhole = () => !!state.project?.split_id
   && state.project.models.some(m => m.split?.id === state.project.split_id && m.split.part === 0);
 const splitSkipped = () => modelOnPlateWhole() && !!splitStep.split?.analysis?.fits_whole;
 
-function startSimple() {
-  state.simple = { intake: null, timer: null };
-  document.body.classList.add("simple-print");
-  simpleTick();
-}
-
-function stopSimple() {
-  if (state.simple) clearTimeout(state.simple.timer);
-  state.simple = null;
-  document.body.classList.remove("simple-print");
-  const card = $("simple-card");
-  if (card) card.hidden = true;
-}
-
-// Leave the confirm screen for the full workflow, on the step that suits the project
-async function leaveSimple(message) {
-  stopSimple();
-  await setStep(defaultStep(), { force: true });
-  renderAll();
-  if (message) toast(message);
-}
-
-async function simpleTick() {
-  const simple = state.simple;
-  if (!simple) return;
-  clearTimeout(simple.timer);
-  const project = state.project;
-  try {
-    let intake = await api("GET", `/api/projects/${project.id}/intake`);
-    if (state.simple !== simple) return;
-    if (intake.state === "ready" && intake.can_print && !intake.placed) {   // fits: skip Split, one auto plate
-      await flushSave();
-      const result = await api("POST", `/api/projects/${project.id}/auto-place`, {});
-      if (state.simple !== simple) return;
-      applyProject(result.project, { keepLocalData: false });
-      intake = result.intake;
-      simple.intake = intake;
-      renderAll();
-      schedulePoll();
-      await setStep("plates", { force: true });
-      state.viewport?.fit(state.viewport.objectsBox());
-    } else if (intake.state === "ready" && intake.scale_ok && !intake.fits) {
-      await leaveSimple("This model is bigger than the bed, so Model and Split are open.");
-      return;
-    }
-    simple.intake = intake;
-  } catch (err) {
-    toast(err.message, true);
-  }
-  renderSimple();
-  if (!simple.intake || simple.intake.state === "analysing") simple.timer = setTimeout(simpleTick, 1500);
-}
-
-const simpleOption = (value, label, chosen) => `<option value="${esc(value)}"${chosen ? " selected" : ""}>${esc(label)}</option>`;
-const simpleDuration = seconds => {
-  const minutes = Math.max(1, Math.round(seconds / 60));
-  return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min` : `${minutes} min`;
-};
-
-function renderSimple() {
-  const card = $("simple-card");
-  const simple = state.simple;
-  if (!card) return;
-  card.hidden = !simple || !state.project;
-  if (!simple || !state.project) return;
-  if (card.contains(document.activeElement) && document.activeElement.tagName === "SELECT") return;   // don't close an open menu
-  const intake = simple.intake;
-  const project = state.project;
-  const head = `<h3>${esc(project.name)}</h3>`;
-  if (!intake || intake.state === "analysing") {
-    card.innerHTML = `${head}<p class="slicer-muted">Checking the model: reading it, repairing small holes and measuring it…</p>`;
-    return;
-  }
-  if (intake.state !== "ready") {
-    card.innerHTML = `${head}<p class="simple-error">${esc(intake.reason || "The model couldn't be read.")}</p>
-      <button class="simple-link" type="button" data-simple="advanced">Open the full workflow</button>`;
-    return;
-  }
-  const plate = data().plates[0];
-  const entry = sliceEntry(plate.id);
-  const sent = entry?.state === "sliced" && entry.sent_job;
-  const sliceBusy = isBusy(plate.id) || (entry?.state === "sliced" && entry.auto_send && !entry.sent_job && !entry.send_error);
-  const bundles = state.bundles || [];
-  const spools = state.spools || [];
-  const chosenSpool = data().profile.spool_id;
-  const size = intake.size.map(v => Math.round(v * 1000) / 1000).join(" × ");
-  const fitBadge = !intake.scale_ok
-    ? `<span class="simple-pill warn">${esc(size)} mm: check the scale</span>`
-    : `<span class="simple-pill good">Fits the bed · no split needed</span>`;
-  const repairBadge = intake.repaired
-    ? `<span class="simple-pill warn" title="${esc(intake.repairs.join("; "))}">Repaired · ${esc(intake.repairs[0])}${intake.repairs.length > 1 ? ` +${intake.repairs.length - 1}` : ""}</span>`
-    : '<span class="simple-pill good">Closed solid · no repairs needed</span>';
-  const scaleFix = !intake.scale_ok && !intake.placed
-    ? (intake.scale_fix ? `<div class="simple-warn">${esc(intake.reason)}.
-        <button class="simple-link" type="button" data-simple="fix-scale">${esc(intake.scale_fix.label)}</button></div>`
-      : `<div class="simple-warn">${esc(intake.reason)}. Open Advanced and set the scale on the Model step.</div>`)
-    : "";
-  const ready = intake.can_print && !!plate.printer_id && !!data().profile.bundle_id && !sliceBusy && !sent;
-  let estimate = intake.estimate ? `~${simpleDuration(intake.estimate.seconds)} · ${intake.estimate.grams} g (rough, before slicing)` : "";
-  if (entry?.state === "sliced" && entry.estimate_s) estimate = `${simpleDuration(entry.estimate_s)} · ${Math.round(entry.estimate_g || 0)} g`;
-  let status = "";
-  if (sliceBusy) status = `<div class="simple-status">Slicing… it goes to the queue when it's done.</div>`;
-  else if (entry?.state === "failed") status = `<div class="simple-error">Slicing failed: ${esc(entry.error || "unknown error")}</div>`;
-  else if (entry?.send_error) status = `<div class="simple-error">Sliced, but not queued: ${esc(entry.send_error)}</div>`;
-  else if (sent) {
-    const printer = state.printers.find(p => p.id === entry.sent_to)?.name || "the printer";
-    status = `<div class="simple-status good">Sliced and queued on ${esc(printer)}. It starts when you confirm the bed is cleared.
-      <a href="/?queue=1">Open the queue</a></div>`;
-  }
-  card.innerHTML = `${head}
-    <div class="slicer-muted">${esc(intake.file)} · ${esc(size)} mm · ${intake.volume_cm3.toLocaleString()} cm³</div>
-    <div class="simple-pills">${fitBadge}${repairBadge}</div>${scaleFix}
-    <div class="simple-fields">
-      <label>Printer<select data-simple-field="printer"><option value="">Choose a printer</option>${state.printers
-        .map(p => simpleOption(p.id, `${p.name}${p.connected ? "" : " (offline)"}`, p.id === plate.printer_id)).join("")}</select></label>
-      <label>Profile<select data-simple-field="profile">${bundles.map(b => simpleOption(b.id, b.label, b.id === data().profile.bundle_id)).join("")
-        || '<option value="">No profile available</option>'}</select></label>
-      <label>Spool<select data-simple-field="spool"><option value="">No spool: use the profile's values</option>${spools
-        .map(sp => simpleOption(sp.id, spoolLabel(sp), sp.id === chosenSpool)).join("")}${chosenSpool && !spools.some(sp => sp.id === chosenSpool)
-        ? simpleOption(chosenSpool, `Spool #${chosenSpool}`, true) : ""}</select></label>
-      <label>Plate side<select data-simple-field="side">${simpleOption("textured", "Textured PEI (Side A)", data().bed === "textured")}${simpleOption("smooth", "Smooth PEI (Side B)", data().bed === "smooth")}</select></label>
-    </div>
-    <div class="simple-go"><button class="btn btn-primary" type="button" data-simple="print"${ready ? "" : " disabled"}>Slice &amp; print</button>
-      <span class="slicer-muted">${esc(estimate)}</span></div>
-    ${status}
-    <div><button class="simple-link" type="button" data-simple="advanced">Advanced: plates, split, every setting ▾</button></div>`;
-}
-
-async function simpleField(field, value) {
-  const plate = data().plates[0];
-  if (field === "printer") {
-    plate.printer_id = value || null;
-    rememberDefaults({ printer: plate.printer_id });
-    changed();
-  } else if (field === "side") {
-    data().bed = value;
-    rememberDefaults({ plate_side: value });
-    changed();
-  } else if (field === "spool") {
-    await chooseSpool(value);
-  } else if (field === "profile" && value && value !== data().profile.bundle_id) {
-    await bundleSettings(value);
-    const spool = data().profile.spool_id;
-    data().profile = { ...data().profile, bundle_id: value, process: {}, filament: {}, spool_id: null };
-    rememberDefaults({ profile: value });
-    changed();
-    if (spool) await chooseSpool(String(spool));
-  }
-  renderSimple();
-}
-
-async function simpleAction(action, button) {
-  if (action === "advanced") {
-    await flushSave();
-    await leaveSimple();
-  } else if (action === "fix-scale") {
-    await withButton(button, async () => {
-      state.simple.intake = await api("POST", `/api/projects/${state.project.id}/fix-scale`, {});
-      renderSimple();
-      simpleTick();
-    });
-  } else if (action === "print") {
-    await withButton(button, async () => {
-      await flushSave();
-      const plate = data().plates[0];
-      rememberDefaults({ printer: plate.printer_id, plate_side: data().bed });
-      applyProject(await api("POST", `/api/projects/${state.project.id}/print`, {
-        printer_id: plate.printer_id, leveling: $("send-leveling").checked, timelapse: $("send-timelapse").checked }));
-      renderAll({ geometry: false });
-      schedulePoll();
-    });
-  }
-}
-
-function bindSimple() {
-  $("simple-card").addEventListener("change", e => {
-    const field = e.target.closest("[data-simple-field]");
-    if (field) simpleField(field.dataset.simpleField, field.value).catch(err => toast(err.message, true));
-  });
-  $("simple-card").addEventListener("click", e => {
-    const button = e.target.closest("[data-simple]");
-    if (button) simpleAction(button.dataset.simple, button).catch(err => toast(err.message, true));
-  });
-}
-
 // ── Wiring ──────────────────────────────────────────────────────────────────────
 function bindUi() {
-  bindSimple();
   document.querySelectorAll("dialog [data-close]").forEach(btn => btn.addEventListener("click", () => btn.closest("dialog").close()));
 
   $("step-bar").addEventListener("click", e => {

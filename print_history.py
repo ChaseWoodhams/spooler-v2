@@ -66,6 +66,7 @@ def _to_print(row) -> dict:
     record["spools"] = json.loads(record["spools"] or "[]")
     record["failure_reasons"] = json.loads(record.get("failure_reasons") or "[]")
     record["outcome_unconfirmed"] = bool(record.get("outcome_unconfirmed"))
+    record["was_quick"] = bool(record.get("was_quick"))
     return record
 
 
@@ -123,10 +124,11 @@ def _open_record(printer, filename: str, pi: dict) -> None:
                      "ended_at = ? WHERE printer_id = ? AND outcome IS NULL", (now, printer.id))
         record_id = conn.execute(
             "INSERT INTO prints (printer_id, printer_name, printer_type, job_id, project_id, plate_id, file_name, "
-            "started_at, total_layers, estimate_s, estimate_g) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "started_at, total_layers, estimate_s, estimate_g, was_quick) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "COALESCE((SELECT quick FROM projects WHERE id = ?), 0))",
             (printer.id, printer.name, getattr(printer, "printer_type", None), job["id"] if job else None,
              job.get("project_id") if job else None, job.get("plate_id") if job else None, filename, started_at, pi.get("TotalLayer") or None,
-             job["estimate_s"] if job else None, job["estimate_g"] if job else None),
+             job["estimate_s"] if job else None, job["estimate_g"] if job else None, job.get("project_id") if job else None),
         ).lastrowid
     _open[printer.id] = {"id": record_id, "file_name": filename,
                          "layers": (pi.get("CurrentLayer") or 0, pi.get("TotalLayer") or 0)}
@@ -292,7 +294,44 @@ def search(q: str = "", printer_id: str | None = None, outcome: str | None = Non
             f"FROM prints{where}", params).fetchone()
     summary = dict(totals)
     summary["success_rate"] = round(summary["completed"] / summary["finished"], 3) if summary["finished"] else None
-    return {"prints": [_to_print(r) for r in rows], "total": summary["prints"], "summary": summary}
+    return {"prints": _with_project([_to_print(r) for r in rows]), "total": summary["prints"], "summary": summary}
+
+
+def _with_project(records: list) -> list:
+    """Add what History needs about each Print's project: its name, whether it is a hidden Quick print one (`quick`),
+    whether it still exists (`project_available`), a thumbnail of its plate and whether Reprint can work."""
+    ids = sorted({r["project_id"] for r in records if r.get("project_id")})
+    job_ids = sorted({r["job_id"] for r in records if r.get("job_id")})
+    projects_by_id, jobs_by_id = {}, {}
+    with database.transaction() as conn:
+        if ids:
+            marks = ",".join("?" * len(ids))
+            projects_by_id = {r["id"]: r for r in conn.execute(f"SELECT id, name, quick FROM projects WHERE id IN ({marks})", ids)}
+        if job_ids:
+            marks = ",".join("?" * len(job_ids))
+            jobs_by_id = {r["id"]: r for r in conn.execute(f"SELECT id, state, stored_file FROM jobs WHERE id IN ({marks})", job_ids)}
+    for record in records:
+        project = projects_by_id.get(record.get("project_id"))
+        record["project_available"] = project is not None
+        record["project_name"] = project["name"] if project else None
+        record["quick"] = bool(project["quick"]) if project else record["was_quick"]   # promoted since, or deleted
+        record["thumbnail"] = (f"/api/projects/{project['id']}/plates/{record['plate_id']}/preview.png"
+                               if project and record.get("plate_id") else None)
+        record["reprint_available"] = _reprint_problem(record, project, jobs_by_id.get(record.get("job_id"))) is None
+    return records
+
+
+def _reprint_problem(record: dict, project, job) -> tuple | None:
+    """Why a Print can't be reprinted unchanged as (message, status), or None when it can."""
+    if project is None and (record.get("project_id") or record.get("was_quick")):
+        return "The project this print came from is gone", 409
+    if job is None:
+        return "This print's queue job no longer exists", 409
+    if job["state"] not in jobs.FINAL:
+        return "This print's job is already waiting in the queue", 409
+    if not job["stored_file"] or not (jobs._data_dir / job["stored_file"]).is_file():
+        return "The G-code file for this print is no longer stored", 410
+    return None
 
 
 def find_print(print_id: int) -> dict | None:
@@ -392,6 +431,20 @@ def export_csv(**filters) -> str:
                       outcome_unconfirmed="yes" if row["outcome_unconfirmed"] else "")
         writer.writerow([record[col] if record[col] is not None else "" for col in CSV_COLUMNS])
     return out.getvalue()
+
+
+def reprint(print_id: int) -> dict:
+    """Queue the Print's own job again, unchanged (the same slice), at the front of the queue."""
+    record = find_print(print_id)
+    if record is None:
+        raise jobs.JobError("Print not found", 404)
+    with database.transaction() as conn:
+        project = conn.execute("SELECT id FROM projects WHERE id = ?", (record["project_id"],)).fetchone() if record["project_id"] else None
+        job = conn.execute("SELECT id, state, stored_file FROM jobs WHERE id = ?", (record["job_id"],)).fetchone() if record["job_id"] else None
+    problem = _reprint_problem(record, project, job)
+    if problem:
+        raise jobs.JobError(*problem)
+    return jobs.requeue(record["job_id"])
 
 
 def repeat_print(print_id: int) -> dict:

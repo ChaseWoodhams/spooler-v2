@@ -48,6 +48,7 @@ import gcode_analysis
 import holds
 import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
 import orca_3mf
+import preflight
 import packing
 import remembered_defaults
 import slicer
@@ -152,6 +153,7 @@ def _to_project(row) -> dict:
     record["data"] = json.loads(record["data"] or "{}")
     record["models"] = json.loads(record["models"] or "[]")
     record["slices"] = json.loads(record["slices"] or "{}")
+    record["quick"] = bool(record.get("quick"))
     record["server_time"] = time.time()  # lets a browser with a different clock show how long a slice has been running
     for plate in record["data"].get("plates", []):
         entry = record["slices"].get(str(plate["id"]))
@@ -168,14 +170,16 @@ def get_project(project_id: int) -> dict:
     return _to_project(row)
 
 
-def list_projects() -> list:
+def list_projects(include_quick: bool = False) -> list:
+    """Projects, newest first. Quick projects (hidden behind Quick print) are left out unless `include_quick`."""
     with database.transaction() as conn:
-        rows = conn.execute("SELECT * FROM projects ORDER BY updated_at DESC, id DESC").fetchall()
+        rows = conn.execute("SELECT * FROM projects" + ("" if include_quick else " WHERE quick = 0")
+                            + " ORDER BY updated_at DESC, id DESC").fetchall()
     out = []
     for record in map(_to_project, rows):
         data = record["data"]
         out.append({"id": record["id"], "name": record["name"], "updated_at": record["updated_at"], "created_at": record["created_at"],
-                    "split_id": record.get("split_id"),
+                    "split_id": record.get("split_id"), "quick": record["quick"],
                     "plates": len(data.get("plates", [])), "objects": len(data.get("objects", [])), "models": len(record["models"]),
                     "busy": any(m["state"] == IMPORTING for m in record["models"])
                     or any(s.get("state") in (QUEUED, SLICING) for s in record["slices"].values())})
@@ -196,8 +200,9 @@ def _new_plate(plate_id: int, overrides: dict | None = None) -> dict:
     return {"id": plate_id, "name": f"Plate {plate_id}", "overrides": dict(overrides or {})}
 
 
-def create_project(name: str = "", split_id: int | None = None) -> dict:
-    """A project with one empty plate. With `split_id` it belongs to that split model and lays out its parts."""
+def create_project(name: str = "", split_id: int | None = None, quick: bool = False) -> dict:
+    """A project with one empty plate. With `split_id` it belongs to that split model and lays out its parts.
+    A `quick` project is hidden from project listings; it is reached by id."""
     if split_id is not None:
         splits.get_split(split_id)
     remembered = remembered_defaults.usable()
@@ -210,13 +215,13 @@ def create_project(name: str = "", split_id: int | None = None) -> dict:
             "plates": [plate], "objects": []}
     now = time.time()
     with database.transaction() as conn:
-        project_id = conn.execute("INSERT INTO projects (name, data, split_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                                  (_clean_name(name) or "Untitled project", json.dumps(data), split_id, now, now)).lastrowid
+        project_id = conn.execute("INSERT INTO projects (name, data, split_id, quick, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                  (_clean_name(name) or "Untitled project", json.dumps(data), split_id, int(bool(quick)), now, now)).lastrowid
     project_dir(project_id).mkdir(parents=True, exist_ok=True)
     return get_project(project_id)
 
 
-def create_project_from_gcode(stream, length: int, filename: str, bed: str = "textured") -> dict:
+def create_project_from_gcode(stream, length: int, filename: str, bed: str = "textured", quick: bool = False) -> dict:
     """A one-plate project with no objects whose plate holds the uploaded G-code as an imported (never outdated) Slice.
     `bed` is the plate side the file was sliced for; the file can't say."""
     if bed not in slicer.BED_TYPES:
@@ -229,7 +234,7 @@ def create_project_from_gcode(stream, length: int, filename: str, bed: str = "te
         raise jobs.JobError(f"The file is larger than {jobs.MAX_UPLOAD_BYTES // (1024 * 1024)} MB", 413)
     path = _spool(stream, length)
     try:
-        project = create_project(name.rsplit(".", 1)[0][:120])
+        project = create_project(name.rsplit(".", 1)[0][:120], quick=quick)
         try:
             work = plate_dir(project["id"], 1)
             work.mkdir(parents=True)
@@ -253,28 +258,75 @@ def create_project_from_gcode(stream, length: int, filename: str, bed: str = "te
         path.unlink(missing_ok=True)
 
 
-def create_project_from_upload(stream, length: int, filename: str, scale=1.0, up="z", bed: str = "textured") -> dict:
+def create_project_from_upload(stream, length: int, filename: str, scale=1.0, up="z", bed: str = "textured", quick: bool = False) -> dict:
     """Start the workflow from a model file: it's stored as a split model (analysed first) owned by a new project.
     A G-code file instead becomes a one-plate project holding it as an imported Slice."""
     if filename.lower().endswith(".gcode"):
-        return create_project_from_gcode(stream, length, filename, bed)
-    if filename.lower().endswith(".3mf"):  # an OrcaSlicer/BambuStudio project keeps its plates and settings
+        return create_project_from_gcode(stream, length, filename, bed, quick=quick)
+    if filename.lower().endswith(".3mf"):
         path = _spool(stream, length)
         try:
-            if orca_3mf.is_project(path):
-                project = create_project(Path(filename.replace("\\", "/")).stem[:120])
-                try:
-                    return import_orca_project(project["id"], path, fresh=True)
-                except BaseException:
-                    delete_project(project["id"])
-                    raise
-            with path.open("rb") as fh:
-                split = splits.create_split(fh, length, filename, {"scale": scale, "up": up})
+            return _create_project_from_3mf(path, length, filename, scale, up, quick)
         finally:
             path.unlink(missing_ok=True)
-        return create_project(Path(split["source_name"]).stem, split_id=split["id"])
     split = splits.create_split(stream, length, filename, {"scale": scale, "up": up})
-    return create_project(Path(split["source_name"]).stem, split_id=split["id"])
+    return create_project(Path(split["source_name"]).stem, split_id=split["id"], quick=quick)
+
+
+def _create_project_from_3mf(path: Path, length: int, filename: str, scale, up, quick: bool) -> dict:
+    """Objects and plates are counted before anything is created. One object on one plate is a model like any other
+    (an Orca project's settings become the project's starting values); anything bigger becomes a normal, visible Project
+    with its objects and plates, even when a quick print was asked for (the result then says `routed`)."""
+    try:
+        found = orca_3mf.summary(path)
+    except orca_3mf.ThreeMFError as e:
+        raise jobs.JobError(str(e)) from e
+    stem = Path(filename.replace("\\", "/")).stem[:120]
+    if found["objects"] > 1 or found["plates"] > 1:
+        project = create_project(stem)
+        try:
+            imported = import_orca_project(project["id"], path, fresh=True)
+        except BaseException:
+            delete_project(project["id"])
+            raise
+        if quick:
+            counts = [f"{found['objects']} objects" if found["objects"] > 1 else None,
+                      f"{found['plates']} plates" if found["plates"] > 1 else None]
+            imported["routed"] = {"to": "project", "reason": f"The file has {' on '.join(c for c in counts if c)}, so it opens as a project"}
+        return imported
+    return _create_project_from_single_object_3mf(path, stem, scale, up, quick)
+
+
+def _create_project_from_single_object_3mf(path: Path, stem: str, scale, up, quick: bool) -> dict:
+    """A one-object 3MF (plain or Orca/Bambu), read with our own parser, normalised to the shape of a plain model upload (a split-owned whole model, so the
+    quick print intake works on it); the file's own settings and plate side become the project's starting values."""
+    _require_geometry()
+    try:
+        parsed = orca_3mf.parse(path)
+    except orca_3mf.ThreeMFError as e:
+        raise jobs.JobError(str(e)) from e
+    (obj,) = parsed["objects"]
+    notes = list(parsed["warnings"])
+    profile, bed = _orca_profile(parsed["project"], notes)
+    base = slicer.bundle_settings(profile["bundle_id"]) if profile.get("bundle_id") else None
+    profile["process"] = {**profile["process"], **_clean_object_settings(obj["settings"], base, obj["name"], notes)}
+    instance = next((i for i in obj["instances"] if i["printable"]), obj["instances"][0])   # a disabled copy is not the one to print
+    verts = obj["verts"] @ instance["matrix"]      # the object as the file poses it (its own scale and turn)
+    staging = Path(tempfile.mkdtemp(prefix=".orca-", dir=path.parent))
+    try:
+        stl = staging / "model.stl"
+        write_stl(stl, verts, obj["tris"])
+        with stl.open("rb") as fh:
+            split = splits.create_split(fh, stl.stat().st_size, f"{stem}.stl", {"scale": scale, "up": up})
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    project = create_project(stem, split_id=split["id"], quick=quick)
+    try:
+        _mutate(project["id"], "data", lambda d: d.update(bed=bed, profile={"spool_id": None, **profile}))
+    except BaseException:
+        delete_project(project["id"])
+        raise
+    return {**get_project(project["id"]), "import_notes": list(dict.fromkeys(notes))}
 
 
 def delete_project(project_id: int) -> None:
@@ -386,7 +438,12 @@ def validate_data(raw, record: dict) -> dict:
             "scale": _numbers(obj.get("scale", [1, 1, 1]), 3, "Scale", 0.01, 100),
             "overrides": slicer.normalize_overrides({"process": overrides}, base).get("process", {}) if overrides else {},
         })
-    return {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
+    out = {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
+    # A quick print's chosen orientation is the server's alone: whatever a save sends, the stored value is kept (the
+    # other writers, _mutate on "data", change a copy of the stored data and so keep it too).
+    if (record.get("data") or {}).get("orientation"):
+        out["orientation"] = record["data"]["orientation"]
+    return out
 
 
 def update_project(project_id: int, body: dict) -> dict:
@@ -581,6 +638,19 @@ def _orca_profile(project: dict | None, notes: list) -> tuple:
         return default, "textured"
 
 
+def _clean_object_settings(settings: dict, base: dict | None, label: str, notes: list) -> dict:
+    """The per-object process settings of an Orca project that this profile accepts; the rest are noted and left out."""
+    kept = {}
+    for key, value in settings.items():
+        try:
+            if base is None:
+                raise jobs.JobError("no profile")
+            kept.update(slicer.normalize_overrides({"process": {key: value}}, base).get("process", {}))
+        except jobs.JobError:
+            notes.append(f"{label}: setting “{key}” can't be used here and was left out")
+    return kept
+
+
 def import_orca_project(project_id: int, path: Path, fresh: bool = False) -> dict:
     """Bring the plates, objects, per-object settings and (for a new project) the settings of an Orca/Bambu 3MF into a project.
     With `fresh` the project's empty first plate is replaced; otherwise the file's plates are added after the existing ones."""
@@ -601,15 +671,7 @@ def import_orca_project(project_id: int, path: Path, fresh: bool = False) -> dic
     base = slicer.bundle_settings(profile["bundle_id"]) if profile.get("bundle_id") else None
 
     def clean(settings: dict, label: str) -> dict:
-        kept = {}
-        for key, value in settings.items():
-            try:
-                if base is None:
-                    raise jobs.JobError("no profile")
-                kept.update(slicer.normalize_overrides({"process": {key: value}}, base).get("process", {}))
-            except jobs.JobError:
-                notes.append(f"{label}: setting “{key}” can't be used here and was left out")
-        return kept
+        return _clean_object_settings(settings, base, label, notes)
 
     model_ids, models = {}, []
     next_model = _next_id(record["models"])
@@ -885,15 +947,21 @@ def place_whole_model(project_id: int) -> dict:
         raise jobs.JobError("Wait for the model to be analysed", 409)
     limits = _machine_limits_for(record)
     x0, y0, x1, y1 = limits["bed"]
-    center = _whole_position(split["analysis"]["size"], limits) or ((x0 + x1) / 2, (y0 + y1) / 2)
+    rotation = _orientation(record)
+    size = _oriented_size(split, rotation) if any(rotation) else split["analysis"]["size"]
+    center = _whole_position(size, limits) or ((x0 + x1) / 2, (y0 + y1) / 2)
     model = _store_source(project_id, _next_id(record["models"]), split["source_name"],
                           _copy_from(splits.work_dir(split_id) / split["source_file"]), split["settings"]["scale"], split["settings"]["up"])
     model["split"] = {"id": split_id, "part": 0, "supports": False}
     layout = [{"group": False, "items": [{"key": 0, "center": center, "turned": False, "oversize": False}]}]
-    return _replace_split_models(project_id, split_id, [model], layout)
+    placed = _replace_split_models(project_id, split_id, [model], layout)
+    if any(rotation):
+        _mutate(project_id, "data", lambda d: [o.__setitem__("rotation", list(rotation)) for o in d["objects"] if o["model"] == model["id"]])
+        placed = get_project(project_id)
+    return placed
 
 
-# ── Import and the simple print ────────────────────────────────────────────────
+# ── Import and Quick print ────────────────────────────────────────────────
 
 PLAUSIBLE_MM = (5.0, 2000.0)   # the longest side of a model outside this is more likely a unit mistake than a real part
 SCALE_GUESSES = ((1000.0, "metres"), (25.4, "inches"), (10.0, "centimetres"), (100.0, "decimetres"),
@@ -916,11 +984,17 @@ def intake(project_id: int) -> dict:
     can be skipped), whether its size is plausible for its scale, and a rough estimate."""
     record = get_project(project_id)
     split_id = record.get("split_id")
+    entry = (record["slices"] or {}).get("1") or {}
+    if split_id is None and entry.get("imported") and not record["data"]["objects"]:   # uploaded G-code: already sliced
+        grams = entry.get("estimate_g")
+        return {"state": "ready", "kind": "gcode", "file": f"{record['name']}.gcode", "placed": True, "fits": True, "scale_ok": True,
+                "can_print": True, "reason": None,
+                "estimate": {"grams": round(grams) if grams is not None else None, "seconds": entry.get("estimate_s"), "rough": False}}
     if split_id is None:
         return {"state": "none", "can_print": False, "reason": "This project has no uploaded model"}
     split = splits.get_split(split_id, detail=True)
     placed = any((m.get("split") or {}).get("id") == split_id for m in record["models"])
-    out = {"state": "analysing", "file": split["source_name"], "placed": placed, "can_print": False, "reason": None}
+    out = {"state": "analysing", "kind": "model", "file": split["source_name"], "placed": placed, "can_print": False, "reason": None}
     analysis = split.get("analysis")
     if split["state"] == splits.FAILED and not analysis:
         return {**out, "state": "failed", "reason": split.get("error") or "The model couldn't be read"}
@@ -935,6 +1009,9 @@ def intake(project_id: int) -> dict:
     fix = _scale_suggestion(longest, scale) if doubtful else None
     if doubtful:   # the analysis rounds to 0.1 mm, which reads 0 for a speck
         size = [round(x * scale, 4) for x in analysis.get("raw_size") or size]
+    rotation = _orientation(record)
+    if any(rotation) and not doubtful:
+        size = _oriented_size(split, rotation)
     fits = _whole_position(size, limits) is not None
     reason = None
     if doubtful:
@@ -944,9 +1021,102 @@ def intake(project_id: int) -> dict:
     grams = analysis["volume_cm3"] * ROUGH_G_PER_CM3
     return {**out, "state": "ready", "size": size, "volume_cm3": analysis["volume_cm3"],
             "repaired": bool(analysis.get("repairs")), "repairs": analysis.get("repairs") or [],
-            "scale": scale, "scale_ok": not doubtful, "scale_fix": fix,
+            "scale": scale, "rotation": list(rotation), "scale_ok": not doubtful, "scale_fix": fix,
             "fits": fits, "can_print": reason is None, "reason": reason,
             "estimate": {"grams": round(grams), "seconds": round(grams / ROUGH_G_PER_HOUR * 3600), "rough": True}}
+
+
+def _orientation(record: dict) -> list:
+    """The rotation (degrees about X, Y, Z) a quick model will be placed with, before it is on a plate."""
+    return [float(r) for r in record["data"].get("orientation") or (0.0, 0.0, 0.0)]
+
+
+def _split_mesh(split: dict):
+    import numpy as np
+    with np.load(splits.work_dir(split["id"]) / "model.npz") as data:
+        return data["verts"].astype(float), np.asarray(data["tris"])
+
+
+def _oriented_size(split: dict, rotation) -> list:
+    """Width, depth and height (mm, one decimal) of the analysed model turned by `rotation`."""
+    verts, _ = _split_mesh(split)
+    turned = verts @ rotation_matrix(rotation).T
+    return [round(float(x), 1) for x in turned.max(axis=0) - turned.min(axis=0)]
+
+
+def _euler_zyx(matrix) -> list:
+    """Degrees about X, Y, Z that rotation_matrix turns back into `matrix`."""
+    sy = -float(matrix[2][0])
+    ry = math.asin(max(-1.0, min(1.0, sy)))
+    if abs(sy) < 0.999999:
+        rx, rz = math.atan2(matrix[2][1], matrix[2][2]), math.atan2(matrix[1][0], matrix[0][0])
+    else:
+        rx, rz = math.atan2(-matrix[1][2], matrix[1][1]), 0.0
+    return [round(math.degrees(a) % 360, 4) % 360 for a in (rx, ry, rz)]
+
+
+def _largest_face_normal(verts, tris):
+    """Normal of the largest flat face: triangles facing the same way (within about 1 degree) are one face."""
+    import numpy as np
+    a, b, c = verts[tris[:, 0]], verts[tris[:, 1]], verts[tris[:, 2]]
+    cross = np.cross(b - a, c - a)
+    area = np.linalg.norm(cross, axis=1) / 2
+    keep = area > 1e-9
+    normals = cross[keep] / (2 * area[keep, None])
+    area = area[keep]
+    best, best_area = None, -1.0
+    for index in np.argsort(-area)[:2000]:                  # a face is as good as its biggest triangles suggest
+        close = normals @ normals[index] > math.cos(math.radians(1.0))
+        total = float(area[close].sum())
+        candidate = normals[close].T @ area[close]
+        # equal faces (a cylinder's two caps) tie: take the one already facing down, so a model resting flat stays put
+        if total > best_area * (1 + 1e-6) or (total > best_area * (1 - 1e-6) and candidate[2] / np.linalg.norm(candidate) < best[2] / np.linalg.norm(best)):
+            best, best_area = candidate, total
+    return best / np.linalg.norm(best)
+
+
+def _quick_orientation(project_id: int, change) -> dict:
+    """Change a quick model's orientation before it is placed: `change(split, current rotation)` gives the new one."""
+    record = get_project(project_id)
+    split_id = record.get("split_id")
+    if split_id is None:
+        raise jobs.JobError("This project has no uploaded model", 409)
+    if any((m.get("split") or {}).get("id") == split_id for m in record["models"]):
+        raise jobs.JobError("The model is already on a plate; turn it there", 409)
+    split = splits.get_split(split_id, detail=True)
+    if not split.get("analysis"):
+        raise jobs.JobError("Wait for the model to be analysed", 409)
+    rotation = [r % 360 for r in change(split, _orientation(record))]
+    _mutate(project_id, "data", lambda d: d.__setitem__("orientation", rotation))
+    return intake(project_id)
+
+
+def lay_flat(project_id: int) -> dict:
+    """Put the model on its largest flat face, turned to take the least room on the bed."""
+    import numpy as np
+
+    def change(split, current):
+        verts, tris = _split_mesh(split)
+        normal = _largest_face_normal(verts, tris)
+        down = np.array([0.0, 0.0, -1.0])
+        axis = np.cross(normal, down)
+        sine, cosine = float(np.linalg.norm(axis)), float(normal @ down)
+        if sine < 1e-9:
+            flip = np.eye(3) if cosine > 0 else np.diag([1.0, -1.0, -1.0])
+        else:
+            k = axis / sine
+            cross = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+            flip = np.eye(3) + sine * cross + (1 - cosine) * (cross @ cross)
+        # then spin it about the vertical axis to the tightest footprint, so a long model lies along the bed's diagonal
+        flat = verts[:: max(1, len(verts) // 4000)] @ flip.T
+        best = min(range(90), key=lambda deg: np.prod(np.ptp(flat[:, :2] @ rotation_matrix([0, 0, deg])[:2, :2].T, axis=0)))
+        return _euler_zyx(rotation_matrix([0, 0, best]) @ flip)
+    return _quick_orientation(project_id, change)
+
+
+def rotate_quarter(project_id: int) -> dict:
+    """Turn the model 90 degrees about the vertical axis."""
+    return _quick_orientation(project_id, lambda split, current: [current[0], current[1], (current[2] + 90) % 360])
 
 
 def auto_place(project_id: int) -> dict:
@@ -961,6 +1131,15 @@ def auto_place(project_id: int) -> dict:
     return {"placed": placed, "intake": info, "project": get_project(project_id)}
 
 
+def open_as_project(project_id: int) -> dict:
+    """Promote a quick project to a normal, visible Project (also the hand-off for a model too big for the bed).
+    Only the flag changes, so the model, plate and slice stay as they are; updated_at moves it to the top of the list."""
+    get_project(project_id)
+    with database.transaction() as conn:
+        conn.execute("UPDATE projects SET quick = 0, updated_at = ? WHERE id = ?", (time.time(), project_id))
+    return get_project(project_id)
+
+
 def fix_scale(project_id: int) -> dict:
     """Apply the suggested scale correction; the model is analysed again."""
     info = intake(project_id)
@@ -972,24 +1151,190 @@ def fix_scale(project_id: int) -> dict:
     return intake(project_id)
 
 
+QUICK_LAYER_HEIGHTS = (0.08, 0.12, 0.16, 0.2, 0.24, 0.28, 0.32)   # the fixed list the Quick print dialog offers (0.4 mm nozzle)
+QUICK_SUPPORTS = ("off", "normal", "tree")
+QUICK_BRIMS = ("off", "auto", "custom")
+QUICK_OPTION_KEYS = ("layer_height", "infill", "walls", "supports", "brim", "brim_width")
+
+
+def _quick_overrides(options) -> dict:
+    """The per-project process overrides for the dialog's options (any subset). Refuses anything outside the choices."""
+    if not isinstance(options, dict):
+        raise jobs.JobError("options must be an object")
+    unknown = sorted(set(options) - set(QUICK_OPTION_KEYS))
+    if unknown:
+        raise jobs.JobError(f"Unknown option: {', '.join(unknown)}")
+    out = {}
+
+    def number(key, label):
+        try:
+            value = float(options[key])
+        except (TypeError, ValueError):
+            raise jobs.JobError(f"{label} must be a number")
+        if not math.isfinite(value):
+            raise jobs.JobError(f"{label} must be a number")
+        return value
+    if "layer_height" in options:
+        value = number("layer_height", "Layer height")
+        if not any(abs(value - choice) < 1e-6 for choice in QUICK_LAYER_HEIGHTS):
+            raise jobs.JobError("Layer height must be one of: " + ", ".join(f"{c:g}" for c in QUICK_LAYER_HEIGHTS) + " mm")
+        out["layer_height"] = f"{value:g}"
+    if "infill" in options:
+        value = number("infill", "Infill")
+        if not 0 <= value <= 100 or value != int(value):
+            raise jobs.JobError("Infill must be a whole percentage from 0 to 100")
+        out["sparse_infill_density"] = f"{int(value)}%"
+    if "walls" in options:
+        value = number("walls", "Walls")
+        if not 1 <= value <= 20 or value != int(value):
+            raise jobs.JobError("Walls must be a whole number from 1 to 20")
+        out["wall_loops"] = str(int(value))
+    if "supports" in options:
+        choice = options["supports"]
+        if choice not in QUICK_SUPPORTS:
+            raise jobs.JobError(f"Supports must be one of: {', '.join(QUICK_SUPPORTS)}")
+        out["enable_support"] = "0" if choice == "off" else "1"
+        if choice != "off":
+            out["support_type"] = "tree(auto)" if choice == "tree" else "normal(auto)"
+    if "brim" in options:
+        choice = options["brim"]
+        if choice not in QUICK_BRIMS:
+            raise jobs.JobError(f"Brim must be one of: {', '.join(QUICK_BRIMS)}")
+        out["brim_type"] = {"off": "no_brim", "auto": "auto_brim", "custom": "outer_only"}[choice]   # off is written, not implied
+        if choice == "custom":
+            if "brim_width" not in options:
+                raise jobs.JobError("A custom brim needs a brim_width")
+            width = number("brim_width", "Brim width")
+            if not 0 < width <= 20:
+                raise jobs.JobError("Brim width must be between 0 and 20 mm")
+            out["brim_width"] = f"{width:g}"
+    elif "brim_width" in options:
+        raise jobs.JobError("brim_width only goes with brim: custom")
+    return out
+
+
+def quick_options(project_id: int, preset: str | None = None) -> dict:
+    """What the Quick print dialog starts from: the option values (the preset's own, with this project's choices over
+    them), the fixed layer-height list and the remembered printer, preset, spool and plate side."""
+    record = get_project(project_id)
+    profile = record["data"]["profile"]
+    bundle_id = preset or profile.get("bundle_id")
+    process = {}
+    if bundle_id:
+        process = {**slicer.bundle_settings(bundle_id)["process"], **profile.get("process", {})}
+
+    def num(key, default, cast):
+        try:
+            return cast(float(str(process.get(key, default)).rstrip("%")))
+        except (TypeError, ValueError):
+            return cast(default)
+    # What the dialog can't express is reported as "preset" (the preset's own value, left alone unless the user picks another)
+    supports = "off"
+    if str(process.get("enable_support", "0")) == "1":
+        kind = str(process.get("support_type", ""))
+        supports = "tree" if kind == "tree(auto)" else "normal" if kind == "normal(auto)" else "preset"
+    brim_type = process.get("brim_type", "auto_brim")   # the slicer's default when a preset says nothing
+    brim = {"no_brim": "off", "auto_brim": "auto", "outer_only": "custom"}.get(brim_type, "preset")
+    infill = num("sparse_infill_density", 15, float)
+    options = {"layer_height": num("layer_height", 0.2, float), "infill": int(infill) if infill == int(infill) else infill,
+               "walls": num("wall_loops", 2, int), "supports": supports, "brim": brim}
+    if brim == "custom":
+        options["brim_width"] = num("brim_width", 5, float)
+    plate = record["data"]["plates"][0]
+    remembered = remembered_defaults.usable()
+    return {"options": options, "layer_heights": list(QUICK_LAYER_HEIGHTS), "preset": bundle_id,
+            "printer_id": plate.get("printer_id"), "bed": record["data"]["bed"], "spool_id": profile.get("spool_id"),
+            "leveling": bool(remembered["options"].get("leveling")), "timelapse": bool(remembered["options"].get("timelapse"))}
+
+
+def _apply_quick_choices(project_id: int, body: dict) -> None:
+    """Write the dialog's printer, preset, plate side, spool and options to the project (nothing if any is refused)."""
+    options = _quick_overrides(body["options"]) if body.get("options") is not None else {}
+    if body.get("printer_id"):
+        jobs._require_printer(body["printer_id"])
+    if body.get("bed") is not None and body["bed"] not in slicer.BED_TYPES:
+        raise jobs.JobError(f"bed must be one of: {', '.join(slicer.BED_TYPES)}")
+    spool = _spool_id(body.get("spool_id")) if "spool_id" in body else None
+    bundle_id = body.get("preset") or get_project(project_id)["data"]["profile"].get("bundle_id")
+    base = slicer.bundle_settings(bundle_id) if bundle_id else None   # a preset that doesn't exist is refused here
+
+    def change(data):
+        profile = data["profile"]
+        if body.get("printer_id"):
+            data["plates"][0]["printer_id"] = body["printer_id"]
+        if body.get("bed") is not None:
+            data["bed"] = body["bed"]
+        if "spool_id" in body:
+            profile["spool_id"] = spool
+        if body.get("preset"):
+            profile["bundle_id"] = body["preset"]          # the options stay: they are overrides, not part of the preset
+        merged = {**profile.get("process", {}), **options}
+        if base is not None and merged:
+            merged = slicer.normalize_overrides({"process": merged}, base).get("process", {})
+        profile["process"] = merged
+    _mutate(project_id, "data", change)
+
+
+def _plate_preflight(project_id: int, plate: dict, bed: str) -> dict:
+    """The preflight checks a sliced plate would get as a Job on its printer, before it is queued."""
+    printer = state.printers.get(plate.get("printer_id") or "")
+    analysis = json.loads(plate_file(project_id, plate["id"], "analysis").read_text(encoding="utf-8"))
+    spool_info = preflight.loaded_spool(printer) if printer is not None else {"spool": None}
+    hardware = preflight.printer_hardware(printer.id) if printer is not None else {"nozzle_diameter": None}
+    job = {"id": 0, "source": "upload", "print_opts": {"smooth_plate": bed == "smooth"}, "estimate_g": None}
+    checks = preflight.evaluate(job, printer, analysis, spool_info, hardware)
+    worst = max((c["level"] for c in checks), key=preflight.LEVEL_ORDER.get, default="pass")
+    return {"state": "ready", "can_start": worst != "fail", "needs_acknowledgement": worst == "warn",
+            "warnings": [{"level": c["level"], "title": c["title"], "detail": c["detail"]} for c in checks if c["level"] in ("warn", "fail")],
+            "checks": sorted(checks, key=lambda c: -preflight.LEVEL_ORDER[c["level"]])}
+
+
 def slice_and_print(project_id: int, body: dict) -> dict:
-    """One action: place the model whole if it isn't yet, slice the plate and queue it when it's done."""
+    """One action: apply the dialog's choices, place the model whole if it isn't yet, slice the plate and queue it when it's
+    done. With `review` it stops after slicing and returns the preflight warnings under "review" instead of queueing."""
     info = intake(project_id)
     if not info["can_print"]:
         raise jobs.JobError(info["reason"] or "The model can't be printed yet", 409)
-    if body.get("printer_id"):
-        jobs._require_printer(body["printer_id"])
-        _mutate(project_id, "data", lambda d: d["plates"][0].__setitem__("printer_id", body["printer_id"]))
+    if info.get("kind") == "gcode":      # already sliced: its preset and options are fixed in the file, so none are written
+        body = {k: v for k, v in body.items() if k not in ("options", "preset")}
+    _apply_quick_choices(project_id, body)
+    if info.get("kind") == "gcode":      # queue it as it is
+        record = get_project(project_id)
+        _require_printers(record, {1})
+        plate = record["data"]["plates"][0]
+        if body.get("review"):      # the preflight report first, as for a sliced model
+            return {**record, "review": _plate_preflight(project_id, plate, record["data"]["bed"])}
+        acknowledge = bool(body.get("acknowledge_warnings"))
+        job = queue_plate(project_id, 1, {"leveling": bool(body.get("leveling")), "timelapse": bool(body.get("timelapse")), "acknowledge": acknowledge})
+        if acknowledge:
+            jobs.acknowledge_warnings(job["id"], plate.get("printer_id"))
+        return get_project(project_id)
     if not info["placed"]:
         place_whole_model(project_id)
     record = get_project(project_id)
-    plate_id = record["data"]["plates"][0]["id"]
+    plate = record["data"]["plates"][0]
+    plate_id = plate["id"]
     entry = record["slices"].get(str(plate_id)) or {}
+    review = bool(body.get("review"))
+    acknowledge = bool(body.get("acknowledge_warnings"))
+    opts = {"leveling": bool(body.get("leveling")), "timelapse": bool(body.get("timelapse")), "acknowledge": acknowledge}
     if entry.get("state") == SLICED and not entry.get("outdated"):
         _require_printers(record, {plate_id})
-        queue_plate(project_id, plate_id, {"leveling": bool(body.get("leveling")), "timelapse": bool(body.get("timelapse"))})
+        report = _plate_preflight(project_id, plate, record["data"]["bed"])
+        if review:
+            return {**record, "review": report}
+        if not report["can_start"]:
+            raise jobs.JobError("Preflight failed: " + "; ".join(c["title"] for c in report["checks"] if c["level"] == "fail"), 409)
+        job = queue_plate(project_id, plate_id, opts)
+        if acknowledge:
+            jobs.acknowledge_warnings(job["id"], plate.get("printer_id"))
         return get_project(project_id)
-    return request_slice(project_id, plate_id, send=True)
+    if entry.get("state") in (QUEUED, SLICING) and review:
+        return {**record, "review": {"state": "slicing"}}
+    if review:
+        _require_printers(record, {plate_id})
+        return {**request_slice(project_id, plate_id), "review": {"state": "slicing"}}
+    return request_slice(project_id, plate_id, send=True, send_opts=opts)
 
 
 def _footprint(project_id: int, obj: dict) -> tuple:
@@ -1329,12 +1674,12 @@ def read_arrangement(path: Path) -> dict:
 
 # ── Slicing a plate ────────────────────────────────────────────────────────────
 
-def _queued_entry(previous: dict | None, queued_at: float, send: bool = False) -> dict:
+def _queued_entry(previous: dict | None, queued_at: float, send: bool = False, send_opts: dict | None = None) -> dict:
     """A plate waiting to be sliced. `last_duration_ms` (how long it took before) lets the page show an expected time."""
     previous = previous or {}
     last = previous.get("duration_ms", previous.get("last_duration_ms"))
     return {"state": QUEUED, "queued_at": queued_at, **({"last_duration_ms": last} if last is not None else {}),
-            **({"auto_send": True} if send else {})}
+            **({"auto_send": True} if send else {}), **({"send_opts": send_opts} if send and send_opts else {})}
 
 
 def _require_printers(record: dict, plate_ids) -> None:
@@ -1353,7 +1698,7 @@ def _stage(project_id: int, plate_id: int, stage: str) -> None:
     _mutate(project_id, "slices", change)
 
 
-def request_slice(project_id: int, plate_id: int, send: bool = False) -> dict:
+def request_slice(project_id: int, plate_id: int, send: bool = False, send_opts: dict | None = None) -> dict:
     """Slice one plate. With `send`, the finished plate goes to the queue for its own printer."""
     record = get_project(project_id)
     if plate_id not in {p["id"] for p in record["data"]["plates"]}:
@@ -1364,7 +1709,7 @@ def request_slice(project_id: int, plate_id: int, send: bool = False) -> dict:
         raise jobs.JobError("The plate is already being sliced", 409)
     if send:
         _require_printers(record, {plate_id})
-    _mutate(project_id, "slices", lambda s: s.__setitem__(str(plate_id), _queued_entry(s.get(str(plate_id)), time.time(), send)))
+    _mutate(project_id, "slices", lambda s: s.__setitem__(str(plate_id), _queued_entry(s.get(str(plate_id)), time.time(), send, send_opts)))
     notify_worker()
     return get_project(project_id)
 
@@ -1597,6 +1942,8 @@ def queue_plates(project_id: int, body: dict) -> dict:
         raise jobs.JobError(f"{_names(outdated)} changed after {'it was' if one else 'they were'} sliced — slice {'it' if one else 'them'} again", 409)
     if not body.get("again"):
         repeats = [p["name"] for p in plates if p["id"] in _open_job_plates(project_id)]
+        if repeats and record["quick"]:      # a quick print's user never sees plates
+            raise jobs.JobError("This print is already waiting in the queue — send again only to print another copy", 409)
         if repeats:
             raise jobs.JobError(f"{_names(repeats)} {'is' if len(repeats) == 1 else 'are'} already in the queue — "
                                 "send again only to print another copy", 409)
@@ -1758,9 +2105,10 @@ async def process_next(slot: int = 0) -> bool:
         _mutate(project_id, "models", update, created_at)
     else:
         try:
-            auto = bool(get_project(project_id)["slices"].get(str(item), {}).get("auto_send"))
+            queued = get_project(project_id)["slices"].get(str(item), {})
+            auto, send_opts = bool(queued.get("auto_send")), queued.get("send_opts") or {}
         except jobs.JobError:
-            auto = False
+            auto, send_opts = False, {}
         try:
             result = await loop.run_in_executor(None, _slice, project_id, item, slot)
         except Exception as e:
@@ -1770,15 +2118,18 @@ async def process_next(slot: int = 0) -> bool:
             result["auto_send"] = True   # the page keeps checking until the plate is in the queue (or says why not)
         _mutate(project_id, "slices", lambda s: s.__setitem__(str(item), result), created_at)
         if auto and result.get("state") == SLICED:
-            await loop.run_in_executor(None, _auto_send, project_id, item, created_at)
+            await loop.run_in_executor(None, _auto_send, project_id, item, created_at, send_opts)
             await jobs.broadcast()
     return True
 
 
-def _auto_send(project_id: int, plate_id: int, created_at: float) -> None:
+def _auto_send(project_id: int, plate_id: int, created_at: float, send_opts: dict | None = None) -> None:
     """Slice & send: put the finished plate in the queue for its printer, and note the job (or why it couldn't be sent)."""
     try:
-        job = queue_plate(project_id, plate_id, {})
+        send_opts = send_opts or {}
+        job = queue_plate(project_id, plate_id, {"leveling": send_opts.get("leveling"), "timelapse": send_opts.get("timelapse")})
+        if send_opts.get("acknowledge"):
+            jobs.acknowledge_warnings(job["id"], job.get("printer_id"))
         outcome = {"sent_job": job["id"], "sent_to": job.get("printer_id")}
     except jobs.JobError as e:
         outcome = {"send_error": str(e)}

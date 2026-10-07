@@ -6,9 +6,9 @@
   <title>Projects – Spooler</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <meta name="theme-color" content="#0d0e12" />
-  <link rel="stylesheet" href="style.css?v=54" />
+  <link rel="stylesheet" href="style.css?v=57" />
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=23" />
+  <link rel="stylesheet" href="slicer.css?v=24" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -41,7 +41,6 @@
         <p class="slicer-muted">Open an existing project, or upload an STL, OBJ or 3MF to start a new one.</p>
         <button id="btn-empty-projects" class="btn btn-primary" type="button">Open or create a project</button>
       </section>
-      <section id="simple-card" class="slicer-card simple-card" hidden></section>
       <div id="split-side" class="split-side" hidden></div>
 
       <section class="slicer-card" data-steps="plates slice">
@@ -194,7 +193,7 @@
     <h3>Projects</h3>
     <section class="slicer-new-model">
       <h4>Start from a model</h4>
-      <p class="slicer-muted">Import an STL, OBJ, 3MF or G-code file, or drop one here. A model that fits the bed goes straight to one confirm screen; a bigger one opens Model and Split. G-code becomes a ready-to-print project, and an OrcaSlicer project 3MF keeps its plates and settings.</p>
+      <p class="slicer-muted">Import an STL, OBJ, 3MF or G-code file, or drop one here. It opens as a Project on the Model step, where a model that fits the bed goes on a plate whole and a bigger one is split. For one model that fits, Quick print on the dashboard is quicker. G-code becomes a ready-to-print project, and an OrcaSlicer project 3MF keeps its plates and settings.</p>
       <div class="slicer-new-row">
         <label class="slicer-field">Units
           <select id="new-scale"><option value="1">Millimetres</option><option value="10">Centimetres (×10)</option><option value="25.4">Inches (×25.4)</option><option value="1000">Metres (×1000)</option></select>
@@ -248,7 +247,7 @@
   </dialog>
 
   <div id="toast-area"></div>
-  <script src="/outcome-prompt.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=19"></script>
+  <script src="/outcome-prompt.js?v=4"></script>
+  <script type="module" src="slicer/main.js?v=21"></script>
 </body>
 </html>

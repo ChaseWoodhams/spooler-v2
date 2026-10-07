@@ -164,6 +164,28 @@ def _merge_object(archive, cache: dict, obj: dict, wanted_parts: dict | None, wa
     return np.concatenate(all_verts), np.concatenate(all_tris)
 
 
+def summary(source) -> dict:
+    """What a 3MF holds, counted without reading its meshes: {"objects": printable instances, "plates": plates, "orca": bool}.
+    Every printable build item is one object on the bed (a repeated object counts once per copy; a disabled one, printable="0", is not counted); an Orca project lists its plates,
+    anything else has the one. Raises ThreeMFError for a file that isn't a 3MF archive."""
+    try:
+        archive = zipfile.ZipFile(source)
+    except (zipfile.BadZipFile, OSError):
+        raise ThreeMFError("That isn't a valid 3MF file")
+    with archive:
+        if MODEL_PATH not in archive.namelist():
+            raise ThreeMFError("The 3MF has no model")
+        objects = 0
+        with archive.open(MODEL_PATH) as fh:
+            for _, element in ElementTree.iterparse(fh):
+                if _local(element.tag) == "item" and _attrs(element).get("printable", "1") != "0":
+                    objects += 1
+                element.clear()
+        plates = len(_settings(archive)["plates"]) or 1
+        names = set(archive.namelist())
+    return {"objects": objects, "plates": plates, "orca": SETTINGS_PATH in names or PROJECT_PATH in names}
+
+
 def parse(source) -> dict:
     """Read a project (path or file object). Raises ThreeMFError for a file that can't be read."""
     warnings = []

@@ -127,10 +127,10 @@ function syncShellView() {
   document.getElementById("btn-printers-nav").classList.toggle("active", !projects);
   if (projects) {
     const frame = document.getElementById("projects-frame");
-    const params = new URLSearchParams(hash.slice(1)); // #projects=<id>[&confirm=1] (confirm: straight after an import)
+    const params = new URLSearchParams(hash.slice(1)); // #projects=<id>[&printer=<id>]
     const id = Number(params.get("projects")) || 0;
     const printer = id ? params.get("printer") || "" : ""; // from a push: focus that printer's card on the project page
-    const target = id ? `/slicer.html?project=${id}${printer ? `&printer=${encodeURIComponent(printer)}` : ""}${params.has("confirm") ? "&confirm=1" : ""}` : "/slicer.html";
+    const target = id ? `/slicer.html?project=${id}${printer ? `&printer=${encodeURIComponent(printer)}` : ""}` : "/slicer.html";
     const route = `${id}|${printer}`;
     if (!frame.getAttribute("src") || (id && frame.dataset.route !== route)) {
       frame.dataset.route = route;

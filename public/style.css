@@ -747,6 +747,8 @@ body.panel-open { overflow: hidden; }
   border-radius: 50%;
   vertical-align: middle;
 }
+.history-thumb { width: 28px; height: 22px; margin-right: 8px; border-radius: 3px; object-fit: cover; vertical-align: middle; background: var(--surface2); }
+.history-quick { margin-left: 6px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); font-size: 11px; font-weight: 400; }
 .history-detail { display: flex; flex-direction: column; gap: 12px; padding: 4px 20px 16px; }
 .history-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; font-size: 12px; }
 .history-facts dt { color: var(--text-muted); }
@@ -1952,3 +1954,81 @@ body.view-printer #needs-you, body.view-printer #dash-bar, body.view-printer #da
 /* Dropping a model file on the dashboard imports it */
 body.import-dropping::after { content: "Drop to import"; position: fixed; inset: 10px; z-index: 900; display: grid; place-items: center;
   border: 2px dashed var(--accent); border-radius: 12px; background: rgba(13, 14, 18, .75); color: var(--text); font-size: 20px; pointer-events: none; }
+
+/* ─── Quick print modal ───────────────────────────────────────────────────── */
+.qp-scrim { position: fixed; inset: 0; z-index: 950; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(0,0,0,.6); }
+.qp-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; width: min(920px, 100%); max-height: 92vh; display: flex; flex-direction: column; box-shadow: var(--shadow); outline: none; }
+.qp-head { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+.qp-head h2 { margin: 0; font-size: 17px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qp-x { background: none; border: 0; color: var(--text-muted); font-size: 24px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.qp-x:hover { color: var(--text); }
+.qp-body { padding: 18px; overflow: auto; min-height: 0; }
+.qp-foot { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-top: 1px solid var(--border); background: var(--surface2); border-radius: 0 0 14px 14px; flex-wrap: wrap; }
+.qp-foot:empty { display: none; }
+.qp-sp { flex: 1; }
+.qp-muted { color: var(--text-muted); font-size: 13px; }
+.qp-cols { display: grid; grid-template-columns: 300px 1fr; gap: 20px; }
+.qp-left, .qp-right { min-width: 0; }
+.qp-right { display: flex; flex-direction: column; gap: 12px; }
+.qp-preview { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; height: 220px; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; text-align: center; padding: 8px; }
+.qp-preview canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.qp-badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.qp-badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--surface2); border: 1px solid var(--border); }
+.qp-badge.qp-ok { color: var(--green); border-color: rgba(34,197,94,.45); }
+.qp-badge.qp-bad { color: var(--red); border-color: rgba(239,68,68,.5); }
+.qp-badge.qp-warn { color: var(--yellow); border-color: rgba(234,179,8,.5); }
+.qp-slot { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.qp-slot:empty { display: none; }
+.qp-left .qp-slot { display: flex; }
+.qp-notice { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 13px; background: var(--surface2); }
+.qp-notice.qp-warn { background: rgba(234,179,8,.08); border-color: rgba(234,179,8,.45); }
+.qp-notice.qp-bad { background: rgba(239,68,68,.08); border-color: rgba(239,68,68,.5); }
+.qp-warning + .qp-warning { margin-top: 8px; }
+.qp-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.qp-f { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted); min-width: 0; }
+.qp-f select, .qp-f input[type=number] { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px; font-size: 14px; width: 100%; min-width: 0; }
+.qp-f select:disabled { opacity: .6; }
+.qp-options { border: 0; border-top: 1px solid var(--border); padding-top: 12px; min-width: 0; }
+.qp-options legend { font-size: 12px; color: var(--text-muted); padding: 0 6px 0 0; }
+.qp-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.qp-check { display: flex; gap: 6px; align-items: center; font-size: 14px; cursor: pointer; }
+.qp-status { display: flex; flex-direction: column; gap: 12px; padding: 4px 0; }
+.qp-bar { height: 8px; background: var(--surface2); border-radius: 99px; overflow: hidden; }
+.qp-bar i { display: block; height: 100%; background: var(--accent); transition: width .2s; }
+.qp-bar-busy i { width: 35%; animation: qp-slide 1.2s ease-in-out infinite alternate; }
+@keyframes qp-slide { from { margin-left: 0; } to { margin-left: 65%; } }
+@media (max-width: 760px) {
+  .qp-cols { grid-template-columns: 1fr; }
+  .qp-grid3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .qp-preview { height: 180px; }
+  .qp-scrim { padding: 8px; }
+}
+
+/* Quick print: More settings panel (ticket 12). The settings panel's own classes, scoped to the modal so slicer.css keeps the project page */
+.qp-more { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; width: 100%; }
+.qp-more-tools { display: flex; gap: 8px; align-items: center; }
+.qp-more-tools input[type=search], .qp-more-tools select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+.qp-more-tools input[type=search] { flex: 1; min-width: 0; }
+.qp-more-pages { display: flex; gap: 2px; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.qp-more-pages button { background: transparent; border: 0; color: var(--text-muted); font-size: 12px; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
+.qp-more-pages button.active { background: rgba(255, 107, 43, .12); color: var(--accent); }
+.qp-more-pages button .count { color: var(--accent); margin-left: 3px; }
+.qp-more-body { display: flex; flex-direction: column; gap: 10px; max-height: 340px; overflow-y: auto; padding-right: 4px; }
+.qp-more .set-note { font-size: 12px; color: var(--text-muted); margin: 0; }
+.qp-more .set-group h5 { font-size: 12px; font-weight: 600; margin: 4px 0; color: var(--text); }
+.qp-more .set-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) 18px; gap: 6px; align-items: center; padding: 3px 0; font-size: 12px; }
+.qp-more .set-row.disabled { opacity: .45; }
+.qp-more .set-label { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; cursor: help; }
+.qp-more .set-row.modified .set-label { color: var(--accent); }
+.qp-more .set-row.modified .set-label::before { content: "● "; font-size: 9px; }
+.qp-more .set-fields { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.qp-more .set-field { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.qp-more .set-field small { color: var(--text-muted); font-size: 10px; }
+.qp-more .set-fields input[type=text], .qp-more .set-fields select { width: 100%; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 3px 6px; font-size: 12px; }
+.qp-more .set-fields .set-field input[type=text] { width: 70px; }
+.qp-more .set-fields input[type=checkbox] { accent-color: var(--accent); }
+.qp-more .set-fields input.invalid { border-color: var(--red); }
+.qp-more .set-unit { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.qp-more .set-reset { background: transparent; border: 0; color: var(--accent); cursor: pointer; padding: 0; font-size: 13px; visibility: hidden; }
+.qp-more .set-row.modified .set-reset { visibility: visible; }
+@media (max-width: 760px) { .qp-more .set-fields input[type="text"], .qp-more .set-fields select { min-height: 44px; font-size: 16px; } .qp-more-pages button { min-height: 44px; } }

@@ -92,6 +92,54 @@ class OutcomePromptTests(unittest.TestCase):
         self.plates.push(9, "plate4.gcode", 50, 50)
         self.assertEqual(len(self.sent), 1)
 
+    # quick prints: no visible project to name or open
+
+    def make_quick(self):
+        """Turn the fixture project into a Quick print's hidden project, named for its model."""
+        with outcome_prompt.database.transaction() as conn:
+            conn.execute("UPDATE projects SET quick = 1, name = 'cube' WHERE id = ?", (self.plates.project_id,))
+
+    def test_a_quick_print_pushes_the_model_and_printer_and_opens_the_printer_not_the_hidden_project(self):
+        self.make_quick()
+        self.plate_print(1)
+        title, body, data = self.sent[0]
+        self.assertEqual(title, "Printer 1 finished cube")
+        self.assertNotIn("Plate", title)
+        self.assertEqual(data["url"], "/#printer=p1")
+        self.assertEqual(data["tag"], f"print-{data['print_id']}")
+
+    def test_a_quick_print_awaits_with_the_model_name_and_no_plate_name(self):
+        self.make_quick()
+        self.plate_print(1)
+        (awaiting,) = self.prompts()
+        self.assertEqual((awaiting["project_name"], awaiting["plate_name"]), ("cube", None))
+        self.assertIs(awaiting["quick"], True)
+        self.assertEqual(awaiting["url"], "/#printer=p1")
+
+    def test_a_normal_print_still_carries_its_project_and_plate(self):
+        self.plate_print(4)
+        (awaiting,) = self.prompts()
+        self.assertEqual((awaiting["project_id"], awaiting["plate_name"], awaiting["quick"]), (self.plates.project_id, "Plate 4", False))
+
+    def test_the_queue_marks_a_quick_job_and_the_dashboard_drops_its_project_id(self):
+        self.make_quick()
+        job = self.plates.plate_job(1)
+        listed = {j["id"]: j for j in self.call("GET", "/api/jobs")[1]["jobs"]}
+        self.assertIs(listed[job["id"]]["project_quick"], True)
+        self.plate_print(4)  # a closed print, so the printer shows under Needs you with the queued job next
+        (waiting,) = self.call("GET", "/api/dashboard")[1]["needs_you"]["printers"]
+        self.assertEqual(waiting["next_job"]["id"], job["id"])
+        self.assertIsNone(waiting["next_job"]["project_id"])
+        self.assertIsNone(waiting["next_job"]["plate_id"])
+
+    def test_a_normal_job_keeps_its_project_in_the_queue_and_dashboard(self):
+        job = self.plates.plate_job(2)
+        listed = {j["id"]: j for j in self.call("GET", "/api/jobs")[1]["jobs"]}
+        self.assertEqual((listed[job["id"]]["project_id"], listed[job["id"]]["project_quick"]), (self.plates.project_id, False))
+        self.plate_print(4)
+        (waiting,) = self.call("GET", "/api/dashboard")[1]["needs_you"]["printers"]
+        self.assertEqual(waiting["next_job"]["project_id"], self.plates.project_id)
+
     # the set of Prints awaiting an outcome
 
     def test_a_closed_print_awaits_until_the_user_answers(self):
