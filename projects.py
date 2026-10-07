@@ -470,8 +470,8 @@ def validate_data(raw, record: dict) -> dict:
     filaments = _filament_choices(raw.get("filaments"), model_ids)
     if filaments:  # likewise only when a model has a choice
         result["filaments"] = filaments
-    if raw.get("arrange_engine") == "orca":  # likewise only when OrcaSlicer's arranger is chosen over the nester
-        result["arrange_engine"] = "orca"
+    if raw.get("arrange_engine") == ORCA:  # likewise only when OrcaSlicer's arranger is chosen over the nester
+        result["arrange_engine"] = ORCA
     return result
 
 
@@ -506,6 +506,28 @@ def _mutate(project_id: int, column: str, change, created_at: float | None = Non
 
 
 # ── Models ─────────────────────────────────────────────────────────────────────
+
+def _save_data(project_id: int, record: dict, data: dict, emptied=()) -> None:
+    """Write `data` as the project's next revision, only if the project is still at the revision `record` was read at.
+    Plates in `emptied` lose their slices and their folders."""
+    with database.transaction() as conn:
+        row = conn.execute("SELECT revision, slices FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise jobs.JobError("Project not found", 404)
+        if row["revision"] != record["revision"]:
+            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
+        if emptied:
+            slices = json.loads(row["slices"] or "{}")
+            for plate_id in emptied:
+                slices.pop(str(plate_id), None)
+            conn.execute("UPDATE projects SET data = ?, slices = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                         (json.dumps(data), json.dumps(slices), time.time(), project_id))
+        else:
+            conn.execute("UPDATE projects SET data = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                         (json.dumps(data), time.time(), project_id))
+    for plate_id in emptied:
+        shutil.rmtree(plate_dir(project_id, plate_id), ignore_errors=True)
+
 
 def _next_id(items) -> int:
     return max((int(i["id"]) for i in items), default=0) + 1
@@ -1145,15 +1167,10 @@ def plate_time(project_id: int, record: dict, plate_id: int, entry: dict) -> dic
     return {**out, "seconds": seconds, "approximate": True, "source": "model"}
 
 
-def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, overrides_for) -> dict:
-    """Move objects as a layout (packing.pack's, or the nester's; keyed by object id) says, onto `plate_ids` in order and
-    new plates after them. A layout plate with a "plate" goes onto that plate and keeps its settings; an item turns by its
-    "angle" degrees about Z, else a quarter turn when "turned". Plates among `plate_ids` left empty are removed; plates
-    still holding importing models are kept."""
-    data = json.loads(json.dumps(record["data"]))
-    ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    busy = {o["plate"] for o in data["objects"] if o["plate"] in plate_ids and o["model"] not in ready}
-    free = [plate_id for plate_id in plate_ids if plate_id not in busy]
+def _place_layout(data: dict, free: list, layout: list, overrides_for) -> list:
+    """Move the objects in `data` as a layout (packing.pack's, or the nester's; keyed by object id) says, onto the plates in
+    `free` in order and new plates after them. A layout plate with a "plate" goes onto that plate and keeps its settings; an
+    item turns by its "angle" degrees about Z, else a quarter turn when "turned". Returns the ids of the plates used."""
     objects = {o["id"]: o for o in data["objects"]}
     plates = {p["id"]: p for p in data["plates"]}
     spare = [plate_id for plate_id in free if plate_id not in {p.get("plate") for p in layout}]
@@ -1169,6 +1186,7 @@ def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, 
                 raise jobs.JobError(f"A project holds at most {MAX_PLATES} plates")
             target = _new_plate(_next_id(data["plates"]), overrides_for(plate["group"]))
             data["plates"].append(target)
+            plates[target["id"]] = target
         used.append(target["id"])
         for item in plate["items"]:
             obj = objects[item["key"]]
@@ -1177,25 +1195,24 @@ def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, 
             turn = item["angle"] if "angle" in item else 90 if item["turned"] else 0
             if turn:
                 obj["rotation"][2] = round((obj["rotation"][2] + turn) % 360, 4)
-    emptied =[plate_id for plate_id in free if plate_id not in used]
+    return used
+
+
+def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, overrides_for) -> dict:
+    """Apply a layout (see `_place_layout`) onto `plate_ids` and new plates. Plates among `plate_ids` left empty are removed;
+    plates still holding importing models are kept."""
+    data = json.loads(json.dumps(record["data"]))
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    busy = {o["plate"] for o in data["objects"] if o["plate"] in plate_ids and o["model"] not in ready}
+    free = [plate_id for plate_id in plate_ids if plate_id not in busy]
+    used = _place_layout(data, free, layout, overrides_for)
+    emptied = [plate_id for plate_id in free if plate_id not in used]
     data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
-    with database.transaction() as conn:
-        row = conn.execute("SELECT revision, slices FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if row is None:
-            raise jobs.JobError("Project not found", 404)
-        if row["revision"] != record["revision"]:
-            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
-        slices = json.loads(row["slices"] or "{}")
-        for plate_id in emptied:
-            slices.pop(str(plate_id), None)
-        conn.execute("UPDATE projects SET data = ?, slices = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
-                     (json.dumps(data), json.dumps(slices), time.time(), project_id))
-    for plate_id in emptied:
-        shutil.rmtree(plate_dir(project_id, plate_id), ignore_errors=True)
+    _save_data(project_id, record, data, emptied)
     return get_project(project_id)
 
 
-ARRANGE_ENGINES = ("nester", "orca")   # the outline nester (default), or OrcaSlicer's own --arrange as a fallback
+NESTER, ORCA = ARRANGE_ENGINES = ("nester", "orca")   # the outline nester (default), or OrcaSlicer's own --arrange as a fallback
 SUPPORT_OVERHANG_MM2 = 25.0            # underside area, off the bed, that makes an object need supports in its orientation
 
 
@@ -1331,18 +1348,11 @@ def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
 def _set_arrange_engine(project_id: int, record: dict, engine: str) -> dict:
     """Remember in the project which engine arranges it: only OrcaSlicer's is stored, the nester being the default."""
     data = json.loads(json.dumps(record["data"]))
-    if engine == "orca":
-        data["arrange_engine"] = "orca"
+    if engine == ORCA:
+        data["arrange_engine"] = ORCA
     else:
         data.pop("arrange_engine", None)
-    with database.transaction() as conn:
-        row = conn.execute("SELECT revision FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if row is None:
-            raise jobs.JobError("Project not found", 404)
-        if row["revision"] != record["revision"]:
-            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
-        conn.execute("UPDATE projects SET data = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
-                     (json.dumps(data), time.time(), project_id))
+    _save_data(project_id, record, data)
     return get_project(project_id)
 
 
@@ -1352,15 +1362,15 @@ def arrange(project_id: int, plate_ids=None, engine: str | None = None) -> dict:
     each plate in place instead (its arranger knows nothing of pins, so a plate holding pinned objects is refused, nor of
     filaments or clearance); a choice of engine is kept in the project and used from then on when none is named."""
     record = get_project(project_id)
-    stored = record["data"].get("arrange_engine", "nester")
+    stored = record["data"].get("arrange_engine", NESTER)
     if engine is not None and engine not in ARRANGE_ENGINES:
         raise jobs.JobError(f"engine must be one of: {', '.join(ARRANGE_ENGINES)}")
     order = _arrange_plate_ids(record, plate_ids)
-    if (engine or stored) == "orca" and any(o.get("pinned") and o["plate"] in order for o in record["data"]["objects"]):
+    if (engine or stored) == ORCA and any(o.get("pinned") and o["plate"] in order for o in record["data"]["objects"]):
         raise jobs.JobError("OrcaSlicer's arranger can't keep clear of pinned objects: unpin them or use the nester")
     if engine is not None and engine != stored:
         record, stored = _set_arrange_engine(project_id, record, engine), engine
-    if stored == "orca":
+    if stored == ORCA:
         ready = {m["id"] for m in record["models"] if m["state"] == READY}
         for plate_id in order:
             if any(o["plate"] == plate_id and o["model"] in ready and not o.get("pinned") for o in record["data"]["objects"]):
@@ -1403,14 +1413,7 @@ def set_copies(project_id: int, object_id, copies, revision=None) -> dict:
         data["objects"] = [o for o in data["objects"] if o["id"] not in gone]
     if data["objects"] == record["data"]["objects"] and data["plates"] == record["data"]["plates"]:
         return {**record, "copies": result}
-    with database.transaction() as conn:
-        row = conn.execute("SELECT revision FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if row is None:
-            raise jobs.JobError("Project not found", 404)
-        if row["revision"] != record["revision"]:
-            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
-        conn.execute("UPDATE projects SET data = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
-                     (json.dumps(data), time.time(), project_id))
+    _save_data(project_id, record, data)
     result["count"] = sum(1 for o in data["objects"] if o["model"] == source["model"])
     return {**get_project(project_id), "copies": result}
 
@@ -1569,18 +1572,11 @@ def suggest_orientation(project_id: int, object_id: int, body: dict) -> dict:
 
 
 def _apply_rotations(project_id: int, record: dict, rotations: dict) -> dict:
-    with database.transaction() as conn:
-        row = conn.execute("SELECT data, revision FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if row is None:
-            raise jobs.JobError("Project not found", 404)
-        if row["revision"] != record["revision"]:
-            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
-        data = json.loads(row["data"])
-        for obj in data["objects"]:
-            if obj["id"] in rotations:
-                obj["rotation"] = rotations[obj["id"]]
-        conn.execute("UPDATE projects SET data = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
-                     (json.dumps(data), time.time(), project_id))
+    data = json.loads(json.dumps(record["data"]))
+    for obj in data["objects"]:
+        if obj["id"] in rotations:
+            obj["rotation"] = rotations[obj["id"]]
+    _save_data(project_id, record, data)
     return get_project(project_id)
 
 
@@ -1676,32 +1672,10 @@ def _plan_data(project_id: int, record: dict) -> dict:
     layout = arrange_layout(project_id, {**record, "data": data}, replannable)
     if not layout:
         return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "fingerprint": _plan_fingerprint(record["data"], [])}
-    objects = {o["id"]: o for o in data["objects"]}
-    plates = {p["id"]: p for p in data["plates"]}
-    spare = [plate_id for plate_id in replannable if plate_id not in {p.get("plate") for p in layout}]
-    used = []
-    for plate in layout:
-        if plate.get("plate") is not None:
-            target = plates[plate["plate"]]
-        elif spare:
-            target = plates[spare.pop(0)]
-            target["overrides"] = dict(json.loads(plate["group"])["overrides"])
-        else:
-            if len(data["plates"]) >= MAX_PLATES:
-                raise jobs.JobError(f"A project holds at most {MAX_PLATES} plates")
-            target = _new_plate(_next_id(data["plates"]), json.loads(plate["group"])["overrides"])
-            data["plates"].append(target)
-            plates[target["id"]] = target
-        used.append(target["id"])
-        for item in plate["items"]:
-            obj = objects[item["key"]]
-            obj["plate"] = target["id"]
-            obj["position"] = [round(item["center"][0], 3), round(item["center"][1], 3)]
-            turn = item["angle"] if "angle" in item else 90 if item["turned"] else 0
-            if turn:
-                obj["rotation"][2] = round((obj["rotation"][2] + turn) % 360, 4)
+    used = _place_layout(data, replannable, layout, lambda group: json.loads(group)["overrides"])
     emptied = [plate_id for plate_id in replannable if plate_id not in used]
     data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
+    plates = {p["id"]: p for p in data["plates"]}
     for plate_id in used:   # a plate that now holds other objects isn't the plate the printer was chosen for
         if {o["id"] for o in data["objects"] if o["plate"] == plate_id} != {o["id"] for o in record["data"]["objects"] if o["plate"] == plate_id}:
             plates[plate_id].pop("printer_id", None)
@@ -1722,7 +1696,6 @@ def _plan_data(project_id: int, record: dict) -> dict:
     order += later
     taken = {int(m.group(1)) for p in data["plates"] if p["id"] in kept_ids and (m := _DEFAULT_PLATE_NAME.match(p["name"] or ""))}
     free = (n for n in range(1, 10000) if n not in taken)
-    plates = {p["id"]: p for p in data["plates"]}
     for plate_id in ordered:   # default names follow the plan; a name the user gave stays
         if not plates[plate_id]["name"] or _DEFAULT_PLATE_NAME.match(plates[plate_id]["name"]):
             plates[plate_id]["name"] = f"Plate {next(free)}"
@@ -1800,19 +1773,7 @@ def accept_plan(project_id: int, plan, fingerprint=None) -> dict:
     view = _plan_view(record, planned)
     if not planned["plates"]:
         return {**record, "plan": view}
-    with database.transaction() as conn:
-        row = conn.execute("SELECT revision, slices FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if row is None:
-            raise jobs.JobError("Project not found", 404)
-        if row["revision"] != record["revision"]:
-            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
-        slices = json.loads(row["slices"] or "{}")
-        for plate_id in planned["emptied"]:
-            slices.pop(str(plate_id), None)
-        conn.execute("UPDATE projects SET data = ?, slices = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
-                     (json.dumps(planned["data"]), json.dumps(slices), time.time(), project_id))
-    for plate_id in planned["emptied"]:
-        shutil.rmtree(plate_dir(project_id, plate_id), ignore_errors=True)
+    _save_data(project_id, record, planned["data"], planned["emptied"])
     return {**get_project(project_id), "plan": view}
 
 
@@ -1861,12 +1822,9 @@ def _run_import(project_id: int, model_id: int) -> dict:
 # ── Geometry ───────────────────────────────────────────────────────────────────
 
 def rotation_matrix(degrees):
-    import numpy as np
-    rx, ry, rz = (math.radians(float(d)) for d in degrees)
-    Rx = np.array([[1, 0, 0], [0, math.cos(rx), -math.sin(rx)], [0, math.sin(rx), math.cos(rx)]])
-    Ry = np.array([[math.cos(ry), 0, math.sin(ry)], [0, 1, 0], [-math.sin(ry), 0, math.cos(ry)]])
-    Rz = np.array([[math.cos(rz), -math.sin(rz), 0], [math.sin(rz), math.cos(rz), 0], [0, 0, 1]])
-    return Rz @ Ry @ Rx
+    """The 3x3 matrix of an object's rotation (degrees about X, then Y, then Z)."""
+    import orientation
+    return orientation.rotation_matrix(degrees)
 
 
 def read_mesh_bin(path: Path) -> list:
