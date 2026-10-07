@@ -1554,10 +1554,12 @@ def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, 
     plates still holding importing models are kept."""
     data = json.loads(json.dumps(record["data"]))
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    busy = {o["plate"] for o in data["objects"] if o["plate"] in plate_ids and o["model"] not in ready}
+    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
+    busy = {o["plate"] for o in data["objects"] if o["plate"] in plate_ids and o["model"] not in ready and o["model"] not in failed}
+    holding = {o["plate"] for o in data["objects"] if o["model"] in failed}   # a failed model's objects stay, so their plate does
     free = [plate_id for plate_id in plate_ids if plate_id not in busy]
     used = _place_layout(data, free, layout, overrides_for)
-    emptied = [plate_id for plate_id in free if plate_id not in used]
+    emptied = [plate_id for plate_id in free if plate_id not in used and plate_id not in holding]
     data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
     _save_data(project_id, record, data, emptied)
     return get_project(project_id)
@@ -1653,11 +1655,12 @@ def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
     data = record["data"]
     limits = _machine_limits_for(record)
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    busy = {o["plate"] for o in data["objects"] if o["model"] not in ready}
+    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
+    busy = {o["plate"] for o in data["objects"] if o["model"] not in ready and o["model"] not in failed}
     order = [p for p in _arrange_plate_ids(record, plate_ids) if p not in busy]
     plates = {p["id"]: p for p in data["plates"]}
     choices = data.get("filaments") or {}
-    objects = [o for o in data["objects"] if o["plate"] in order]
+    objects = [o for o in data["objects"] if o["plate"] in order and o["model"] in ready]   # a failed model's objects are skipped
     shapes = _Shapes(project_id, record, data)
 
     def group_of(obj):
@@ -1707,7 +1710,44 @@ def _set_arrange_engine(project_id: int, record: dict, engine: str) -> dict:
     return get_project(project_id)
 
 
+def _skipped_failed(record: dict, plate_ids=None) -> str:
+    """"; N objects skipped (their model failed to import)" for the failed models' objects on these plates, else ""."""
+    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
+    covered = None if plate_ids is None else set(plate_ids)
+    n = sum(1 for o in record["data"]["objects"] if o["model"] in failed and (covered is None or o["plate"] in covered))
+    return f"; {_count(n, 'object')} skipped (their model failed to import)" if n else ""
+
+
+def _arranged_outcome(before: dict, after: dict, skipped: str) -> str:
+    """The one-line outcome every Arrange of ready objects carries."""
+    def stand(record):
+        return [(o["id"], o["plate"], o["position"], o["rotation"]) for o in record["data"]["objects"]]
+    added = len(after["data"]["plates"]) - len(before["data"]["plates"])
+    if stand(before) == stand(after):
+        text = "Nothing moved: already arranged"
+    elif added > 0:
+        text = f"Arranged; objects that didn't fit or differ in filament went on {_count(added, 'new plate')}"
+    elif added < 0:
+        text = f"Arranged onto {_count(len(after['data']['plates']), 'plate')} (was {len(before['data']['plates'])})"
+    else:
+        text = "Arranged"
+    return text + skipped
+
+
 def arrange(project_id: int, plate_ids=None, engine: str | None = None) -> dict:
+    """Arrange (see `_arrange`) and return the project plus "outcome": one line saying what happened, which the UI always
+    shows, naming the objects skipped because their model failed to import."""
+    before = get_project(project_id)
+    order = _arrange_plate_ids(before, plate_ids)
+    after = _arrange(project_id, plate_ids, engine)
+    ready = {m["id"] for m in after["models"] if m["state"] == READY}
+    skipped = _skipped_failed(after, order)
+    if not any(o["plate"] in order and o["model"] in ready for o in after["data"]["objects"]):
+        return {**after, "outcome": "Nothing ready to arrange" + skipped}
+    return {**after, "outcome": _arranged_outcome(before, after, skipped)}
+
+
+def _arrange(project_id: int, plate_ids=None, engine: str | None = None) -> dict:
     """The one Arrange: lay out the unpinned objects on these plates (all by default) with `arrange_layout`, onto as few
     plates as fit; plates left empty are removed, never one holding a pinned object. `engine` "orca" has OrcaSlicer arrange
     each plate in place instead (its arranger knows nothing of pins, so a plate holding pinned objects is refused, nor of
@@ -1994,7 +2034,8 @@ def _plan_data(project_id: int, record: dict) -> dict:
     "kept": [{"id", "name", "reason"}], "emptied": [plate ids removed]}; "plates" is empty when there is nothing to plan."""
     data = json.loads(json.dumps(record["data"]))
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    importing = {o["plate"] for o in data["objects"] if o["model"] not in ready}
+    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
+    importing = {o["plate"] for o in data["objects"] if o["model"] not in ready and o["model"] not in failed}
     status = {p["id"]: p["status"] for p in plate_status(project_id)["plates"]}
     with database.transaction() as conn:   # a Print whose outcome is unknown still counts as on record
         recorded = {r["plate_id"] for r in conn.execute("SELECT DISTINCT plate_id FROM prints WHERE project_id = ? AND plate_id IS NOT NULL", (project_id,))}
@@ -2010,7 +2051,7 @@ def _plan_data(project_id: int, record: dict) -> dict:
     options = _orient_options(record, {})
     suggested = {}
     for obj in data["objects"]:
-        if obj["plate"] not in replannable or obj.get("pinned"):
+        if obj["plate"] not in replannable or obj.get("pinned") or obj["model"] not in ready:
             continue
         key = (obj["model"], tuple(obj["scale"]), tuple(obj["rotation"]))
         if key not in suggested:
@@ -2024,7 +2065,12 @@ def _plan_data(project_id: int, record: dict) -> dict:
     if not layout:
         return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "fingerprint": _plan_fingerprint(record["data"], [])}
     used = _place_layout(data, replannable, layout, lambda group: json.loads(group)["overrides"])
-    emptied = [plate_id for plate_id in replannable if plate_id not in used]
+    holding = {o["plate"] for o in data["objects"] if o["model"] in failed}
+    for plate in data["plates"]:   # a plate left holding only a failed model's objects stays as it is
+        if plate["id"] in replannable and plate["id"] not in used and plate["id"] in holding:
+            kept.append({"id": plate["id"], "name": plate["name"], "reason": "Holds an object whose model failed to import"})
+    kept_now = {k["id"] for k in kept}
+    emptied = [plate_id for plate_id in replannable if plate_id not in used and plate_id not in kept_now]
     data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
     plates = {p["id"]: p for p in data["plates"]}
     for plate_id in used:   # a plate that now holds other objects isn't the plate the printer was chosen for
@@ -2052,7 +2098,8 @@ def _plan_data(project_id: int, record: dict) -> dict:
             plates[plate_id]["name"] = f"Plate {next(free)}"
     data["plates"] = [plates[plate_id] for plate_id in order]
     proposed = [{"id": plate_id, "new": plate_id not in existing, "features": features[plate_id],
-                 "objects": sorted((o for o in data["objects"] if o["plate"] == plate_id), key=lambda o: o["id"])} for plate_id in ordered]
+                 "objects": sorted((o for o in data["objects"] if o["plate"] == plate_id and o["model"] in ready),
+                                   key=lambda o: o["id"])} for plate_id in ordered]
     for entry in proposed:
         entry["turned"] = sum(1 for o in entry["objects"] if _turned(before[o["id"]], o["rotation"]))
     return {"data": data, "plates": proposed, "kept": kept, "emptied": emptied, "fingerprint": _plan_fingerprint(data, emptied)}
@@ -2087,7 +2134,9 @@ def _plan_view(record: dict, planned: dict) -> dict:
             summary += f"; {_count(len(kept), 'plate')} kept as {'it is' if len(kept) == 1 else 'they are'}"
     else:
         summary = "Nothing to plan"
-    return {"revision": record["revision"], "fingerprint": planned["fingerprint"], "plates": plates, "kept": kept, "summary": summary}
+    summary += _skipped_failed(record)
+    return {"revision": record["revision"], "fingerprint": planned["fingerprint"], "plates": plates, "kept": kept,
+            "summary": summary, "outcome": summary}
 
 
 def plan_plates(project_id: int) -> dict:
@@ -2325,7 +2374,7 @@ def arrange_plate(project_id: int, plate_id: int, engine: str | None = None) -> 
     record = get_project(project_id)
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
     if not any(o["plate"] == plate_id and o["model"] in ready for o in record["data"]["objects"]):
-        raise jobs.JobError("There's nothing ready to arrange on this plate", 409)
+        raise jobs.JobError("There's nothing ready to arrange on this plate" + _skipped_failed(record, [plate_id]), 409)
     return arrange(project_id, [plate_id], engine)
 
 

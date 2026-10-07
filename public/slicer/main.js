@@ -1465,12 +1465,11 @@ async function arrange() {
   await flushSave();
   const button = $("btn-arrange");
   await withButton(button, async () => {
-    const before = data().plates.length;
-    applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${state.plate}/arrange`, { engine: arrangeEngine() }));
+    const result = await api("POST", `/api/projects/${state.project.id}/plates/${state.plate}/arrange`, { engine: arrangeEngine() });
+    applyProject(result);
     recordEdit();
     renderAll();
-    const added = data().plates.length - before;
-    toast(added > 0 ? `Plate arranged; objects that didn't fit or differ in filament went on ${plural(added, "new plate")}` : "Plate arranged");
+    toast(arrangeOutcome(result));
   });
 }
 
@@ -1478,15 +1477,18 @@ async function arrangeAll() {
   await flushSave();
   await withButton($("btn-arrange"), async () => {
     if (!platesWithObjects().length) { toast("Nothing to arrange"); return; }
-    const before = data().plates.length;
-    applyProject(await api("POST", `/api/projects/${state.project.id}/arrange`, { engine: arrangeEngine() }));
+    const result = await api("POST", `/api/projects/${state.project.id}/arrange`, { engine: arrangeEngine() });
+    applyProject(result);
     recordEdit();
     renderAll();
     state.viewport?.fit(state.viewport.objectsBox());
-    const after = data().plates.length;
-    toast(after < before ? `Arranged onto ${plural(after, "plate")} (was ${before})` : `Arranged — ${plural(after, "plate")}`);
+    toast(arrangeOutcome(result));
   });
 }
+
+// Every Arrange response carries "outcome", one line saying what happened (including objects skipped because their
+// model failed to import); the toast always shows it, so Arrange is never a silent no-op.
+const arrangeOutcome = result => result.outcome || "Arranged";
 
 const arrangeEngine = () => $("arrange-engine").value === "orca" ? "orca" : "nester";
 
