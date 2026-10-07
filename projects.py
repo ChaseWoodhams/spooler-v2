@@ -825,7 +825,7 @@ def _machine_limits_for(record: dict) -> dict:
 
 
 def _gap_for(process: dict) -> float:
-    """Room to leave between parts printed with these process settings: supports need far more than the parts alone."""
+    """Room to leave between objects printed with these process settings: supports need far more than the objects alone."""
     return packing.SUPPORT_GAP_MM if str((process or {}).get("enable_support")) == "1" else packing.GAP_MM
 
 
@@ -1758,7 +1758,7 @@ def _plan_view(record: dict, planned: dict) -> dict:
     kept = planned["kept"]
     if plates:
         summary = (f"{_count(len(plates), 'plate')} (was {len(record['data']['plates']) - len(kept)}), "
-                   f"{_count(sum(p['parts'] for p in plates), 'part')}, {sum(p['turned'] for p in plates)} turned")
+                   f"{_count(sum(p['parts'] for p in plates), 'object')}, {sum(p['turned'] for p in plates)} turned")
         if kept:
             summary += f"; {_count(len(kept), 'plate')} kept as {'it is' if len(kept) == 1 else 'they are'}"
     else:
@@ -1767,8 +1767,8 @@ def _plan_view(record: dict, planned: dict) -> dict:
 
 
 def plan_plates(project_id: int) -> dict:
-    """Plan the project's plates and change nothing: {"revision", "plates": [{"id", "name", "new", "filament", "parts",
-    "turned", "time_estimate" (approximate seconds, layers, volume_cm3), "objects"}] in plan order (longest first by
+    """Plan the project's plates and change nothing: {"revision", "plates": [{"id", "name", "new", "filament", "parts" (how many
+    objects it holds; the key keeps its name), "turned", "time_estimate" (approximate seconds, layers, volume_cm3), "objects"}] in plan order (longest first by
     layers, then volume), "kept": [{"id", "name", "reason"}] (plates with a Job or a Print on record, which are never
     touched), "summary"}. `accept_plan` applies it."""
     record = get_project(project_id)
