@@ -20,6 +20,7 @@ import splits
 from tests.test_slicer import cube_stl, make_fake_orca
 
 GEOMETRY = not splits.missing_modules()
+FIXTURES = Path(__file__).parent / "fixtures" / "daz_shifter"
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 if GEOMETRY:
@@ -241,6 +242,34 @@ class OrientApiTests(unittest.TestCase):
         self.assertEqual((relaxed["overhang_angle"], relaxed["current"]["support"]), (20, 0))
         _, asked = self.call("GET", base + "?overhang_angle=45")
         self.assertEqual(asked["overhang_angle"], 45)
+
+    def test_orient_all_says_how_many_objects_it_turned(self):
+        project = self.rotate(self.project_with(mushroom(), mushroom(), l_bracket()), [[180, 0, 0], [180, 0, 0], [0, 0, 0]])
+        project = self.edit(project, lambda d: d["objects"][1].update(pinned=True))
+        _, oriented = self.orient_all(project)
+        self.assertEqual(oriented["outcome"], "Turned 1 object, 1 already on a good face, 1 pinned left alone")
+
+    def test_orient_all_says_so_when_there_was_nothing_to_turn(self):
+        project = self.project_with(mushroom(), l_bracket())
+        _, oriented = self.orient_all(project)
+        self.assertEqual(oriented["outcome"], "Turned 0 objects, 2 already on a good face")
+
+    def test_orient_all_says_so_when_there_is_nothing_to_orient(self):
+        project = projects.get_project(projects.create_project("Empty")["id"])
+        _, oriented = self.orient_all(project)
+        self.assertEqual(oriented["outcome"], "Nothing to orient")
+
+    def test_orient_all_turns_the_daz_shifter_parts_that_are_not_on_a_good_face(self):
+        stls = sorted(FIXTURES.glob("*.stl"))
+        self.assertEqual(len(stls), 19)
+        project = self.project_with(*(p.read_bytes() for p in stls))
+        self.assertEqual(len(project["data"]["objects"]), 19)
+        _, oriented = self.orient_all(project)
+        before = {o["id"]: o["rotation"] for o in project["data"]["objects"]}
+        turned = [o["id"] for o in oriented["data"]["objects"] if o["rotation"] != before[o["id"]]]
+        self.assertEqual(sorted(turned), sorted(oriented["orient"]["oriented"]))
+        self.assertGreaterEqual(len(turned), 10)   # most of these parts print on a face other than the one they are modelled on
+        self.assertTrue(oriented["outcome"].startswith(f"Turned {len(turned)} objects"), oriented["outcome"])
 
     def test_a_project_changed_meanwhile_is_not_overwritten(self):
         project = self.rotate(self.project_with(mushroom()), [[180, 0, 0]])
