@@ -1552,20 +1552,32 @@ function planSheetHtml(plan) {
       ${SHOW_PLAN_SECONDS && plate.time_estimate?.seconds ? `<div class="slicer-muted">${planTime(plate.time_estimate.seconds)}</div>` : ""}
     </div>`).join("");
   const kept = plan.kept.length ? `<h4>Kept as they are</h4><ul class="plan-kept">${plan.kept.map(k => `<li><b>${esc(k.name)}</b> <span class="slicer-muted">${esc(k.reason)}</span></li>`).join("")}</ul>` : "";
+  const tilt = `<label class="slicer-check" title="Without this a part only goes onto a side of its own box; with it, a part may lean on an angled face"><input type="checkbox" id="plan-tilt"${state.planTilt ? " checked" : ""}> Allow tilting parts onto angled faces</label>`;
+  const refused = plan.refused ? `<p class="slicer-error" role="alert">No plan is offered: ${esc(plan.refused)}. Nothing was changed.</p>` : "";
   return `<p class="slicer-muted">Now ${plural(before, "plate")}. Plan: ${esc(plan.summary)}${plan.plates.length > 1 ? ", longest first" : ""}.</p>
+    ${refused}${tilt}
     ${plan.plates.length ? `<div class="plan-grid">${cards}</div>` : ""}${kept}`;
 }
 
 async function planPlates() {
   await flushSave();
+  state.planTilt = false;
   await withButton($("btn-plan-plates"), async () => {
-    const plan = await api("POST", `/api/projects/${state.project.id}/plan`, {});
-    state.plan = plan;
-    $("plan-body").innerHTML = planSheetHtml(plan);
-    $("plan-error").textContent = "";
-    $("plan-accept").disabled = !plan.plates.length;
+    await showPlan();
     $("dlg-plan").showModal();
   });
+}
+
+async function showPlan() {
+  const plan = await api("POST", `/api/projects/${state.project.id}/plan`, { allow_tilt: !!state.planTilt });
+  state.plan = plan;
+  $("plan-body").innerHTML = planSheetHtml(plan);
+  $("plan-tilt").addEventListener("change", async event => {
+    state.planTilt = event.target.checked;
+    await showPlan();
+  });
+  $("plan-error").textContent = "";
+  $("plan-accept").disabled = !plan.plates.length;
 }
 
 async function acceptPlan() {
@@ -1573,7 +1585,7 @@ async function acceptPlan() {
   if (!plan) return;
   await withButton($("plan-accept"), async () => {
     try {
-      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision, fingerprint: plan.fingerprint });
+      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision, fingerprint: plan.fingerprint, allow_tilt: !!state.planTilt });
       applyProject(result);
       recordEdit();
       state.plan = null;

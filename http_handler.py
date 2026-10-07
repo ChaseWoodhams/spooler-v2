@@ -1195,12 +1195,12 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(actions[parts[4]], broadcast=False)
             return
         if len(parts) == 5 and parts[4] == "plan":
-            self._jobs_call(lambda: projects.plan_plates(self._job_id()), broadcast=False)
+            self._jobs_call(lambda: projects.plan_plates(self._job_id(), bool(self._json_body().get("allow_tilt"))), broadcast=False)
             return
         if len(parts) == 6 and parts[4] == "plan" and parts[5] == "accept":
             def accept():
                 body = self._json_body()
-                return projects.accept_plan(self._job_id(), body.get("plan") or body.get("revision"), body.get("fingerprint"))
+                return projects.accept_plan(self._job_id(), body.get("plan") or body.get("revision"), body.get("fingerprint"), bool(body.get("allow_tilt")))
             self._jobs_call(accept, broadcast=False)
             return
         if len(parts) == 5 and parts[4] == "orient-all":
