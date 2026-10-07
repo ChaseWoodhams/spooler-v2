@@ -2327,6 +2327,24 @@ function _resetScannerError() {
   document.getElementById("btn-scanner-photo").style.display = "none";
 }
 
+// The barcode library comes from a CDN. It loads when the scanner is first used, never at startup, so a slow or
+// blocked CDN only affects barcode scanning.
+let _qrLibPromise = null;
+function loadQrLib() {
+  if (window.Html5Qrcode) return Promise.resolve();
+  if (!_qrLibPromise) {
+    _qrLibPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js";
+      const timer = setTimeout(() => reject(new Error("The barcode scanner couldn't be loaded")), 8000);
+      script.onload = () => { clearTimeout(timer); resolve(); };
+      script.onerror = () => { clearTimeout(timer); reject(new Error("The barcode scanner couldn't be loaded")); };
+      document.head.appendChild(script);
+    }).catch(err => { _qrLibPromise = null; throw err; });
+  }
+  return _qrLibPromise;
+}
+
 async function openScanner() {
   _resetScannerError();
   document.getElementById("modal-scanner").classList.add("open");
@@ -2350,6 +2368,7 @@ async function openScanner() {
   }, 5000);
 
   try {
+    await loadQrLib();
     _liveScanner = new Html5Qrcode("scanner-region", { verbose: false });
     await _liveScanner.start(
       { facingMode: "environment" },
@@ -2385,6 +2404,7 @@ document.getElementById("barcode-file-input").addEventListener("change", async (
   e.target.value = "";
   if (!file) return;
   try {
+    await loadQrLib();
     const reader = new Html5Qrcode("barcode-scan-canvas", { verbose: false });
     const text = await reader.scanFile(file, false);
     lookupEan(text);

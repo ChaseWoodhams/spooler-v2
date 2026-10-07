@@ -165,6 +165,7 @@ const openJobPlates = () => new Set(state.jobs.filter(j => OPEN_JOB_STATES.has(j
 // ── Loading ─────────────────────────────────────────────────────────────────────
 async function boot() {
   document.querySelectorAll("[data-steps], #prepare-tools").forEach(el => { el.hidden = true; });  // shown once a project is open
+  bindUi();   // first, so "Open or create a project" works even if the slower setup below fails
   const viewport = $("viewport");
   try {
     state.viewport = new Viewport(viewport, {
@@ -208,7 +209,6 @@ async function boot() {
   });
   $("settings-mode").value = remember("slicer.mode") || (remember("slicer.advanced") === "1" ? "advanced" : "simple");
   $("settings-mode").addEventListener("change", e => remember("slicer.mode", e.target.value));
-  bindUi();
   try {
     state.schema = await (await fetch("/orca/settings.json")).json();
     state.settings.setSchema(state.schema);

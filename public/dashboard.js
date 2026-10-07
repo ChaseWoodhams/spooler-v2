@@ -151,6 +151,10 @@ document.addEventListener("click", event => {
 });
 
 window.addEventListener("hashchange", syncShellView);
+// Clicking Projects when the hash already says #projects fires no hashchange, so apply the view here too.
+document.getElementById("btn-slicer").addEventListener("click", () => {
+  if (location.hash === "#projects") syncShellView();
+});
 if (typeof applyJobs === "function") {
   const _applyJobs = applyJobs;
   applyJobs = list => {
