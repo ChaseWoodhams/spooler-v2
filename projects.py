@@ -2102,7 +2102,21 @@ def orient_all(project_id: int, body: dict) -> dict:
         else:
             summary["unchanged"].append(obj["id"])
     result = _apply_rotations(project_id, record, rotations) if rotations else record
-    return {**result, "orient": summary}
+    return {**result, "orient": summary, "outcome": _orient_outcome(summary)}
+
+
+def _orient_outcome(summary: dict) -> str:
+    """One line for the toast: how many objects were turned (zero included), how many were already on a good face,
+    and how many pinned ones were left alone."""
+    turned, fine, pinned = len(summary["oriented"]), len(summary["unchanged"]), len(summary["pinned"])
+    if not (turned or fine or pinned):
+        return "Nothing to orient"
+    parts = [f"Turned {_count(turned, 'object')}"]
+    if fine or not turned:
+        parts.append(f"{fine} already on a good face")
+    if pinned:
+        parts.append(f"{pinned} pinned left alone")
+    return ", ".join(parts)
 
 
 # ── Plan plates ────────────────────────────────────────────────────────────────

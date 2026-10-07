@@ -1389,12 +1389,11 @@ async function orientAll(wholeProject = false) {
   await flushSave();
   await withButton($("btn-orient-all"), async () => {
     const result = await api("POST", `/api/projects/${state.project.id}/orient-all`, wholeProject ? {} : { plate: state.plate });
-    const { oriented, unchanged, pinned } = result.orient;
     state.orientSuggestion = null;
     applyProject(result);
-    if (oriented.length) recordEdit();
+    if (result.orient.oriented.length) recordEdit();
     renderAll();
-    toast(`Turned ${plural(oriented.length, "object")}, ${unchanged.length} already fine` + (pinned.length ? `, ${pinned.length} pinned left alone` : ""));
+    toast(result.outcome || "Oriented");   // the server's one line, "Turned 0 objects, ..." included
   });
 }
 
