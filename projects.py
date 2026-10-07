@@ -1324,15 +1324,17 @@ def _set_arrange_engine(project_id: int, record: dict, engine: str) -> dict:
 def arrange(project_id: int, plate_ids=None, engine: str | None = None) -> dict:
     """The one Arrange: lay out the unpinned objects on these plates (all by default) with `arrange_layout`, onto as few
     plates as fit; plates left empty are removed, never one holding a pinned object. `engine` "orca" has OrcaSlicer arrange
-    each plate in place instead (its arranger knows nothing of pins, so pinned objects are left out of it, nor of
+    each plate in place instead (its arranger knows nothing of pins, so a plate holding pinned objects is refused, nor of
     filaments or clearance); a choice of engine is kept in the project and used from then on when none is named."""
     record = get_project(project_id)
     stored = record["data"].get("arrange_engine", "nester")
     if engine is not None and engine not in ARRANGE_ENGINES:
         raise jobs.JobError(f"engine must be one of: {', '.join(ARRANGE_ENGINES)}")
+    order = _arrange_plate_ids(record, plate_ids)
+    if (engine or stored) == "orca" and any(o.get("pinned") and o["plate"] in order for o in record["data"]["objects"]):
+        raise jobs.JobError("OrcaSlicer's arranger can't keep clear of pinned objects: unpin them or use the nester")
     if engine is not None and engine != stored:
         record, stored = _set_arrange_engine(project_id, record, engine), engine
-    order = _arrange_plate_ids(record, plate_ids)
     if stored == "orca":
         ready = {m["id"] for m in record["models"] if m["state"] == READY}
         for plate_id in order:

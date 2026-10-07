@@ -272,6 +272,19 @@ class ArrangeApiTests(unittest.TestCase):
             self.assertEqual(len(runner.calls), 2)                                  # the nester didn't need OrcaSlicer
         self.assertEqual(self.arrange(project, engine="magic")[0], 400)
 
+    def test_orca_is_refused_on_a_plate_holding_pinned_objects(self):
+        project = self.project_with(cube_stl(20))
+        project = self.lay(project, [(1, 1, (50, 50), False), (1, 1, (120, 120), True), (1, 2, (50, 50), False)])
+        runner = arrange_runner([(70.0, 70.0, 0.0)])
+        with mock.patch.object(slicer, "runner", runner):
+            status, refused = self.arrange(project, plate=1, engine="orca")
+            self.assertEqual(status, 400, refused)
+            self.assertIn("pinned", refused["error"])
+            self.assertEqual(self.arrange(project, plate=2, engine="orca")[0], 200)   # a plate without pins is fine
+        after = self.call("GET", f"/api/projects/{project['id']}")[1]
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual({o["id"]: o["position"] for o in after["data"]["objects"] if o["id"] in (1, 2)}, {1: [50.0, 50.0], 2: [120.0, 120.0]})
+
     def test_orca_arranges_each_plate_when_asked_for_all(self):
         project = self.project_with(cube_stl(20))
         project = self.lay(project, [(1, 1, (50, 50), False), (1, 2, (50, 50), False)])
