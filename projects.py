@@ -1554,10 +1554,12 @@ def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, 
     plates still holding importing models are kept."""
     data = json.loads(json.dumps(record["data"]))
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    busy = {o["plate"] for o in data["objects"] if o["plate"] in plate_ids and o["model"] not in ready}
+    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
+    busy = {o["plate"] for o in data["objects"] if o["plate"] in plate_ids and o["model"] not in ready and o["model"] not in failed}
+    holding = {o["plate"] for o in data["objects"] if o["model"] in failed}   # a failed model's objects stay, so their plate does
     free = [plate_id for plate_id in plate_ids if plate_id not in busy]
     used = _place_layout(data, free, layout, overrides_for)
-    emptied = [plate_id for plate_id in free if plate_id not in used]
+    emptied = [plate_id for plate_id in free if plate_id not in used and plate_id not in holding]
     data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
     _save_data(project_id, record, data, emptied)
     return get_project(project_id)
@@ -1637,6 +1639,27 @@ class _Shapes:
         return self.nesting.hull_outline(place(self.mesh(obj["model"])[0], obj)[:, :2])
 
 
+def placement_problems(project_id: int, record: dict, plate_ids=None) -> list:
+    """Whether the ready objects on these plates (all by default) are placed validly, by the one definition every layout
+    is held to (`nesting.placement_problems`): on the bed, clear of the purge area, and as far apart as Arrange keeps them
+    (the larger of their two clearances). Judged on each object's real outline where it stands, not on its bounding box.
+    Returns [{"key": object id, "plate", "problem": "off the bed" | "over the purge area" | "overlaps", "other": object id
+    or None}], empty when all is well. Objects of models that failed or are still importing have no outline and are left
+    out."""
+    try:
+        import nesting
+    except ImportError:
+        raise _nest_error()
+    data = record["data"]
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    covered = None if plate_ids is None else set(plate_ids)
+    shapes = _Shapes(project_id, record, data)
+    placed = [{"key": o["id"], "plate": o["plate"], "polygon": shapes.polygon(o), "clearance": shapes.outline_and_clearance(o)[1]}
+              for o in data["objects"] if o["model"] in ready and (covered is None or o["plate"] in covered)]
+    limits = _machine_limits_for(record)
+    return nesting.placement_problems(placed, limits["bed"], limits["exclude"])
+
+
 def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
     """Where the nester would put the unpinned objects on these plates (all by default), changing nothing. Each object
     is nested by the hull of the shape it has now, turned about Z, with its own clearance (SUPPORT_CLEARANCE_MM when it
@@ -1653,11 +1676,12 @@ def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
     data = record["data"]
     limits = _machine_limits_for(record)
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    busy = {o["plate"] for o in data["objects"] if o["model"] not in ready}
+    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
+    busy = {o["plate"] for o in data["objects"] if o["model"] not in ready and o["model"] not in failed}
     order = [p for p in _arrange_plate_ids(record, plate_ids) if p not in busy]
     plates = {p["id"]: p for p in data["plates"]}
     choices = data.get("filaments") or {}
-    objects = [o for o in data["objects"] if o["plate"] in order]
+    objects = [o for o in data["objects"] if o["plate"] in order and o["model"] in ready]   # a failed model's objects are skipped
     shapes = _Shapes(project_id, record, data)
 
     def group_of(obj):
@@ -1693,7 +1717,26 @@ def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
         held = slots.get(plate["group"], [])
         layout.append({"group": plate["group"], "plate": held[index] if index < len(held) else None,
                        "overrides": overrides[plate["group"]], "fixed": plate["fixed"], "items": plate["items"]})
+    occupied = [p for p in order if any(o["plate"] == p for o in objects)]
+    if len(layout) > len(occupied):   # the nester is greedy: don't make an arrangement that already holds worse by adding a plate
+        standing = _standing_layout(project_id, record, objects, occupied, group_of, overrides)
+        if standing:
+            return standing
     return layout
+
+
+def _standing_layout(project_id: int, record: dict, objects: list, occupied: list, group_of, overrides: dict) -> list:
+    """The objects as they stand, as a layout (see `arrange_layout`), when that is a valid one: every object on the bed and
+    clear of the others, no plate mixing groups. Else []."""
+    if any(len({group_of(o) for o in objects if o["plate"] == plate_id}) > 1 for plate_id in occupied):
+        return []
+    if placement_problems(project_id, record, occupied):
+        return []
+    return [{"group": (group := group_of(next(o for o in objects if o["plate"] == plate_id))), "plate": plate_id,
+             "overrides": overrides[group], "fixed": [o["id"] for o in objects if o["plate"] == plate_id and o.get("pinned")],
+             "items": [{"key": o["id"], "center": tuple(o["position"]), "turned": False, "angle": 0.0, "oversize": False}
+                       for o in objects if o["plate"] == plate_id and not o.get("pinned")]}
+            for plate_id in occupied]
 
 
 def _set_arrange_engine(project_id: int, record: dict, engine: str) -> dict:
@@ -1707,7 +1750,54 @@ def _set_arrange_engine(project_id: int, record: dict, engine: str) -> dict:
     return get_project(project_id)
 
 
+def _skipped_failed(record: dict, plate_ids=None) -> str:
+    """"; N objects skipped (their model failed to import)" for the failed models' objects on these plates, else ""."""
+    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
+    covered = None if plate_ids is None else set(plate_ids)
+    n = sum(1 for o in record["data"]["objects"] if o["model"] in failed and (covered is None or o["plate"] in covered))
+    return f"; {_count(n, 'object')} skipped (their model failed to import)" if n else ""
+
+
+def _too_big_for_the_bed(after: dict, plate_ids: list) -> str:
+    """"; N objects are bigger than the bed (left centred on a plate of its own)" for the unpinned ready objects still off
+    the bed after an Arrange of these plates, which only a part too big for any plate can be; else "". A pinned object
+    stays where its owner put it, so it is not counted."""
+    pinned = {o["id"] for o in after["data"]["objects"] if o.get("pinned")}
+    big = {p["key"] for p in placement_problems(after["id"], after, plate_ids) if p["problem"] == "off the bed"} - pinned
+    return f"; {_count(len(big), 'object')} {'is' if len(big) == 1 else 'are'} bigger than the bed (left centred on a plate of its own)" if big else ""
+
+
+def _arranged_outcome(before: dict, after: dict, skipped: str, too_big: str = "") -> str:
+    """The one-line outcome every Arrange of ready objects carries, then what could not be done: `too_big` (objects that fit
+    no plate) and `skipped` (objects of failed models)."""
+    def stand(record):
+        return [(o["id"], o["plate"], o["position"], o["rotation"]) for o in record["data"]["objects"]]
+    added = len(after["data"]["plates"]) - len(before["data"]["plates"])
+    if stand(before) == stand(after):
+        text = "Nothing moved: already arranged"
+    elif added > 0:
+        text = f"Arranged; objects that didn't fit or differ in filament went on {_count(added, 'new plate')}"
+    elif added < 0:
+        text = f"Arranged onto {_count(len(after['data']['plates']), 'plate')} (was {len(before['data']['plates'])})"
+    else:
+        text = "Arranged"
+    return text + too_big + skipped
+
+
 def arrange(project_id: int, plate_ids=None, engine: str | None = None) -> dict:
+    """Arrange (see `_arrange`) and return the project plus "outcome": one line saying what happened, which the UI always
+    shows, naming the objects skipped because their model failed to import."""
+    before = get_project(project_id)
+    order = _arrange_plate_ids(before, plate_ids)
+    after = _arrange(project_id, plate_ids, engine)
+    ready = {m["id"] for m in after["models"] if m["state"] == READY}
+    skipped = _skipped_failed(after, order)
+    if not any(o["plate"] in order and o["model"] in ready for o in after["data"]["objects"]):
+        return {**after, "outcome": "Nothing ready to arrange" + skipped}
+    return {**after, "outcome": _arranged_outcome(before, after, skipped, _too_big_for_the_bed(after, order))}
+
+
+def _arrange(project_id: int, plate_ids=None, engine: str | None = None) -> dict:
     """The one Arrange: lay out the unpinned objects on these plates (all by default) with `arrange_layout`, onto as few
     plates as fit; plates left empty are removed, never one holding a pinned object. `engine` "orca" has OrcaSlicer arrange
     each plate in place instead (its arranger knows nothing of pins, so a plate holding pinned objects is refused, nor of
@@ -1965,7 +2055,21 @@ def orient_all(project_id: int, body: dict) -> dict:
         else:
             summary["unchanged"].append(obj["id"])
     result = _apply_rotations(project_id, record, rotations) if rotations else record
-    return {**result, "orient": summary}
+    return {**result, "orient": summary, "outcome": _orient_outcome(summary)}
+
+
+def _orient_outcome(summary: dict) -> str:
+    """One line for the toast: how many objects were turned (zero included), how many were already on a good face,
+    and how many pinned ones were left alone."""
+    turned, fine, pinned = len(summary["oriented"]), len(summary["unchanged"]), len(summary["pinned"])
+    if not (turned or fine or pinned):
+        return "Nothing to orient"
+    parts = [f"Turned {_count(turned, 'object')}"]
+    if fine or not turned:
+        parts.append(f"{fine} already on a good face")
+    if pinned:
+        parts.append(f"{pinned} pinned left alone")
+    return ", ".join(parts)
 
 
 # ── Plan plates ────────────────────────────────────────────────────────────────
@@ -1994,7 +2098,8 @@ def _plan_data(project_id: int, record: dict) -> dict:
     "kept": [{"id", "name", "reason"}], "emptied": [plate ids removed]}; "plates" is empty when there is nothing to plan."""
     data = json.loads(json.dumps(record["data"]))
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    importing = {o["plate"] for o in data["objects"] if o["model"] not in ready}
+    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
+    importing = {o["plate"] for o in data["objects"] if o["model"] not in ready and o["model"] not in failed}
     status = {p["id"]: p["status"] for p in plate_status(project_id)["plates"]}
     with database.transaction() as conn:   # a Print whose outcome is unknown still counts as on record
         recorded = {r["plate_id"] for r in conn.execute("SELECT DISTINCT plate_id FROM prints WHERE project_id = ? AND plate_id IS NOT NULL", (project_id,))}
@@ -2010,7 +2115,7 @@ def _plan_data(project_id: int, record: dict) -> dict:
     options = _orient_options(record, {})
     suggested = {}
     for obj in data["objects"]:
-        if obj["plate"] not in replannable or obj.get("pinned"):
+        if obj["plate"] not in replannable or obj.get("pinned") or obj["model"] not in ready:
             continue
         key = (obj["model"], tuple(obj["scale"]), tuple(obj["rotation"]))
         if key not in suggested:
@@ -2024,7 +2129,12 @@ def _plan_data(project_id: int, record: dict) -> dict:
     if not layout:
         return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "fingerprint": _plan_fingerprint(record["data"], [])}
     used = _place_layout(data, replannable, layout, lambda group: json.loads(group)["overrides"])
-    emptied = [plate_id for plate_id in replannable if plate_id not in used]
+    holding = {o["plate"] for o in data["objects"] if o["model"] in failed}
+    for plate in data["plates"]:   # a plate left holding only a failed model's objects stays as it is
+        if plate["id"] in replannable and plate["id"] not in used and plate["id"] in holding:
+            kept.append({"id": plate["id"], "name": plate["name"], "reason": "Holds an object whose model failed to import"})
+    kept_now = {k["id"] for k in kept}
+    emptied = [plate_id for plate_id in replannable if plate_id not in used and plate_id not in kept_now]
     data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
     plates = {p["id"]: p for p in data["plates"]}
     for plate_id in used:   # a plate that now holds other objects isn't the plate the printer was chosen for
@@ -2052,7 +2162,8 @@ def _plan_data(project_id: int, record: dict) -> dict:
             plates[plate_id]["name"] = f"Plate {next(free)}"
     data["plates"] = [plates[plate_id] for plate_id in order]
     proposed = [{"id": plate_id, "new": plate_id not in existing, "features": features[plate_id],
-                 "objects": sorted((o for o in data["objects"] if o["plate"] == plate_id), key=lambda o: o["id"])} for plate_id in ordered]
+                 "objects": sorted((o for o in data["objects"] if o["plate"] == plate_id and o["model"] in ready),
+                                   key=lambda o: o["id"])} for plate_id in ordered]
     for entry in proposed:
         entry["turned"] = sum(1 for o in entry["objects"] if _turned(before[o["id"]], o["rotation"]))
     return {"data": data, "plates": proposed, "kept": kept, "emptied": emptied, "fingerprint": _plan_fingerprint(data, emptied)}
@@ -2087,7 +2198,9 @@ def _plan_view(record: dict, planned: dict) -> dict:
             summary += f"; {_count(len(kept), 'plate')} kept as {'it is' if len(kept) == 1 else 'they are'}"
     else:
         summary = "Nothing to plan"
-    return {"revision": record["revision"], "fingerprint": planned["fingerprint"], "plates": plates, "kept": kept, "summary": summary}
+    summary += _skipped_failed(record)
+    return {"revision": record["revision"], "fingerprint": planned["fingerprint"], "plates": plates, "kept": kept,
+            "summary": summary, "outcome": summary}
 
 
 def plan_plates(project_id: int) -> dict:
@@ -2144,6 +2257,25 @@ def delete_model(project_id: int, model_id: int) -> dict:
         conn.execute("UPDATE projects SET data = ?, models = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
                      (json.dumps(data), json.dumps(models), time.time(), project_id))
     shutil.rmtree(model_dir(project_id, model_id), ignore_errors=True)
+    return get_project(project_id)
+
+
+def retry_model(project_id: int, model_id: int) -> dict:
+    """Re-queue a failed import. The model goes back to importing with no claim, so the workers take it under the
+    same atomic rule as a fresh upload."""
+    record = get_project(project_id)
+    model = next((m for m in record["models"] if m["id"] == model_id), None)
+    if model is None:
+        raise jobs.JobError("Model not found", 404)
+    if model["state"] != FAILED:
+        raise jobs.JobError("Only a model that failed to import can be retried", 409)
+
+    def requeue(models):
+        for m in models:
+            if m["id"] == model_id and m["state"] == FAILED:
+                m.update(state=IMPORTING, error=None)
+                m.pop("claimed_at", None)
+    _mutate(project_id, "models", requeue, record["created_at"])
     return get_project(project_id)
 
 
@@ -2306,7 +2438,7 @@ def arrange_plate(project_id: int, plate_id: int, engine: str | None = None) -> 
     record = get_project(project_id)
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
     if not any(o["plate"] == plate_id and o["model"] in ready for o in record["data"]["objects"]):
-        raise jobs.JobError("There's nothing ready to arrange on this plate", 409)
+        raise jobs.JobError("There's nothing ready to arrange on this plate" + _skipped_failed(record, [plate_id]), 409)
     return arrange(project_id, [plate_id], engine)
 
 

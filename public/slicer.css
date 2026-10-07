@@ -89,6 +89,9 @@ body.slicer-page a.btn { text-decoration: none; }
 .slicer-object-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slicer-object small { color: var(--text-muted); }
 .slicer-object .bad { color: var(--red); }
+.slicer-object.failed { border-color: var(--red); }
+.slicer-object.failed .slicer-object-name { white-space: normal; }
+.slicer-retry-btn { padding: 2px 8px; font-size: 12px; }
 .slicer-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: rgba(255, 107, 43, .15); color: var(--accent); }
 .slicer-icon-btn { background: transparent; border: 0; color: var(--text-muted); cursor: pointer; padding: 2px 4px; font-size: 13px; }
 .slicer-icon-btn:hover { color: var(--text); }

@@ -23,6 +23,8 @@ CLEARANCE_MM = GAP_MM        # a plain object's clearance; the pair rule is max,
 SUPPORT_CLEARANCE_MM = SUPPORT_GAP_MM   # an object that needs tree supports in its orientation
 EDGE_MARGIN_MM = MARGIN_MM   # brim and supports are clipped at the bed edge, so no more than the packer's margin
 ANGLES = tuple(range(0, 360, 15))
+FINE_ANGLES = tuple(range(0, 360, 5))   # tried, slower, only when the coarse turns leave a group on more plates than it needs
+RETRY_UP_TO = 40                         # objects; with more, the first order and turns are kept as they are (each try takes seconds)
 _ROUND = 8                  # segments per quarter circle when growing an outline by its clearance
 _REACH = 1.012 / math.cos(math.pi / (4 * _ROUND))   # grow a little more so the polygon encloses the true circle; GEOS also simplifies a buffer by up to 1% of its distance
 _NUDGE = 1e-4               # clears an obstacle's edge so touching candidates aren't taken as overlapping
@@ -153,6 +155,36 @@ def _rotations(outline, angles) -> list:
     return out
 
 
+TOLERANCE_MM = 0.01   # positions are stored to 0.001 mm and angles to 0.0001 degrees; the viewport allows the same 0.01 mm
+
+
+def placement_problems(shapes: list, bed, exclude=None, tolerance: float = TOLERANCE_MM) -> list:
+    """The one definition of a valid layout, for the nester's result and for anything else that must say whether objects
+    are placed well. shapes: [{"key", "plate", "polygon": the object's outline from above in bed mm, "clearance": mm}];
+    bed and exclude: (x0, y0, x1, y1). Returns one {"key", "plate", "problem", "other"} per fault, in shape order:
+    "off the bed" (any part of the outline past the bed edge), "over the purge area" (the outline enters the exclusion
+    area), "overlaps" (two objects on one plate closer than the larger of their clearances, which is what the nester
+    keeps; reported for both, `other` being the key of the one it is too close to). Objects on different plates never
+    overlap. Empty when the layout is valid. The nester also keeps EDGE_MARGIN_MM from the edge and its clearance from
+    the purge area, but a layout is not invalid for being closer to them than that."""
+    x0, y0, x1, y1 = bed
+    purge = box(*exclude) if exclude else None
+    polys = [Polygon(s["polygon"]) for s in shapes]
+    problems = []
+    for n, (s, poly) in enumerate(zip(shapes, polys)):
+        lx, ly, hx, hy = poly.bounds
+        if lx < x0 - tolerance or ly < y0 - tolerance or hx > x1 + tolerance or hy > y1 + tolerance:
+            problems.append({"key": s["key"], "plate": s["plate"], "problem": "off the bed", "other": None})
+        if purge is not None and poly.intersection(purge).area > tolerance * tolerance:
+            problems.append({"key": s["key"], "plate": s["plate"], "problem": "over the purge area", "other": None})
+        for m, (t, other) in enumerate(zip(shapes, polys)):
+            if m != n and t["plate"] == s["plate"]:
+                need = max(float(s["clearance"]), float(t["clearance"]))
+                if poly.distance(other) < need - tolerance:
+                    problems.append({"key": s["key"], "plate": s["plate"], "problem": "overlaps", "other": t["key"]})
+    return problems
+
+
 def nest(items: list, bed, exclude=None, fixed=(), angles=ANGLES) -> list:
     """items: [{"key", "outline": [(x, y), …] in mm, "clearance": mm (default CLEARANCE_MM; SUPPORT_CLEARANCE_MM
     for an object that needs tree supports), "group"}]; bed and
@@ -162,7 +194,50 @@ def nest(items: list, bed, exclude=None, fixed=(), angles=ANGLES) -> list:
     [{"group", "fixed": [keys], "items": [{"key", "center": (x, y), "turned": False, "angle": degrees, "oversize"}]}]
     where `center` is the middle of the turned outline's bounding box and `angle` is how far it was turned
     counter-clockwise about Z. An object that can't fit even on an empty plate gets a plate of its own, centred,
-    marked oversize."""
+    marked oversize. Objects go in largest first, and when that leaves a group on more plates than it must have, other
+    orders are tried too (see ORDERS) and the layout with the fewest plates wins: the first order is kept on a tie, so a
+    layout that already fits is not disturbed."""
+    groups = set(i["group"] for i in items) | set(f["group"] for f in fixed)
+    room = (bed[2] - bed[0] - 2 * EDGE_MARGIN_MM) * (bed[3] - bed[1] - 2 * EDGE_MARGIN_MM)
+    if exclude:
+        room -= (exclude[2] - exclude[0]) * (exclude[3] - exclude[1])
+    least = sum(max(max([f["slot"] + 1 for f in fixed if f["group"] == group], default=1),
+                    math.ceil(sum(_area(i["outline"]) for i in items if i["group"] == group) / room))   # the outlines alone, no clearance
+                for group in groups)
+
+    def used(plates):   # an oversize object's plate is no fault of the order
+        return sum(1 for p in plates if not any(i["oversize"] for i in p["items"]))
+    tries = [(angles, order) for order in ORDERS] + ([(FINE_ANGLES, order) for order in ORDERS] if angles == ANGLES else [])
+    best = None
+    for turns, order in tries[:1] if len(items) > RETRY_UP_TO else tries:
+        plates = _nest_once(items, bed, exclude, fixed, turns, order)
+        if best is None or used(plates) < used(best):
+            best = plates
+        if used(best) <= least:
+            break
+    return best
+
+
+def _area(outline) -> float:
+    return Polygon(outline).area
+
+
+def _longest(outline) -> float:
+    x0, y0, x1, y1 = Polygon(outline).bounds
+    return max(x1 - x0, y1 - y0)
+
+
+def _boxed(outline) -> float:
+    x0, y0, x1, y1 = Polygon(outline).bounds
+    return (x1 - x0) * (y1 - y0)
+
+
+# The orders objects are tried in: each is a key that sorts the biggest first. Placement is greedy, so which comes first
+# decides what space is left, and no one order is best for every set.
+ORDERS = (_area, _longest, _boxed)
+
+
+def _nest_once(items: list, bed, exclude, fixed, angles, order) -> list:
     groups = list(dict.fromkeys([i["group"] for i in items] + [f["group"] for f in fixed]))
     plates = []   # [{"group", "plate": _Plate | None}]
     for group in groups:
@@ -175,7 +250,7 @@ def nest(items: list, bed, exclude=None, fixed=(), angles=ANGLES) -> list:
             plates.append({"group": group, "plate": plate})
 
     shapes = {}   # outline -> its rotations, so copies share them
-    for item in sorted(items, key=lambda i: (groups.index(i["group"]), -Polygon(i["outline"]).area)):
+    for item in sorted(items, key=lambda i: (groups.index(i["group"]), -order(i["outline"]), -_area(i["outline"]))):
         b = float(item.get("clearance", CLEARANCE_MM))
         outline = tuple(map(tuple, item["outline"]))
         if outline not in shapes:
