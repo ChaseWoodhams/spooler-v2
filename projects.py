@@ -1660,6 +1660,53 @@ def placement_problems(project_id: int, record: dict, plate_ids=None) -> list:
     return nesting.placement_problems(placed, limits["bed"], limits["exclude"])
 
 
+_problem_cache: dict = {}   # project id → (key, problems), so the page's polling doesn't measure every mesh again
+
+
+def plate_problems(project_id: int, record: dict, plate_ids=None) -> list:
+    """The one definition of a problem Object, used by the Plates step, the step bar, the Slice findings and the queue send:
+    an Object that is off the bed, over the purge area or overlapping another (`placement_problems`), or whose model
+    failed to import. [{"key", "plate", "name", "problem", "other", "text"}], in object order; "text" says it in words."""
+    data = record["data"]
+    covered = None if plate_ids is None else set(plate_ids)
+    cache_key = json.dumps([data, [(m["id"], m["state"]) for m in record["models"]]], sort_keys=True, default=str)
+    cached = _problem_cache.get(project_id)
+    if cached and cached[0] == cache_key:
+        found = cached[1]
+    else:
+        names = {o["id"]: o.get("name") or f"Object {o['id']}" for o in data["objects"]}
+        failed = {m["id"] for m in record["models"] if m["state"] == "failed"}
+        try:
+            found = [{"key": p["key"], "plate": p["plate"], "problem": p["problem"], "other": p["other"]}
+                     for p in placement_problems(project_id, record)]
+        except (jobs.JobError, OSError, KeyError, ValueError):
+            found = []   # no geometry libraries, or a model's mesh is missing: nothing can be judged
+        found += [{"key": o["id"], "plate": o["plate"], "problem": "failed model", "other": None}
+                  for o in data["objects"] if o["model"] in failed]
+        order = {o["id"]: i for i, o in enumerate(data["objects"])}
+        found.sort(key=lambda p: (order.get(p["key"], 0), p["problem"]))
+        for p in found:
+            what = {"overlaps": f"overlaps {names.get(p['other'])}", "failed model": "failed to import"}.get(p["problem"], p["problem"])
+            verb = "is " if p["problem"] in ("off the bed", "over the purge area") else ""
+            p["name"], p["text"] = names.get(p["key"]), f"{names.get(p['key'])} {verb}{what}"
+        _problem_cache[project_id] = (cache_key, found)
+    return [dict(p) for p in found if covered is None or p["plate"] in covered]
+
+
+def problems_reason(problems: list) -> str | None:
+    """The problems in a sentence for the Plates step: “cube is off the bed; lid overlaps cube” (a pair is named once)."""
+    seen, texts = set(), []
+    for p in problems:
+        pair = frozenset((p["key"], p["other"])) if p["problem"] == "overlaps" else None
+        if pair is not None and pair in seen:
+            continue
+        seen.add(pair)
+        texts.append(p["text"])
+    if not texts:
+        return None
+    return "; ".join(texts[:3]) + (f"; and {len(texts) - 3} more" if len(texts) > 3 else "")
+
+
 def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
     """Where the nester would put the unpinned objects on these plates (all by default), changing nothing. Each object
     is nested by the hull of the shape it has now, turned about Z, with its own clearance (SUPPORT_CLEARANCE_MM when it
@@ -2663,7 +2710,14 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
             "estimate_s": estimates.get("estimate_s"), "estimate_g": estimates.get("estimate_g"),
             "layers": len(analysis["layers"]), "slicer": analysis.get("slicer"), "gcode_bytes": gcode.stat().st_size,
             "bricklayers": bricks,
-            "findings": [f for f in analysis.get("findings", []) if f["level"] == "fail"][:5]}
+            "findings": _placement_findings(project_id, record, plate_id)
+                        + [f for f in analysis.get("findings", []) if f["level"] == "fail"][:5]}
+
+
+def _placement_findings(project_id: int, record: dict, plate_id: int) -> list:
+    """A slice of a plate with a problem Object records each problem as a failing finding."""
+    return [{"line": None, "command": "placement", "reason": p["text"], "level": "fail"}
+            for p in plate_problems(project_id, record, {plate_id})]
 
 
 def add_thumbnails(project_id: int, objects: list, machine: dict, gcode: Path, log: Path) -> None:
@@ -2774,6 +2828,9 @@ def queue_plates(project_id: int, body: dict) -> dict:
         raise jobs.JobError("There are no plates with objects to send", 409)
     if body.get("printer_id"):
         jobs._require_printer(body["printer_id"])
+    problems = plate_problems(project_id, record, {p["id"] for p in plates})
+    if problems:
+        raise jobs.JobError(f"Fix the objects marked in red first: {problems_reason(problems)}", 409)
     unsliced = [p["name"] for p in plates if (record["slices"].get(str(p["id"])) or {}).get("state") != SLICED]
     if unsliced:
         raise jobs.JobError(f"Slice {_names(unsliced)} first", 409)
@@ -2842,6 +2899,9 @@ def plate_status(project_id: int) -> dict:
     for obj in record["data"].get("objects", []):
         parts[obj.get("plate")] = parts.get(obj.get("plate"), 0) + 1
 
+    by_plate = {}   # plate id → its problem Objects
+    for problem in plate_problems(project_id, record):
+        by_plate.setdefault(problem["plate"], []).append(problem)
     plates, counts = [], {status: 0 for status in PLATE_STATUSES}
     filament = {"used": 0.0, "total": 0.0, "unknown_plates": 0}
     by_choice = {}   # filament choice → its plates' totals; None is the project default
@@ -2884,6 +2944,7 @@ def plate_status(project_id: int) -> dict:
                        "mixed": mixed, "filament": choice_label(found[0]) if found and not mixed else None,
                        "parts": parts.get(n, 0), "layout": fingerprint(record, n), "job_id": job["id"] if job else None,
                        "printer_id": (job["printer_id"] if job else None) or plate.get("printer_id"),
+                       "problems": by_plate.get(n, []), "problem_reason": problems_reason(by_plate.get(n, [])),
                        "estimate_s": entry.get("estimate_s") if sliced else None, "estimate_g": grams,
                        "time_estimate": plate_time(project_id, record, n, entry)})
     total = len(plates)
@@ -2978,6 +3039,10 @@ async def process_next(slot: int = 0) -> bool:
         except Exception as e:
             result = {"state": FAILED, "error": str(e) or type(e).__name__, "finished_at": time.time()}
             print(f"[Projects] Slicing plate {item} of project {project_id} failed: {e}")
+            try:   # a plate with a problem Object says so even when the slice stops on it
+                result["findings"] = _placement_findings(project_id, get_project(project_id), item)
+            except Exception:
+                pass
         if auto and result.get("state") == SLICED:
             result["auto_send"] = True   # the page keeps checking until the plate is in the queue (or says why not)
         _mutate(project_id, "slices", lambda s: s.__setitem__(str(item), result), created_at)

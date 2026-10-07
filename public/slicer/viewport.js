@@ -71,6 +71,7 @@ export class Viewport {
     this.head = null;              // [x, y, z] of the nozzle tip in printer coordinates
     this.geometries = new Map();   // model id → centred BufferGeometry
     this.holders = new Map();      // object id → { holder, mesh, object }
+    this.serverIssues = new Map(); // object id → problems the server found (overlaps, failed model…): the one definition of a problem Object
     this.selected = null;
     this.mode = "prepare";
     this.limits = { bed: [0, 0, 256, 256], exclude: [246, 0, 256, 20], height: 256 };
@@ -333,9 +334,18 @@ export class Viewport {
         const [ex0, ey0, ex1, ey1] = this.limits.exclude;
         if (box.max.x > ex0 && box.min.x < ex1 && box.max.y > ey0 && box.min.y < ey1) issues.push("over the purge area");
       }
+      for (const issue of this.serverIssues.get(id) || []) {
+        if (!issues.includes(issue) && !(issue === "failed model" && issues.includes("import failed"))) issues.push(issue);
+      }
       out.set(id, { box, issues });
     }
     return out;
+  }
+
+  /** The server's problem list (object id → issues) marks objects red too, e.g. for overlaps the viewport doesn't measure. */
+  setServerIssues(map) {
+    this.serverIssues = map;
+    this._refreshWarnings();
   }
 
   _refreshWarnings() {
