@@ -32,6 +32,7 @@ import slicer
 import splits
 import state
 import time
+import time_estimate
 from auth import (
     AUTH_ENABLED, BCRYPT_AVAILABLE, SECURE_COOKIES, SESSION_COOKIE,
     _auth_ok, _check_rate_limit, _create_session, _get_pw_hash, _get_username,
@@ -652,6 +653,9 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: preflight.printer_hardware(self._path_printer_id()), broadcast=False)
         elif self.path == "/api/prints" or self.path.startswith("/api/prints?"):
             self._jobs_call(lambda: print_history.search(**self._print_filters(paged=True)), broadcast=False)
+        elif self.path == "/api/slice-log" or self.path.startswith("/api/slice-log?"):
+            project = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("project_id") or [""])[0]
+            self._jobs_call(lambda: time_estimate.slice_log(int(project) if project.isdigit() else None), broadcast=False)
         elif self.path == "/api/outcome-prompts":
             self._jobs_call(lambda: {"awaiting": outcome_prompt.awaiting(), "reminder_delay_s": outcome_prompt.REMINDER_DELAY_S},
                             broadcast=False)
@@ -1134,6 +1138,11 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._send_bytes(projects.export_orca_project(project_id), "model/3mf", download_name=f"{name}.3mf")
             elif len(parts) == 7 and parts[4] == "models" and parts[6] == "preview":
                 self._send_file(projects.model_preview(project_id, int(parts[5])), "application/octet-stream")
+            elif len(parts) == 7 and parts[4] == "objects" and parts[6] == "orientation":
+                query = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}
+                if query.get("face"):
+                    query["face"] = [float(x) for x in query["face"].split(",")]   # "x,y,z", a direction in the model's space
+                self._json(projects.suggest_orientation(project_id, int(parts[5]), query))
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "fit":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 self._json(farm.plate_fit(projects.get_project(project_id), int(parts[5]), (query.get("printer_id") or [None])[0]))
@@ -1185,15 +1194,36 @@ class SPHandler(SimpleHTTPRequestHandler):
             }
             self._jobs_call(actions[parts[4]], broadcast=False)
             return
-        if len(parts) == 5 and parts[4] in ("layout", "whole", "pack", "slice", "queue"):
+        if len(parts) == 5 and parts[4] == "plan":
+            self._jobs_call(lambda: projects.plan_plates(self._job_id()), broadcast=False)
+            return
+        if len(parts) == 6 and parts[4] == "plan" and parts[5] == "accept":
+            def accept():
+                body = self._json_body()
+                return projects.accept_plan(self._job_id(), body.get("plan") or body.get("revision"), body.get("fingerprint"))
+            self._jobs_call(accept, broadcast=False)
+            return
+        if len(parts) == 5 and parts[4] == "orient-all":
+            self._jobs_call(lambda: projects.orient_all(self._job_id(), self._json_body()), broadcast=False)
+            return
+        if len(parts) == 7 and parts[4] == "objects" and parts[5].isdigit() and parts[6] == "orient":
+            self._jobs_call(lambda: projects.orient_object(self._job_id(), int(parts[5]), self._json_body()), broadcast=False)
+            return
+        if len(parts) == 5 and parts[4] in ("layout", "whole", "arrange", "slice", "queue"):
             actions = {
-                "layout": lambda: projects.lay_out_split(self._job_id(), self._json_body().get("parts")),
-                "whole":  lambda: projects.place_whole_model(self._job_id()),
-                "pack":   lambda: projects.pack_plates(self._job_id(), self._json_body().get("plates")),
-                "slice":  lambda: (lambda body: projects.request_slices(self._job_id(), body.get("plates"), bool(body.get("send"))))(self._json_body()),
-                "queue":  lambda: projects.queue_plates(self._job_id(), self._json_body()),
+                "layout":  lambda: projects.lay_out_split(self._job_id(), self._json_body().get("parts")),
+                "whole":   lambda: projects.place_whole_model(self._job_id()),
+                "arrange": lambda: (lambda body: projects.arrange(self._job_id(), body.get("plates"), body.get("engine")))(self._json_body()),
+                "slice":   lambda: (lambda body: projects.request_slices(self._job_id(), body.get("plates"), bool(body.get("send"))))(self._json_body()),
+                "queue":   lambda: projects.queue_plates(self._job_id(), self._json_body()),
             }
             self._jobs_call(actions[parts[4]], broadcast=parts[4] == "queue")
+            return
+        if len(parts) == 5 and parts[4] == "copies":
+            def copies():
+                body = self._json_body()
+                return projects.set_copies(self._job_id(), body.get("object"), body.get("copies"), body.get("revision"))
+            self._jobs_call(copies, broadcast=False)
             return
         if len(parts) == 6 and parts[4] == "models" and parts[5] == "upload":
             self._handle_project_upload()
@@ -1218,7 +1248,7 @@ class SPHandler(SimpleHTTPRequestHandler):
                     raise jobs.JobError("into must be a plate number")
                 return projects.merge_plates(self._job_id(), plate_id, into)
             actions = {
-                "arrange": lambda: projects.arrange_plate(self._job_id(), plate_id),
+                "arrange": lambda: projects.arrange_plate(self._job_id(), plate_id, self._json_body().get("engine")),
                 "slice":   lambda: projects.request_slice(self._job_id(), plate_id, bool(self._json_body().get("send"))),
                 "queue":   lambda: projects.queue_plate(self._job_id(), plate_id, self._json_body()),
                 "merge":   merge,

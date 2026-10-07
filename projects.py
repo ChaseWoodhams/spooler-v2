@@ -13,7 +13,10 @@ Record
            "profile": {"bundle_id", "process": {…changes}, "filament": {…changes}, "bricklayers": {…} | null},
            "plates": [{"id", "name", "overrides": {…process changes for this plate}, "bricklayers": {…} | null}],
            "objects": [{"id", "model", "name", "plate", "position": [x, y], "rotation": [x, y, z], "scale": [x, y, z],
-                        "overrides": {…process changes for this object}}]}
+                        "overrides": {…process changes for this object},
+                        "pinned": true — only when set: the planner leaves this object where it is}],
+           "filaments": {"<model id>": {"preset", "colour"}} — only models with a filament choice; the rest use the project's,
+           "arrange_engine": "orca" — only when chosen: Arrange uses OrcaSlicer's own arranger instead of the nester}
   models  [{"id", "name", "file", "state": importing | ready | failed, "error", "size", "triangles", "volume_cm3", "sha256",
             "split": {"id", "part" (0 = the whole model), "supports"} — models that came from a split}]
   slices  {"<plate id>": {"state": queued | slicing | sliced | failed, "error", "fingerprint", "estimate_s", "estimate_g", …}}
@@ -33,6 +36,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -56,10 +60,12 @@ import splits
 import spoolman
 import state
 import thumbnails
+import time_estimate
 from gcode_meta import safe_gcode_name
 from persistence import DATA_DIR
 
 MAX_PLATES, MAX_OBJECTS = 50, 500
+MAX_FILAMENT_NAME, MAX_FILAMENT_COLOUR = 80, 40
 # Plates sliced at the same time. Each OrcaSlicer process can use a few GB for a big plate, so the default is modest.
 SLICE_WORKERS = max(1, int(os.getenv("SLICE_WORKERS", str(max(1, min(2, (os.cpu_count() or 2) // 4))))))
 IMPORTING, READY, FAILED = "importing", "ready", "failed"
@@ -140,7 +146,42 @@ def fingerprint(record: dict, plate_id: int) -> str:
     bricks = plate_bricklayers(data, plate)
     if bricks:  # likewise only when on, so plates sliced before BrickLayers existed stay up to date
         payload["bricklayers"] = bricks
+    chosen = plate_filaments(data, plate_id)
+    if any(chosen):  # only when an object's model has a choice, so plates on the project default stay up to date
+        payload["filament"] = [{"preset": c["preset"], "colour": c.get("colour", "")} if c else None for c in chosen]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _choice_key(choice: dict | None) -> tuple | None:
+    return (choice["preset"], choice.get("colour", "")) if choice else None
+
+
+def choice_label(choice: dict | None) -> str:
+    """How a filament choice reads on the page: "PETG grey" (the preset without its @printer suffix, then the colour)."""
+    if not choice:
+        return "the project default"
+    return f"{choice['preset'].split(' @')[0]} {choice.get('colour', '')}".strip()
+
+
+def plate_filaments(data: dict, plate_id: int) -> list:
+    """The distinct filament choices of a plate's objects, in object order; None stands for the project default.
+    A plate's filament is derived here every time and never stored on the plate."""
+    choices = data.get("filaments") or {}
+    found = {}
+    for obj in sorted((o for o in data.get("objects", []) if o["plate"] == plate_id), key=lambda o: o["id"]):
+        choice = choices.get(str(obj["model"]))
+        found.setdefault(_choice_key(choice), choice)
+    return list(found.values())
+
+
+def plate_mix(data: dict, plate_id: int) -> str | None:
+    """"Plate 3 mixes PETG grey and PLA white" when the plate holds more than one filament choice, else None."""
+    found = plate_filaments(data, plate_id)
+    if len(found) < 2:
+        return None
+    plate = next((p for p in data.get("plates", []) if p["id"] == plate_id), {})
+    labels = [choice_label(c) for c in found]
+    return f"{plate.get('name') or f'Plate {plate_id}'} mixes {', '.join(labels[:-1])} and {labels[-1]}"
 
 
 def plate_bricklayers(data: dict, plate: dict) -> dict | None:
@@ -372,6 +413,43 @@ def _spool_id(value) -> int | None:
     return number
 
 
+def _pinned(value) -> bool:
+    if not isinstance(value, bool):
+        raise jobs.JobError("pinned must be true or false")
+    return value
+
+
+def _filament_choice(value, model_id) -> dict:
+    """A model's filament choice: a material preset plus an optional colour label."""
+    if not isinstance(value, dict):
+        raise jobs.JobError(f"Model {model_id}'s filament choice needs a preset and an optional colour")
+    preset, colour = value.get("preset"), value.get("colour") or ""
+    if not isinstance(preset, str) or not preset.strip() or len(preset.strip()) > MAX_FILAMENT_NAME:
+        raise jobs.JobError(f"Model {model_id}'s filament choice needs a preset name of up to {MAX_FILAMENT_NAME} characters")
+    if not isinstance(colour, str) or len(colour.strip()) > MAX_FILAMENT_COLOUR:
+        raise jobs.JobError(f"Model {model_id}'s filament colour is a label of up to {MAX_FILAMENT_COLOUR} characters")
+    return {"preset": re.sub(r"\s+", " ", preset).strip(), "colour": re.sub(r"\s+", " ", colour).strip()}
+
+
+def _filament_choices(value, model_ids: set) -> dict:
+    """{"<model id>": choice}; a model without an entry (or with null) prints in the project's default filament."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise jobs.JobError("Filament choices are an object keyed by model id")
+    choices = {}
+    for key, choice in value.items():
+        try:
+            model_id = int(key)
+        except (TypeError, ValueError):
+            raise jobs.JobError("Filament choices are keyed by model id")
+        if model_id not in model_ids:
+            raise jobs.JobError(f"Filament choice for model {key}, which isn't in the project")
+        if choice is not None:
+            choices[str(model_id)] = _filament_choice(choice, model_id)
+    return choices
+
+
 def validate_data(raw, record: dict) -> dict:
     if not isinstance(raw, dict):
         raise jobs.JobError("Project data must be an object")
@@ -430,8 +508,10 @@ def validate_data(raw, record: dict) -> dict:
         if overrides and base is None:
             raise jobs.JobError("Choose a profile before changing an object's settings")
         rotation = _numbers(obj.get("rotation", [0, 0, 0]), 3, "Rotation", -100000, 100000)
+        pinned = _pinned(obj["pinned"]) if "pinned" in obj else False
         objects.append({
             "id": object_id, "model": model_id, "plate": plate_id,
+            **({"pinned": True} if pinned else {}),   # only when set, so projects saved before pinning stay as they were
             "name": _clean_name(obj.get("name")) or f"Object {object_id}",
             "position": _numbers(obj.get("position", [128, 128]), 2, "Position", -1000, 3000),
             "rotation": [round(r % 360, 4) for r in rotation],
@@ -439,6 +519,11 @@ def validate_data(raw, record: dict) -> dict:
             "overrides": slicer.normalize_overrides({"process": overrides}, base).get("process", {}) if overrides else {},
         })
     out = {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
+    filaments = _filament_choices(raw.get("filaments"), model_ids)
+    if filaments:  # likewise only when a model has a choice
+        out["filaments"] = filaments
+    if raw.get("arrange_engine") == ORCA:  # likewise only when OrcaSlicer's arranger is chosen over the nester
+        out["arrange_engine"] = ORCA
     # A quick print's chosen orientation is the server's alone: whatever a save sends, the stored value is kept (the
     # other writers, _mutate on "data", change a copy of the stored data and so keep it too).
     if (record.get("data") or {}).get("orientation"):
@@ -477,6 +562,28 @@ def _mutate(project_id: int, column: str, change, created_at: float | None = Non
 
 
 # ── Models ─────────────────────────────────────────────────────────────────────
+
+def _save_data(project_id: int, record: dict, data: dict, emptied=()) -> None:
+    """Write `data` as the project's next revision, only if the project is still at the revision `record` was read at.
+    Plates in `emptied` lose their slices and their folders."""
+    with database.transaction() as conn:
+        row = conn.execute("SELECT revision, slices FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise jobs.JobError("Project not found", 404)
+        if row["revision"] != record["revision"]:
+            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
+        if emptied:
+            slices = json.loads(row["slices"] or "{}")
+            for plate_id in emptied:
+                slices.pop(str(plate_id), None)
+            conn.execute("UPDATE projects SET data = ?, slices = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                         (json.dumps(data), json.dumps(slices), time.time(), project_id))
+        else:
+            conn.execute("UPDATE projects SET data = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                         (json.dumps(data), time.time(), project_id))
+    for plate_id in emptied:
+        shutil.rmtree(plate_dir(project_id, plate_id), ignore_errors=True)
+
 
 def _next_id(items) -> int:
     return max((int(i["id"]) for i in items), default=0) + 1
@@ -801,7 +908,7 @@ def _machine_limits_for(record: dict) -> dict:
 
 
 def _gap_for(process: dict) -> float:
-    """Room to leave between parts printed with these process settings: supports need far more than the parts alone."""
+    """Room to leave between objects printed with these process settings: supports need far more than the objects alone."""
     return packing.SUPPORT_GAP_MM if str((process or {}).get("enable_support")) == "1" else packing.GAP_MM
 
 
@@ -1345,79 +1452,375 @@ def _footprint(project_id: int, obj: dict) -> tuple:
     return float(size[0]), float(size[1])
 
 
-def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, overrides_for) -> dict:
-    """Move objects as packing.pack's `layout` (keyed by object id) says, onto `plate_ids` in order and new plates
-    after them. Plates among `plate_ids` left empty are removed; plates still holding importing models are kept."""
-    data = json.loads(json.dumps(record["data"]))
-    ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    busy = {o["plate"] for o in data["objects"] if o["plate"] in plate_ids and o["model"] not in ready}
-    free = [plate_id for plate_id in plate_ids if plate_id not in busy]
+# ── Rough print time before slicing ───────────────────────────────────────────
+
+_estimate_cache: dict = {}   # (project id, plate fingerprint) → plate features; only complete answers are kept
+
+
+def _plate_process(record: dict, plate: dict) -> dict:
+    """The process settings a plate slices with, as far as they can be told without slicing."""
+    data = record["data"]
+    try:
+        base = slicer.bundle_settings(data["profile"]["bundle_id"])["process"]
+    except jobs.JobError:
+        base = {}
+    return {**base, **data["profile"].get("process", {}), **(plate.get("overrides") or {})}
+
+
+def plate_features(project_id: int, record: dict, plate_id: int) -> dict | None:
+    """What a plate's print time is estimated from: layers, deposited volume (cm3) and first-layer footprint (cm2), the
+    first-layer footprint being the objects' bounding boxes on the bed. None while a model's geometry isn't available."""
+    plate = next((p for p in record["data"]["plates"] if p["id"] == plate_id), None)
+    objects = [o for o in record["data"]["objects"] if o["plate"] == plate_id]
+    if plate is None or not objects:
+        return None
+    key = (project_id, fingerprint(record, plate_id))
+    if key in _estimate_cache:
+        return _estimate_cache[key]
+    settings = time_estimate.settings_from(_plate_process(record, plate))
+    height = volume = footprint = 0.0
+    try:
+        for obj in objects:
+            analysis = splits._read(model_dir(project_id, obj["model"]), "analysis.json") or {}
+            verts, _ = load_mesh(project_id, obj["model"], preview=True)
+            placed = place(verts, {**obj, "position": [0.0, 0.0]})
+            size = placed.max(axis=0) - placed.min(axis=0)
+            factor = abs(float(obj["scale"][0]) * float(obj["scale"][1]) * float(obj["scale"][2]))
+            volume += time_estimate.deposited_cm3(float(analysis["volume_cm3"]) * factor,
+                                                  float(analysis.get("surface_cm2") or 0) * factor ** (2 / 3),
+                                                  float(size[2]), settings)
+            height = max(height, float(size[2]))
+            footprint += float(size[0] * size[1]) / 100
+    except (OSError, KeyError, TypeError, ValueError, jobs.JobError):
+        return None   # the model isn't imported (yet): no estimate, which is better than a wrong one
+    features = {"layers": time_estimate.layer_count(height, settings["layer_height"]),
+                "volume_cm3": round(volume, 2), "first_layer_cm2": round(footprint, 2)}
+    _estimate_cache[key] = features
+    return features
+
+
+def plate_time(project_id: int, record: dict, plate_id: int, entry: dict) -> dict | None:
+    """A plate's time: the slicer's figure while its slice is current, otherwise the rough estimate marked approximate."""
+    features = plate_features(project_id, record, plate_id)
+    out = {"layers": features["layers"], "volume_cm3": features["volume_cm3"]} if features else {}
+    if entry.get("state") == SLICED and not entry.get("outdated") and entry.get("estimate_s"):
+        return {**out, "seconds": entry["estimate_s"], "approximate": False, "source": "slicer"}
+    if not features:
+        return None
+    seconds = time_estimate.predict_seconds(features["layers"], features["volume_cm3"], features["first_layer_cm2"])
+    return {**out, "seconds": seconds, "approximate": True, "source": "model"}
+
+
+def _place_layout(data: dict, free: list, layout: list, overrides_for) -> list:
+    """Move the objects in `data` as a layout (packing.pack's, or the nester's; keyed by object id) says, onto the plates in
+    `free` in order and new plates after them. A layout plate with a "plate" goes onto that plate and keeps its settings; an
+    item turns by its "angle" degrees about Z, else a quarter turn when "turned". Returns the ids of the plates used."""
     objects = {o["id"]: o for o in data["objects"]}
     plates = {p["id"]: p for p in data["plates"]}
+    spare = [plate_id for plate_id in free if plate_id not in {p.get("plate") for p in layout}]
     used = []
-    for index, plate in enumerate(layout):
-        if index < len(free):
-            target = plates[free[index]]
+    for plate in layout:
+        if plate.get("plate") is not None:
+            target = plates[plate["plate"]]
+        elif spare:
+            target = plates[spare.pop(0)]
             target["overrides"] = dict(overrides_for(plate["group"]))
         else:
             if len(data["plates"]) >= MAX_PLATES:
                 raise jobs.JobError(f"A project holds at most {MAX_PLATES} plates")
             target = _new_plate(_next_id(data["plates"]), overrides_for(plate["group"]))
             data["plates"].append(target)
+            plates[target["id"]] = target
         used.append(target["id"])
         for item in plate["items"]:
             obj = objects[item["key"]]
             obj["plate"] = target["id"]
             obj["position"] = [round(item["center"][0], 3), round(item["center"][1], 3)]
-            if item["turned"]:
-                obj["rotation"][2] = round((obj["rotation"][2] + 90) % 360, 4)
+            turn = item["angle"] if "angle" in item else 90 if item["turned"] else 0
+            if turn:
+                obj["rotation"][2] = round((obj["rotation"][2] + turn) % 360, 4)
+    return used
+
+
+def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, overrides_for) -> dict:
+    """Apply a layout (see `_place_layout`) onto `plate_ids` and new plates. Plates among `plate_ids` left empty are removed;
+    plates still holding importing models are kept."""
+    data = json.loads(json.dumps(record["data"]))
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    busy = {o["plate"] for o in data["objects"] if o["plate"] in plate_ids and o["model"] not in ready}
+    free = [plate_id for plate_id in plate_ids if plate_id not in busy]
+    used = _place_layout(data, free, layout, overrides_for)
     emptied = [plate_id for plate_id in free if plate_id not in used]
     data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
-    with database.transaction() as conn:
-        row = conn.execute("SELECT revision, slices FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if row is None:
-            raise jobs.JobError("Project not found", 404)
-        if row["revision"] != record["revision"]:
-            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
-        slices = json.loads(row["slices"] or "{}")
-        for plate_id in emptied:
-            slices.pop(str(plate_id), None)
-        conn.execute("UPDATE projects SET data = ?, slices = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
-                     (json.dumps(data), json.dumps(slices), time.time(), project_id))
-    for plate_id in emptied:
-        shutil.rmtree(plate_dir(project_id, plate_id), ignore_errors=True)
+    _save_data(project_id, record, data, emptied)
     return get_project(project_id)
 
 
-def pack_plates(project_id: int, plate_ids=None) -> dict:
-    """Repack the objects on these plates (all plates by default) onto as few plates as fit. Plates with different
-    settings aren't mixed, and plates left empty are removed."""
-    record = get_project(project_id)
-    plates = record["data"]["plates"]
-    if plate_ids is not None:
-        try:
-            wanted = {int(i) for i in plate_ids}
-        except (TypeError, ValueError):
-            raise jobs.JobError("plates must be a list of plate numbers")
-        plates = [p for p in plates if p["id"] in wanted]
-    order = [p["id"] for p in plates]
-    ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    movable = sorted((o for o in record["data"]["objects"] if o["plate"] in order and o["model"] in ready),
-                     key=lambda o: order.index(o["plate"]))
-    if not movable:
-        return record
+NESTER, ORCA = ARRANGE_ENGINES = ("nester", "orca")   # the outline nester (default), or OrcaSlicer's own --arrange as a fallback
+SUPPORT_OVERHANG_MM2 = 25.0            # underside area, off the bed, that makes an object need supports in its orientation
+
+
+def _arrange_plate_ids(record: dict, plate_ids) -> list:
+    """The plates an arrange covers, in plate order: the ones asked for (all by default) that exist."""
+    plates = [p["id"] for p in record["data"]["plates"]]
+    if plate_ids is None:
+        return plates
+    try:
+        wanted = {int(i) for i in plate_ids}
+    except (TypeError, ValueError):
+        raise jobs.JobError("plates must be a list of plate numbers")
+    return [p for p in plates if p in wanted]
+
+
+def _threshold_angle(process: dict) -> float:
+    """Degrees from horizontal at or below which the profile prints supports (support_threshold_angle). 0 is "automatic":
+    the usual angle."""
+    import orientation
+    try:
+        angle = float((process or {}).get("support_threshold_angle") or 0)
+    except (TypeError, ValueError):
+        angle = 0.0
+    return angle if 1 <= angle <= 89 else orientation.DEFAULT_OVERHANG_ANGLE
+
+
+def _needs_supports(process: dict, verts, tris, obj: dict) -> bool:
+    """Whether the object, placed as it is, gets tree supports: supports are on in its settings and an underside off the
+    bed slopes no more than the profile's overhang angle (from horizontal) over enough area."""
+    import numpy as np
+    if str(process.get("enable_support")) != "1":
+        return False
+    angle = _threshold_angle(process)
+    placed = place(verts, {**obj, "position": [0.0, 0.0]})[np.asarray(tris)]
+    cross = np.cross(placed[:, 1] - placed[:, 0], placed[:, 2] - placed[:, 0])
+    area = np.linalg.norm(cross, axis=1) / 2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        facing_down = -cross[:, 2] / (2 * area) >= math.cos(math.radians(angle)) - 1e-9
+    off_bed = placed[:, :, 2].min(axis=1) > 0.3
+    return bool(area[facing_down & off_bed & (area > 1e-9)].sum() > SUPPORT_OVERHANG_MM2)
+
+
+class _Shapes:
+    """What the nester needs to know of each object of a project: its outline from above and its clearance
+    (SUPPORT_CLEARANCE_MM when it needs tree supports in its orientation, else CLEARANCE_MM), cached."""
+
+    def __init__(self, project_id: int, record: dict, data: dict):
+        import nesting
+        self.nesting, self.project_id, self.record = nesting, project_id, record
+        self.plates = {p["id"]: p for p in data["plates"]}
+        self.processes, self.meshes, self.shapes = {}, {}, {}
+
+    def mesh(self, model_id: int):
+        if model_id not in self.meshes:
+            self.meshes[model_id] = load_mesh(self.project_id, model_id)
+        return self.meshes[model_id]
+
+    def outline_and_clearance(self, obj: dict) -> tuple:
+        key = (obj["model"], obj["plate"], tuple(obj["rotation"]), tuple(obj["scale"]), json.dumps(obj.get("overrides") or {}, sort_keys=True))
+        if key not in self.shapes:
+            if obj["plate"] not in self.processes:
+                self.processes[obj["plate"]] = _plate_process(self.record, self.plates[obj["plate"]])
+            verts, tris = self.mesh(obj["model"])
+            hull = self.nesting.hull_outline(place(verts, {**obj, "position": [0.0, 0.0]})[:, :2])
+            needs = _needs_supports({**self.processes[obj["plate"]], **(obj.get("overrides") or {})}, verts, tris, obj)
+            self.shapes[key] = hull, self.nesting.SUPPORT_CLEARANCE_MM if needs else self.nesting.CLEARANCE_MM
+        return self.shapes[key]
+
+    def polygon(self, obj: dict) -> list:
+        """The object's outline where it stands on the bed."""
+        return self.nesting.hull_outline(place(self.mesh(obj["model"])[0], obj)[:, :2])
+
+
+def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
+    """Where the nester would put the unpinned objects on these plates (all by default), changing nothing. Each object
+    is nested by the hull of the shape it has now, turned about Z, with its own clearance (SUPPORT_CLEARANCE_MM when it
+    needs tree supports in its orientation, else CLEARANCE_MM); pinned objects are fixed shapes the others keep clear of
+    and stay on their plates; objects on plates with different settings, or whose models have different filament
+    choices, never share a plate. Plates holding a model that is still importing are left out. Returns, in plate order
+    for each group, [{"group", "plate": the existing plate it is (a plate holding pinned objects) or None for one to
+    fill, "overrides", "fixed": [pinned object ids], "items": [{"key": object id, "center": (x, y), "turned", "angle":
+    degrees about Z, "oversize"}]}]. `_apply_layout` applies it."""
+    try:
+        import nesting
+    except ImportError:
+        raise _nest_error()
+    data = record["data"]
     limits = _machine_limits_for(record)
-    group = {p["id"]: json.dumps(p.get("overrides") or {}, sort_keys=True) for p in plates}
-    items = [{"key": o["id"], "size": _footprint(project_id, o), "group": group[o["plate"]]} for o in movable]
-    profile = record["data"]["profile"]["process"]
-    layout = [plate for key in dict.fromkeys(i["group"] for i in items)   # each group of settings packs with its own gap
-              for plate in packing.pack([i for i in items if i["group"] == key], limits["bed"], limits["exclude"],
-                                        gap=_gap_for({**profile, **json.loads(key)}))]
-    return _apply_layout(project_id, record, order, layout, json.loads)
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    busy = {o["plate"] for o in data["objects"] if o["model"] not in ready}
+    order = [p for p in _arrange_plate_ids(record, plate_ids) if p not in busy]
+    plates = {p["id"]: p for p in data["plates"]}
+    choices = data.get("filaments") or {}
+    objects = [o for o in data["objects"] if o["plate"] in order]
+    shapes = _Shapes(project_id, record, data)
+
+    def group_of(obj):
+        plate = plates[obj["plate"]]
+        return json.dumps({"overrides": plate.get("overrides") or {}, "filament": _choice_key(choices.get(str(obj["model"])))},
+                          sort_keys=True)
+
+    pinned_plates = {}   # plate id → the group it holds: its first pinned object's
+    for obj in sorted((o for o in objects if o.get("pinned")), key=lambda o: o["id"]):
+        pinned_plates.setdefault(obj["plate"], group_of(obj))
+    slots = {}           # group → [plate ids holding pinned objects], a plate's place in the list being its slot
+    for plate_id in order:
+        if plate_id in pinned_plates:
+            slots.setdefault(pinned_plates[plate_id], []).append(plate_id)
+    fixed = []
+    for obj in objects:
+        if obj.get("pinned"):
+            group = pinned_plates[obj["plate"]]
+            _, clearance = shapes.outline_and_clearance(obj)
+            fixed.append({"key": obj["id"], "group": group, "slot": slots[group].index(obj["plate"]), "clearance": clearance,
+                          "polygon": shapes.polygon(obj)})
+    items = []
+    for obj in (o for o in objects if not o.get("pinned")):
+        hull, clearance = shapes.outline_and_clearance(obj)
+        items.append({"key": obj["id"], "outline": hull, "clearance": clearance, "group": group_of(obj)})
+    if not items:
+        return []
+    overrides = {group_of(o): dict(plates[o["plate"]].get("overrides") or {}) for o in objects}
+    seen = {}
+    layout = []
+    for plate in nesting.nest(items, limits["bed"], limits["exclude"], fixed):
+        index = seen[plate["group"]] = seen.get(plate["group"], -1) + 1
+        held = slots.get(plate["group"], [])
+        layout.append({"group": plate["group"], "plate": held[index] if index < len(held) else None,
+                       "overrides": overrides[plate["group"]], "fixed": plate["fixed"], "items": plate["items"]})
+    return layout
+
+
+def _set_arrange_engine(project_id: int, record: dict, engine: str) -> dict:
+    """Remember in the project which engine arranges it: only OrcaSlicer's is stored, the nester being the default."""
+    data = json.loads(json.dumps(record["data"]))
+    if engine == ORCA:
+        data["arrange_engine"] = ORCA
+    else:
+        data.pop("arrange_engine", None)
+    _save_data(project_id, record, data)
+    return get_project(project_id)
+
+
+def arrange(project_id: int, plate_ids=None, engine: str | None = None) -> dict:
+    """The one Arrange: lay out the unpinned objects on these plates (all by default) with `arrange_layout`, onto as few
+    plates as fit; plates left empty are removed, never one holding a pinned object. `engine` "orca" has OrcaSlicer arrange
+    each plate in place instead (its arranger knows nothing of pins, so a plate holding pinned objects is refused, nor of
+    filaments or clearance); a choice of engine is kept in the project and used from then on when none is named."""
+    record = get_project(project_id)
+    stored = record["data"].get("arrange_engine", NESTER)
+    if engine is not None and engine not in ARRANGE_ENGINES:
+        raise jobs.JobError(f"engine must be one of: {', '.join(ARRANGE_ENGINES)}")
+    order = _arrange_plate_ids(record, plate_ids)
+    if (engine or stored) == ORCA and any(o.get("pinned") and o["plate"] in order for o in record["data"]["objects"]):
+        raise jobs.JobError("OrcaSlicer's arranger can't keep clear of pinned objects: unpin them or use the nester")
+    if engine is not None and engine != stored:
+        record, stored = _set_arrange_engine(project_id, record, engine), engine
+    if stored == ORCA:
+        ready = {m["id"] for m in record["models"] if m["state"] == READY}
+        for plate_id in order:
+            if any(o["plate"] == plate_id and o["model"] in ready and not o.get("pinned") for o in record["data"]["objects"]):
+                record = _arrange_with_orca(project_id, plate_id)
+        return record
+    layout = arrange_layout(project_id, record, order)
+    if not layout:
+        return record
+    return _apply_layout(project_id, record, order, layout, lambda group: json.loads(group)["overrides"])
+
+
+def set_copies(project_id: int, object_id, copies, revision=None) -> dict:
+    """Make the number of Objects made from this object's Model (across all plates) `copies`. More copies are clones of
+    the object, placed where they fit (its plate first, then plates with the same settings, then a new plate); fewer
+    remove unpinned objects, last plate first, never the object itself. The result is the project plus
+    `copies`: {model, count, asked, pinned} so a count above `asked` can say that pinned objects held it up."""
+    if isinstance(copies, bool) or not isinstance(copies, int) or not 1 <= copies <= MAX_OBJECTS:
+        raise jobs.JobError(f"Copies must be a whole number from 1 to {MAX_OBJECTS}")
+    record = get_project(project_id)
+    if revision is not None and revision != record["revision"]:
+        raise jobs.JobError("The project was changed elsewhere — reload it", 409)
+    data = json.loads(json.dumps(record["data"]))
+    source = next((o for o in data["objects"] if o["id"] == object_id), None)
+    if source is None:
+        raise jobs.JobError("Object not found", 404)
+    made = [o for o in data["objects"] if o["model"] == source["model"]]
+    result = {"model": source["model"], "count": len(made), "asked": copies,
+              "pinned": sum(1 for o in made if o.get("pinned"))}
+    if copies > len(made):
+        if source["model"] not in {m["id"] for m in record["models"] if m["state"] == READY}:
+            raise jobs.JobError("Wait for the model to finish importing", 409)
+        if len(data["objects"]) + copies - len(made) > MAX_OBJECTS:
+            raise jobs.JobError(f"A project holds at most {MAX_OBJECTS} objects")
+        _add_copies(project_id, record, data, source, copies - len(made))
+    elif copies < len(made):
+        order = {p["id"]: i for i, p in enumerate(data["plates"])}
+        removable = [o for o in data["objects"] if o["model"] == source["model"] and o["id"] != source["id"] and not o.get("pinned")]
+        removable.sort(key=lambda o: (order[o["plate"]], data["objects"].index(o)), reverse=True)
+        gone = {o["id"] for o in removable[:len(made) - copies]}
+        data["objects"] = [o for o in data["objects"] if o["id"] not in gone]
+    if data["objects"] == record["data"]["objects"] and data["plates"] == record["data"]["plates"]:
+        return {**record, "copies": result}
+    _save_data(project_id, record, data)
+    result["count"] = sum(1 for o in data["objects"] if o["model"] == source["model"])
+    return {**get_project(project_id), "copies": result}
+
+
+def _nest_error() -> jobs.JobError:
+    return jobs.JobError("Arranging needs shapely installed on the Spooler computer", 503)
+
+
+def _add_copies(project_id: int, record: dict, data: dict, source: dict, count: int) -> None:
+    """Append `count` clones of `source` to `data`, each where the nester finds room for it: its plate first, then plates
+    with the same settings, then a new plate."""
+    try:
+        import nesting
+    except ImportError:
+        raise _nest_error()
+    limits = _machine_limits_for(record)
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    plates = {p["id"]: p for p in data["plates"]}
+    shapes = _Shapes(project_id, record, data)
+    settings = lambda plate_id: json.dumps(plates[plate_id].get("overrides") or {}, sort_keys=True)
+    hull, clearance = shapes.outline_and_clearance(source)
+    same = [source["plate"]] + [p["id"] for p in data["plates"] if p["id"] != source["plate"] and settings(p["id"]) == settings(source["plate"])]
+    for _ in range(count):
+        spot = None
+        for plate_id in same:
+            fixed = [{"key": o["id"], "group": 0, "slot": 0, "polygon": shapes.polygon(o), "clearance": shapes.outline_and_clearance(o)[1]}
+                     for o in data["objects"] if o["plate"] == plate_id and o["model"] in ready]
+            spot = _nest_one(nesting, hull, clearance, limits, fixed)
+            if spot:
+                spot = plate_id, spot
+                break
+        if spot is None:
+            if len(data["plates"]) >= MAX_PLATES:
+                raise jobs.JobError(f"A project holds at most {MAX_PLATES} plates")
+            plate = _new_plate(_next_id(data["plates"]), plates[source["plate"]].get("overrides"))
+            data["plates"].append(plate)
+            plates[plate["id"]] = shapes.plates[plate["id"]] = plate
+            same.append(plate["id"])
+            spot = plate["id"], _nest_one(nesting, hull, clearance, limits, []) or ((128.0, 128.0), 0.0)   # too big for any plate: it sits centred
+        plate_id, ((x, y), angle) = spot
+        added = json.loads(json.dumps(source))
+        added.pop("pinned", None)
+        added.update(id=_next_id(data["objects"]), plate=plate_id, position=[round(x, 3), round(y, 3)])
+        if angle:
+            added["rotation"][2] = round((added["rotation"][2] + angle) % 360, 4)
+        data["objects"].append(added)
+
+
+def _nest_one(nesting, hull, clearance: float, limits: dict, fixed: list):
+    """((centre x, centre y), turn about Z in degrees) for one more object on a plate holding `fixed` shapes, or None when
+    it doesn't fit there."""
+    plates = nesting.nest([{"key": 0, "outline": hull, "clearance": clearance, "group": 0}], limits["bed"], limits["exclude"], fixed)
+    placed = [i for i in plates[0]["items"] if i["key"] == 0 and not i["oversize"]]
+    return (placed[0]["center"], placed[0]["angle"]) if placed else None
 
 
 def merge_plates(project_id: int, source_id: int, into_id: int) -> dict:
-    """Move everything on one plate onto another, packed to fit. The combined plate keeps the settings of `into_id`."""
+    """Move everything on one plate onto another, nested to fit. The combined plate keeps the settings of `into_id`; plates
+    of different filament choices don't merge."""
+    try:
+        import nesting
+    except ImportError:
+        raise _nest_error()
     record = get_project(project_id)
     plates = {p["id"]: p for p in record["data"]["plates"]}
     if source_id not in plates or into_id not in plates:
@@ -1428,13 +1831,294 @@ def merge_plates(project_id: int, source_id: int, into_id: int) -> dict:
     objects = [o for o in record["data"]["objects"] if o["plate"] in (into_id, source_id)]
     if any(o["model"] not in ready for o in objects):
         raise jobs.JobError("Wait for the models on these plates to finish importing", 409)
+    found = plate_filaments({"objects": [{**o, "plate": into_id} for o in objects], "filaments": record["data"].get("filaments")}, into_id)
+    if len(found) > 1:
+        labels = [choice_label(c) for c in found]
+        raise jobs.JobError(f"{plates[into_id]['name']} and {plates[source_id]['name']} together mix {', '.join(labels[:-1])} and {labels[-1]}", 409)
     limits = _machine_limits_for(record)
-    gap = _gap_for({**record["data"]["profile"]["process"], **(plates[into_id].get("overrides") or {})})
-    layout = packing.pack([{"key": o["id"], "size": _footprint(project_id, o), "group": "merged"} for o in objects],
-                          limits["bed"], limits["exclude"], gap=gap) or [{"group": "merged", "items": []}]  # both plates empty
+    shapes = _Shapes(project_id, record, record["data"])
+    items = []
+    for o in objects:
+        hull, clearance = shapes.outline_and_clearance({**o, "plate": into_id})
+        items.append({"key": o["id"], "outline": hull, "clearance": clearance, "group": "merged"})
+    layout = nesting.nest(items, limits["bed"], limits["exclude"]) or [{"group": "merged", "items": []}]   # both plates empty
     if len(layout) > 1 or any(item["oversize"] for plate in layout for item in plate["items"]):
         raise jobs.JobError(f"Those objects don't fit on one plate — {plates[source_id]['name']} stays as it is", 409)
     return _apply_layout(project_id, record, [into_id, source_id], layout, lambda _: plates[into_id].get("overrides") or {})
+
+
+# ── Orientation ────────────────────────────────────────────────────────────────
+
+def _overhang_angle(record: dict, body: dict) -> float:
+    """Degrees from horizontal at or below which the profile prints supports (support_threshold_angle, 30 when unset)."""
+    if body.get("overhang_angle") not in (None, ""):
+        try:
+            angle = float(body["overhang_angle"])
+        except (TypeError, ValueError):
+            angle = 0.0
+        if not 1 <= angle <= 89:
+            raise jobs.JobError("overhang_angle is a number of degrees from 1 to 89")
+        return angle
+    profile = record["data"]["profile"]
+    try:
+        process = {**slicer.bundle_settings(profile["bundle_id"])["process"], **profile.get("process", {})} if profile["bundle_id"] else {}
+    except jobs.JobError:
+        process = {}
+    return _threshold_angle(process)
+
+
+def _bed_limits(record: dict) -> dict:
+    limits = _machine_limits_for(record)
+    x0, y0, x1, y1 = limits["bed"]
+    return {"height": limits["height"], "bed_x": x1 - x0, "bed_y": y1 - y0}
+
+
+def _orient_options(record: dict, body: dict) -> dict:
+    import orientation
+    mode = body.get("mode") or orientation.LEAST_SUPPORT
+    if mode not in orientation.MODES:
+        raise jobs.JobError(f"mode must be one of {', '.join(orientation.MODES)}")
+    options = {"mode": mode, "angle": _overhang_angle(record, body), "favoured": body.get("face")}
+    try:
+        options["limits"] = _bed_limits(record)
+    except jobs.JobError:
+        options["limits"] = None   # no profile chosen yet: orient without checking the bed
+    return options
+
+
+def _orientation_for(project_id: int, obj: dict, options: dict) -> dict:
+    import orientation
+    verts, tris = load_mesh(project_id, obj["model"], preview=True)
+    try:
+        return orientation.suggest(verts, tris, obj["scale"], obj["rotation"], **options)
+    except orientation.OrientError as e:
+        raise jobs.JobError(str(e))
+
+
+def _ready_object(record: dict, object_id) -> dict:
+    obj = next((o for o in record["data"]["objects"] if o["id"] == object_id), None)
+    if obj is None:
+        raise jobs.JobError("Object not found", 404)
+    if next((m["state"] for m in record["models"] if m["id"] == obj["model"]), None) != READY:
+        raise jobs.JobError("The model isn't ready yet", 409)
+    return obj
+
+
+def suggest_orientation(project_id: int, object_id: int, body: dict) -> dict:
+    """The orientation suggested for one object; changes nothing. `mode`: least-support (default), strength or looks
+    (which needs `face`, the side that should look best, as a direction in the model's own space)."""
+    record = get_project(project_id)
+    obj = _ready_object(record, object_id)
+    options = _orient_options(record, body)
+    suggestion = _orientation_for(project_id, obj, options)
+    return {"object": object_id, "mode": options["mode"], "overhang_angle": options["angle"],
+            "rotation_from": obj["rotation"], **suggestion}
+
+
+def _apply_rotations(project_id: int, record: dict, rotations: dict) -> dict:
+    data = json.loads(json.dumps(record["data"]))
+    for obj in data["objects"]:
+        if obj["id"] in rotations:
+            obj["rotation"] = rotations[obj["id"]]
+    _save_data(project_id, record, data)
+    return get_project(project_id)
+
+
+def orient_object(project_id: int, object_id: int, body: dict) -> dict:
+    """Accept the suggestion for one object. Works on a pinned object too: pinning only keeps the planner away."""
+    record = get_project(project_id)
+    obj = _ready_object(record, object_id)
+    suggestion = _orientation_for(project_id, obj, _orient_options(record, body))
+    return _apply_rotations(project_id, record, {object_id: suggestion["rotation"]}) if suggestion["changed"] else record
+
+
+def orient_all(project_id: int, body: dict) -> dict:
+    """Orient every unpinned, ready object on one plate (`plate`) or in the whole project. Pinned objects are left alone.
+    Returns the project plus "orient": {"oriented": [...], "unchanged": [...], "pinned": [...]} (object ids)."""
+    record = get_project(project_id)
+    plate_id = body.get("plate")
+    if plate_id is not None and plate_id not in {p["id"] for p in record["data"]["plates"]}:
+        raise jobs.JobError("Plate not found", 404)
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    if body.get("mode") == "looks":
+        raise jobs.JobError("Looks needs a favoured side, so it is chosen for one object at a time")
+    options = _orient_options(record, body)
+    summary = {"oriented": [], "unchanged": [], "pinned": []}
+    rotations = {}
+    for obj in record["data"]["objects"]:
+        if (plate_id is not None and obj["plate"] != plate_id) or obj["model"] not in ready:
+            continue
+        if obj.get("pinned"):
+            summary["pinned"].append(obj["id"])
+            continue
+        suggestion = _orientation_for(project_id, obj, options)
+        if suggestion["changed"]:
+            rotations[obj["id"]] = suggestion["rotation"]
+            summary["oriented"].append(obj["id"])
+        else:
+            summary["unchanged"].append(obj["id"])
+    result = _apply_rotations(project_id, record, rotations) if rotations else record
+    return {**result, "orient": summary}
+
+
+# ── Plan plates ────────────────────────────────────────────────────────────────
+
+KEPT_REASONS = {"queued": "In the print queue", "waiting": "In the print queue, waiting on a hold", "printing": "Printing now",
+                "printed_ok": "Printed", "failed": "A print of it is on record, and it didn't finish"}
+_DEFAULT_PLATE_NAME = re.compile(r"^Plate (\d+)$")
+
+
+def _turned(before, after) -> bool:
+    """Whether the object now stands on another side: its X or Y rotation changed. A turn about Z only spins it on the bed."""
+    return any(abs((a - b + 180) % 360 - 180) > 0.01 for a, b in zip(before[:2], after[:2]))
+
+
+def _count(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _plan_data(project_id: int, record: dict) -> dict:
+    """The project data as Plan plates would leave it, changing nothing. Plates that are queued, printing, have a Print on
+    record, or hold a model still importing are kept as they are. On the others, every unpinned object is oriented
+    (in memory, as Orient all would) and packed with `arrange_layout` (a pinned object keeps its plate and place; a plate
+    never mixes filament choices), then the plates are ordered longest first by `time_estimate.rank_key`; plates keep their
+    ids, which are what slices and jobs follow, while the order and the default names ("Plate 3") follow the plan, filling
+    the numbers the kept plates leave free. Returns {"data", "plates": [{"id", "new", "objects", "turned", "features"}],
+    "kept": [{"id", "name", "reason"}], "emptied": [plate ids removed]}; "plates" is empty when there is nothing to plan."""
+    data = json.loads(json.dumps(record["data"]))
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    importing = {o["plate"] for o in data["objects"] if o["model"] not in ready}
+    status = {p["id"]: p["status"] for p in plate_status(project_id)["plates"]}
+    with database.transaction() as conn:   # a Print whose outcome is unknown still counts as on record
+        recorded = {r["plate_id"] for r in conn.execute("SELECT DISTINCT plate_id FROM prints WHERE project_id = ? AND plate_id IS NOT NULL", (project_id,))}
+    kept, replannable = [], []
+    for plate in data["plates"]:
+        reason = (KEPT_REASONS.get(status.get(plate["id"])) or ("A print of it is on record" if plate["id"] in recorded else None)
+                  or ("Its models are still importing" if plate["id"] in importing else None))
+        if reason:
+            kept.append({"id": plate["id"], "name": plate["name"], "reason": reason})
+        else:
+            replannable.append(plate["id"])
+    before = {o["id"]: list(o["rotation"]) for o in data["objects"]}
+    options = _orient_options(record, {})
+    suggested = {}
+    for obj in data["objects"]:
+        if obj["plate"] not in replannable or obj.get("pinned"):
+            continue
+        key = (obj["model"], tuple(obj["scale"]), tuple(obj["rotation"]))
+        if key not in suggested:
+            try:
+                suggested[key] = _orientation_for(project_id, obj, options)
+            except jobs.JobError:
+                suggested[key] = None   # nothing to suggest for it: it stays as it is
+        if suggested[key] and suggested[key]["changed"]:
+            obj["rotation"] = list(suggested[key]["rotation"])
+    layout = arrange_layout(project_id, {**record, "data": data}, replannable)
+    if not layout:
+        return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "fingerprint": _plan_fingerprint(record["data"], [])}
+    used = _place_layout(data, replannable, layout, lambda group: json.loads(group)["overrides"])
+    emptied = [plate_id for plate_id in replannable if plate_id not in used]
+    data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
+    plates = {p["id"]: p for p in data["plates"]}
+    for plate_id in used:   # a plate that now holds other objects isn't the plate the printer was chosen for
+        if {o["id"] for o in data["objects"] if o["plate"] == plate_id} != {o["id"] for o in record["data"]["objects"] if o["plate"] == plate_id}:
+            plates[plate_id].pop("printer_id", None)
+    existing = {p["id"] for p in record["data"]["plates"]}
+    features = {plate_id: plate_features(project_id, {**record, "data": data}, plate_id) for plate_id in used}
+    ordered = (sorted((p for p in used if features[p]), key=lambda p: time_estimate.rank_key(features[p]), reverse=True)
+               + [p for p in used if not features[p]])
+    kept_ids = {k["id"] for k in kept}
+    kept_at = {p["id"]: i for i, p in enumerate(record["data"]["plates"]) if p["id"] in kept_ids}   # kept plates keep their place
+    order, queue, later = [], list(ordered), sorted(kept_at, key=kept_at.get)
+    for index in range(len(kept) + len(ordered)):
+        holder = next((k for k in later if kept_at[k] == index), None)
+        if holder is not None:
+            order.append(holder)
+            later.remove(holder)
+        elif queue:
+            order.append(queue.pop(0))
+    order += later
+    taken = {int(m.group(1)) for p in data["plates"] if p["id"] in kept_ids and (m := _DEFAULT_PLATE_NAME.match(p["name"] or ""))}
+    free = (n for n in range(1, 10000) if n not in taken)
+    for plate_id in ordered:   # default names follow the plan; a name the user gave stays
+        if not plates[plate_id]["name"] or _DEFAULT_PLATE_NAME.match(plates[plate_id]["name"]):
+            plates[plate_id]["name"] = f"Plate {next(free)}"
+    data["plates"] = [plates[plate_id] for plate_id in order]
+    proposed = [{"id": plate_id, "new": plate_id not in existing, "features": features[plate_id],
+                 "objects": sorted((o for o in data["objects"] if o["plate"] == plate_id), key=lambda o: o["id"])} for plate_id in ordered]
+    for entry in proposed:
+        entry["turned"] = sum(1 for o in entry["objects"] if _turned(before[o["id"]], o["rotation"]))
+    return {"data": data, "plates": proposed, "kept": kept, "emptied": emptied, "fingerprint": _plan_fingerprint(data, emptied)}
+
+
+def _plan_fingerprint(data: dict, emptied: list) -> str:
+    """Identifies what a plan would do: the data it would leave and the plates it would remove."""
+    return hashlib.sha256(json.dumps({"data": data, "emptied": sorted(emptied)}, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _plan_view(record: dict, planned: dict) -> dict:
+    """What a plan shows: the proposed plates in plan order, the plates kept as they are, and a one-line summary."""
+    data = planned["data"]
+    names = {p["id"]: p["name"] for p in data["plates"]}
+    plates = []
+    for entry in planned["plates"]:
+        found = plate_filaments(data, entry["id"])
+        features = entry["features"]
+        estimate = ({"layers": features["layers"], "volume_cm3": features["volume_cm3"], "approximate": True, "source": "model",
+                     "seconds": time_estimate.predict_seconds(features["layers"], features["volume_cm3"], features["first_layer_cm2"])}
+                    if features else None)
+        plates.append({"id": entry["id"], "name": names[entry["id"]], "new": entry["new"],
+                       "filament": choice_label(found[0]) if found else None, "parts": len(entry["objects"]),
+                       "turned": entry["turned"], "time_estimate": estimate,
+                       "objects": [{"id": o["id"], "name": o.get("name"), "model": o["model"], "position": o["position"],
+                                    "rotation": o["rotation"], "pinned": bool(o.get("pinned"))} for o in entry["objects"]]})
+    kept = planned["kept"]
+    if plates:
+        summary = (f"{_count(len(plates), 'plate')} (was {len(record['data']['plates']) - len(kept)}), "
+                   f"{_count(sum(p['parts'] for p in plates), 'object')}, {sum(p['turned'] for p in plates)} turned")
+        if kept:
+            summary += f"; {_count(len(kept), 'plate')} kept as {'it is' if len(kept) == 1 else 'they are'}"
+    else:
+        summary = "Nothing to plan"
+    return {"revision": record["revision"], "fingerprint": planned["fingerprint"], "plates": plates, "kept": kept, "summary": summary}
+
+
+def plan_plates(project_id: int) -> dict:
+    """Plan the project's plates and change nothing: {"revision", "plates": [{"id", "name", "new", "filament", "parts" (how many
+    objects it holds; the key keeps its name), "turned", "time_estimate" (approximate seconds, layers, volume_cm3), "objects"}] in plan order (longest first by
+    layers, then volume), "kept": [{"id", "name", "reason"}] (plates with a Job or a Print on record, which are never
+    touched), "summary"}. `accept_plan` applies it."""
+    record = get_project(project_id)
+    return _plan_view(record, _plan_data(project_id, record))
+
+
+def accept_plan(project_id: int, plan, fingerprint=None) -> dict:
+    """Apply the plan as one change: `plan` is the revision it was made at, or the plan itself, and `fingerprint` the plan's
+    own (taken from `plan` when that is the plan). A project that has changed since is refused ("changed elsewhere"), and so
+    is a plan the server would now make differently ("The plan changed"): what is applied is what was reviewed. Slices of
+    replanned plates become Outdated by their fingerprints; plates left empty go. Returns the project (one revision later,
+    so the client records one undo step) plus "plan", the view of what was applied."""
+    if isinstance(plan, dict):
+        revision, fingerprint = plan.get("revision"), plan.get("fingerprint") or fingerprint
+    else:
+        revision = plan
+    try:
+        revision = int(revision)
+    except (TypeError, ValueError):
+        raise jobs.JobError("Send the revision the plan was made at, or the plan itself")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise jobs.JobError("Send the fingerprint of the plan that was reviewed")
+    record = get_project(project_id)
+    if revision != record["revision"]:
+        raise jobs.JobError("The project was changed elsewhere — reload it", 409)
+    planned = _plan_data(project_id, record)
+    if planned["fingerprint"] != fingerprint:
+        raise jobs.JobError("The plan changed, review it again", 409)
+    view = _plan_view(record, planned)
+    if not planned["plates"]:
+        return {**record, "plan": view}
+    _save_data(project_id, record, planned["data"], planned["emptied"])
+    return {**get_project(project_id), "plan": view}
 
 
 def delete_model(project_id: int, model_id: int) -> dict:
@@ -1445,6 +2129,10 @@ def delete_model(project_id: int, model_id: int) -> dict:
         row = conn.execute("SELECT data, models FROM projects WHERE id = ?", (project_id,)).fetchone()
         data, models = json.loads(row["data"]), json.loads(row["models"])
         data["objects"] = [o for o in data["objects"] if o["model"] != model_id]
+        if data.get("filaments"):
+            data["filaments"].pop(str(model_id), None)
+            if not data["filaments"]:
+                del data["filaments"]
         models = [m for m in models if m["id"] != model_id]
         conn.execute("UPDATE projects SET data = ?, models = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
                      (json.dumps(data), json.dumps(models), time.time(), project_id))
@@ -1478,12 +2166,9 @@ def _run_import(project_id: int, model_id: int) -> dict:
 # ── Geometry ───────────────────────────────────────────────────────────────────
 
 def rotation_matrix(degrees):
-    import numpy as np
-    rx, ry, rz = (math.radians(float(d)) for d in degrees)
-    Rx = np.array([[1, 0, 0], [0, math.cos(rx), -math.sin(rx)], [0, math.sin(rx), math.cos(rx)]])
-    Ry = np.array([[math.cos(ry), 0, math.sin(ry)], [0, 1, 0], [-math.sin(ry), 0, math.cos(ry)]])
-    Rz = np.array([[math.cos(rz), -math.sin(rz), 0], [math.sin(rz), math.cos(rz), 0], [0, 0, 1]])
-    return Rz @ Ry @ Rx
+    """The 3x3 matrix of an object's rotation (degrees about X, then Y, then Z)."""
+    import orientation
+    return orientation.rotation_matrix(degrees)
 
 
 def read_mesh_bin(path: Path) -> list:
@@ -1609,12 +2294,21 @@ def escape_attr(value) -> str:
 
 # ── Arrange ────────────────────────────────────────────────────────────────────
 
-def arrange_plate(project_id: int, plate_id: int) -> dict:
-    """Let OrcaSlicer arrange a plate's objects (it knows the bed and its exclusion area). Blocking."""
+def arrange_plate(project_id: int, plate_id: int, engine: str | None = None) -> dict:
+    """Arrange one plate (see `arrange`); a plate with nothing ready on it is refused."""
+    record = get_project(project_id)
+    ready = {m["id"] for m in record["models"] if m["state"] == READY}
+    if not any(o["plate"] == plate_id and o["model"] in ready for o in record["data"]["objects"]):
+        raise jobs.JobError("There's nothing ready to arrange on this plate", 409)
+    return arrange(project_id, [plate_id], engine)
+
+
+def _arrange_with_orca(project_id: int, plate_id: int) -> dict:
+    """Let OrcaSlicer arrange a plate's unpinned objects (it knows the bed and its exclusion area). Blocking."""
     record = get_project(project_id)
     data = record["data"]
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    objects = [o for o in data["objects"] if o["plate"] == plate_id and o["model"] in ready]
+    objects = [o for o in data["objects"] if o["plate"] == plate_id and o["model"] in ready and not o.get("pinned")]
     if not objects:
         raise jobs.JobError("There's nothing ready to arrange on this plate", 409)
     orca = slicer.require_orca()
@@ -1698,6 +2392,15 @@ def _stage(project_id: int, plate_id: int, stage: str) -> None:
     _mutate(project_id, "slices", change)
 
 
+def _require_one_filament(record: dict, plate_ids) -> None:
+    """A plate that mixes filament choices can't be sliced."""
+    for plate in record["data"]["plates"]:
+        if plate["id"] in plate_ids:
+            mix = plate_mix(record["data"], plate["id"])
+            if mix:
+                raise jobs.JobError(mix, 409)
+
+
 def request_slice(project_id: int, plate_id: int, send: bool = False, send_opts: dict | None = None) -> dict:
     """Slice one plate. With `send`, the finished plate goes to the queue for its own printer."""
     record = get_project(project_id)
@@ -1707,6 +2410,7 @@ def request_slice(project_id: int, plate_id: int, send: bool = False, send_opts:
         raise jobs.JobError("The plate is empty", 409)
     if record["slices"].get(str(plate_id), {}).get("state") in (QUEUED, SLICING):
         raise jobs.JobError("The plate is already being sliced", 409)
+    _require_one_filament(record, {plate_id})
     if send:
         _require_printers(record, {plate_id})
     _mutate(project_id, "slices", lambda s: s.__setitem__(str(plate_id), _queued_entry(s.get(str(plate_id)), time.time(), send, send_opts)))
@@ -1735,6 +2439,7 @@ def request_slices(project_id: int, plate_ids=None, send: bool = False) -> dict:
             todo.append(plate["id"])
     if not todo:
         raise jobs.JobError("Nothing to slice — every plate is empty, already sliced or slicing", 409)
+    _require_one_filament(record, set(todo))
     if send:
         _require_printers(record, set(todo))
     now = time.time()
@@ -1764,6 +2469,7 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
         raise jobs.JobError(f"Still importing: {', '.join(waiting)}")
     if not data["profile"]["bundle_id"]:
         raise jobs.JobError("Choose a profile first")
+    _require_one_filament(record, {plate_id})
     _stage(project_id, plate_id, "preparing")
     stamp = fingerprint(record, plate_id)
     settings = slicer.bundle_settings(data["profile"]["bundle_id"])
@@ -1775,6 +2481,12 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
     if bricks:
         process.update(brick_post.REQUIRED_PROCESS)
     filament = {**settings["filament"], **data["profile"]["filament"]}
+    chosen = next((c for c in plate_filaments(data, plate_id) if c), None)
+    if chosen:  # the profile's filament changes tweak the default preset, so they don't carry over to another one
+        filament, _ = slicer.flatten_preset(slicer._presets("filament", orca), chosen["preset"])
+        machine = settings["machine"]["name"]
+        if filament.get("type") != "filament" or not slicer._compatible(filament, machine):
+            raise jobs.JobError(f"“{chosen['preset']}” isn't a filament preset for {machine}")
 
     work = plate_dir(project_id, plate_id)
     shutil.rmtree(work, ignore_errors=True)
@@ -1818,6 +2530,10 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
     (work / "toolpath.bin").write_bytes(toolpath)
     (work / "analysis.json").write_text(json.dumps(analysis), encoding="utf-8")
     estimates = analysis.get("estimates") or {}
+    try:
+        time_estimate.record_slice(project_id, plate_id, plate_features(project_id, record, plate_id), analysis)
+    except sqlite3.Error as e:   # the log must never fail a slice
+        print(f"[Projects] Could not log the slice of plate {plate_id} of project {project_id}: {e}")
     return {"state": SLICED, "error": None, "fingerprint": stamp, "sliced_at": time.time(), "duration_ms": duration_ms,
             "estimate_s": estimates.get("estimate_s"), "estimate_g": estimates.get("estimate_g"),
             "layers": len(analysis["layers"]), "slicer": analysis.get("slicer"), "gcode_bytes": gcode.stat().st_size,
@@ -2003,6 +2719,7 @@ def plate_status(project_id: int) -> dict:
 
     plates, counts = [], {status: 0 for status in PLATE_STATUSES}
     filament = {"used": 0.0, "total": 0.0, "unknown_plates": 0}
+    by_choice = {}   # filament choice → its plates' totals; None is the project default
     for plate in record["data"]["plates"]:
         n = plate["id"]
         entry = record["slices"].get(str(n)) or {}
@@ -2021,24 +2738,42 @@ def plate_status(project_id: int) -> dict:
         counts[status] += 1
         sliced = entry.get("state") == SLICED
         grams = entry.get("estimate_g") if sliced else None
+        used = consumed[n] if n in consumed else (grams or 0.0) if status == "printed_ok" else 0.0   # what the printer counted wins;
+        # a plate printed OK with no count falls back to its estimate
         if grams:
             filament["total"] += grams
         else:
             filament["unknown_plates"] += 1  # not sliced yet, so its filament isn't in the total
-        # what the printer counted wins; a plate printed OK with no count falls back to its estimate
-        filament["used"] += consumed[n] if n in consumed else (grams or 0.0) if status == "printed_ok" else 0.0
+        filament["used"] += used
+        found = plate_filaments(record["data"], n)
+        mixed = plate_mix(record["data"], n)
+        if found and not mixed:   # a mixed plate belongs to no single choice
+            group = by_choice.setdefault(_choice_key(found[0]), {"choice": found[0], "total": 0.0, "used": 0.0, "plates": 0, "unknown_plates": 0})
+            group["plates"] += 1
+            group["total"] += grams or 0.0
+            group["used"] += used
+            group["unknown_plates"] += 0 if grams else 1
         job = open_job.get(n)
         plates.append({"id": n, "name": plate.get("name"), "status": status,
                        "outdated": bool(entry.get("outdated")) if sliced else False,
+                       "mixed": mixed, "filament": choice_label(found[0]) if found and not mixed else None,
                        "parts": parts.get(n, 0), "layout": fingerprint(record, n), "job_id": job["id"] if job else None,
                        "printer_id": (job["printer_id"] if job else None) or plate.get("printer_id"),
-                       "estimate_s": entry.get("estimate_s") if sliced else None, "estimate_g": grams})
+                       "estimate_s": entry.get("estimate_s") if sliced else None, "estimate_g": grams,
+                       "time_estimate": plate_time(project_id, record, n, entry)})
     total = len(plates)
     return {"project_id": project_id, "plates": plates,
-            "progress": {"total": total, "counts": counts, "printed_ok": counts["printed_ok"],
+            "print_order": [p["id"] for p in time_estimate.longest_first(plates, lambda p: p["time_estimate"])],
+            "progress":{"total": total, "counts": counts, "printed_ok": counts["printed_ok"],
                          "percent": round(100 * counts["printed_ok"] / total) if total else 0,
                          "filament_g": {"used": round(filament["used"], 1), "total": round(filament["total"], 1),
-                                        "unknown_plates": filament["unknown_plates"], "spool": _spool_level(record)}}}
+                                        "unknown_plates": filament["unknown_plates"], "spool": _spool_level(record),
+                                        "by_filament": [{"label": choice_label(g["choice"]), "default": g["choice"] is None,
+                                                         "preset": g["choice"]["preset"] if g["choice"] else None,
+                                                         "colour": g["choice"].get("colour", "") if g["choice"] else None,
+                                                         "plates": g["plates"], "total": round(g["total"], 1), "used": round(g["used"], 1),
+                                                         "unknown_plates": g["unknown_plates"]}
+                                                        for g in sorted(by_choice.values(), key=lambda g: (g["choice"] is not None, choice_label(g["choice"])))]}}}
 
 
 def _spool_level(record: dict) -> dict | None:

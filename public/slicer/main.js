@@ -2,7 +2,7 @@
    Model (analysis, units) → Split (cuts, parts) → Plates (parts packed onto plates; move, merge, settings for the
    project, a plate or an object) → Slice (every plate, layer preview) → Queue (send the plates as one batch, assign
    printers). Projects without an uploaded model start at Plates. Talks to /api/projects, /api/splits and /api/jobs. */
-import * as orient from "./orient.js?v=1";
+import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=4";
 import { splitStep } from "./split-step.js";
 import { projectPage } from "./project-page.js";
@@ -137,7 +137,27 @@ const sliceEntry = (plateId = state.plate) => state.project?.slices?.[String(pla
 const isImportedPlate = plateId => !!sliceEntry(plateId)?.imported;
 const isGcodeProject = () => data().plates.some(p => isImportedPlate(p.id)) && !data().objects.length;
 const platesWithObjects = () => data().plates.filter(p => plateObjects(p.id).length || isImportedPlate(p.id));
-const isUpToDate = plateId => sliceEntry(plateId)?.state === "sliced" && !sliceEntry(plateId).outdated;
+// Filament choice: a per-model preset plus colour label, absent meaning the project default (data().filaments["<model id>"])
+const filamentChoice = modelId => data().filaments?.[String(modelId)] || null;
+const choiceLabel = choice => choice ? `${choice.preset.replace(/ @.*$/, "")} ${choice.colour || ""}`.trim() : "the project default";
+// "Plate 3 mixes PETG grey and PLA white" when the plate's objects hold more than one filament choice, else ""
+function plateMix(plateId) {
+  const seen = new Map();
+  for (const o of plateObjects(plateId).sort((a, b) => a.id - b.id)) {
+    const choice = filamentChoice(o.model);
+    seen.set(choice ? `${choice.preset}\n${choice.colour || ""}` : "", choiceLabel(choice));
+  }
+  const labels = [...seen.values()];
+  return labels.length < 2 ? "" : `${plateById(plateId)?.name || `Plate ${plateId}`} mixes ${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
+}
+function setFilamentChoice(modelId, choice) {
+  const filaments = { ...(data().filaments || {}) };
+  if (choice) filaments[String(modelId)] = choice; else delete filaments[String(modelId)];
+  if (Object.keys(filaments).length) data().filaments = filaments; else delete data().filaments;
+  changed();
+  renderObjectPanel();
+}
+const isUpToDate = plateId =>sliceEntry(plateId)?.state === "sliced" && !sliceEntry(plateId).outdated;
 const isBusy = plateId => ["queued", "slicing"].includes(sliceEntry(plateId)?.state);
 const plateImporting = plateId => plateObjects(plateId).some(o => state.project.models.find(m => m.id === o.model)?.state === "importing");
 const openJobPlates = () => new Set(state.jobs.filter(j => OPEN_JOB_STATES.has(j.state)).map(j => j.plate_id));
@@ -897,7 +917,7 @@ function renderPlates() {
   const tabs = data().plates.map(plate => {
     const count = plateObjects(plate.id).length;
     return `<button class="slicer-plate-tab${plate.id === state.plate ? " active" : ""}" type="button" data-plate="${plate.id}"
-      title="${esc(plate.name)} · ${plural(count, "object")}"><span class="dot ${plateDot(plate.id)}"></span>${esc(plate.name)} <small>${count}</small>${plateBadge(plate)}</button>`;
+      title="${esc(plate.name)} · ${plural(count, "object")}${plateMix(plate.id) ? ` · ${esc(plateMix(plate.id))}` : ""}"><span class="dot ${plateDot(plate.id)}"></span>${esc(plate.name)} <small>${count}</small>${plateBadge(plate)}</button>`;
   });
   if (state.step === "plates") {
     tabs.push('<button class="slicer-plate-tab" type="button" data-plate="new" title="Add a plate">+ Plate</button>');
@@ -1108,7 +1128,9 @@ function renderTools() {
   const others = data().plates.filter(p => p.id !== state.plate);
   $("merge-plate").innerHTML = `<option value="">Merge into…</option>${others.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}`;
   $("merge-plate").disabled = !others.length;
-  $("btn-repack").disabled = !data().objects.length;
+  $("arrange-engine").value = data().arrange_engine === "orca" ? "orca" : "nester";
+  $("btn-orient-all").disabled = !data().objects.length;
+  $("btn-plan-plates").disabled = !data().objects.length;
   $("btn-undo").disabled = !editLog.undo.length;
   $("btn-redo").disabled = !editLog.redo.length;
 }
@@ -1130,6 +1152,8 @@ function renderObjectPanel() {
   const input = (field, index, value, step) =>
     `<input type="number" step="${step}" data-field="${field}" data-index="${index}" value="${Math.round(value * 1000) / 1000}">`;
   const uniform = object.scale.every(s => Math.abs(s - object.scale[0]) < 1e-9);
+  const copies = data().objects.filter(o => o.model === object.model).length;
+  const note = state.copiesNote?.model === object.model && state.copiesNote.count === copies ? state.copiesNote.text : "";
   panel.innerHTML = `
     <h5 title="${esc(object.name)}">${esc(object.name)}</h5>
     <div class="slicer-xyz"><span></span><span>X</span><span>Y</span><span>Z</span>
@@ -1139,14 +1163,36 @@ function renderObjectPanel() {
     </div>
     <label class="slicer-check"><input type="checkbox" id="scale-uniform"${uniform ? " checked" : ""}> Keep proportions</label>
     <label class="slicer-field">Plate <select id="object-plate">${data().plates.map(p => `<option value="${p.id}"${p.id === object.plate ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
+    <label class="slicer-field">Copies <input type="number" id="object-copies" min="1" max="500" step="1" value="${copies}" title="How many objects are made from this model, across all plates"></label>
+    ${note ? `<div class="slicer-muted" id="object-copies-note">${esc(note)}</div>` : ""}
+    ${filamentControls(object)}
     <div class="slicer-actions-row">
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="flat" title="Rotate so the largest flat face is on the bed">Lay flat</button>
-      <button class="btn btn-secondary btn-sm" type="button" data-object-action="orient" title="Turn to the orientation that needs the least support (O)">Auto-orient</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-object-action="orient" title="Suggest an orientation, to accept or ignore (O)">Suggest orientation</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="reset">Reset rotation</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="duplicate">Duplicate</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="settings">Settings</button>
-    </div>`;
+    </div>${orientSuggestionHtml(object)}`;
 }
+
+// The inspector's filament choice (shared by every copy of the model), colour label, pin, and the mixed-plate warning
+function filamentControls(object) {
+  const choice = filamentChoice(object.model);
+  const machine = currentPresets()?.machine;
+  let list = state.presets?.filaments?.[machine] || [];
+  if (choice && !list.includes(choice.preset)) list = [choice.preset, ...list];
+  const base = currentPresets()?.filament;
+  const mix = plateMix(object.plate);
+  return `
+    <label class="slicer-field">Filament <select id="object-filament">
+      <option value="">Project default${base ? ` (${esc(base.replace(/ @.*$/, ""))})` : ""}</option>
+      ${list.map(name => `<option value="${esc(name)}"${choice?.preset === name ? " selected" : ""}>${esc(name.replace(/ @.*$/, ""))}</option>`).join("")}
+    </select></label>
+    <label class="slicer-field"${choice ? "" : " hidden"}>Colour <input type="text" id="object-filament-colour" maxlength="${FILAMENT_COLOUR_MAX}" placeholder="e.g. grey" value="${esc(choice?.colour || "")}"></label>
+    <label class="slicer-check" title="The planner, Arrange and Orient leave a pinned object where it is; you can still move it by hand"><input type="checkbox" id="object-pinned"${object.pinned ? " checked" : ""}> Pin</label>
+    ${mix ? `<p class="slicer-warn" role="alert">${esc(mix)}. Slicing is refused until each plate holds one filament.</p>` : ""}`;
+}
+const FILAMENT_COLOUR_MAX = 40;
 
 function showMessage(text) {
   $("viewport-message").hidden = !text;
@@ -1245,14 +1291,60 @@ function faceClicked({ objectId, normal }) {
   renderAll({ geometry: false });
 }
 
-function autoOrient(object = selectedObject()) {
-  const geometry = object && state.viewport?.geometries.get(object.model);
-  if (!geometry) return toast("Select an object first", true);
-  const result = orient.bestOrientation(geometry, object.rotation);
-  if (JSON.stringify(result.rotation) === JSON.stringify(object.rotation)) return toast(`${object.name} is already in a good orientation`);
-  const saved = Math.round(result.current.overhang - result.overhang);
-  updateObject(object.id, { rotation: result.rotation });
-  toast(saved > 20 ? `Turned ${object.name} — about ${saved} mm² less needs support` : `Turned ${object.name} onto a flatter face`);
+// O: ask the server for an orientation (nothing changes until it is accepted)
+const ORIENT_MODES = { "least-support": "Least support", strength: "Strength (lie low)", looks: "Looks (front side)" };
+
+async function suggestOrientation(object = selectedObject(), mode = state.orientMode || "least-support") {
+  if (!object) return toast("Select an object first", true);
+  state.orientMode = mode;
+  await flushSave();
+  // Looks favours the side facing the viewer (the front of the bed), as the model sees it
+  const face = mode === "looks" ? `&face=${orient.toModelSpace([0, -1, 0], object.rotation).join(",")}` : "";
+  try {
+    const result = await api("GET", `/api/projects/${state.project.id}/objects/${object.id}/orientation?mode=${mode}${face}`);
+    state.orientSuggestion = { objectId: object.id, mode, result };
+  } catch (e) {
+    return toast(e.message, true);
+  }
+  renderObjectPanel();
+}
+
+function orientSuggestionHtml(object) {
+  const s = state.orientSuggestion;
+  if (!s || s.objectId !== object.id) return "";
+  const { current, suggested, changed } = s.result;
+  const area = m => `${Math.round(m.overhang_area / 10) / 10} cm²`;
+  const summary = !changed ? "Already the best of the orientations tried."
+    : `Needs support on ${area(suggested)} instead of ${area(current)}, ${Math.round(suggested.height)} mm tall instead of ${Math.round(current.height)} mm.`;
+  return `<div class="slicer-field" id="orient-suggestion">
+    <select data-orient-mode aria-label="What to favour">${Object.entries(ORIENT_MODES).map(([value, label]) =>
+      `<option value="${value}"${value === s.mode ? " selected" : ""}>${label}</option>`).join("")}</select>
+    <span>${summary}</span>
+    <div class="slicer-actions-row">
+      <button class="btn btn-secondary btn-sm" type="button" data-orient-accept${changed ? "" : " disabled"}>Accept</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-orient-ignore>Ignore</button>
+    </div>
+  </div>`;
+}
+
+function acceptOrientation() {
+  const s = state.orientSuggestion;
+  state.orientSuggestion = null;
+  if (s?.result.changed) updateObject(s.objectId, { rotation: s.result.rotation });
+  else renderObjectPanel();
+}
+
+async function orientAll(wholeProject = false) {
+  await flushSave();
+  await withButton($("btn-orient-all"), async () => {
+    const result = await api("POST", `/api/projects/${state.project.id}/orient-all`, wholeProject ? {} : { plate: state.plate });
+    const { oriented, unchanged, pinned } = result.orient;
+    state.orientSuggestion = null;
+    applyProject(result);
+    if (oriented.length) recordEdit();
+    renderAll();
+    toast(`Turned ${plural(oriented.length, "object")}, ${unchanged.length} already fine` + (pinned.length ? `, ${pinned.length} pinned left alone` : ""));
+  });
 }
 
 function copyObject() {
@@ -1273,6 +1365,25 @@ function pasteObject() {
   state.selected = copy.id;
   changed();
   renderAll();
+}
+
+// Copies: the number of objects made from the selected object's model, across all plates. The server adds or removes them.
+async function setCopies(object, asked) {
+  if (!Number.isInteger(asked) || asked < 1) { renderObjectPanel(); return toast("Copies must be a whole number, at least 1", true); }
+  await flushSave();
+  try {
+    const result = await api("POST", `/api/projects/${state.project.id}/copies`, { object: object.id, copies: asked });
+    applyProject(result);
+    const { model, count, pinned } = result.copies;
+    state.copiesNote = count > asked
+      ? { model, count, text: `Still ${count}: ${plural(pinned, "pinned object")} can't be removed. Unpin ${pinned === 1 ? "it" : "them"} to lower this.` }
+      : null;
+    recordEdit();
+    renderAll();
+  } catch (err) {
+    toast(err.message, true);
+    renderObjectPanel();
+  }
 }
 
 function removeSelected() {
@@ -1342,43 +1453,36 @@ async function sliceplates(plateIds) {
   toast(`Slicing ${plural(queued || plateIds?.length || 1, "plate")}…`);
 }
 
+// One Arrange: A does this plate, Shift+A every plate (onto as few as fit). The nester keeps each object's clearance,
+// leaves pinned objects where they are and never mixes filaments on a plate; the engine select can switch to OrcaSlicer's.
 async function arrange() {
   await flushSave();
   const button = $("btn-arrange");
   await withButton(button, async () => {
-    applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${state.plate}/arrange`));
+    const before = data().plates.length;
+    applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${state.plate}/arrange`, { engine: arrangeEngine() }));
     recordEdit();
     renderAll();
-    toast("Plate arranged");
+    const added = data().plates.length - before;
+    toast(added > 0 ? `Plate arranged; objects that didn't fit or differ in filament went on ${plural(added, "new plate")}` : "Plate arranged");
   });
 }
 
 async function arrangeAll() {
   await flushSave();
   await withButton($("btn-arrange"), async () => {
-    let count = 0;
-    for (const plate of platesWithObjects()) {
-      applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${plate.id}/arrange`));
-      count += 1;
-    }
-    recordEdit();
-    renderAll();
-    toast(count ? `Arranged ${plural(count, "plate")}` : "Nothing to arrange");
-  });
-}
-
-async function repack() {
-  await flushSave();
-  await withButton($("btn-repack"), async () => {
+    if (!platesWithObjects().length) { toast("Nothing to arrange"); return; }
     const before = data().plates.length;
-    applyProject(await api("POST", `/api/projects/${state.project.id}/pack`, {}));
+    applyProject(await api("POST", `/api/projects/${state.project.id}/arrange`, { engine: arrangeEngine() }));
     recordEdit();
     renderAll();
     state.viewport?.fit(state.viewport.objectsBox());
     const after = data().plates.length;
-    toast(after < before ? `Packed onto ${plural(after, "plate")} (was ${before})` : `Repacked — still ${plural(after, "plate")}`);
+    toast(after < before ? `Arranged onto ${plural(after, "plate")} (was ${before})` : `Arranged — ${plural(after, "plate")}`);
   });
 }
+
+const arrangeEngine = () => $("arrange-engine").value === "orca" ? "orca" : "nester";
 
 async function mergeInto(targetId) {
   const source = currentPlate(), target = plateById(targetId);
@@ -1393,6 +1497,88 @@ async function mergeInto(targetId) {
     renderAll();
     state.viewport?.fit(state.viewport.objectsBox());
     toast(`${source.name} merged into ${target.name}`);
+  });
+}
+
+// ── Plan plates ─────────────────────────────────────────────────────────────────
+// The review sheet for the planner: POST /plan changes nothing; Accept applies it as one revision, so one Undo step reverses it.
+// The seed time coefficients still overshoot about 2x, so the time is hidden until that is settled: flip this to show "≈ 1 h 05 min".
+const SHOW_PLAN_SECONDS = true;  // approximate until a plate is sliced: the seeds in time_estimate.py are fitted to one plate
+const planTime = seconds => {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return `≈ ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+};
+
+// An object's footprint on the bed: its model size, scaled, turned by its rotation (degrees, about x then y, then z):
+// returns the half-sides of the box before the turn about z, and that angle
+function planFootprint(object) {
+  const model = state.project.models.find(m => m.id === object.model);
+  if (!model?.size) return null;
+  const scale = object.scale || [1, 1, 1];
+  const half = model.size.map((v, i) => v * (scale[i] ?? scale[0] ?? 1) / 2);
+  const [rx, ry, rz] = (object.rotation || [0, 0, 0]).map(v => v * Math.PI / 180);
+  const turn = ([x, y, z]) => {
+    [y, z] = [y * Math.cos(rx) - z * Math.sin(rx), y * Math.sin(rx) + z * Math.cos(rx)];
+    [x, z] = [x * Math.cos(ry) + z * Math.sin(ry), -x * Math.sin(ry) + z * Math.cos(ry)];
+    return [x, y];
+  };
+  const corners = [-1, 1].flatMap(a => [-1, 1].flatMap(b => [-1, 1].map(c => turn([a * half[0], b * half[1], c * half[2]]))));
+  return { half: [Math.max(...corners.map(c => Math.abs(c[0]))), Math.max(...corners.map(c => Math.abs(c[1])))], turn: rz * 180 / Math.PI };
+}
+
+function planMap(plate) {
+  const [x0, y0, x1, y1] = bedLimits(state.bundleSettings.get(data().profile.bundle_id)?.machine).bed;
+  const objects = plate.objects.map(object => {
+    const { half, turn } = planFootprint(object) || { half: [8, 8], turn: 0 };
+    const [x, y] = object.position, cy = y1 - y + y0;
+    return `<rect class="plan-object${object.pinned ? " pinned" : ""}" x="${(x - half[0]).toFixed(1)}" y="${(cy - half[1]).toFixed(1)}" width="${(half[0] * 2).toFixed(1)}" height="${(half[1] * 2).toFixed(1)}" transform="rotate(${(-turn).toFixed(1)} ${x.toFixed(1)} ${cy.toFixed(1)})"><title>${esc(object.name)}</title></rect>`;
+  }).join("");
+  return `<svg class="plan-map" viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" role="img" aria-label="${esc(plate.name)}: ${plural(plate.parts, "object")}"><rect class="plan-bed" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}"/>${objects}</svg>`;
+}
+
+function planSheetHtml(plan) {
+  const before = platesWithObjects().length;
+  const cards = plan.plates.map(plate => `<div class="plan-card">
+      <div class="plan-card-head"><b>${esc(plate.name)}</b>${plate.new ? ' <span class="slicer-muted">new</span>' : ""}</div>
+      ${planMap(plate)}
+      <div class="slicer-muted">${plural(plate.parts, "object")} · ${esc(plate.filament)}${plate.turned ? ` · ${plate.turned} turned` : ""}</div>
+      ${SHOW_PLAN_SECONDS && plate.time_estimate?.seconds ? `<div class="slicer-muted">${planTime(plate.time_estimate.seconds)}</div>` : ""}
+    </div>`).join("");
+  const kept = plan.kept.length ? `<h4>Kept as they are</h4><ul class="plan-kept">${plan.kept.map(k => `<li><b>${esc(k.name)}</b> <span class="slicer-muted">${esc(k.reason)}</span></li>`).join("")}</ul>` : "";
+  return `<p class="slicer-muted">Now ${plural(before, "plate")}. Plan: ${esc(plan.summary)}${plan.plates.length > 1 ? ", longest first" : ""}.</p>
+    ${plan.plates.length ? `<div class="plan-grid">${cards}</div>` : ""}${kept}`;
+}
+
+async function planPlates() {
+  await flushSave();
+  await withButton($("btn-plan-plates"), async () => {
+    const plan = await api("POST", `/api/projects/${state.project.id}/plan`, {});
+    state.plan = plan;
+    $("plan-body").innerHTML = planSheetHtml(plan);
+    $("plan-error").textContent = "";
+    $("plan-accept").disabled = !plan.plates.length;
+    $("dlg-plan").showModal();
+  });
+}
+
+async function acceptPlan() {
+  const plan = state.plan;
+  if (!plan) return;
+  await withButton($("plan-accept"), async () => {
+    try {
+      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision, fingerprint: plan.fingerprint });
+      applyProject(result);
+      recordEdit();
+      state.plan = null;
+      $("dlg-plan").close();
+      renderAll();
+      state.viewport?.fit(state.viewport.objectsBox());
+      toast(`Planned: ${result.plan.summary}. Undo puts it back`);
+    } catch (err) {
+      if (err.status !== 409) throw err;
+      $("plan-error").textContent = err.message;   // "changed elsewhere" or "The plan changed, review it again"
+      state.plan = null;   // nothing to accept any more: Accept does nothing until the sheet is opened again
+    }
   });
 }
 
@@ -1917,11 +2103,28 @@ function bindUi() {
     const object = selectedObject();
     if (!object) return;
     const field = e.target.dataset.field;
+    if (e.target.matches("[data-orient-mode]")) return suggestOrientation(object, e.target.value);
     if (e.target.id === "object-plate") {
       object.plate = Number(e.target.value);
       state.selected = null;
       changed();
       renderAll();
+      return;
+    }
+    if (e.target.id === "object-copies") { setCopies(object, Number(e.target.value)); return; }
+    if (e.target.id === "object-pinned") {
+      if (e.target.checked) object.pinned = true; else delete object.pinned;
+      changed();
+      return;
+    }
+    if (e.target.id === "object-filament") {
+      const preset = e.target.value;
+      setFilamentChoice(object.model, preset ? { preset, colour: filamentChoice(object.model)?.colour || "" } : null);
+      return;
+    }
+    if (e.target.id === "object-filament-colour") {
+      const current = filamentChoice(object.model);
+      if (current) setFilamentChoice(object.model, { ...current, colour: e.target.value.trim() });
       return;
     }
     if (!field) return;
@@ -1936,11 +2139,13 @@ function bindUi() {
     updateObject(object.id, { [field]: next });
   });
   $("object-panel").addEventListener("click", async e => {
+    if (e.target.closest("[data-orient-accept]")) return acceptOrientation();
+    if (e.target.closest("[data-orient-ignore]")) { state.orientSuggestion = null; return renderObjectPanel(); }
     const action = e.target.closest("[data-object-action]")?.dataset.objectAction;
     const object = selectedObject();
     if (!action || !object) return;
     if (action === "flat") await layFlat(object);
-    else if (action === "orient") autoOrient(object);
+    else if (action === "orient") suggestOrientation(object);
     else if (action === "reset") updateObject(object.id, { rotation: [0, 0, 0] });
     else if (action === "settings") { state.settingsTab = "object"; renderSettings(); }
     else if (action === "duplicate") {
@@ -1972,7 +2177,13 @@ function bindUi() {
   $("btn-face").addEventListener("click", () => layOnFace(!state.layingOnFace));
   $("btn-undo").addEventListener("click", undo);
   $("btn-redo").addEventListener("click", redo);
-  $("btn-repack").addEventListener("click", repack);
+  $("arrange-engine").addEventListener("change", e => {
+    if (e.target.value === "orca") data().arrange_engine = "orca"; else delete data().arrange_engine;
+    changed();
+  });
+  $("btn-orient-all").addEventListener("click", e => orientAll(e.shiftKey));
+  $("btn-plan-plates").addEventListener("click", planPlates);
+  $("plan-accept").addEventListener("click", acceptPlan);
   $("merge-plate").addEventListener("change", e => {
     const target = Number(e.target.value);
     e.target.value = "";
@@ -2027,7 +2238,7 @@ function bindUi() {
       else if (key === "s") { state.viewport?.setTool("scale"); renderTools(); }
       else if (key === "f") layOnFace(!state.layingOnFace);
       else if (key === "a") (e.shiftKey ? arrangeAll : arrange)();
-      else if (key === "o") autoOrient();
+      else if (key === "o") suggestOrientation();
       else if (key === "z") zoomToSelection();
       else if ("0123456".includes(e.key) && e.key !== "") state.viewport?.setView(["iso", "top", "bottom", "front", "back", "left", "right"][Number(e.key)]);
       else if (e.key === "Escape") { if (state.layingOnFace) layOnFace(false); else selectObject(null); }

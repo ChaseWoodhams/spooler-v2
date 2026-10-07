@@ -47,6 +47,17 @@ class BedClearedApiTests(unittest.TestCase):
         self.assertEqual([f for f, _ in self.wait_started()], ["/local/a.gcode"])
         self.assertEqual(self.api.call("GET", f"/api/jobs/{second['id']}/events")[1]["events"][-1]["event"], "created")
 
+    def test_a_job_left_without_a_printer_waits_for_a_start_on_the_free_printer(self):
+        """A plate Assign printers left out has no printer: Bed cleared's auto-start leaves it, and Start puts it on the free one."""
+        job = self.queue()
+        self.assertEqual(self.api.call("PATCH", f"/api/jobs/{job['id']}", {"printer_id": ""})[1]["printer_id"], None)
+        self.finish_print()
+        status, result = self.api.call("POST", "/api/printers/p1/bed-cleared", {})
+        self.assertEqual((status, result["started"], result["valid"]), (200, None, True))
+        status, started = self.api.call("POST", f"/api/jobs/{job['id']}/start", {"printer_id": "p1"})
+        self.assertEqual(status, 200, started)
+        self.assertEqual([f for f, _ in self.wait_started()], ["/local/cube.gcode"])
+
     def test_with_auto_start_off_confirming_only_marks_the_printer_ready(self):
         job = self.queue()
         self.finish_print()

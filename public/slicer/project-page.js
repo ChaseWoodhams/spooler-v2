@@ -62,7 +62,18 @@ function filament(grams) {
   const spool = grams.spool ? ` · spool ${esc(grams.spool.name || "#" + grams.spool.id)}${grams.spool.remaining_g != null ? `: ${Math.round(grams.spool.remaining_g)} g left${
     grams.spool.remaining_g < grams.total - grams.used ? ` <b class="pp-warn">(not enough for the rest)</b>` : ""}` : ""}` : "";
   return `<div class="pp-filament"><div class="pp-bar pp-bar-filament" role="img" aria-label="${Math.round(grams.used)} of ${Math.round(grams.total)} grams of filament used"><i style="width:${pct}%"></i></div>
-    <span class="slicer-muted">Filament: ${Math.round(grams.used)} g used of ${Math.round(grams.total)} g needed${open}${spool}</span></div>`;
+    <span class="slicer-muted">Filament: ${Math.round(grams.used)} g used of ${Math.round(grams.total)} g needed${open}${spool}</span>${perChoice(grams)}</div>`;
+}
+
+// Totals per filament choice; the project spool applies to the project default only
+function perChoice(grams) {
+  const groups = grams.by_filament || [];
+  if (groups.length < 2 && !groups.some(g => !g.default)) return "";
+  return groups.map(g => {
+    const open = g.unknown_plates ? ` (${plural(g.unknown_plates, "plate")} not sliced yet)` : "";
+    const spool = g.default && grams.spool ? ` · spool ${esc(grams.spool.name || "#" + grams.spool.id)}` : "";
+    return `<span class="slicer-muted">${esc(g.label.charAt(0).toUpperCase() + g.label.slice(1))}: ${Math.round(g.used)} g used of ${Math.round(g.total)} g, ${plural(g.plates, "plate")}${open}${spool}</span>`;
+  }).join("");
 }
 
 function printerCards() {
@@ -93,7 +104,8 @@ function plateMap() {
 }
 
 function nextUp() {
-  const next = status.plates.filter(p => ["queued", "waiting", "sliced"].includes(p.status)).slice(0, NEXT_UP);
+  const rank = id => { const at = (status.print_order || []).indexOf(id); return at < 0 ? Infinity : at; };   // longest by the best available time; names stay as planned
+  const next = status.plates.filter(p => ["queued", "waiting", "sliced"].includes(p.status)).sort((a, b) => rank(a.id) - rank(b.id)).slice(0, NEXT_UP);
   const queued = jobs.filter(j => j.state === "queued");
   const canAssign = queued.length > 1 && printers.some(p => p.connected);
   return `<div class="pp-card"><b>Next up</b>
@@ -107,7 +119,7 @@ function detail() {
   const plate = plateOf(selected);
   if (!plate) return `<div class="pp-card slicer-muted">Select a plate.</div>`;
   const slicing = ["queued", "slicing"].includes(host.sliceState(plate.id));
-  const facts = [plural(plate.parts, "part"), duration(plate.estimate_s), plate.estimate_g ? `${Math.round(plate.estimate_g)} g` : ""].filter(Boolean).join(" · ");
+  const facts = [plural(plate.parts, "object"), duration(plate.estimate_s), plate.estimate_g ? `${Math.round(plate.estimate_g)} g` : ""].filter(Boolean).join(" · ");
   const editable = ["unsliced", "sliced", "waiting", "queued", "failed"].includes(plate.status);
   const options = ['<option value="">Next free printer</option>', ...printers.map(p =>
     `<option value="${esc(p.id)}"${p.id === plate.printer_id ? " selected" : ""}>${esc(p.name)}${p.connected ? "" : " (offline)"}</option>`)].join("");

@@ -395,14 +395,14 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(project["slices"]["1"]["state"], "failed")
             self.assertIn(message, project["slices"]["1"]["error"])
 
-    async def test_arrange_uses_orcaslicer_placements(self):
+    async def test_arrange_can_use_orcaslicer_placements(self):
         project = await self.project_with_cube()
         data = cube_stl(30)
         projects.import_model(project["id"], io.BytesIO(data), len(data), "big.stl")
         await self.run_worker()
         runner = arrange_runner([(60.0, 60.0, 0.0), (180.0, 150.0, 90.0)])
         with mock.patch.object(slicer, "runner", runner):
-            arranged = projects.arrange_plate(project["id"], 1)
+            arranged = projects.arrange_plate(project["id"], 1, engine="orca")
         self.assertEqual([(o["position"], o["rotation"][2]) for o in arranged["data"]["objects"]],
                          [([60.0, 60.0], 0.0), ([180.0, 150.0], 90.0)])
         self.assertEqual(runner.calls[0][runner.calls[0].index("--arrange") + 1], "1")

@@ -142,7 +142,7 @@ body.slicer-page a.btn { text-decoration: none; }
 .slicer-toolbar .btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .slicer-float { position: absolute; z-index: 2; background: rgba(22, 24, 31, .94); border: 1px solid var(--border); border-radius: var(--radius-sm);
   padding: 10px 12px; color: var(--text); font-size: 12px; box-shadow: var(--shadow); }
-.slicer-object-panel { top: 52px; left: 10px; width: 250px; display: flex; flex-direction: column; gap: 8px; }
+.slicer-object-panel { flex: none; font-size: 12px; }  /* docked at the top of the sidebar, which scrolls past it */
 .slicer-object-panel h5 { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slicer-xyz { display: grid; grid-template-columns: 58px repeat(3, 1fr); gap: 4px; align-items: center; }
 .slicer-xyz input { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 3px 5px; font-size: 12px; }
@@ -171,6 +171,16 @@ body.slicer-page a.btn { text-decoration: none; }
 .slicer-dialog .slicer-field { margin-top: 8px; }
 .slicer-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 14px; flex-wrap: wrap; }
 .slicer-dialog-actions input { flex: 1; min-width: 160px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+.slicer-dialog-wide { width: min(760px, 94vw); }
+.slicer-dialog h4 { margin: 12px 0 4px; font-size: 13px; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-top: 8px; max-height: 55vh; overflow-y: auto; }
+.plan-card { border: 1px solid var(--border); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+.plan-map { width: 100%; aspect-ratio: 1; display: block; }
+.plan-bed { fill: var(--bg); stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.plan-object { fill: var(--accent); fill-opacity: .55; stroke: var(--accent); vector-effect: non-scaling-stroke; }
+.plan-object.pinned { fill-opacity: .25; stroke-dasharray: 3 2; }
+.plan-kept { margin: 0; padding-left: 18px; font-size: 13px; }
+.slicer-error { color: #ff5a5a; font-size: 13px; margin-top: 8px; }
 .slicer-project-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; margin-top: 8px; }
 .slicer-project-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
 .slicer-project-row small { display: block; color: var(--text-muted); }
@@ -362,6 +372,7 @@ body.print-step .slicer-sidebar { display: none; }
 .pp-bar-filament { height: 6px; }
 .pp-bar-filament i { display: block; height: 100%; background: var(--accent, #d67634); }
 .pp-warn { color: #d9534f; }
+.slicer-warn { color: #d9534f; font-size: 12px; margin: 4px 0; }
 .pp-preview { width: 100%; max-width: 320px; height: auto; align-self: center; border-radius: 8px; background: var(--surface2); }
 
 

@@ -1,14 +1,14 @@
 """
-Packing parts onto build plates.
+Packing objects (Split Parts, when laying out a split) onto build plates.
 
-Each part is a footprint rectangle. Rectangles are placed largest first with MaxRects (best short side fit),
-turning a part a quarter turn when that fits better, keeping GAP_MM between parts, MARGIN_MM from the bed
-edge and clear of the nozzle purge area. A part goes on the first plate of its group with room, otherwise
-on a new plate, so parts that must print with different settings never share a plate.
+Each object is a footprint rectangle. Rectangles are placed largest first with MaxRects (best short side fit),
+turning an object a quarter turn when that fits better, keeping GAP_MM between objects, MARGIN_MM from the bed
+edge and clear of the nozzle purge area. An object goes on the first plate of its group with room, otherwise
+on a new plate, so objects that must print with different settings never share a plate.
 """
 
 GAP_MM = 6.0
-SUPPORT_GAP_MM = 20.0  # tree supports branch out past a part's footprint; closer parts make OrcaSlicer's toolpaths collide
+SUPPORT_GAP_MM = 22.0  # tree supports branch out past an object's footprint (measured reach 21 mm plus margin); closer objects make OrcaSlicer's toolpaths collide
 MARGIN_MM = 3.0
 
 
@@ -60,7 +60,7 @@ def pack(items: list, bed, exclude=None, gap: float = GAP_MM, margin: float = MA
     """items: [{"key", "size": (width, depth), "group"}]; bed and exclude: (x0, y0, x1, y1) in bed millimetres.
     Returns plates in group order (groups in order of first appearance) as
     [{"group", "items": [{"key", "center": (x, y), "turned": bool, "oversize": bool}]}].
-    A part that can't fit even on an empty plate gets a plate of its own, centred, marked oversize."""
+    An object that can't fit even on an empty plate gets a plate of its own, centred, marked oversize."""
     bx0, by0, bx1, by1 = bed
     ox, oy = bx0 + margin, by0 + margin
     width, depth = bx1 - bx0 - 2 * margin + gap, by1 - by0 - 2 * margin + gap
@@ -84,7 +84,7 @@ def pack(items: list, bed, exclude=None, gap: float = GAP_MM, margin: float = MA
             plate = {"group": item["group"], "bin": _Bin(width, depth, blocked), "items": []}
             found = plate["bin"].find(w, d)
             if found is None:
-                plate["bin"] = None  # nothing else goes on an oversize part's plate
+                plate["bin"] = None  # nothing else goes on an oversize object's plate
                 plate["items"].append({"key": item["key"], "center": ((bx0 + bx1) / 2, (by0 + by1) / 2), "turned": False, "oversize": True})
                 plates.append(plate)
                 continue
