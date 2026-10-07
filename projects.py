@@ -125,6 +125,13 @@ def init() -> None:
                 entry["state"] = QUEUED
             if interrupted:
                 conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(entries), row["id"]))
+        for row in conn.execute("SELECT id, models FROM projects").fetchall():
+            models = json.loads(row["models"] or "[]")
+            claimed = [m for m in models if m.get("claimed_at")]  # an import a worker had taken when Spooler stopped
+            for model in claimed:
+                del model["claimed_at"]
+            if claimed:
+                conn.execute("UPDATE projects SET models = ? WHERE id = ?", (json.dumps(models), row["id"]))
 
 
 # ── Records ────────────────────────────────────────────────────────────────────
@@ -2807,8 +2814,11 @@ def _claim() -> tuple | None:
     with database.transaction() as conn:
         rows = conn.execute("SELECT id, models, slices, created_at FROM projects ORDER BY updated_at, id").fetchall()
         for row in rows:
-            for model in json.loads(row["models"] or "[]"):
-                if model["state"] == IMPORTING:
+            models = json.loads(row["models"] or "[]")
+            for model in models:
+                if model["state"] == IMPORTING and not model.get("claimed_at"):
+                    model["claimed_at"] = time.time()  # taken: no other worker analyses it too
+                    conn.execute("UPDATE projects SET models = ? WHERE id = ?", (json.dumps(models), row["id"]))
                     return "import", row["id"], model["id"], row["created_at"]
         for row in rows:
             entries = json.loads(row["slices"] or "{}")
@@ -2836,6 +2846,7 @@ async def process_next(slot: int = 0) -> bool:
         def update(models):
             for model in models:
                 if model["id"] == item:
+                    model.pop("claimed_at", None)
                     model.update(result)
         _mutate(project_id, "models", update, created_at)
     else:
