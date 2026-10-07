@@ -1211,16 +1211,24 @@ def _arrange_plate_ids(record: dict, plate_ids) -> list:
     return [p for p in plates if p in wanted]
 
 
+def _threshold_angle(process: dict) -> float:
+    """Degrees from horizontal at or below which the profile prints supports (support_threshold_angle). 0 is "automatic":
+    the usual angle."""
+    import orientation
+    try:
+        angle = float((process or {}).get("support_threshold_angle") or 0)
+    except (TypeError, ValueError):
+        angle = 0.0
+    return angle if 1 <= angle <= 89 else orientation.DEFAULT_OVERHANG_ANGLE
+
+
 def _needs_supports(process: dict, verts, tris, obj: dict) -> bool:
     """Whether the object, placed as it is, gets tree supports: supports are on in its settings and an underside off the
-    bed slopes no more than the profile's overhang angle (support_threshold_angle, from horizontal) over enough area."""
+    bed slopes no more than the profile's overhang angle (from horizontal) over enough area."""
     import numpy as np
     if str(process.get("enable_support")) != "1":
         return False
-    try:
-        angle = float(process.get("support_threshold_angle") or 30)
-    except (TypeError, ValueError):
-        angle = 30.0
+    angle = _threshold_angle(process)
     placed = place(verts, {**obj, "position": [0.0, 0.0]})[np.asarray(tris)]
     cross = np.cross(placed[:, 1] - placed[:, 0], placed[:, 2] - placed[:, 0])
     area = np.linalg.norm(cross, axis=1) / 2
@@ -1228,6 +1236,37 @@ def _needs_supports(process: dict, verts, tris, obj: dict) -> bool:
         facing_down = -cross[:, 2] / (2 * area) >= math.cos(math.radians(angle)) - 1e-9
     off_bed = placed[:, :, 2].min(axis=1) > 0.3
     return bool(area[facing_down & off_bed & (area > 1e-9)].sum() > SUPPORT_OVERHANG_MM2)
+
+
+class _Shapes:
+    """What the nester needs to know of each object of a project: its outline from above and its clearance
+    (SUPPORT_CLEARANCE_MM when it needs tree supports in its orientation, else CLEARANCE_MM), cached."""
+
+    def __init__(self, project_id: int, record: dict, data: dict):
+        import nesting
+        self.nesting, self.project_id, self.record = nesting, project_id, record
+        self.plates = {p["id"]: p for p in data["plates"]}
+        self.processes, self.meshes, self.shapes = {}, {}, {}
+
+    def mesh(self, model_id: int):
+        if model_id not in self.meshes:
+            self.meshes[model_id] = load_mesh(self.project_id, model_id)
+        return self.meshes[model_id]
+
+    def outline_and_clearance(self, obj: dict) -> tuple:
+        key = (obj["model"], obj["plate"], tuple(obj["rotation"]), tuple(obj["scale"]), json.dumps(obj.get("overrides") or {}, sort_keys=True))
+        if key not in self.shapes:
+            if obj["plate"] not in self.processes:
+                self.processes[obj["plate"]] = _plate_process(self.record, self.plates[obj["plate"]])
+            verts, tris = self.mesh(obj["model"])
+            hull = self.nesting.hull_outline(place(verts, {**obj, "position": [0.0, 0.0]})[:, :2])
+            needs = _needs_supports({**self.processes[obj["plate"]], **(obj.get("overrides") or {})}, verts, tris, obj)
+            self.shapes[key] = hull, self.nesting.SUPPORT_CLEARANCE_MM if needs else self.nesting.CLEARANCE_MM
+        return self.shapes[key]
+
+    def polygon(self, obj: dict) -> list:
+        """The object's outline where it stands on the bed."""
+        return self.nesting.hull_outline(place(self.mesh(obj["model"])[0], obj)[:, :2])
 
 
 def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
@@ -1242,8 +1281,7 @@ def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
     try:
         import nesting
     except ImportError:
-        raise jobs.JobError("Arranging needs shapely installed on the Spooler computer", 503)
-    import numpy as np
+        raise _nest_error()
     data = record["data"]
     limits = _machine_limits_for(record)
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
@@ -1252,25 +1290,12 @@ def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
     plates = {p["id"]: p for p in data["plates"]}
     choices = data.get("filaments") or {}
     objects = [o for o in data["objects"] if o["plate"] in order]
-    processes, meshes, shapes = {}, {}, {}
+    shapes = _Shapes(project_id, record, data)
 
     def group_of(obj):
         plate = plates[obj["plate"]]
         return json.dumps({"overrides": plate.get("overrides") or {}, "filament": _choice_key(choices.get(str(obj["model"])))},
                           sort_keys=True)
-
-    def outline_and_clearance(obj):
-        key = (obj["model"], obj["plate"], tuple(obj["rotation"]), tuple(obj["scale"]), json.dumps(obj.get("overrides") or {}, sort_keys=True))
-        if key not in shapes:
-            if obj["plate"] not in processes:
-                processes[obj["plate"]] = _plate_process(record, plates[obj["plate"]])
-            if obj["model"] not in meshes:
-                meshes[obj["model"]] = load_mesh(project_id, obj["model"])
-            verts, tris = meshes[obj["model"]]
-            hull = nesting.hull_outline(place(verts, {**obj, "position": [0.0, 0.0]})[:, :2])
-            needs = _needs_supports({**processes[obj["plate"]], **(obj.get("overrides") or {})}, verts, tris, obj)
-            shapes[key] = hull, nesting.SUPPORT_CLEARANCE_MM if needs else nesting.CLEARANCE_MM
-        return shapes[key]
 
     pinned_plates = {}   # plate id → the group it holds: its first pinned object's
     for obj in sorted((o for o in objects if o.get("pinned")), key=lambda o: o["id"]):
@@ -1283,12 +1308,12 @@ def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
     for obj in objects:
         if obj.get("pinned"):
             group = pinned_plates[obj["plate"]]
-            _, clearance = outline_and_clearance(obj)
+            _, clearance = shapes.outline_and_clearance(obj)
             fixed.append({"key": obj["id"], "group": group, "slot": slots[group].index(obj["plate"]), "clearance": clearance,
-                          "polygon": nesting.hull_outline(place(meshes[obj["model"]][0], obj)[:, :2])})
+                          "polygon": shapes.polygon(obj)})
     items = []
     for obj in (o for o in objects if not o.get("pinned")):
-        hull, clearance = outline_and_clearance(obj)
+        hull, clearance = shapes.outline_and_clearance(obj)
         items.append({"key": obj["id"], "outline": hull, "clearance": clearance, "group": group_of(obj)})
     if not items:
         return []
@@ -1390,51 +1415,65 @@ def set_copies(project_id: int, object_id, copies, revision=None) -> dict:
     return {**get_project(project_id), "copies": result}
 
 
+def _nest_error() -> jobs.JobError:
+    return jobs.JobError("Arranging needs shapely installed on the Spooler computer", 503)
+
+
 def _add_copies(project_id: int, record: dict, data: dict, source: dict, count: int) -> None:
-    """Append `count` clones of `source` to `data`, each where it fits."""
+    """Append `count` clones of `source` to `data`, each where the nester finds room for it: its plate first, then plates
+    with the same settings, then a new plate."""
+    try:
+        import nesting
+    except ImportError:
+        raise _nest_error()
     limits = _machine_limits_for(record)
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
     plates = {p["id"]: p for p in data["plates"]}
+    shapes = _Shapes(project_id, record, data)
     settings = lambda plate_id: json.dumps(plates[plate_id].get("overrides") or {}, sort_keys=True)
-    sizes = {}
-
-    def size_of(obj):
-        key = (obj["model"], tuple(obj["rotation"]), tuple(obj["scale"]))
-        if key not in sizes:
-            sizes[key] = _footprint(project_id, obj)
-        return sizes[key]
-    size = size_of(source)
+    hull, clearance = shapes.outline_and_clearance(source)
     same = [source["plate"]] + [p["id"] for p in data["plates"] if p["id"] != source["plate"] and settings(p["id"]) == settings(source["plate"])]
     for _ in range(count):
         spot = None
         for plate_id in same:
-            gap = _gap_for({**data["profile"]["process"], **(plates[plate_id].get("overrides") or {})})
-            occupied = [(*o["position"], *size_of(o)) for o in data["objects"] if o["plate"] == plate_id and o["model"] in ready]
-            found = packing.find_spot(size, limits["bed"], limits["exclude"], occupied, gap=gap)
-            if found:
-                spot = plate_id, found
+            fixed = [{"key": o["id"], "group": 0, "slot": 0, "polygon": shapes.polygon(o), "clearance": shapes.outline_and_clearance(o)[1]}
+                     for o in data["objects"] if o["plate"] == plate_id and o["model"] in ready]
+            spot = _nest_one(nesting, hull, clearance, limits, fixed)
+            if spot:
+                spot = plate_id, spot
                 break
         if spot is None:
             if len(data["plates"]) >= MAX_PLATES:
                 raise jobs.JobError(f"A project holds at most {MAX_PLATES} plates")
             plate = _new_plate(_next_id(data["plates"]), plates[source["plate"]].get("overrides"))
             data["plates"].append(plate)
-            plates[plate["id"]] = plate
-            gap = _gap_for({**data["profile"]["process"], **(plate.get("overrides") or {})})
-            found = packing.find_spot(size, limits["bed"], limits["exclude"], [], gap=gap)
-            spot = plate["id"], found or ((128.0, 128.0), False)   # too big for any plate: it sits centred, as in packing.pack
+            plates[plate["id"]] = shapes.plates[plate["id"]] = plate
             same.append(plate["id"])
-        plate_id, ((x, y), turned) = spot
+            spot = plate["id"], _nest_one(nesting, hull, clearance, limits, []) or ((128.0, 128.0), 0.0)   # too big for any plate: it sits centred
+        plate_id, ((x, y), angle) = spot
         added = json.loads(json.dumps(source))
         added.pop("pinned", None)
         added.update(id=_next_id(data["objects"]), plate=plate_id, position=[round(x, 3), round(y, 3)])
-        if turned:
-            added["rotation"][2] = round((added["rotation"][2] + 90) % 360, 4)
+        if angle:
+            added["rotation"][2] = round((added["rotation"][2] + angle) % 360, 4)
         data["objects"].append(added)
 
 
+def _nest_one(nesting, hull, clearance: float, limits: dict, fixed: list):
+    """((centre x, centre y), turn about Z in degrees) for one more object on a plate holding `fixed` shapes, or None when
+    it doesn't fit there."""
+    plates = nesting.nest([{"key": 0, "outline": hull, "clearance": clearance, "group": 0}], limits["bed"], limits["exclude"], fixed)
+    placed = [i for i in plates[0]["items"] if i["key"] == 0 and not i["oversize"]]
+    return (placed[0]["center"], placed[0]["angle"]) if placed else None
+
+
 def merge_plates(project_id: int, source_id: int, into_id: int) -> dict:
-    """Move everything on one plate onto another, packed to fit. The combined plate keeps the settings of `into_id`."""
+    """Move everything on one plate onto another, nested to fit. The combined plate keeps the settings of `into_id`; plates
+    of different filament choices don't merge."""
+    try:
+        import nesting
+    except ImportError:
+        raise _nest_error()
     record = get_project(project_id)
     plates = {p["id"]: p for p in record["data"]["plates"]}
     if source_id not in plates or into_id not in plates:
@@ -1445,10 +1484,17 @@ def merge_plates(project_id: int, source_id: int, into_id: int) -> dict:
     objects = [o for o in record["data"]["objects"] if o["plate"] in (into_id, source_id)]
     if any(o["model"] not in ready for o in objects):
         raise jobs.JobError("Wait for the models on these plates to finish importing", 409)
+    found = plate_filaments({"objects": [{**o, "plate": into_id} for o in objects], "filaments": record["data"].get("filaments")}, into_id)
+    if len(found) > 1:
+        labels = [choice_label(c) for c in found]
+        raise jobs.JobError(f"{plates[into_id]['name']} and {plates[source_id]['name']} together mix {', '.join(labels[:-1])} and {labels[-1]}", 409)
     limits = _machine_limits_for(record)
-    gap = _gap_for({**record["data"]["profile"]["process"], **(plates[into_id].get("overrides") or {})})
-    layout = packing.pack([{"key": o["id"], "size": _footprint(project_id, o), "group": "merged"} for o in objects],
-                          limits["bed"], limits["exclude"], gap=gap) or [{"group": "merged", "items": []}]  # both plates empty
+    shapes = _Shapes(project_id, record, record["data"])
+    items = []
+    for o in objects:
+        hull, clearance = shapes.outline_and_clearance({**o, "plate": into_id})
+        items.append({"key": o["id"], "outline": hull, "clearance": clearance, "group": "merged"})
+    layout = nesting.nest(items, limits["bed"], limits["exclude"]) or [{"group": "merged", "items": []}]   # both plates empty
     if len(layout) > 1 or any(item["oversize"] for plate in layout for item in plate["items"]):
         raise jobs.JobError(f"Those objects don't fit on one plate — {plates[source_id]['name']} stays as it is", 409)
     return _apply_layout(project_id, record, [into_id, source_id], layout, lambda _: plates[into_id].get("overrides") or {})
@@ -1458,7 +1504,6 @@ def merge_plates(project_id: int, source_id: int, into_id: int) -> dict:
 
 def _overhang_angle(record: dict, body: dict) -> float:
     """Degrees from horizontal at or below which the profile prints supports (support_threshold_angle, 30 when unset)."""
-    import orientation
     if body.get("overhang_angle") not in (None, ""):
         try:
             angle = float(body["overhang_angle"])
@@ -1470,10 +1515,9 @@ def _overhang_angle(record: dict, body: dict) -> float:
     profile = record["data"]["profile"]
     try:
         process = {**slicer.bundle_settings(profile["bundle_id"])["process"], **profile.get("process", {})} if profile["bundle_id"] else {}
-        angle = float(process.get("support_threshold_angle") or 0)
-    except (jobs.JobError, TypeError, ValueError):
-        angle = 0.0
-    return angle if 1 <= angle <= 89 else orientation.DEFAULT_OVERHANG_ANGLE   # 0 is "automatic": use the usual angle
+    except jobs.JobError:
+        process = {}
+    return _threshold_angle(process)
 
 
 def _bed_limits(record: dict) -> dict:

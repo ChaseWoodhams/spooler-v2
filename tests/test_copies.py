@@ -118,6 +118,18 @@ class CopiesApiTests(unittest.TestCase):
             for b in objects[i + 1:]:
                 self.assertGreaterEqual(max(abs(a["position"][0] - b["position"][0]), abs(a["position"][1] - b["position"][1])), 31)
 
+    def test_added_copies_keep_the_nesters_clearance_not_a_gap_for_every_object_when_supports_are_on(self):
+        project = self.project_with_cubes()
+        project = self.save(project, lambda d: d["plates"][0].update(overrides={"enable_support": "1"}))
+        status, result = self.set_copies(project, 1, 4)
+        self.assertEqual(status, 200, result)
+        objects = result["data"]["objects"]
+        self.assertEqual({o["plate"] for o in objects}, {1})
+        gaps = sorted(max(abs(a["position"][0] - b["position"][0]), abs(a["position"][1] - b["position"][1])) - 20
+                      for i, a in enumerate(objects) for b in objects[i + 1:])
+        self.assertGreaterEqual(gaps[0], 6 - 0.01)      # a cube on the bed needs no supports: the plain 6 mm, not 20
+        self.assertLess(gaps[0], 12)
+
     def test_added_objects_spill_onto_a_new_plate_when_the_plate_is_full(self):
         project = self.project_with_cubes()
         project = self.save(project, lambda d: d["objects"][0].update(scale=[10, 10, 10], position=[128, 128]))   # a 200 mm cube

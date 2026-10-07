@@ -17,11 +17,11 @@ import numpy as np
 import shapely
 from shapely.geometry import MultiPoint, Polygon, box
 
-from packing import GAP_MM
+from packing import GAP_MM, MARGIN_MM, SUPPORT_GAP_MM
 
 CLEARANCE_MM = GAP_MM        # a plain part's clearance; the pair rule is max, so two plain parts keep today's 6 mm
-SUPPORT_CLEARANCE_MM = 22.0  # a part that needs tree supports in its orientation: measured reach 21 mm plus margin
-EDGE_MARGIN_MM = 3.0         # brim and supports are clipped at the bed edge, so no more than today's margin
+SUPPORT_CLEARANCE_MM = SUPPORT_GAP_MM   # a part that needs tree supports in its orientation
+EDGE_MARGIN_MM = MARGIN_MM   # brim and supports are clipped at the bed edge, so no more than the packer's margin
 ANGLES = tuple(range(0, 360, 15))
 _ROUND = 8                  # segments per quarter circle when growing an outline by its clearance
 _REACH = 1.012 / math.cos(math.pi / (4 * _ROUND))   # grow a little more so the polygon encloses the true circle; GEOS also simplifies a buffer by up to 1% of its distance
