@@ -86,7 +86,7 @@ class TimeEstimateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((estimate["source"], estimate["approximate"]), ("model", True))
         self.assertEqual(estimate["layers"], 150)                      # 30 mm tall at 0.2 mm layers
         self.assertTrue(0 < estimate["volume_cm3"] < 27)               # a 27 cm3 cube printed at 15% infill is not solid
-        self.assertAlmostEqual(estimate["seconds"], 50 * 150 + 160 * estimate["volume_cm3"], delta=1)
+        self.assertAlmostEqual(estimate["seconds"], 25 * 150 + 80 * estimate["volume_cm3"], delta=1)
 
     async def test_a_sliced_plate_reports_the_slicers_figure_until_the_slice_is_outdated(self):
         project_id = await self.cube_project(30)

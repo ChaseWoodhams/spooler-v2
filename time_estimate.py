@@ -3,13 +3,12 @@ A rough print time for a plate before it is sliced, and the features logged with
 
     time = a x layers + b x deposited volume + c x first-layer footprint
 
-The seeds below come from the one real Spooler-sliced plate (research/time-estimate.md): about 50 s per layer and about
-160 s per cm3, each fitted on its own, so used together they overshoot. The footprint term has no seed yet.
+The seeds below are the research figures (about 50 s per layer and about 160 s per cm3, each fitted on its own on the one real
+Spooler-sliced plate, research/time-estimate.md) halved, because used together they doubled that plate's time. The footprint term has no seed yet.
 
-Checked on that plate (project 1 plate 1, two rear_base parts, OrcaSlicer 15260 s, 310 layers, 94.9 cm3 deposited):
-the estimate finds 310 layers and 96.2 cm3 (+1.3%) but 30886 s, +102% against the slicer, because both seeds are applied
-at once. Either seed alone lands within 2% (layers only 15500 s, volume only 15386 s), which says nothing yet about other
-plates. Fitting `COEFFICIENTS` from the log is what makes the seconds usable. Nothing here
+Checked on that plate (project 1 plate 1, two rear_base parts, OrcaSlicer 15260 s, 310 layers, 94.9 cm3 deposited): the estimate
+finds 310 layers and 96.2 cm3 (+1.3%) and, with the halved seeds, about 15446 s (+1.2%). With the unhalved seeds it was 30886 s
+(+102%). That is one plate, so it says nothing yet about other plates. Fitting `COEFFICIENTS` from the log is what makes the seconds usable. Nothing here
 is trustworthy as a time until the log (table `slice_log`) holds enough slices to fit `COEFFICIENTS`; until then the rank
 (layers, then volume) is the useful part, and every figure is marked approximate.
 """
@@ -20,7 +19,7 @@ import time
 import database
 
 # seconds per layer, per cm3 deposited, per cm2 of first-layer footprint
-COEFFICIENTS = (50.0, 160.0, 0.0)
+COEFFICIENTS = (25.0, 80.0, 0.0)
 DEFAULT_LAYER_HEIGHT, DEFAULT_LINE_WIDTH, DEFAULT_WALLS, DEFAULT_SHELL_LAYERS, DEFAULT_INFILL = 0.2, 0.42, 2, 8, 0.15
 
 

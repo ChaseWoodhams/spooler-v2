@@ -1504,7 +1504,7 @@ async function mergeInto(targetId) {
 // ── Plan plates ─────────────────────────────────────────────────────────────────
 // The review sheet for the planner: POST /plan changes nothing; Accept applies it as one revision, so one Undo step reverses it.
 // The seed time coefficients still overshoot about 2x, so the time is hidden until that is settled: flip this to show "≈ 1 h 05 min".
-const SHOW_PLAN_SECONDS = false;
+const SHOW_PLAN_SECONDS = true;  // approximate until a plate is sliced: the seeds in time_estimate.py are fitted to one plate
 const planTime = seconds => {
   const minutes = Math.max(1, Math.round(seconds / 60));
   return `≈ ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
