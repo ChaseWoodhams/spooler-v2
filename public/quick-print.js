@@ -24,6 +24,11 @@
   const POLL_MS = 900;
   const OPTION_KEYS = ["layer_height", "infill", "walls", "supports", "brim", "brim_width"];
 
+  const qualityStyles = document.createElement("link");
+  qualityStyles.rel = "stylesheet";
+  qualityStyles.href = "/quick-print-quality.css?v=1";
+  document.head.appendChild(qualityStyles);
+
   let S = null;           // the open session, or null
   let picker = null;      // the hidden file input
   let pickerPrinter = null;
@@ -201,6 +206,8 @@
     if (S !== session) return null;
     session.intake = intake;
     session.project = project;
+    session.ack = false;
+    if (session.phase === "review") { session.review = null; enterEdit(); }
     if (session.phase === "edit") renderIntake();
     return intake;
   }
@@ -218,6 +225,7 @@
     root.className = "qp-scrim";
     root.innerHTML = `<div class="qp-card" role="dialog" aria-modal="true" aria-labelledby="qp-title" tabindex="-1">
       <div class="qp-head"><h2 id="qp-title">Quick print</h2><button type="button" class="qp-x" data-qp-act="close" aria-label="Close">&times;</button></div>
+      <ol class="qp-progress" aria-label="Quick print stages"><li>1. File intake</li><li>2. Configure</li><li>3. Review and queue</li><li>4. Start from Queue</li></ol>
       <div class="qp-body" data-qp="body"></div>
       <div class="qp-foot" data-qp="foot"></div>
     </div>`;
@@ -248,6 +256,11 @@
   function setHead() {
     const name = title();
     $("#qp-title").textContent = name ? `Quick print: ${name}` : "Quick print";
+    const stage = ["upload", "check", "routed"].includes(S.phase) ? 0 : ["edit", "slicing", "error"].includes(S.phase) ? 1 : 2;
+    [...S.root.querySelectorAll(".qp-progress li")].forEach((item, index) => {
+      if (index === stage) item.setAttribute("aria-current", "step");
+      else item.removeAttribute("aria-current");
+    });
   }
 
   /** The non-form phases: uploading, checking, slicing, review, queueing and errors replace the body. */
@@ -263,14 +276,14 @@
       body.innerHTML = `<div class="qp-status"><div>Uploading ${esc(S.file?.name)}…</div><div class="qp-bar"><i style="width:${S.uploadPct}%"></i></div></div>`;
       foot.innerHTML = `<span class="qp-sp"></span><button type="button" class="btn btn-secondary" data-qp-act="close">Cancel</button>`;
     } else if (phase === "check") {
-      body.innerHTML = `<div class="qp-status"><div>Checking the model: reading it, repairing small holes and measuring it…</div><div class="qp-bar qp-bar-busy"><i></i></div></div>`;
+      body.innerHTML = `<div class="qp-status"><div>Checking the file: reading its contents and measuring the model when applicable…</div><div class="qp-bar qp-bar-busy"><i></i></div></div>`;
       foot.innerHTML = `<span class="qp-sp"></span><button type="button" class="btn btn-secondary" data-qp-act="close">Close</button>`;
     } else if (phase === "slicing") {
       const entry = S.project?.slices?.["1"] || {};
       const stage = { preparing: "Preparing", slicing: "Slicing", "post-processing": "Post-processing", analysing: "Analysing" }[entry.stage] || (entry.state === "queued" ? "Waiting for the slicer" : "Slicing");
       body.innerHTML = `<div class="qp-status"><div><strong data-qp="stage">${esc(stage)}</strong> ${esc(title())}<span class="qp-muted" data-qp="elapsed"></span></div>
         <div class="qp-bar qp-bar-busy"><i></i></div>
-        <p class="qp-muted">It goes to the queue when it's done. Closing this window leaves the slice running but queues nothing.</p></div>`;
+        <p class="qp-muted">Review the Slice before adding a Job to the Queue. Slicing does not start a physical Print. Closing this window leaves the slice running but queues nothing.</p></div>`;
       foot.innerHTML = `<span class="qp-sp"></span><button type="button" class="btn btn-secondary" data-qp-act="close">Close</button>`;
     } else if (phase === "review") {
       renderReview(body, foot);
@@ -300,32 +313,30 @@
     location.hash = `#projects=${id}`;
   }
 
-  function renderReview(body, foot) {
-    const r = S.review || { warnings: [] };
-    const name = printerName();
-    if (S.intake?.kind === "gcode") { renderGcodeReview(body, foot); return; }
-    const est = exactEstimate();
-    body.innerHTML = `<div class="qp-status"><div><strong>Sliced.</strong> ${est ? esc(est) : ""}</div>
-      <div class="qp-notice qp-warn" role="alert">${r.warnings.map(w => `<div class="qp-warning"><strong>${esc(w.title)}</strong>${w.detail ? `<div class="qp-muted">${esc(w.detail)}</div>` : ""}</div>`).join("")}</div>
-      ${S.error ? `<div class="qp-notice qp-bad" role="alert">${esc(S.error)}</div>` : ""}
-      <label class="qp-check"><input type="checkbox" data-qp-act="ack" ${S.ack ? "checked" : ""}> I've seen these warnings</label></div>`;
-    foot.innerHTML = `<span class="qp-muted">Queues on ${esc(name)}</span><span class="qp-sp"></span>
-      <button type="button" class="btn btn-secondary" data-qp-act="back">Back</button>
-      <button type="button" class="btn btn-primary" data-qp-act="queue" ${S.ack ? "" : "disabled"}>Queue print</button>`;
+  function reviewSummary() {
+    const c = S.choices;
+    const spool = S.spools.find(sp => String(sp.id) === String(c.spool));
+    const values = [["File", title()], ["Printer", printerName()], ["Build plate", SIDES[c.bed] || c.bed],
+      ["Material", spool?.name || (c.spool ? `Spool #${c.spool}` : "Preset values; verify loaded filament")],
+      ["Estimate", exactEstimate() || "Unavailable"], ["Options", `Bed leveling: ${c.leveling ? "on" : "off"}; Timelapse: ${c.timelapse ? "on" : "off"}`],
+      ["Slice settings", S.intake?.kind === "gcode" ? "Fixed in G-code" : `${S.choices.preset}; layer ${S.values.layer_height} mm; infill ${S.values.infill}%; walls ${S.values.walls}; supports ${S.values.supports}; brim ${S.values.brim}`]];
+    return `<dl class="qp-review-summary">${values.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>`;
   }
-
-  const CHECK_MARK = { pass: "OK", info: "Note", warn: "Warning", fail: "Blocked" };
-  function renderGcodeReview(body, foot) {
+  function renderReview(body, foot) {
     const r = S.review || { warnings: [], checks: [] };
-    const warned = !!r.warnings?.length;
-    const rows = (r.checks?.length ? r.checks : r.warnings || []).map(c => `<div class="qp-warning"><strong>${esc(CHECK_MARK[c.level] || c.level)}: ${esc(c.title)}</strong>${c.detail ? `<div class="qp-muted">${esc(c.detail)}</div>` : ""}</div>`).join("");
-    body.innerHTML = `<div class="qp-status"><div><strong>Preflight for ${esc(title())}</strong> on ${esc(printerName())}. Slicing was skipped: the file is already sliced.</div>
-      <div class="qp-notice ${warned ? "qp-warn" : ""}" role="status">${rows || "No checks to report."}</div>
-      ${S.error ? `<div class="qp-notice qp-bad" role="alert">${esc(S.error)}</div>` : ""}
-      ${warned ? `<label class="qp-check"><input type="checkbox" data-qp-act="ack" ${S.ack ? "checked" : ""}> I've seen these warnings</label>` : ""}</div>`;
-    foot.innerHTML = `<span class="qp-muted">Queues on ${esc(printerName())}</span><span class="qp-sp"></span>
-      <button type="button" class="btn btn-secondary" data-qp-act="back">Back</button>
-      <button type="button" class="btn btn-primary" data-qp-act="queue" ${S.ack ? "" : "disabled"}>Queue print</button>`;
+    const checks = r.checks?.length ? r.checks : r.warnings || [];
+    const groups = [["Blockers", checks.filter(c => c.level === "fail"), "Resolve this blocker, then return to configuration and run review again."],
+      ["Warnings", checks.filter(c => c.level === "warn" || !c.level), "Verify this condition before acknowledging the warnings."],
+      ["Information", checks.filter(c => c.level === "info" || c.level === "pass"), "Use this information to verify the Job matches your printer and material."]];
+    body.innerHTML = `<div class="qp-status"><h3 tabindex="-1">Job review</h3>${reviewSummary()}
+      <p>${S.intake?.kind === "gcode" ? "G-code is already sliced; slicing was skipped." : "The model has been sliced."} Adding a Job to the Queue does not physically start a Print. Review and start it from the Queue after confirming the build plate is clear.</p>
+      ${groups.map(([name, items, recovery]) => items.length ? `<section><h4>${name}</h4>${items.map(c => `<div class="qp-warning"><strong>${esc(c.title)}</strong><p>${esc(c.detail || "")}</p><p class="qp-muted">${esc(c.next_step || recovery)}</p></div>`).join("")}</section>` : "").join("")}
+      ${r.can_start === false ? `<p class="qp-notice qp-bad" role="alert">Queueing is blocked by preflight. Resolve the blockers and run review again.</p>` : ""}
+      ${S.error ? `<p class="qp-notice qp-bad" role="alert">${esc(S.error)}</p>` : ""}
+      ${r.warnings?.length ? `<label class="qp-check"><input type="checkbox" data-qp-act="ack" ${S.ack ? "checked" : ""}> I have reviewed the warnings</label><p class="qp-muted">Warning acknowledgement is separate from confirming that the bed is clear.</p>` : ""}</div>`;
+    foot.innerHTML = `<span class="qp-sp"></span><button type="button" class="btn btn-secondary" data-qp-act="back">Back</button>
+      <button type="button" class="btn btn-primary" data-qp-act="queue" ${r.can_start === false || (r.warnings?.length && !S.ack) ? "disabled" : ""}>Add Job to Queue</button>`;
+    body.querySelector("h3").focus();
   }
 
   function printerName() { return printerList().find(p => p.id === S.choices.printer)?.name || "the printer"; }
@@ -399,10 +410,12 @@
         <div class="qp-slot" data-qp-slot="more-panel"></div>
       </div>
     </div>`;
-    foot.innerHTML = `<span class="qp-muted" data-qp="estimate"></span><span class="qp-sp"></span>
-      <button type="button" class="btn btn-primary" data-qp-act="go" data-qp="go" disabled>Slice &amp; print</button>`;
+    foot.innerHTML = `<p class="qp-action-reason" data-qp="action-reason" role="status"></p><span class="qp-muted" data-qp="estimate"></span><span class="qp-sp"></span>
+      <button type="button" class="btn btn-primary" data-qp-act="go" data-qp="go" disabled>Slice and review</button>`;
     S.formBuilt = true;
     syncPrinterSelect(true);
+    $("#qp-title").tabIndex = -1;
+    $("#qp-title").focus();
   }
 
   /** What changes when the intake does: badges, notice, estimate, preview and whether Slice & print can go. */
@@ -446,7 +459,7 @@
     if (!force && signature === S.printerSignature) return;
     S.printerSignature = signature;
     const c = S.choices;
-    const wanted = list.find(p => p.id === c.printer && p.usable);
+    const wanted = list.find(p => p.id === c.printer);
     if (!wanted) c.printer = (list.find(p => p.usable && p.state === "idle") || list.find(p => p.usable))?.id || null;
     const options = list.length ? [...(c.printer ? [] : [["", "Choose a printer"]]), ...list.map(p => [p.id, printerLabel(p), !p.usable])] : [["", "No printers"]];
     select.innerHTML = selectOptions(options, c.printer ?? "");
@@ -463,6 +476,8 @@
     if (!i || i.state !== "ready") return "The model isn't ready yet";
     if (!i.can_print) return i.reason || "The model can't be printed yet";
     if (!S.choices.printer) return printerList().some(p => p.usable) ? "Choose a printer" : "No printer is available";
+    const selected = printerList().find(p => p.id === S.choices.printer);
+    if (!selected?.usable) return "Selected printer is offline or unavailable. Reconnect it or choose another printer.";
     if (!S.choices.preset && i.kind !== "gcode") return "Choose a preset";
     return null;
   }
@@ -472,7 +487,9 @@
     const reason = blockedReason();
     go.disabled = !!reason;
     go.title = reason || "";
-    go.textContent = S.intake?.kind === "gcode" ? "Queue print" : "Slice & print";
+    const explanation = $('[data-qp="action-reason"]');
+    if (explanation) explanation.textContent = reason || (S.intake?.kind === "gcode" ? "Review the existing G-code before queueing. No physical Print starts here." : "Slice the model, then review it before queueing. No physical Print starts here.");
+    go.textContent = S.intake?.kind === "gcode" ? "Review G-code" : "Slice and review";
   }
 
   // ─── Form events ────────────────────────────────────────────────────────────
@@ -480,6 +497,7 @@
     const act = e.target.closest("[data-qp-act]")?.dataset.qpAct;
     if (act === "close") close();
     else if (act === "go") go();
+    else if (act === "preview-retry") loadPreview();
     else if (act === "back") { S.phase = "edit"; S.error = null; S.review = null; S.ack = false; buildForm(); renderIntake(); startPrinterWatch(); }
     else if (act === "queue") queue();
     else if (act === "open-project") openRoutedProject();
@@ -496,9 +514,10 @@
   }
   function renderReviewButtons() {
     const button = $('[data-qp-act="queue"]');
-    if (button) button.disabled = !S.ack;
+    if (button) button.disabled = S.review?.can_start === false || (!!S.review?.warnings?.length && !S.ack);
   }
   function applyField(key, input) {
+    S.ack = false;
     const c = S.choices, v = S.values;
     const number = () => (input.value === "" ? NaN : Number(input.value));
     if (key === "printer") c.printer = input.value || null;
@@ -581,7 +600,8 @@
     buildForm();
     renderIntake();
     startPrinterWatch();
-    showFormError(message);
+    showFormError(`${message}. Check the file, preset and connection, then use ${session.intake?.kind === "gcode" ? "Review G-code" : "Slice and review"} to retry. Your configuration is retained.`);
+    $('[data-qp="error"]')?.scrollIntoView({ block: "nearest" });
   }
 
   /** Follow the slice until it is sliced, then fetch the preflight report (and queue straight away when it is clean). */
@@ -600,7 +620,7 @@
         if (elapsed) elapsed.textContent = ` · ${Math.round((Date.now() - session.sliceStarted) / 1000)} s`;
         const stage = $('[data-qp="stage"]');
         if (stage) stage.textContent = { preparing: "Preparing", slicing: "Slicing", "post-processing": "Post-processing", analysing: "Analysing" }[entry.stage] || (entry.state === "queued" ? "Waiting for the slicer" : "Slicing");
-        if (entry.state === "failed") return sliceError(session, `Slicing failed: ${entry.error || "unknown error"}`);
+        if (entry.state === "failed") return sliceError(session, `Slicing failed: ${entry.error || "unknown error"}. Check the preset and model, then choose Slice and review to retry.`);
         if (entry.state === "sliced" && !entry.outdated) {
           const result = await api("POST", `/api/projects/${session.id}/print`, requestBody({ review: true }));
           if (S !== session) return;
@@ -616,11 +636,6 @@
   function reviewed(session, review) {
     if (S !== session) return;
     session.review = review;
-    if (review.can_start === false) {
-      const failed = (review.checks || review.warnings || []).filter(c => c.level === "fail").map(c => c.title + (c.detail ? `: ${c.detail}` : ""));
-      return sliceError(session, `Sliced, but it can't be printed: ${failed.join("; ") || "a preflight check failed"}`);
-    }
-    if (!review.warnings?.length) return queue();
     session.phase = "review";
     session.ack = false;
     renderStatus();
@@ -628,6 +643,7 @@
 
   async function queue() {
     const session = S;
+    if (!session.review || session.review.can_start === false || (session.review.warnings?.length && !session.ack)) return;
     session.phase = "queueing";
     renderStatus();
     try {
@@ -652,8 +668,6 @@
       if (S !== session) return;
       session.project = result;
       session.review = result.review;
-      const failed = (result.review.checks || []).filter(c => c.level === "fail");
-      if (result.review.can_start === false) return sliceError(session, `It can't be printed: ${failed.map(c => c.title + (c.detail ? `: ${c.detail}` : "")).join("; ") || "a preflight check failed"}`);
       session.phase = "review";
       session.ack = !result.review.warnings?.length;   // only warnings need to be acknowledged
       renderStatus();
@@ -668,7 +682,7 @@
       options: { leveling: c.leveling, timelapse: c.timelapse } }).catch(() => {});   // best effort, like the rest of the app
     emit("queued", { printerId: c.printer, printerName: name });
     close({ silent: true });
-    const message = `Queued on ${name}. It starts when you confirm the bed is cleared.`;
+    const message = `Job queued on ${name}; no Print has started. Review and start from Queue, or use Bed cleared after checking the bed and filament.`;
     if (typeof toastAction === "function" && typeof openQueue === "function") toastAction(message, "Open queue", () => openQueue());
     else say(message);
     if (typeof refreshQueueSoon === "function") refreshQueueSoon();
@@ -763,7 +777,7 @@
       p.resize();
       p.draw();
     } catch (err) {
-      if (S === session && host.isConnected && !session.preview) host.innerHTML = `<span class="qp-muted">The preview isn't available (${esc(err.message)})</span>`;
+      if (S === session && host.isConnected && !session.preview) host.innerHTML = `<span class="qp-muted">The preview isn't available (${esc(err.message)}). Check the dimensions and bed fit, or retry the preview.</span><button type="button" class="btn btn-secondary" data-qp-act="preview-retry">Retry preview</button>`;
     }
   }
 
@@ -919,6 +933,7 @@
   /** Flush pending field edits and apply one panel change to the project, in order, on fresh data (never outdated data). */
   function commitMore(mutate, resetKeys = []) {
     const session = S, m = S.more;
+    session.ack = false;
     m.queue = m.queue.then(async () => {
       if (S !== session) return;
       moreError(null);

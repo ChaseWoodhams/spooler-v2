@@ -21,10 +21,24 @@ const ISO_POINT_BUDGET_BYTES = 1_600_000; // ~400k points drawn per frame in the
 
 let _review = null; // { job, report, toolpath: DataView | null, layer, view }
 let _reviewFrame = 0;
+let _reviewRequest = 0;
 
 // ─── Open / check / start ─────────────────────────────────────────────────────
 async function openReview(job) {
-  _review = { job, report: null, toolpath: null, layer: 0, view: "3d" };
+  _review = { job, report: null, toolpath: null, layer: 0, view: "3d", opener: document.activeElement };
+  const dialog = document.querySelector("#modal-review .review-box");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "review-title");
+  dialog.tabIndex = -1;
+  if (!document.getElementById("review-warnings-ack")) {
+    const ack = document.querySelector("#modal-review .review-ack");
+    ack.insertAdjacentHTML("beforebegin", '<label class="review-ack" id="review-warnings-label" hidden><input type="checkbox" id="review-warnings-ack"> I have reviewed the preflight warnings</label><p id="review-start-reason" role="status"></p>');
+    document.getElementById("review-warnings-ack").addEventListener("change", _updateReviewStart);
+  }
+  document.getElementById("review-printer").setAttribute("aria-label", "Job review printer");
+  document.getElementById("review-layer").setAttribute("aria-label", "Preview layer");
+  document.getElementById("review-no-preview").textContent = "No toolpath preview is available. Verify the file, dimensions, printer and material below. Use Recheck to retry; preflight still applies.";
   document.getElementById("review-title").textContent = job.name;
   document.getElementById("review-subtitle").textContent = jobMetaText(job);
   const select = document.getElementById("review-printer");
@@ -33,17 +47,27 @@ async function openReview(job) {
   document.getElementById("review-ack").checked = false;
   _setReviewView("3d");
   document.getElementById("modal-review").classList.add("open");
+  document.getElementById("btn-review-recheck").textContent = "Recheck";
+  dialog.focus();
   await runReview();
 }
 
 function closeReview() {
   document.getElementById("modal-review").classList.remove("open");
+  const opener = _review?.opener;
   _review = null;
+  if (opener?.isConnected) opener.focus();
 }
 
 async function runReview() {
   const review = _review;
   if (!review) return;
+  const requestId = ++_reviewRequest;
+  review.report = null;
+  document.getElementById("review-ack").checked = false;
+  document.getElementById("review-warnings-ack").checked = false;
+  document.getElementById("btn-review-accept").hidden = true;
+  document.getElementById("review-start-reason").textContent = "Running preflight. Start remains disabled until the current Job is checked.";
   const printerId = document.getElementById("review-printer").value;
   _setReviewStatus("checking");
   document.getElementById("review-check-list").innerHTML = '<li class="queue-empty">Running preflight checks…</li>';
@@ -51,19 +75,23 @@ async function runReview() {
   try {
     const query = printerId ? `?printer_id=${encodeURIComponent(printerId)}` : "";
     const report = await jobsApi("GET", `/api/jobs/${review.job.id}/preflight${query}`);
-    if (_review !== review) return;
+    if (_review !== review || requestId !== _reviewRequest) return;
     review.report = report;
     if (report.preview && !review.toolpath) {
-      const resp = await fetch(`/api/jobs/${review.job.id}/toolpath`);
-      if (resp.ok) review.toolpath = new DataView(await resp.arrayBuffer());
-      if (_review !== review) return;
+      try {
+        const resp = await fetch(`/api/jobs/${review.job.id}/toolpath`);
+        if (resp.ok) review.toolpath = new DataView(await resp.arrayBuffer());
+      } catch (_) { /* Missing preview is separate from server preflight. Recheck retries. */ }
+      if (_review !== review || requestId !== _reviewRequest) return;
       review.layer = report.preview.layers.length - 1;
     }
     _renderReviewReport();
     drawReview();
   } catch (err) {
-    if (_review !== review) return;
+    if (_review !== review || requestId !== _reviewRequest) return;
+    review.report = null;
     _setReviewStatus("fail");
+    document.getElementById("review-start-reason").textContent = "Preflight failed. Check the connection and use Recheck to retry.";
     document.getElementById("review-check-list").innerHTML =
       `<li class="review-check fail"><span class="review-check-icon">✕</span><div class="review-check-title">${escHtml(err.message)}</div></li>`;
   }
@@ -71,7 +99,8 @@ async function runReview() {
 
 async function startFromReview() {
   const review = _review;
-  if (!review?.report) return;
+  if (!review?.report || !review.report.can_start || !document.getElementById("review-ack").checked ||
+      (review.report.needs_acknowledgement && !document.getElementById("review-warnings-ack").checked)) return;
   const btn = document.getElementById("btn-review-start");
   const printerId = document.getElementById("review-printer").value || null;
   btn.disabled = true;
@@ -91,7 +120,7 @@ async function startFromReview() {
 
 async function acceptWarningsForLater() {
   const review = _review;
-  if (!review?.report) return;
+  if (!review?.report?.can_start || !document.getElementById("review-warnings-ack").checked) return;
   const btn = document.getElementById("btn-review-accept");
   btn.disabled = true;
   try {
@@ -108,7 +137,15 @@ function _updateReviewStart() {
   const report = _review?.report;
   document.getElementById("btn-review-accept").hidden = !(report && report.can_start && report.needs_acknowledgement);
   document.getElementById("btn-review-start").disabled =
-    !report || !report.can_start || !document.getElementById("review-ack").checked;
+    !report || !report.can_start || !document.getElementById("review-ack").checked ||
+      (report.needs_acknowledgement && !document.getElementById("review-warnings-ack").checked);
+  document.getElementById("btn-review-accept").disabled = !document.getElementById("review-warnings-ack").checked;
+  document.getElementById("review-start-reason").textContent = !report ? "Run preflight before starting." : !report.can_start
+    ? "Start is blocked. Resolve the blockers below, then Recheck."
+    : report.needs_acknowledgement && !document.getElementById("review-warnings-ack").checked
+      ? "Review and acknowledge the warnings. This does not confirm the bed is clear."
+      : !document.getElementById("review-ack").checked ? "Confirm the build plate is clear and the right filament is loaded before starting."
+      : "Start print sends the physical start command to the selected printer.";
 }
 
 // ─── Checks panel ─────────────────────────────────────────────────────────────
@@ -123,14 +160,27 @@ function _renderReviewReport() {
   const { report } = _review;
   _setReviewStatus(report.status);
 
-  document.getElementById("review-check-list").innerHTML = report.checks.map(c =>
-    `<li class="review-check ${c.level}"><span class="review-check-icon">${REVIEW_ICON[c.level]}</span><div>` +
-    `<div class="review-check-title">${escHtml(c.title)}</div>` +
-    (c.detail ? `<div class="review-check-detail">${escHtml(c.detail)}</div>` : "") +
-    "</div></li>").join("");
+  const groups = [["Blockers", "fail", "Resolve this condition and use Recheck before starting."],
+    ["Warnings", "warn", "Verify this condition, then acknowledge the warnings before starting."],
+    ["Information", "info", "Compare this information with the file, printer and loaded material."],
+    ["Passed checks", "pass", "This check passed for the selected printer."]];
+  document.getElementById("review-check-list").innerHTML = groups.map(([title,level,next]) => {
+    const items = report.checks.filter(c => c.level === level);
+    if (!items.length) return "";
+    return `<li class="review-check-group"><h4>${title}</h4><ul>${items.map(c =>
+      `<li class="review-check ${c.level}"><span class="review-check-icon" aria-hidden="true">${REVIEW_ICON[c.level]}</span><div>` +
+      `<div class="review-check-title">${escHtml(c.title)}</div><div class="review-check-detail">${escHtml(c.detail || "")}</div>` +
+      `<div class="review-check-detail">${escHtml(c.next_step || next)}</div></div></li>`).join("")}</ul></li>`;
+  }).join("");
 
   const preview = report.preview;
-  const summary = [];
+  const job = _review.job, opts = job.print_opts || {};
+  const summary = [ `<span>File: ${escHtml(job.file_name || job.name)}</span>`,
+    `<span>Printer: ${escHtml(jobPrinterName(document.getElementById("review-printer").value || job.printer_id))}</span>`,
+    `<span>Build plate: ${opts.smooth_plate ? "Smooth PEI (Side B)" : "Textured PEI (Side A)"}</span>`,
+    `<span>Material: ${escHtml(report.preview?.config?.filament_settings_id || job.material || "Not reported; verify loaded filament")}</span>`,
+    `<span>Estimate: ${job.estimate_s != null ? escHtml(formatTime(job.estimate_s)) : "Unavailable"}</span>`,
+    `<span>Bed leveling: ${opts.leveling ? "on" : "off"}; Timelapse: ${opts.timelapse ? "on" : "off"}</span>` ];
   if (preview) {
     const est = preview.estimates || {};
     const model = preview.bounds.model;
@@ -148,9 +198,8 @@ function _renderReviewReport() {
 
   const nozzleCheck = report.checks.find(c => c.id === "nozzle");
   document.getElementById("review-nozzle").hidden = !(report.printer_id && nozzleCheck && nozzleCheck.level === "info");
-  document.getElementById("review-ack-text").textContent = report.needs_acknowledgement
-    ? "I've read the warnings above, and the build plate is clear"
-    : "The build plate is clear and the right filament is loaded";
+  document.getElementById("review-warnings-label").hidden = !report.needs_acknowledgement;
+  document.getElementById("review-ack-text").textContent = "The build plate is clear and the right filament is loaded";
   _updateReviewStart();
 }
 
@@ -330,3 +379,14 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && document.getElementById("modal-review").classList.contains("open")) closeReview();
 });
 window.addEventListener("resize", () => { if (_review) drawReview(); });
+
+// Keep keyboard focus inside the physical-start review until it closes.
+document.getElementById("modal-review").addEventListener("keydown", e => {
+  if (e.key !== "Tab") return;
+  const box = document.querySelector("#modal-review .review-box");
+  const items = [...box.querySelectorAll("button,input,select,a[href],[tabindex]:not([tabindex='-1'])")].filter(el => !el.disabled && el.offsetParent !== null);
+  const first = items[0], last = items[items.length - 1];
+  if (!first) return;
+  if (e.shiftKey && (document.activeElement === first || document.activeElement === box)) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
