@@ -339,19 +339,35 @@ class PlanPlatesApiTests(unittest.TestCase):
                                    {"revision": project["revision"], "fingerprint": reviewed["fingerprint"], "allow_tilt": True})
         self.assertEqual(status, 409, result)
 
-    def test_a_plan_that_leaves_an_object_off_the_bed_is_not_offered_and_says_why(self):
-        project = self.project_with(cube_stl(20), cube_stl(300))
-        project = self.lay(project, [(1, 1, (50, 50), False), (2, 1, (50, 50), False)])
+    def test_an_object_bigger_than_the_bed_gets_a_plate_of_its_own_and_is_reported_like_arrange_does(self):
+        project = self.project_with(cube_stl(20), cube_stl(30), cube_stl(300))
+        project = self.lay(project, [(1, 1, (50, 50), False), (2, 1, (50, 50), False), (3, 1, (50, 50), False)])
         status, plan = self.plan(project)
         self.assertEqual(status, 200, plan)
-        self.assertEqual(plan["plates"], [])
-        self.assertIn("off the bed", plan["refused"])
-        self.assertIn("Object 2", plan["refused"])
-        self.assertIn("off the bed", plan["summary"])
-        self.assertEqual({p["key"] for p in plan["problems"]}, {2})
-        self.assertIn("off the bed", {p["problem"] for p in plan["problems"]})
+        self.assertIsNone(plan["refused"])
+        self.assertEqual(sorted(sorted(o["id"] for o in p["objects"]) for p in plan["plates"]), [[1, 2], [3]])   # the big one is alone
+        self.assertIn("1 object is bigger than the bed", plan["summary"])
+        self.assertEqual([o["id"] for o in plan["too_big"]], [3])
         status, result = self.accept(project)
-        self.assertEqual(status, 409, result)
+        self.assertEqual(status, 200, result)
+        self.assertEqual({p["key"] for p in self.problems(project["id"])}, {3})
+        arranged = self.call("POST", f"/api/projects/{project['id']}/arrange", {})[1]
+        self.assertIn("1 object is bigger than the bed", arranged["outcome"])   # the same words, the same object
+
+    def test_a_plan_whose_layout_would_leave_objects_overlapping_is_not_offered_and_says_why(self):
+        project = self.project_with(cube_stl(20), cube_stl(20))
+        project = self.lay(project, [(1, 1, (50, 50), False), (2, 1, (150, 150), False)])
+        stacked = [{"group": json.dumps({"overrides": {}, "filament": None}), "plate": 1, "overrides": {}, "fixed": [],
+                    "items": [{"key": k, "center": (100.0, 100.0), "turned": False, "angle": 0.0, "oversize": False} for k in (1, 2)]}]
+        with mock.patch.object(projects, "arrange_layout", return_value=stacked):
+            status, plan = self.plan(project)
+            accepted = self.accept(project)
+        self.assertEqual(status, 200, plan)
+        self.assertEqual(plan["plates"], [])
+        self.assertIn("would overlap another", plan["refused"])
+        self.assertIn("No valid plan", plan["summary"])
+        self.assertEqual({p["key"] for p in plan["problems"]}, {1, 2})
+        self.assertEqual(accepted[0], 409, accepted[1])
         after = self.call("GET", f"/api/projects/{project['id']}")[1]
         self.assertEqual((after["revision"], after["data"]), (project["revision"], project["data"]))
 

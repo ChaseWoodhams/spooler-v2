@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -91,12 +92,41 @@ class ProblemObjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted((p["key"], p["problem"]) for p in plate["problems"]), [(1, "overlaps"), (2, "overlaps")])
         self.assertEqual(plate["problem_reason"], "cube overlaps cube 2")
 
+    async def test_objects_apart_but_closer_than_the_clearance_are_too_close_not_overlapping(self):
+        project = await self.project_with_cube((100, 100), second=(122, 100))   # 2 mm apart, Arrange keeps 6
+        plate = self.plate(project)
+        self.assertEqual(sorted((p["key"], p["problem"]) for p in plate["problems"]), [(1, "too close"), (2, "too close")])
+        self.assertEqual(plate["problem_reason"], "cube is too close to cube 2")
+
     async def test_an_object_of_a_failed_model_is_a_problem(self):
         project = await self.project_with_cube((100, 100))
         projects._mutate(project["id"], "models", lambda models: models[0].update(state="failed", error="bad mesh"),
                          project["created_at"])
         plate = self.plate(project)
         self.assertEqual([(p["key"], p["problem"]) for p in plate["problems"]], [(1, "failed model")])
+
+    def narrow_the_bed(self, project, to=150):
+        """Lock a smaller bed into the project's profile, as choosing another machine would."""
+        path = slicer.profiles_dir() / project["data"]["profile"]["bundle_id"] / "machine.json"
+        machine = json.loads(path.read_text(encoding="utf-8"))
+        machine["printable_area"] = ["0x0", f"{to}x0", f"{to}x{to}", f"0x{to}"]
+        machine["bed_exclude_area"] = []
+        path.write_text(json.dumps(machine), encoding="utf-8")
+
+    async def test_a_smaller_bed_in_the_profile_marks_the_objects_it_leaves_off_it(self):
+        project = await self.project_with_cube((200, 100))
+        self.assertEqual(self.plate(project)["problems"], [])
+        self.narrow_the_bed(project)
+        self.assertEqual([(p["key"], p["problem"]) for p in self.plate(project)["problems"]], [(1, "off the bed")])
+
+    async def test_a_model_whose_mesh_cannot_be_read_does_not_hide_the_problem_once_it_can(self):
+        project = await self.project_with_cube((-50, 100))
+        mesh = projects.model_dir(project["id"], 1) / "model.npz"
+        aside = mesh.with_suffix(".aside")
+        mesh.rename(aside)
+        self.plate(project)   # nothing can be judged while the mesh is missing
+        aside.rename(mesh)
+        self.assertEqual([(p["key"], p["problem"]) for p in self.plate(project)["problems"]], [(1, "off the bed")])
 
     async def test_slicing_a_plate_with_a_problem_records_it_as_a_finding(self):
         project = await self.project_with_cube((-50, 100))
@@ -109,6 +139,19 @@ class ProblemObjectTests(unittest.IsolatedAsyncioTestCase):
         entry = await self.sliced(project)
         self.assertEqual(entry["state"], "sliced")
         self.assertEqual([f["reason"] for f in entry["findings"]], ["cube overlaps cube 2", "cube 2 overlaps cube"])
+
+    async def test_the_findings_of_a_failed_slice_are_not_worked_out_on_the_event_loop(self):
+        project = await self.project_with_cube((-50, 100))
+        real, ran_on = projects._placement_findings, []
+
+        def spy(*args):
+            ran_on.append(threading.current_thread())
+            return real(*args)
+        with mock.patch.object(projects, "_placement_findings", spy):
+            entry = await self.sliced(project)
+        self.assertEqual(entry["state"], "failed")
+        self.assertTrue(ran_on)
+        self.assertNotIn(threading.main_thread(), ran_on)
 
     async def test_a_clean_slice_has_no_placement_finding(self):
         project = await self.project_with_cube((100, 100))
