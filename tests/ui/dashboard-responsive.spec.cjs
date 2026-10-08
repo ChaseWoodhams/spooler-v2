@@ -1,0 +1,240 @@
+const { chromium } = require("playwright");
+const { spawn } = require("node:child_process");
+const { mkdtemp, rm } = require("node:fs/promises");
+const net = require("node:net");
+const os = require("node:os");
+const path = require("node:path");
+const viewports = [
+  [320, 640], [360, 800], [390, 844], [430, 932],
+  [667, 375], [844, 390], [768, 1024], [1024, 768], [1440, 1000],
+];
+
+async function freePort() {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => server.once("error", reject).listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  await new Promise(resolve => server.close(resolve));
+  return port;
+}
+
+async function waitForServer(url, child, getLogs) {
+  const until = Date.now() + 30000;
+  while (Date.now() < until) {
+    if (child.exitCode !== null) throw new Error(`Spooler test server exited with code ${child.exitCode}: ${getLogs()}`);
+    try {
+      const response = await fetch(`${url}/api/health`);
+      if (response.ok) return;
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+  throw new Error(`Spooler test server did not become ready within 30 seconds: ${getLogs()}`);
+}
+
+(async () => {
+  const root = path.resolve(__dirname, "../..");
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "spooler-ui-test-"));
+  const httpPort = await freePort();
+  let wsPort = await freePort();
+  while (wsPort === httpPort) wsPort = await freePort();
+  const baseUrl = `http://127.0.0.1:${httpPort}`;
+  const python = process.env.SPOOLER_PYTHON || path.join(root, ".venv", "Scripts", "python.exe");
+  const server = spawn(python, ["server.py"], {
+    cwd: root,
+    env: { ...process.env, AUTH_ENABLED: "false", HTTP_PORT: String(httpPort), HTTPS_ENABLED: "false", WS_PORT: String(wsPort), DATA_DIR: dataDir, PYTHONUTF8: "1" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let serverLogs = "";
+  server.stdout.setEncoding("utf8").on("data", chunk => { serverLogs += chunk; });
+  server.stderr.setEncoding("utf8").on("data", chunk => { serverLogs += chunk; });
+  let browser;
+  try {
+    await waitForServer(baseUrl, server, () => serverLogs);
+    browser = await chromium.launch({ headless: true });
+    for (const [width, height] of viewports) {
+      const page = await browser.newPage({ viewport: { width, height }, serviceWorkers: "block" });
+      await page.routeWebSocket(/.*/, ws => ws.close());
+      await page.route("**/api/**", route => route.fulfill({ json: {} }));
+      await page.goto(baseUrl);
+      const result = await page.evaluate(() => ({
+        viewportWidth: document.documentElement.clientWidth,
+        bodyWidth: document.body.scrollWidth,
+        actions: ["btn-quick-print", "btn-import"].map(id => {
+          const element = document.getElementById(id);
+          const { left, right } = element.getBoundingClientRect();
+          return { id, reachable: getComputedStyle(element).display !== "none" && left >= 0 && right <= document.documentElement.clientWidth };
+        }),
+        hasOverflowMenu: getComputedStyle(document.getElementById("btn-header-more")).display !== "none",
+      }));
+      let menuWorks = true;
+      if (width <= 640) {
+        const more = page.getByRole("button", { name: "More actions" });
+        await more.focus();
+        await page.keyboard.press("Enter");
+        menuWorks = await more.getAttribute("aria-expanded") === "true"
+          && await page.getByRole("menuitem", { name: "Discover printers" }).isVisible()
+          && await page.getByRole("menuitem", { name: "Add Printer" }).isVisible()
+          && await page.evaluate(() => document.activeElement.id === "btn-header-discover");
+        await page.keyboard.press("ArrowDown");
+        menuWorks = menuWorks && await page.evaluate(() => document.activeElement.id === "btn-header-add-printer");
+        await page.keyboard.press("Escape");
+        menuWorks = menuWorks && await more.getAttribute("aria-expanded") === "false"
+          && await page.evaluate(() => document.activeElement.id === "btn-header-more");
+        const navMore = page.locator("#btn-mobile-more");
+        await navMore.focus();
+        await page.keyboard.press("Enter");
+        menuWorks = menuWorks && await navMore.getAttribute("aria-expanded") === "true"
+          && await page.evaluate(() => document.activeElement.id === "btn-mobile-history");
+        await page.keyboard.press("Escape");
+        menuWorks = menuWorks && await navMore.getAttribute("aria-expanded") === "false"
+          && await page.evaluate(() => document.activeElement.id === "btn-mobile-more");
+        const bottomNav = await page.locator(".sidenav").evaluate(element => {
+          const rect = element.getBoundingClientRect();
+          return rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+        });
+        menuWorks = menuWorks && bottomNav;
+      }
+      const failed = result.bodyWidth > result.viewportWidth || result.actions.some(action => !action.reachable)
+        || (width <= 640 && (!result.hasOverflowMenu || !menuWorks));
+      result.mobileMenuWorks = width <= 640 ? menuWorks : undefined;
+      console.log(`${width}x${height} ${failed ? "FAIL" : "PASS"}`, JSON.stringify(result));
+      await page.close();
+      if (failed) process.exitCode = 1;
+    }
+
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: "block" });
+    page.on("pageerror", error => console.error("Browser error:", error.message));
+    page.on("response", response => { if (response.url().includes("printer-cockpit")) console.log("Cockpit response", response.status()); });
+    page.on("requestfailed", request => console.error("Request failed", request.url(), request.failure()?.errorText));
+    await page.routeWebSocket(/.*/, ws => ws.close());
+    let catalogueAttempts = 0;
+    await page.route("**/api/**", route => {
+      const url = route.request().url();
+      if (url.includes("/api/backup")) return route.fulfill({ json: {
+        name: "spooler-backup-test.zip", path: "temporary-test-backup.zip", size: 2048,
+        created_at: Date.now() / 1000, errors: [],
+      } });
+      if (url.includes("/api/filament-meta")) {
+        catalogueAttempts++;
+        return catalogueAttempts === 1
+          ? route.fulfill({ status: 503, json: { error: "catalogue unavailable" } })
+          : route.fulfill({ json: { brands: ["Fixture brand"], materials: [{ name: "PLA", density: 1.24 }] } });
+      }
+      if (url.includes("/api/spoolman/api/v1/spool")) return route.fulfill({ json: [] });
+      return route.fulfill({ json: {} });
+    });
+    page.on("response", response => { if (response.url().includes("/api/backup")) console.log("Backup fixture response", response.status()); });
+    await page.goto(baseUrl);
+    await page.evaluate(() => {
+      eval("_wsConnected = true; _wsAttempts = 0;");
+      applySystemStatus({ generated_at: Date.now() / 1000, spooler: { loop_lag_ms: 1, started_at: Date.now() / 1000, browser_clients: 1 },
+        spoolman: { ok: true, latency_ms: 1, pending_deductions: 0 }, printers: [],
+        backups: { running: false, latest: null, overdue: true, count: 0, keep: 14, interval_hours: 24, dir: "temporary" } });
+    });
+    await page.getByRole("button", { name: /System health/ }).click();
+    const healthTimestampVisible = await page.locator("#system-health-updated").isVisible();
+    await page.getByRole("button", { name: "Back up now" }).click();
+    await page.waitForFunction(() => document.getElementById("backup-feedback")?.textContent.includes("spooler-backup-test.zip"), null, { timeout: 3000 });
+    const backupFeedback = await page.locator("#backup-feedback").innerText();
+    const backupResultPersistent = await page.locator("#backup-feedback").isVisible()
+      && /recovery|restore/i.test(backupFeedback);
+    console.log(`Health timestamp ${healthTimestampVisible ? "PASS" : "FAIL"}; backup recovery feedback ${backupResultPersistent ? "PASS" : "FAIL"}`);
+    if (!healthTimestampVisible || !backupResultPersistent) process.exitCode = 1;
+
+    await page.locator("#btn-system-health-close").click();
+    await page.locator("#btn-mobile-more").click();
+    await page.locator("#btn-mobile-settings").click();
+    await page.locator("#btn-settings-goto-password").click();
+    const passwordTitleFocused = await page.evaluate(() => document.activeElement.textContent.includes("Change password"));
+    await page.locator("#btn-settings-back").click();
+    const settingsContextRestored = await page.evaluate(() => document.activeElement.id === "btn-settings-goto-password");
+    console.log(`Settings page focus ${passwordTitleFocused && settingsContextRestored ? "PASS" : "FAIL"}`);
+    if (!passwordTitleFocused || !settingsContextRestored) process.exitCode = 1;
+    await page.locator("#btn-settings-goto-password").click();
+    await page.locator("#settings-new-password").fill("short");
+    await page.locator("#settings-confirm-password").fill("short");
+    await page.locator("#btn-app-settings-save").click();
+    const passwordFeedback = await page.locator("#settings-feedback").innerText().catch(() => "");
+    const passwordRejectedClearly = /at least 8 characters/i.test(passwordFeedback);
+    console.log(`Password validation ${passwordRejectedClearly ? "PASS" : "FAIL"}`);
+    if (!passwordRejectedClearly) process.exitCode = 1;
+    await page.locator("#modal-app-settings").click({ position: { x: 2, y: 2 } });
+
+    const printerUiResults = await page.evaluate(() => {
+      window.__sentActions = [];
+      send = message => window.__sentActions.push(message);
+      printers.fixture = { id: "fixture", name: "Fixture printer", ip: "192.0.2.10", connected: false,
+        printer_type: "cc1", status: {}, camera_url: null };
+      openFileBrowser("fixture");
+      const offlineDoesNotRequest = window.__sentActions.length === 0
+        && document.getElementById("files-list").innerText.includes("offline");
+      printers.fixture.connected = true;
+      renderFileList([], "File list request timed out.");
+      const canRetry = !!document.querySelector("#files-list button[data-action='retry-files']");
+      return { offlineDoesNotRequest, canRetry };
+    });
+    if (printerUiResults.canRetry) {
+      await page.locator("#files-list button[data-action='retry-files']").click();
+      printerUiResults.retryTargetsSamePrinter = await page.evaluate(() => window.__sentActions.at(-1)?.printer_id === "fixture");
+      await page.locator("#btn-files-close").click();
+    }
+    const cameraToggle = await page.evaluate(() => {
+      document.getElementById("printer-grid").style.display = "grid";
+      renderPrinter(printers.fixture);
+      return !!document.querySelector("#card-fixture .camera-view-toggle");
+    });
+    if (cameraToggle) {
+      await page.locator("#card-fixture .camera-view-toggle").click();
+      printerUiResults.cameraExpands = await page.locator("#card-fixture .card-camera").evaluate(el => !el.classList.contains("camera-compact"));
+    }
+    const printerUiPass = printerUiResults.offlineDoesNotRequest && printerUiResults.canRetry
+      && printerUiResults.retryTargetsSamePrinter && cameraToggle && printerUiResults.cameraExpands;
+    console.log(`Printer monitoring recovery ${printerUiPass ? "PASS" : "FAIL"}`, JSON.stringify(printerUiResults));
+    if (!printerUiPass) process.exitCode = 1;
+
+    await page.evaluate(() => openPrinterDashboard("fixture"));
+    await page.waitForFunction(() => typeof window.cockpitPrinterHtml === "function");
+    await page.evaluate(() => renderPrinterDetail(printers.fixture));
+    await page.getByRole("tab", { name: "Motion", exact: true }).focus();
+    await page.keyboard.press("ArrowRight");
+    const temperatureTab = page.getByRole("tab", { name: "Temperatures", exact: true });
+    const temperatureTabOperable = await temperatureTab.getAttribute("aria-selected") === "true"
+      && await page.getByRole("tabpanel", { name: "Temperatures", exact: true }).isVisible();
+    const explicitTemperatureUnits = await page.getByRole("spinbutton", { name: "Nozzle target temperature (°C)" }).count() === 1;
+    const printerDetailFits = await page.evaluate(() => document.body.scrollWidth <= innerWidth);
+    console.log(`Printer detail keyboard/units/phone ${temperatureTabOperable && explicitTemperatureUnits && printerDetailFits ? "PASS" : "FAIL"}`);
+    if (!temperatureTabOperable || !explicitTemperatureUnits || !printerDetailFits) process.exitCode = 1;
+    await page.getByRole("button", { name: "All printers", exact: false }).click();
+
+    await page.locator("#btn-spools").click();
+    await page.locator("#btn-add-spool").click();
+    await page.waitForFunction(() => document.getElementById("spool-catalogue-status")?.dataset.state === "error");
+    const catalogueErrorVisible = await page.locator("#spool-catalogue-status").isVisible().catch(() => false);
+    await page.locator("#spool-input-weight").fill("750");
+    await page.locator("#spool-input-color").fill("Blue");
+    const retryVisible = await page.locator("#btn-spool-catalogue-retry").isVisible().catch(() => false);
+    if (retryVisible) await page.locator("#btn-spool-catalogue-retry").click();
+    const catalogueRecovered = await page.waitForFunction(() =>
+      !!document.querySelector("#spool-input-brand option[value='Fixture brand']"), null, { timeout: 3000 }).then(() => true).catch(() => false);
+    const spoolFormPreserved = await page.locator("#spool-input-weight").inputValue() === "750"
+      && await page.locator("#spool-input-color").inputValue() === "Blue";
+    const spoolCataloguePass = catalogueErrorVisible && retryVisible && catalogueRecovered && spoolFormPreserved;
+    console.log(`Spool catalogue retry ${spoolCataloguePass ? "PASS" : "FAIL"}`, JSON.stringify({ catalogueErrorVisible, retryVisible, catalogueRecovered, spoolFormPreserved, catalogueAttempts }));
+    if (!spoolCataloguePass) process.exitCode = 1;
+    await page.locator("#btn-add-spool-cancel").click();
+    await page.route("**/api/spoolman/api/v1/spool", route => route.fulfill({ status: 503, json: { error: "Fixture Spoolman unavailable" } }));
+    await page.locator("#btn-spools-close").click();
+    await page.locator("#btn-spools").click();
+    await page.waitForFunction(() => document.getElementById("spools-status")?.dataset.state === "error", null, { timeout: 3000 });
+    const inventoryFailureClear = /Spoolman|connection/i.test(await page.locator("#spools-status").innerText())
+      && await page.getByRole("button", { name: "Retry inventory" }).isVisible()
+      && !await page.locator("#spools-empty").isVisible();
+    console.log(`Spool dependency failure ${inventoryFailureClear ? "PASS" : "FAIL"}`);
+    if (!inventoryFailureClear) process.exitCode = 1;
+    await page.close();
+  } finally {
+    if (browser) await browser.close();
+    server.kill();
+    await new Promise(resolve => server.once("exit", resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+})().catch(error => { console.error(error); process.exit(1); });

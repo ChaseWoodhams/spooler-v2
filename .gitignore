@@ -8,3 +8,4 @@ history.json
 .venv/
 data/
 spooler.*.log
+node_modules/

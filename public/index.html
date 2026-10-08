@@ -11,7 +11,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=57" />
+  <link rel="stylesheet" href="style.css?v=58" />
+  <link rel="stylesheet" href="history-quality.css?v=1" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body>
@@ -21,9 +22,9 @@
       <span>Spooler</span>
     </div>
     <div class="header-actions">
-      <button id="btn-system-health" class="health-pill" data-state="unknown" title="System health">
+      <button id="btn-system-health" class="health-pill" data-state="unknown" title="System health" aria-label="System health: Connecting">
         <span class="health-dot"></span>
-        <span id="health-pill-label" class="health-pill-label">Connecting…</span>
+        <span id="health-pill-label" class="health-pill-label" role="status" aria-live="polite">Connecting…</span>
       </button>
       <button id="btn-discover" class="btn btn-secondary" title="Auto-discover printers on network">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -50,6 +51,15 @@
         </svg>
         Add Printer
       </button>
+      <div class="header-more-actions">
+        <button id="btn-header-more" class="btn btn-secondary" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="header-more-menu">
+          More actions
+        </button>
+        <div id="header-more-menu" class="header-more-menu" role="menu" aria-label="More dashboard actions" hidden>
+          <button id="btn-header-discover" type="button" role="menuitem">Discover printers</button>
+          <button id="btn-header-add-printer" type="button" role="menuitem">Add Printer</button>
+        </div>
+      </div>
     </div>
   </header>
   <div id="connection-banner" class="connection-banner" role="status" hidden></div>
@@ -166,21 +176,24 @@
         </label>
         <label>
           IP Address
-          <input id="input-ip" type="text" placeholder="192.168.1.100" />
+          <input id="input-ip" type="text" placeholder="192.168.1.100" aria-describedby="input-ip-error" />
+          <span id="input-ip-error" class="field-error" hidden></span>
         </label>
         <label id="label-printer-type">
           Printer Type
           <select id="input-type">
             <option value="cc1">CC1 – Centauri Carbon 1 (WebSocket/SDCP)</option>
             <option value="cc2">CC2 – Centauri Carbon 2 (MQTT)</option>
-            <option value="prusa">Prusa – PrusaLink HTTP API</option>
-            <option value="moonraker">Klipper – Moonraker HTTP API</option>
+            <option value="prusa">PrusaLink (Experimental) – HTTP API</option>
+            <option value="moonraker">Klipper (Experimental) – Moonraker HTTP API</option>
           </select>
           <span id="input-type-readonly" class="settings-readonly" style="display:none"></span>
         </label>
+        <p class="input-hint">PrusaLink and Klipper support is experimental. Confirm the API is enabled and reachable before adding the printer.</p>
         <label id="label-access-code" style="display:none">
           <span id="label-access-code-text">MQTT Password</span>
-          <input id="input-access-code" type="password" placeholder="12345" maxlength="64" />
+          <input id="input-access-code" type="password" placeholder="12345" maxlength="64" aria-describedby="input-access-code-error" />
+          <span id="input-access-code-error" class="field-error" hidden></span>
           <span class="input-hint">Found on the printer under Settings → Network.</span>
         </label>
         <div class="printer-panel-actions">
@@ -257,6 +270,8 @@
       </div>
     </div>
     <div class="side-panel-body">
+      <p id="spools-status" role="status" aria-live="polite" hidden></p>
+      <button id="btn-spools-retry" class="btn btn-secondary" hidden>Retry inventory</button>
       <div id="spools-list"></div>
       <p id="spools-empty" style="display:none;text-align:center;color:var(--text-muted);padding:40px">No spools yet. Click <strong>Add Spool</strong> to get started.</p>
     </div>
@@ -287,11 +302,11 @@
   <div id="panel-backdrop" class="panel-backdrop"></div>
 
   <!-- File browser modal -->
-  <div id="modal-files" class="modal">
+  <div id="modal-files" class="modal" role="dialog" aria-modal="true" aria-labelledby="files-modal-title">
     <div class="modal-box modal-box-wide">
-      <h3 id="files-modal-title">Files</h3>
-      <div id="files-loading" class="files-loading">Loading…</div>
-      <div id="files-list"></div>
+      <h3 id="files-modal-title" tabindex="-1">Files</h3>
+      <div id="files-loading" class="files-loading" role="status" aria-live="polite">Loading…</div>
+      <div id="files-list" aria-live="polite"></div>
       <div class="modal-actions">
         <button id="btn-files-refresh" class="btn btn-secondary btn-sm">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -362,9 +377,10 @@
   </div>
 
   <!-- Spool picker modal -->
-  <div id="modal-spool-picker" class="modal">
+  <div id="modal-spool-picker" class="modal operator-dialog" role="dialog" aria-modal="true" aria-labelledby="spool-picker-title">
     <div class="modal-box modal-box-wide">
       <h3 id="spool-picker-title">Assign Spool</h3>
+      <p id="spool-picker-feedback" role="status" aria-live="polite" hidden></p>
       <div id="spool-picker-list" class="spool-picker-list"></div>
       <div class="modal-actions">
         <button id="btn-spool-picker-cancel" class="btn btn-secondary">Cancel</button>
@@ -397,14 +413,14 @@
   <div id="barcode-scan-canvas" style="display:none"></div>
 
   <!-- Add Spool modal -->
-  <div id="modal-add-spool" class="modal">
+  <div id="modal-add-spool" class="modal operator-dialog" role="dialog" aria-modal="true" aria-labelledby="add-spool-title">
     <div class="modal-box">
-      <h3>Add Spool</h3>
+      <h3 id="add-spool-title">Add Spool</h3>
       <div class="ean-row">
-        <label style="flex:1">EAN
-          <input id="spool-input-ean" type="text" placeholder="Scan or enter EAN" inputmode="numeric" />
+        <label style="flex:1">EAN (optional)
+          <input id="spool-input-ean" type="text" placeholder="Enter EAN manually or scan" inputmode="numeric" autocomplete="off" />
         </label>
-        <button id="btn-scan-ean" class="btn btn-secondary" title="Scan with camera">
+        <button id="btn-scan-ean" class="btn btn-secondary" type="button" title="Scan with camera" aria-label="Scan EAN with camera">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M3 9V5a2 2 0 0 1 2-2h4M3 15v4a2 2 0 0 0 2 2h4M21 9V5a2 2 0 0 0-2-2h-4M21 15v4a2 2 0 0 1-2 2h-4"/>
             <line x1="8" y1="12" x2="8" y2="12"/><line x1="12" y1="12" x2="16" y2="12"/>
@@ -412,27 +428,31 @@
           Scan
         </button>
       </div>
-      <label>Brand
+      <p class="input-hint">Camera scanning asks permission to use this device’s camera. Manual EAN entry is always available.</p>
+      <p id="spool-catalogue-status" class="spool-catalogue-status" role="status" aria-live="polite" data-state="loading">Loading brand and material catalogue…</p>
+      <button id="btn-spool-catalogue-retry" class="btn btn-secondary btn-sm" type="button" hidden>Retry catalogue</button>
+      <label>Brand (optional)
         <select id="spool-input-brand">
           <option value="">– Loading… –</option>
           <option value="__other__">Other…</option>
         </select>
-        <input id="spool-input-brand-other" type="text" placeholder="Brand name" style="display:none;margin-top:6px" />
+        <input id="spool-input-brand-other" type="text" aria-label="Brand name" placeholder="Brand name" style="display:none;margin-top:6px" />
       </label>
-      <label>Material
-        <select id="spool-input-material">
+      <label>Material (required)
+        <select id="spool-input-material" required>
           <option value="">– Loading… –</option>
           <option value="__other__">Other…</option>
         </select>
-        <input id="spool-input-material-other" type="text" placeholder="Material name" style="display:none;margin-top:6px" />
+        <input id="spool-input-material-other" type="text" aria-label="Material name" placeholder="Material name" style="display:none;margin-top:6px" />
       </label>
       <label>Color<input id="spool-input-color" type="text" placeholder="White" /></label>
-      <label>Color (hex)<input id="spool-input-hex" type="color" value="#888888" /></label>
-      <label>Total weight (g)<input id="spool-input-weight" type="number" placeholder="1000" min="1" /></label>
+      <label>Color (hex)<input id="spool-input-hex" type="color" value="#888888" aria-describedby="spool-color-hex-value" /><span id="spool-color-hex-value" class="input-hint" role="status" aria-live="polite">Hex color #888888</span></label>
+      <label>Total weight (g) (required)<input id="spool-input-weight" type="number" placeholder="1000" value="1000" min="1" step="1" required /></label>
       <div class="form-row-2">
         <label>Diameter (mm)<input id="spool-input-diameter" type="number" placeholder="1.75" step="0.01" min="0.1" value="1.75" /></label>
         <label>Density (g/cm³)<input id="spool-input-density" type="number" placeholder="1.24" step="0.01" min="0.1" value="1.24" /></label>
       </div>
+      <p id="spool-form-feedback" class="spool-form-feedback" role="status" aria-live="polite" hidden></p>
       <div class="modal-actions">
         <button id="btn-add-spool-cancel" class="btn btn-secondary">Cancel</button>
         <button id="btn-add-spool-confirm" class="btn btn-primary">Add</button>
@@ -449,11 +469,11 @@
   </footer>
 
   <!-- Settings modal -->
-  <div id="modal-app-settings" class="modal">
+  <div id="modal-app-settings" class="modal operator-dialog" role="dialog" aria-modal="true" aria-label="Settings">
     <div class="modal-box">
       <!-- Main settings menu -->
       <div id="settings-menu">
-        <h3>Settings</h3>
+        <h3 tabindex="-1">Settings</h3>
         <div class="settings-menu-list">
           <button class="settings-menu-item" id="btn-settings-goto-password">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -494,13 +514,14 @@
           <button id="btn-app-settings-cancel" class="btn btn-secondary">Close</button>
         </div>
       </div>
+      <p id="settings-feedback" class="settings-feedback" role="status" aria-live="polite" hidden></p>
       <!-- Printers sub-page -->
       <div id="settings-printers" style="display:none">
         <div class="settings-subpage-header">
           <button id="btn-settings-back-printers" class="settings-back-btn" aria-label="Back to Settings" title="Back">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
-          <h3>Printers</h3>
+          <h3 tabindex="-1">Printers</h3>
         </div>
         <div id="settings-printer-list" class="settings-printer-list"></div>
         <div class="modal-actions">
@@ -524,7 +545,7 @@
           <button id="btn-settings-back-printer-edit" class="settings-back-btn" aria-label="Back to Printers" title="Back">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
-          <h3 id="settings-printer-edit-title">Edit Printer</h3>
+          <h3 id="settings-printer-edit-title" tabindex="-1">Edit Printer</h3>
         </div>
         <label>
           Printer Name
@@ -532,21 +553,24 @@
         </label>
         <label>
           IP Address
-          <input id="settings-edit-ip" type="text" placeholder="192.168.1.100" />
+          <input id="settings-edit-ip" type="text" placeholder="192.168.1.100" aria-describedby="settings-edit-ip-error" />
+          <span id="settings-edit-ip-error" class="field-error" hidden></span>
         </label>
         <label id="settings-edit-type-label">
           Printer Type
           <select id="settings-edit-type">
             <option value="cc1">CC1 – Centauri Carbon 1 (WebSocket/SDCP)</option>
             <option value="cc2">CC2 – Centauri Carbon 2 (MQTT)</option>
-            <option value="prusa">Prusa – PrusaLink HTTP API</option>
-            <option value="moonraker">Klipper – Moonraker HTTP API</option>
+            <option value="prusa">PrusaLink (Experimental) – HTTP API</option>
+            <option value="moonraker">Klipper (Experimental) – Moonraker HTTP API</option>
           </select>
           <span id="settings-edit-type-readonly" class="settings-readonly" style="display:none"></span>
         </label>
+        <p class="input-hint">PrusaLink and Klipper support is experimental. Verify the API address and credentials before saving.</p>
         <label id="settings-edit-access-code-label" style="display:none">
           <span id="settings-edit-access-code-text">MQTT Password</span>
-          <input id="settings-edit-access-code" type="password" placeholder="12345" maxlength="64" />
+          <input id="settings-edit-access-code" type="password" placeholder="12345" maxlength="64" aria-describedby="settings-edit-access-code-error" />
+          <span id="settings-edit-access-code-error" class="field-error" hidden></span>
           <span class="input-hint">Found on the printer under Settings → Network.</span>
         </label>
         <div class="modal-actions">
@@ -560,9 +584,10 @@
           <button id="btn-settings-back-notif" class="settings-back-btn" aria-label="Back to Settings" title="Back">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
-          <h3>Notifications</h3>
+          <h3 tabindex="-1">Notifications</h3>
         </div>
         <div class="notif-list">
+          <p class="input-hint">Notifications require browser permission. Delivery while Spooler is closed also requires an active push subscription and a reachable Spooler server.</p>
 
           <div class="notif-row">
             <div class="notif-info">
@@ -643,7 +668,7 @@
           <button id="btn-settings-back" class="settings-back-btn" aria-label="Back to Settings" title="Back">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
-          <h3>Change password</h3>
+          <h3 tabindex="-1">Change password</h3>
         </div>
         <label>
           New password
@@ -675,7 +700,9 @@
   <div id="modal-system-health" class="modal">
     <div class="modal-box modal-box-wide">
       <h3>System health</h3>
+      <p id="system-health-updated" class="health-freshness" role="status" aria-live="polite">Waiting for health data…</p>
       <div id="system-health-body" class="health-body"></div>
+      <p id="backup-feedback" class="health-feedback" role="status" aria-live="polite" hidden></p>
       <div class="modal-actions">
         <button id="btn-backup-now" class="btn btn-secondary">Back up now</button>
         <button id="btn-system-health-close" class="btn btn-primary">Close</button>
@@ -796,12 +823,13 @@
   <script src="health.js?v=1"></script>
   <script src="jobs.js?v=6"></script>
   <script src="preview.js?v=1"></script>
-  <script src="history.js?v=7"></script>
+  <script src="history.js?v=8"></script>
   <script src="outcome-prompt.js?v=4"></script>
-  <script src="app.js?v=66"></script>
+  <script src="app.js?v=67"></script>
   <script src="quick-print.js?v=4"></script>
   <script src="import.js?v=4"></script>
   <script src="dashboard.js?v=2"></script>
+  <script src="printer-cockpit.js"></script>
   <script>
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
