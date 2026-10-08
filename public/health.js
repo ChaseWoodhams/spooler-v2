@@ -59,6 +59,7 @@ function renderSystemHealth() {
   label.textContent = issues.length
     ? issues[0].text + (issues.length > 1 ? ` +${issues.length - 1}` : "")
     : level === "ok" ? "All systems OK" : "Connecting…";
+  pill.setAttribute("aria-label", `System health: ${label.textContent}`);
   pill.title = issues.length ? issues.map(i => i.text).join("\n") : "System health";
 
   const banner = document.getElementById("connection-banner");
@@ -73,15 +74,27 @@ function renderSystemHealth() {
 
 function healthRow(level, title, detail) {
   const dot = level ? `<span class="health-dot" data-state="${level}"></span>` : `<span class="health-dot-spacer"></span>`;
+  const next = level === "ok" ? "No action needed while this status is healthy."
+    : level === "unknown" ? "Wait for the next health update, then check again."
+    : `Check ${title} and follow the recovery steps shown here.`;
   return `<div class="health-row">${dot}<div class="health-row-main">` +
     `<span class="health-row-title">${escHtml(title)}</span>` +
-    `<span class="health-row-detail">${escHtml(detail)}</span></div></div>`;
+    `<span class="health-row-detail">${escHtml(detail)}</span>` +
+    `<span class="health-row-next">Next: ${escHtml(next)}</span></div></div>`;
 }
 
 function renderSystemHealthDetail() {
   const body = document.getElementById("system-health-body");
+  const freshness = document.getElementById("system-health-updated");
   const backupBtn = document.getElementById("btn-backup-now");
   const s = systemStatus;
+  if (!_systemStatusAt) {
+    freshness.textContent = "Health data has not arrived yet. Check the dashboard connection and wait for a report.";
+  } else {
+    const age = Math.max(0, Math.floor((Date.now() - _systemStatusAt) / 1000));
+    freshness.textContent = `Last checked ${new Date(_systemStatusAt).toLocaleTimeString()} · ${fmtDuration(age)} ago` +
+      (age > HEALTH_STALE_MS / 1000 ? " · Out of date; check the dashboard connection and wait for a fresh report." : " · Current");
+  }
   const services = [healthRow(_wsConnected ? "ok" : "down", "Dashboard connection",
     _wsConnected ? "Connected" : `Reconnecting (attempt ${_wsAttempts})`)];
   if (!s) {
@@ -146,6 +159,7 @@ function renderSystemHealthDetail() {
     (b.spoolman_db ? "Configuration + Spoolman database" : "Configuration only — set SPOOLMAN_DB_FILE to include Spoolman") +
     ` · every ${b.interval_hours} h · keeping ${b.keep} · ${b.count} stored`));
   backupRows.push(healthRow(null, "Location", b.dir));
+  backupRows.push(healthRow(null, "Recovery", "Keep a verified archive and use the Recovery instructions in the Spooler handoff documentation to restore it."));
 
   body.innerHTML =
     `<div class="health-section"><h4>Services</h4>${services.join("")}</div>` +
@@ -178,14 +192,26 @@ document.getElementById("btn-backup-now").addEventListener("click", async (e) =>
     const r = await fetch("/api/backup", { method: "POST" });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-    if (data.errors?.length) toast(`Backup saved with problems: ${data.errors.join("; ")}`, true);
-    else toast(`Backup saved: ${data.name}`);
+    const when = new Date((data.created_at || Date.now() / 1000) * 1000).toLocaleString();
+    const size = typeof formatFileSize === "function" ? formatFileSize(data.size || 0) : `${data.size || 0} bytes`;
+    const errors = data.errors || [];
+    const feedback = document.getElementById("backup-feedback");
+    feedback.hidden = false;
+    feedback.dataset.state = errors.length ? "warn" : "ok";
+    feedback.textContent = errors.length
+      ? `Backup archive ${data.name} was created on ${when} (${size}) with problems: ${errors.join("; ")}. Check the coverage and problem rows above, correct the reported issue, then create and verify another backup. ${data.path ? `Archive location: ${data.path}.` : ""} Use the Recovery instructions in the Spooler handoff documentation to restore it.`
+      : `Backup archive ${data.name} was verified on ${when} (${size}). Confirm its location and coverage above. For recovery, follow the Recovery instructions in the Spooler handoff documentation. ${data.path ? `Archive location: ${data.path}.` : ""}`;
+    toast(errors.length ? `Backup saved with problems: ${errors.join("; ")}` : `Backup saved: ${data.name}`, errors.length > 0);
   } catch (err) {
+    const feedback = document.getElementById("backup-feedback");
+    feedback.hidden = false;
+    feedback.dataset.state = "error";
+    feedback.textContent = `Backup failed at ${new Date().toLocaleString()}: ${err.message}. No new verified archive was confirmed. Check available storage and backup-directory permissions, then retry. Existing backups remain listed above.`;
     toast(`Backup failed: ${err.message}`, true);
   } finally {
     delete btn.dataset.busy;
     btn.textContent = "Back up now";
-    btn.disabled = false;
+    renderSystemHealthDetail();
   }
 });
 

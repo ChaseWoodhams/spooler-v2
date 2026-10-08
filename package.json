@@ -1,0 +1,26 @@
+{
+  "name": "spooler-v2",
+  "version": "1.0.0",
+  "description": "Local web GUI for **Elegoo Centauri Carbon** FDM 3D printers (CC1 and CC2). Monitor and control multiple printers from a single browser tab — or install as a PWA on your phone. Experimental support for **Prusa (PrusaLink)** and **Klipper (Moonraker)** printers is also included.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test:ui": "node tests/ui/run.cjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tharje/spooler-v2.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/tharje/spooler-v2/issues"
+  },
+  "homepage": "https://github.com/tharje/spooler-v2#readme",
+  "devDependencies": {
+    "playwright": "^1.64.0"
+  }
+}

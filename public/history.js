@@ -26,6 +26,20 @@ let _historyDetails = {};     // print id → detail payload (with job and job e
 let _historyCurrency;         // undefined until fetched from Spoolman
 let _historySearchTimer = null;
 let _historyRequest = 0;
+const _historyDrafts = {};
+const _historyFeedback = {};
+function historyFocusSelector(el) {
+  for (const key of ["historyToggle", "historyNotes", "historyOutcome", "historyAction"]) {
+    if (el.dataset[key]) return `[data-${key.replace(/[A-Z]/g, c => "-" + c.toLowerCase())}="${el.dataset[key]}"]` +
+      (el.dataset.printId ? `[data-print-id="${el.dataset.printId}"]` : "");
+  }
+  return null;
+}
+function historySaveFeedback(id, text, error = false) {
+  _historyFeedback[id] = { text, error };
+  const el = document.querySelector(`[data-history-feedback="${id}"]`);
+  if (el) { el.textContent = text; el.classList.toggle("error", error); }
+}
 
 const _histAttr = s => escAttr(escHtml(s));
 
@@ -70,6 +84,10 @@ async function loadHistory(append = false) {
   params.set("limit", HISTORY_PAGE);
   params.set("offset", append ? historyPrints.length : 0);
   const request = ++_historyRequest;
+  const results = document.getElementById("history-result-count");
+  results.textContent = append ? "Loading more prints�" : "Loading history�";
+  document.getElementById("btn-history-retry").hidden = true;
+  document.getElementById("history-list").setAttribute("aria-busy", "true");
   try {
     await loadFailureReasons();
     const r = await fetch(`/api/prints?${params}`);
@@ -81,22 +99,35 @@ async function loadHistory(append = false) {
     renderHistory(data.summary);
   } catch (err) {
     if (request === _historyRequest && document.getElementById("panel-history").classList.contains("open")) {
+      results.textContent = `Could not load history: ${err.message}. Previous results may be out of date.`;
+      document.getElementById("btn-history-retry").hidden = false;
       toast(`Couldn't load history: ${err.message}`, true);
     }
+  } finally {
+    if (request === _historyRequest) document.getElementById("history-list").setAttribute("aria-busy", "false");
   }
 }
 
 // ─── Rendering ────────────────────────────────────────────────────────────────
 function renderHistory(summary) {
+  updateHistoryFilterSummary();
   if (summary) {
     const bits = [`<span><strong>${summary.prints}</strong> print${summary.prints === 1 ? "" : "s"}</span>`];
     if (summary.success_rate != null) bits.push(`<span><strong>${Math.round(summary.success_rate * 100)}%</strong> completed</span>`);
-    if (summary.filament_g) bits.push(`<span><strong>${Math.round(summary.filament_g)} g</strong> filament</span>`);
-    if (summary.cost) bits.push(`<span><strong>${escHtml(formatCost(summary.cost))}</strong> material</span>`);
-    if (summary.duration_s) bits.push(`<span><strong>${(summary.duration_s / 3600).toFixed(1)} h</strong> printing</span>`);
+    if (summary.filament_g != null) bits.push(`<span><strong>${Math.round(summary.filament_g)} g</strong> filament</span>`);
+    if (summary.cost != null) bits.push(`<span><strong>${escHtml(formatCost(summary.cost))}</strong> material</span>`);
+    if (summary.duration_s != null) bits.push(`<span><strong>${(summary.duration_s / 3600).toFixed(1)} h</strong> printing</span>`);
     document.getElementById("history-totals").innerHTML = bits.join("");
   }
-  document.getElementById("history-list").innerHTML = historyPrints.map(historyItem).join("");
+  const list = document.getElementById("history-list");
+  const active = document.activeElement;
+  const focusSelector = active && list.contains(active) ? historyFocusSelector(active) : null;
+  for (const input of list.querySelectorAll("[data-history-notes]")) _historyDrafts[input.dataset.historyNotes] = input.value;
+  list.innerHTML = historyPrints.map(historyItem).join("");
+  for (const input of list.querySelectorAll("[data-history-notes]")) {
+    if (Object.hasOwn(_historyDrafts, input.dataset.historyNotes)) input.value = _historyDrafts[input.dataset.historyNotes];
+  }
+  if (focusSelector) list.querySelector(focusSelector)?.focus({ preventScroll: true });
   document.getElementById("history-empty").hidden = historyPrints.length > 0;
   document.getElementById("btn-history-more").hidden = historyPrints.length >= historyTotal;
 }
@@ -107,15 +138,15 @@ function _safeColor(hex) {
 
 function historyItem(p) {
   const when = new Date(p.started_at * 1000).toLocaleString(undefined,
-    { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const stats = [
-    p.duration_s ? formatTime(p.duration_s) : "",
-    p.filament_g ? `${Math.round(p.filament_g)} g` : "",
+    p.duration_s != null ? `${formatTime(p.duration_s)} observed` : "Duration not recorded",
+    p.filament_g != null ? `${p.filament_g} g observed` : "Filament not recorded",
     p.cost != null ? formatCost(p.cost) : "",
   ].filter(Boolean);
   const open = _historyOpenId === p.id;
   return `<div class="history-item${open ? " open" : ""}">
-    <button class="history-row" data-history-toggle="${p.id}" aria-expanded="${open}">
+    <button class="history-row" data-history-toggle="${p.id}" aria-expanded="${open}" aria-controls="history-detail-${p.id}">
       <span class="history-date">${escHtml(when)}</span>
       <span class="history-file" title="${_histAttr(p.file_name)}">
         ${p.quick && p.thumbnail ? `<img class="history-thumb" src="${_histAttr(p.thumbnail)}" alt="" loading="lazy" onerror="this.remove()">` : ""}${p.color_hex ? `<span class="history-swatch" style="background:#${_safeColor(p.color_hex)}"></span>` : ""}${escHtml(p.quick && p.project_name ? p.project_name : p.file_name)}${p.quick ? ` <span class="history-quick">Quick print</span>` : ""}
@@ -131,15 +162,16 @@ function historyItem(p) {
 
 function historyDetail(p) {
   const detail = _historyDetails[p.id];
-  const at = ts => ts ? new Date(ts * 1000).toLocaleString() : "—";
+  const at = ts => ts != null ? new Date(ts * 1000).toLocaleString() : "—";
   const facts = [
     ["Started", at(p.started_at)],
-    ["Ended", p.ended_at ? at(p.ended_at) : "Still printing"],
-    ["Duration", p.duration_s ? formatTime(p.duration_s) + (p.estimate_s ? ` (slicer estimate ${formatTime(p.estimate_s)})` : "") : "—"],
-    ["Layers", p.total_layers ? `${p.layer ?? 0} of ${p.total_layers}` : "—"],
-    ["Filament", p.filament_g != null
-      ? `${p.filament_g} g · ${((p.filament_mm || 0) / 1000).toFixed(2)} m` + (p.estimate_g ? ` (slicer estimate ${Math.round(p.estimate_g)} g)` : "")
-      : "—"],
+    ["Ended", p.ended_at != null ? at(p.ended_at) : p.outcome ? "End time not recorded" : "Still printing"],
+    ["Observed duration", p.duration_s != null ? formatTime(p.duration_s) : "Not recorded"],
+    ["Slicer estimate � duration", p.estimate_s != null ? formatTime(p.estimate_s) : "Not available"],
+    ["Layers", p.total_layers != null ? `${p.layer != null ? p.layer : "Not recorded"} of ${p.total_layers}` : "Not recorded"],
+    ["Observed filament", (p.filament_g != null ? `${p.filament_g} g` : "Weight not recorded") +
+      " � " + (p.filament_mm != null ? `${(p.filament_mm / 1000).toFixed(2)} m` : "Length not recorded")],
+    ["Slicer estimate � filament", p.estimate_g != null ? `${p.estimate_g} g` : "Not available"],
     ["Material", [p.vendor, p.material, p.filament_name].filter(Boolean).join(" ") || "—"],
     ["Cost", p.cost != null ? formatCost(p.cost) : "—"],
     ["Queue job", p.job_id ? `#${p.job_id}${detail?.job ? ` · ${detail.job.name}` : ""}` : "Started outside the queue"],
@@ -155,12 +187,12 @@ function historyDetail(p) {
 
   const events = detail?.job_events?.length
     ? `<details class="history-events"><summary>Job timeline (${detail.job_events.length} events)</summary><ol>` +
-      detail.job_events.map(e => `<li><time>${escHtml(new Date(e.at * 1000).toLocaleTimeString())}</time> ` +
+      detail.job_events.map(e => `<li><time>${escHtml(new Date(e.at * 1000).toLocaleString())}</time> ` +
         `${escHtml(e.event)}${e.detail ? ` — ${escHtml(e.detail)}` : ""}</li>`).join("") +
       "</ol></details>"
     : "";
 
-  return `<div class="history-detail">
+  return `<div class="history-detail" id="history-detail-${p.id}" role="region" aria-label="Details for Print ${p.id}">
     <dl class="history-facts">${facts.map(([k, v]) => `<dt>${escHtml(k)}</dt><dd>${escHtml(v)}</dd>`).join("")}</dl>
     ${spools ? `<ul class="history-spools">${spools}</ul>` : ""}
     ${events}
@@ -170,6 +202,7 @@ function historyDetail(p) {
       <textarea data-history-notes="${p.id}" rows="3" maxlength="4000"
         placeholder="What worked, what failed, settings to reuse…">${escHtml(p.notes || "")}</textarea>
     </label>
+    <p class="history-save-feedback${_historyFeedback[p.id]?.error ? " error" : ""}" data-history-feedback="${p.id}" role="status" aria-live="polite">${escHtml(_historyFeedback[p.id]?.text || "")}</p>
     <div class="job-controls">
       <button class="btn btn-secondary btn-sm" data-history-action="save" data-print-id="${p.id}">Save notes</button>
       ${p.outcome ? `<button class="btn btn-primary btn-sm" data-history-action="repeat" data-print-id="${p.id}">Print again</button>` : ""}
@@ -217,7 +250,7 @@ function onPrintRecorded(record) {
   toast(`${record.printer_name}: ${record.file_name} — ${printOutcomeLabel(record.outcome).toLowerCase()}${grams}`,
     record.outcome !== "completed");
   if (!document.getElementById("panel-history").classList.contains("open")) return;
-  if (document.activeElement?.matches?.("[data-history-notes]")) return; // don't clobber unsaved notes
+  if (document.activeElement?.closest?.(".history-detail")) return; // don't clobber unsaved notes
   loadHistory();
 }
 
@@ -233,7 +266,7 @@ document.getElementById("history-list").addEventListener("click", async (e) => {
         const r = await fetch(`/api/prints/${id}`);
         if (r.ok) {
           _historyDetails[id] = await r.json();
-          if (_historyOpenId === id) renderHistory();
+          if (_historyOpenId === id && !document.activeElement?.closest(".history-detail")) renderHistory();
         }
       } catch (_) { /* details stay basic */ }
     }
@@ -245,6 +278,7 @@ document.getElementById("history-list").addEventListener("click", async (e) => {
   const id = Number(btn.dataset.printId);
   const record = historyPrints.find(p => p.id === id);
   if (!record) return;
+  const restoreActionFocus = document.activeElement === btn;
   btn.disabled = true;
   try {
     if (btn.dataset.historyAction === "save") {
@@ -252,6 +286,8 @@ document.getElementById("history-list").addEventListener("click", async (e) => {
       const updated = await jobsApi("PATCH", `/api/prints/${id}`, { notes });
       record.notes = updated.notes;
       _historyDetails[id] = updated;
+      delete _historyDrafts[id];
+      historySaveFeedback(id, "Notes saved.");
       toast("Notes saved");
     } else if (btn.dataset.historyAction === "outcome") {
       const outcome = document.querySelector(`[data-history-outcome="${id}"]`).value;
@@ -259,8 +295,10 @@ document.getElementById("history-list").addEventListener("click", async (e) => {
       const updated = await jobsApi("POST", `/api/prints/${id}/outcome`, { outcome, failure_reasons: reasons });
       Object.assign(record, updated);
       _historyDetails[id] = updated;
+      historySaveFeedback(id, "Outcome saved and confirmed.");
+      renderHistory();
+      document.querySelector(`[data-history-action="outcome"][data-print-id="${id}"]`)?.focus();
       toast("Outcome saved");
-      loadHistory();
     } else if (btn.dataset.historyAction === "reprint") {
       const job = await jobsApi("POST", `/api/prints/${id}/reprint`, {});
       loadJobs();
@@ -278,9 +316,11 @@ document.getElementById("history-list").addEventListener("click", async (e) => {
       toastAction(`Queued ${job.name} again`, "Open queue", () => { closeHistory(); openQueue(); });
     }
   } catch (err) {
+    historySaveFeedback(id, `Could not save: ${err.message}. Your entries are retained. Try again.`, true);
     toast(err.message, true);
   }
   btn.disabled = false;
+  if (restoreActionFocus) document.querySelector(`[data-history-action="${btn.dataset.historyAction}"][data-print-id="${id}"]`)?.focus();
 });
 
 document.getElementById("history-list").addEventListener("change", (e) => {
@@ -315,7 +355,9 @@ function openHistory() {
   select.innerHTML = '<option value="">All printers</option>' + Object.values(printers)
     .map(p => `<option value="${_histAttr(p.id)}">${escHtml(p.name)}</option>`).join("");
   select.value = current;
-  _loadCurrency().then(() => renderHistory());
+  _loadCurrency().then(() => {
+    if (document.getElementById("history-list").getAttribute("aria-busy") !== "true" && document.getElementById("btn-history-retry").hidden) renderHistory();
+  });
   loadHistory();
 }
 
@@ -326,3 +368,28 @@ function closeHistory() {
 
 document.getElementById("btn-history").addEventListener("click", openHistory);
 document.getElementById("btn-history-close").addEventListener("click", closeHistory);
+
+// Filter context stays visible when the controls are collapsed on phones.
+const historyFilters = document.querySelector("#panel-history .history-filters");
+historyFilters.id = "history-filter-controls";
+const historyFilterBar = document.createElement("div");
+historyFilterBar.className = "history-filter-bar";
+historyFilterBar.innerHTML = '<button class="btn btn-secondary btn-sm" id="btn-history-filters" aria-expanded="true" aria-controls="history-filter-controls">Hide filters</button><span id="history-result-count" role="status" aria-live="polite"></span><span id="history-filter-summary"></span><button id="btn-history-retry" class="btn btn-secondary btn-sm" hidden>Retry history</button>';
+historyFilters.before(historyFilterBar);
+document.getElementById("btn-history-retry").addEventListener("click", () => loadHistory());
+document.getElementById("btn-history-filters").addEventListener("click", e => {
+  historyFilters.hidden = !historyFilters.hidden;
+  e.currentTarget.setAttribute("aria-expanded", String(!historyFilters.hidden));
+  e.currentTarget.textContent = historyFilters.hidden ? "Show filters" : "Hide filters";
+});
+function updateHistoryFilterSummary() {
+  const bits = [];
+  const search = document.getElementById("history-search").value.trim();
+  if (search) bits.push(`Search: ${search}`);
+  for (const id of ["history-printer", "history-outcome", "history-range"]) {
+    const el = document.getElementById(id);
+    if (el.value) bits.push(el.selectedOptions[0].textContent);
+  }
+  document.getElementById("history-filter-summary").textContent = bits.join(" � ") || "All prints � all time";
+  document.getElementById("history-result-count").textContent = `${historyTotal} result${historyTotal === 1 ? "" : "s"}`;
+}
