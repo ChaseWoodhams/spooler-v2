@@ -1,8 +1,10 @@
 """The Nester keeps every ready Object on the bed: free space first, then added Plates; one shared check says whether a layout is valid."""
 import io
+import json
 import unittest
 from pathlib import Path
 
+import database
 import nesting
 import projects
 from tests import test_arrange
@@ -42,10 +44,14 @@ class PlacementProblemsTests(unittest.TestCase):
     def test_an_object_over_the_purge_area_is_flagged(self):
         self.assertEqual(self.problems(shape(1, square(236, 10))), [(1, "over the purge area", None)])
 
-    def test_two_objects_closer_than_the_larger_clearance_overlap(self):
+    def test_two_objects_closer_than_the_larger_clearance_are_too_close_not_overlapping(self):
         close = self.problems(shape(1, square(10, 100), 6.0), shape(2, square(35, 100), 22.0))   # 5 mm apart
-        self.assertEqual(close, [(1, "overlaps", 2), (2, "overlaps", 1)])
+        self.assertEqual(close, [(1, "too close", 2), (2, "too close", 1)])
         self.assertEqual(self.problems(shape(1, square(10, 100), 6.0), shape(2, square(52, 100), 22.0)), [])   # 22 mm apart
+
+    def test_two_objects_whose_outlines_cross_overlap(self):
+        crossing = self.problems(shape(1, square(10, 100), 6.0), shape(2, square(20, 100), 6.0))   # 10 mm of each shared
+        self.assertEqual(crossing, [(1, "overlaps", 2), (2, "overlaps", 1)])
 
     def test_objects_on_different_plates_never_overlap(self):
         self.assertEqual(self.problems(shape(1, square(10, 100), plate=1), shape(2, square(10, 100), plate=2)), [])
@@ -98,6 +104,17 @@ class NesterFitsTests(unittest.TestCase):
         self.assertIn("1 object", result["outcome"])
         self.assertIn("bigger than the bed", result["outcome"])
         self.assertEqual({p["key"] for p in self.problems(result)}, {2})   # the one that can't fit anywhere is the one named
+
+    def test_a_ready_object_left_off_the_bed_on_a_plate_still_importing_is_not_reported_as_too_big(self):
+        project = self.project_with(cube_stl(20), cube_stl(300), cube_stl(30))
+        project = self.lay(project, [(1, 1, (50, 50), False), (2, 2, (50, 50), False), (3, 2, (150, 150), False)])
+        with database.transaction() as conn:   # model 3 is still being analysed, so plate 2 is left alone
+            models = json.loads(conn.execute("SELECT models FROM projects WHERE id = ?", (project["id"],)).fetchone()["models"])
+            models[2]["state"] = "importing"
+            conn.execute("UPDATE projects SET models = ? WHERE id = ?", (json.dumps(models), project["id"]))
+        status, result = self.arrange(project)
+        self.assertEqual(status, 200, result)
+        self.assertNotIn("bigger than the bed", result["outcome"])
 
     def test_the_whole_daz_shifter_set_is_on_the_bed_with_no_overlap_and_stays_so_when_arranged_again(self):
         project = projects.create_project("Daz shifter")

@@ -18,6 +18,7 @@ import shapely
 from shapely.geometry import MultiPoint, Polygon, box
 
 from packing import GAP_MM, MARGIN_MM, SUPPORT_GAP_MM
+from problem_kinds import OFF_THE_BED, OVER_THE_PURGE_AREA, OVERLAPS, TOO_CLOSE
 
 CLEARANCE_MM = GAP_MM        # a plain object's clearance; the pair rule is max, so two plain objects keep today's 6 mm
 SUPPORT_CLEARANCE_MM = SUPPORT_GAP_MM   # an object that needs tree supports in its orientation
@@ -163,9 +164,9 @@ def placement_problems(shapes: list, bed, exclude=None, tolerance: float = TOLER
     are placed well. shapes: [{"key", "plate", "polygon": the object's outline from above in bed mm, "clearance": mm}];
     bed and exclude: (x0, y0, x1, y1). Returns one {"key", "plate", "problem", "other"} per fault, in shape order:
     "off the bed" (any part of the outline past the bed edge), "over the purge area" (the outline enters the exclusion
-    area), "overlaps" (two objects on one plate closer than the larger of their clearances, which is what the nester
-    keeps; reported for both, `other` being the key of the one it is too close to). Objects on different plates never
-    overlap. Empty when the layout is valid. The nester also keeps EDGE_MARGIN_MM from the edge and its clearance from
+    area), "overlaps" (two outlines on one plate touch or cross) or "too close" (they are apart, but closer than the
+    larger of their clearances, which is what the nester keeps); both are reported for both objects, `other` being the
+    key of the one it is too near. Objects on different plates never overlap (see `problem_kinds`). Empty when the layout is valid. The nester also keeps EDGE_MARGIN_MM from the edge and its clearance from
     the purge area, but a layout is not invalid for being closer to them than that."""
     x0, y0, x1, y1 = bed
     purge = box(*exclude) if exclude else None
@@ -174,14 +175,16 @@ def placement_problems(shapes: list, bed, exclude=None, tolerance: float = TOLER
     for n, (s, poly) in enumerate(zip(shapes, polys)):
         lx, ly, hx, hy = poly.bounds
         if lx < x0 - tolerance or ly < y0 - tolerance or hx > x1 + tolerance or hy > y1 + tolerance:
-            problems.append({"key": s["key"], "plate": s["plate"], "problem": "off the bed", "other": None})
+            problems.append({"key": s["key"], "plate": s["plate"], "problem": OFF_THE_BED, "other": None})
         if purge is not None and poly.intersection(purge).area > tolerance * tolerance:
-            problems.append({"key": s["key"], "plate": s["plate"], "problem": "over the purge area", "other": None})
+            problems.append({"key": s["key"], "plate": s["plate"], "problem": OVER_THE_PURGE_AREA, "other": None})
         for m, (t, other) in enumerate(zip(shapes, polys)):
             if m != n and t["plate"] == s["plate"]:
                 need = max(float(s["clearance"]), float(t["clearance"]))
-                if poly.distance(other) < need - tolerance:
-                    problems.append({"key": s["key"], "plate": s["plate"], "problem": "overlaps", "other": t["key"]})
+                gap = poly.distance(other)
+                if gap < need - tolerance:
+                    problems.append({"key": s["key"], "plate": s["plate"], "problem": OVERLAPS if gap <= tolerance else TOO_CLOSE,
+                                     "other": t["key"]})
     return problems
 
 
