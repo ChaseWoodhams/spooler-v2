@@ -1628,6 +1628,22 @@ body.panel-open { overflow: hidden; }
   .toggle-switch::before { content: ""; position: absolute; inset: -11px -4px; }
 }
 
+/* Compact the dashboard header before the full-width desktop actions stop fitting. */
+@media (min-width: 641px) and (max-width: 720px) {
+  header { padding-inline: 10px; gap: 8px; }
+  .logo { width: 42px; }
+  .logo span { display: none; }
+  .header-actions { flex: 1; display: grid; grid-template-columns: 44px repeat(2, minmax(0, 1fr)) auto; gap: 6px; align-items: center; }
+  .header-actions > #btn-system-health { grid-column: 1; grid-row: 1; width: 44px; min-height: 44px; padding: 8px; }
+  .header-actions > #btn-quick-print { grid-column: 2; grid-row: 1; }
+  .header-actions > #btn-import { grid-column: 3; grid-row: 1; }
+  .header-actions > #btn-discover, .header-actions > #btn-add { display: none; }
+  .header-more-actions { display: block; grid-column: 4; grid-row: 1; }
+  #btn-header-more { min-height: 44px; padding-inline: 9px; font-size: 12px; white-space: nowrap; }
+  .header-actions > .btn { justify-content: center; min-width: 0; padding-inline: 8px; white-space: nowrap; }
+  .header-actions > .btn svg { width: 16px; height: 16px; }
+}
+
 @media (max-width: 360px) {
   header { padding-inline: 6px; gap: 4px; }
   .logo { width: 38px; padding-left: 2px; }

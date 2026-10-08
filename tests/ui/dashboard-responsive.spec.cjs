@@ -43,7 +43,7 @@ const viewports = [
         hasOverflowMenu: getComputedStyle(document.getElementById("btn-header-more")).display !== "none",
       }));
       let menuWorks = true;
-      if (width <= 640) {
+      if (width <= 720) {
         const more = page.getByRole("button", { name: "More actions" });
         await more.focus();
         await page.keyboard.press("Enter");
@@ -56,6 +56,8 @@ const viewports = [
         await page.keyboard.press("Escape");
         menuWorks = menuWorks && await more.getAttribute("aria-expanded") === "false"
           && await page.evaluate(() => document.activeElement.id === "btn-header-more");
+      }
+      if (width <= 640) {
         const navMore = page.locator("#btn-mobile-more");
         await navMore.focus();
         await page.keyboard.press("Enter");
@@ -71,8 +73,8 @@ const viewports = [
         menuWorks = menuWorks && bottomNav;
       }
       const failed = result.bodyWidth > result.viewportWidth || result.actions.some(action => !action.reachable)
-        || (width <= 640 && (!result.hasOverflowMenu || !menuWorks));
-      result.mobileMenuWorks = width <= 640 ? menuWorks : undefined;
+        || (width <= 720 && (!result.hasOverflowMenu || !menuWorks));
+      result.overflowMenuWorks = width <= 720 ? menuWorks : undefined;
       console.log(`${width}x${height} ${failed ? "FAIL" : "PASS"}`, JSON.stringify(result));
       await page.close();
       if (failed) process.exitCode = 1;
