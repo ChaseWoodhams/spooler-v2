@@ -27,6 +27,16 @@ export class SettingsPanel {
       const btn = e.target.closest("[data-tab]");
       if (btn) this.onTab?.(btn.dataset.tab);
     });
+    this.tabsEl.addEventListener('keydown', e => {
+      if (!['ArrowLeft','ArrowRight','Home','End'].includes(e.key)) return;
+      const tabs=[...this.tabsEl.querySelectorAll('[role="tab"]')];
+      const at=tabs.indexOf(e.target); if(at<0)return;
+      e.preventDefault();
+      const index=e.key==='Home'?0:e.key==='End'?tabs.length-1:(at+(e.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+      const id=tabs[index].dataset.tab;
+      this.onTab?.(id);
+      this.tabsEl.querySelector(`[data-tab="${id}"]`)?.focus();
+    });
     this.bodyEl.addEventListener("change", e => this._changed(e.target));
     this.bodyEl.addEventListener("click", e => {
       const btn = e.target.closest("[data-reset]");
@@ -62,7 +72,9 @@ export class SettingsPanel {
     const ctx = this.context;
     if (!this.schema || !ctx) return;
     this.tabsEl.innerHTML = ctx.tabs.map(t =>
-      `<button class="btn btn-secondary btn-sm${t.id === ctx.tab ? " active" : ""}" type="button" role="tab" data-tab="${t.id}">${esc(t.label)}</button>`).join("");
+      `<button class="btn btn-secondary btn-sm${t.id === ctx.tab ? " active" : ""}" type="button" role="tab" aria-selected="${t.id === ctx.tab}" tabindex="${t.id === ctx.tab ? 0 : -1}" aria-controls="settings-body" data-tab="${t.id}">${esc(t.label)}</button>`).join("");
+    this.bodyEl.setAttribute('role','tabpanel');
+    this.bodyEl.setAttribute('aria-label',ctx.tabs.find(t=>t.id===ctx.tab)?.label || 'Settings');
     const options = this.schema.options;
     const query = this.searchEl.value.trim().toLowerCase();
     // OrcaSlicer greys out or hides settings that depend on others (rules.js); only process settings have such rules
@@ -112,9 +124,9 @@ export class SettingsPanel {
     const tooltip = keys.map(key => `${options[key].label || key}${options[key].tooltip ? `: ${options[key].tooltip}` : ""} [${key}]`).join("\n\n");
     const fields = keys.map(key => this._field(key, options[key], single, this.toggles.disabled.has(key), label)).join("");
     return `<div class="set-row${modified ? " modified" : ""}${disabled ? " disabled" : ""}">
-      <div class="set-label" title="${esc(tooltip)}">${esc(label)}</div>
+      <div class="set-label" title="${esc(tooltip)}">${esc(label)}${modified ? '<small> · modified</small>' : ''}</div>
       <div class="set-fields">${fields}</div>
-      <button type="button" class="set-reset" data-reset="${esc(keys.join(","))}" title="Back to the profile's value">↺</button>
+      <button type="button" class="set-reset" aria-label="Reset ${esc(label)} to inherited value" data-reset="${esc(keys.join(","))}" title="Back to the profile's value">↺</button>
     </div>`;
   }
 
@@ -152,6 +164,7 @@ export class SettingsPanel {
         && (meta.min === undefined || value.endsWith("%") && meta.type !== "percent" || number >= meta.min)
         && (meta.max === undefined || value.endsWith("%") && meta.type !== "percent" || number <= meta.max);
       input.classList.toggle("invalid", !ok);
+      input.setAttribute('aria-invalid',String(!ok));
       if (!ok) {
         input.title = meta.min !== undefined || meta.max !== undefined
           ? `Enter a number${meta.min !== undefined ? ` from ${meta.min}` : ""}${meta.max !== undefined ? ` up to ${meta.max}` : ""}` : "Enter a number";

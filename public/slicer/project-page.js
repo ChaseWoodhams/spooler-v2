@@ -48,7 +48,8 @@ function header() {
   const waiting = c.queued + c.waiting, toSlice = c.sliced + c.unsliced;
   return `<div class="pp-card pp-progress">
     <div class="pp-progress-head"><b>${progress.printed_ok} of ${plural(progress.total, "plate")} printed</b>
-      <span class="slicer-muted">${c.failed} failed · ${c.printing} printing · ${waiting} waiting · ${toSlice} to slice</span></div>
+      <span class="slicer-muted">${c.unsliced} unsliced · ${c.sliced} sliced · ${c.queued} queued Jobs · ${c.waiting} held Jobs · ${c.printing} printing · ${c.printed_ok} completed · ${c.failed} failed</span></div>
+    <p class="slicer-muted">${progress.outcome_unknown ?? 'Unavailable:'} latest Outcome unknown${progress.outcome_unknown === 1 ? '' : 's'}${progress.outcome_unknown ? ' — verify these Prints in History. This overlaps the Plate status counts above; it is not another completed Plate.' : ''}</p>
     <div class="pp-bar" role="img" aria-label="${progress.printed_ok} of ${progress.total} plates printed">${BAR_ORDER.map(s =>
       `<i class="st-${s}" style="width:${progress.total ? c[s] / progress.total * 100 : 0}%" title="${STATUS[s]}: ${c[s]}"></i>`).join("")}</div>
     ${filament(grams)}
@@ -92,14 +93,16 @@ function printerCards() {
     return `<div class="pp-card pp-printer st-${cls}" id="pp-printer-${esc(printer.id)}"><b>${esc(printer.name)}</b> <span class="pp-chip st-${cls}">${label}</span>
       <div class="slicer-muted">${note}</div>
       <label class="pp-autostart" title="When on, Bed cleared starts the next queued plate on this printer by itself"><input type="checkbox" data-autostart="${esc(printer.id)}"${auto ? " checked" : ""}> Auto-start next plate</label>
+      <p class="slicer-muted">${auto ? 'After you confirm Bed cleared, the next eligible queued Job can start automatically through preflight. Holds wait for their prerequisite to print OK.' : 'Bed cleared records that the bed is free. Start the next Job from Review & start.'}</p>
       ${asking ? `<button type="button" class="btn btn-primary btn-sm" data-outcome="${esc(printer.id)}">Print ended: Printed OK · Bed cleared / Failed…</button>` : ""}</div>`;
   }).join("")}</div>`;
 }
 
 function plateMap() {
-  return `<div class="pp-card"><div class="slicer-muted">Every plate at a glance. Colour is status; click one for its detail.</div>
+  return `<div class="pp-card"><div class="slicer-muted">Every Plate at a glance. Select a numbered Plate or use the readable list below.</div>
     <div class="pp-grid">${status.plates.map(p =>
-      `<button type="button" class="pp-cell st-${p.status}${p.id === selected ? " sel" : ""}" data-plate="${p.id}" title="${esc(p.name)}: ${STATUS[p.status]}">${p.id}</button>`).join("")}</div>
+      `<button type="button" class="pp-cell st-${p.status}${p.id === selected ? " sel" : ""}" data-plate="${p.id}" aria-pressed="${p.id === selected}" aria-label="Plate map ${esc(p.name)}: ${STATUS[p.status]}${p.outcome_unknown ? ', latest Outcome unknown' : ''}">${p.id}</button>`).join("")}</div>
+    <ul class="pp-readable-plates">${status.plates.map(p => `<li><button type="button" class="btn btn-secondary btn-sm" data-plate="${p.id}" aria-pressed="${p.id === selected}">${esc(p.name)}: ${STATUS[p.status]}${p.outcome_unknown ? ', latest Outcome unknown' : ''}</button></li>`).join('')}</ul>
     <div class="pp-legend">${Object.keys(STATUS).map(chip).join("")}</div></div>`;
 }
 
@@ -109,7 +112,7 @@ function nextUp() {
   const queued = jobs.filter(j => j.state === "queued");
   const canAssign = queued.length > 1 && printers.some(p => p.connected);
   return `<div class="pp-card"><b>Next up</b>
-    ${next.map(p => `<div class="pp-next" data-plate="${p.id}"><span>${esc(p.name)}${p.printer_id ? ` → ${esc(printerName(p.printer_id) || "printer")}` : ""}</span>${chip(p.status)}</div>`).join("")
+    ${next.map(p => `<button type="button" class="pp-next" data-plate="${p.id}" aria-pressed="${p.id === selected}"><span>${esc(p.name)}${p.printer_id ? ` → ${esc(printerName(p.printer_id) || "printer")}` : ""}</span>${chip(p.status)}</button>`).join("")
       || '<p class="slicer-muted">Nothing waiting. Slice a plate and add it to the queue.</p>'}
     <button type="button" class="btn btn-primary btn-sm" data-act="assign"${canAssign ? "" : " disabled"}
       title="Spread the queued plates over the connected printers so they finish about together, by estimated print time">Assign printers · balance by time</button></div>`;
@@ -164,6 +167,7 @@ function detail() {
     ${plate.parts ? `<img class="pp-preview" src="${picture}" alt="${esc(plate.name)} as laid out" width="320" height="240" loading="lazy">` : ""}
     <div class="slicer-muted">${facts || "No slice yet"}</div>
     ${plate.status === "waiting" ? '<div class="slicer-muted">Waiting on another plate to print OK first</div>' : ""}
+    ${plate.outcome_unknown ? '<p role="status">The latest Print has an unknown Outcome. Review its record in History before treating this Plate as completed.</p>' : ''}
     ${editable ? `<label class="pp-printon">Print on <select data-printon aria-label="Print ${esc(plate.name)} on">${options}</select></label>` : ""}
     ${warnBox}${holdList}
     <div class="pp-actions">${actions.join("")}</div>${picker}</div>`;
@@ -174,8 +178,11 @@ function render() {
   if (!shown || !status) return;
   if (document.activeElement?.matches?.("select") && root.contains(document.activeElement)) return;  // never rebuild a menu being used
   if (selected == null || !plateOf(selected)) selected = status.plates.find(p => p.status === "printing")?.id ?? status.plates[0]?.id ?? null;
+  const active = root.contains(document.activeElement) ? document.activeElement : null;
+  const activePlate = active?.getAttribute('data-plate'), activeName = active?.getAttribute('aria-label');
   root.innerHTML = `${header()}${printerCards()}
     <div class="pp-layout">${plateMap()}<div class="pp-side">${nextUp()}${detail()}</div></div>`;
+  if (activePlate) [...root.querySelectorAll('[data-plate]')].find(button => button.getAttribute('data-plate') === activePlate && button.getAttribute('aria-label') === activeName)?.focus();
 }
 
 async function refresh() {

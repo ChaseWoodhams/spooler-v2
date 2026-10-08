@@ -456,6 +456,24 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
 class ProjectApiTests(unittest.TestCase):
+    def test_project_progress_exposes_latest_unknown_outcome_without_changing_status(self):
+        pid = self.call('POST', '/api/projects', {'name': 'Outcome fixture'})[1]['id']
+        with database.transaction() as conn:
+            for started, outcome in [(1, 'completed'), (2, 'unknown')]:
+                print_id = conn.execute('INSERT INTO prints (printer_id, printer_name, file_name, project_id, plate_id, started_at, ended_at, outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                                        ('fixture', 'Fixture printer', 'fixture.gcode', pid, 1, started, started + 1, outcome)).lastrowid
+        code, status = self.call('GET', f'/api/projects/{pid}/status')
+        self.assertEqual(code, 200)
+        self.assertEqual(status['progress']['outcome_unknown'], 1)
+        self.assertTrue(status['plates'][0]['outcome_unknown'])
+        self.assertEqual(status['plates'][0]['status'], 'printed_ok')
+        self.assertEqual(status['progress']['counts']['printed_ok'], 1)
+        code, _ = self.call('POST', f'/api/prints/{print_id}/outcome', {'outcome': 'completed'})
+        self.assertEqual(code, 200)
+        resolved = self.call('GET', f'/api/projects/{pid}/status')[1]
+        self.assertEqual(resolved['progress']['outcome_unknown'], 0)
+        self.assertFalse(resolved['plates'][0]['outcome_unknown'])
+
     def setUp(self):
         from http_handler import SPHandler
         self._tmp = tempfile.TemporaryDirectory()

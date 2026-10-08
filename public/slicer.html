@@ -8,7 +8,7 @@
   <meta name="theme-color" content="#0d0e12" />
   <link rel="stylesheet" href="style.css?v=57" />
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=24" />
+  <link rel="stylesheet" href="slicer.css?v=25" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -27,15 +27,18 @@
     </div>
     <nav id="step-bar" class="slicer-steps" aria-label="Workflow steps"></nav>
     <div class="slicer-top-actions">
-      <span id="slice-state" class="slicer-slice-state"></span>
+      <span id="slice-state" class="slicer-slice-state" role="status"></span>
       <span id="step-actions" class="slicer-step-actions"></span>
     </div>
   </header>
 
-  <p class="slicer-small-screen-note">Editing plates, split and slice settings is best on a larger screen.</p>
+  <div class="slicer-small-screen-note">Review your Project here and defer 3D editing to a larger screen. Numeric transforms are available when editing controls are shown.
+    <button id="btn-mobile-edit" type="button" class="btn btn-secondary btn-sm" aria-expanded="false">Show editing controls</button>
+  </div>
+  <button id="btn-sidebar" type="button" class="btn btn-secondary btn-sm slicer-sidebar-toggle" aria-expanded="true" aria-controls="project-sidebar">Hide sidebar</button>
 
   <div class="slicer-body">
-    <aside class="slicer-sidebar">
+    <aside id="project-sidebar" class="slicer-sidebar">
       <section id="object-panel" class="slicer-card slicer-object-panel" hidden></section>
       <section id="empty-state" class="slicer-card">
         <div class="slicer-card-head"><h4>No project open</h4></div>
@@ -102,6 +105,9 @@
       <section class="slicer-card" data-steps="queue">
         <div class="slicer-card-head"><h4>Send to the queue</h4></div>
         <div id="send-plates" class="slicer-plate-rows"></div>
+        <button id="btn-balance-selected" type="button" class="btn btn-secondary btn-sm">Balance selected Plates by estimated time</button>
+        <p class="slicer-muted">Balancing assigns the longest selected Plates first to connected printers with the smallest estimated workload in this Project. Other Projects are not counted. Review printer compatibility and edit each assignment below before submission; preflight still runs at Print start.</p>
+        <div id="batch-summary" class="slicer-batch-summary" role="status"></div>
         <label class="slicer-check"><input type="checkbox" id="send-leveling" /> Level the bed before each plate</label>
         <label class="slicer-check"><input type="checkbox" id="send-timelapse" /> Time-lapse</label>
         <div class="slicer-actions-row"><button id="btn-send-batch" class="btn btn-primary" type="button" disabled>Send to the queue</button></div>
@@ -117,9 +123,10 @@
       </section>
 
       <section class="slicer-card slicer-settings" data-steps="plates slice">
-        <div id="settings-scope-toggle" class="scope-toggle" role="tablist" aria-label="Settings apply to">
-          <button type="button" data-scope-tab="global" role="tab">Global</button>
-          <button type="button" data-scope-tab="objects" role="tab">Objects</button>
+        <p class="slicer-muted">Simple shows common settings; Advanced and Expert reveal more detail. An asterisk marks changes from the selected preset. Reset restores the value inherited by the selected Project, Plate or Object.</p>
+        <div id="settings-scope-toggle" class="scope-toggle" role="group" aria-label="Settings apply to">
+          <button type="button" data-scope-tab="global">Global</button>
+          <button type="button" data-scope-tab="objects">Objects</button>
         </div>
         <div id="settings-tabs" class="slicer-tabs" role="tablist" aria-label="Settings"></div>
         <div id="settings-scope" class="slicer-actions-row" hidden></div>
@@ -138,10 +145,12 @@
       <div id="plate-tabs" class="slicer-plates"></div>
       <div id="viewport" class="slicer-viewport">
         <div class="slicer-toolbar" id="prepare-tools">
+          <div class="slicer-tool-group" role="group" aria-label="Transform"><span>Transform</span>
           <button class="btn btn-secondary btn-sm" type="button" data-tool="translate" title="Move (M)">Move</button>
           <button class="btn btn-secondary btn-sm" type="button" data-tool="rotate" title="Rotate (R)">Rotate</button>
           <button class="btn btn-secondary btn-sm" type="button" data-tool="scale" title="Scale, keeping proportions (S)">Scale</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-face" title="Lay a face flat: click it on the model (F)">Lay on face</button>
+          </div><div class="slicer-tool-group" role="group" aria-label="Arrange"><span>Arrange</span>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-arrange" title="Arrange this plate (A); Shift+A arranges every plate onto as few as fit. Pinned objects stay put and plates never mix filaments.">Arrange</button>
           <select id="arrange-engine" class="slicer-toolbar-select" aria-label="What arranges the plates" title="The nester keeps room for each object's supports and brim. OrcaSlicer's own arranger is a fallback: it can't work around pinned objects (a plate holding one is refused) and ignores filaments and supports.">
             <option value="nester">Nester</option>
@@ -150,14 +159,17 @@
           <button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-plan-plates" title="Plan plates: turn objects, pack them across plates by filament and order the plates. You review it first; Undo reverses it.">Plan plates</button>
           <select id="merge-plate" class="slicer-toolbar-select" aria-label="Merge this plate into another"></select>
+          </div><div class="slicer-tool-group" role="group" aria-label="View"><span>View</span>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-fit" title="Fit the view (Z zooms to the selection; 0-6 pick a side)">Fit view</button>
+          </div><div class="slicer-tool-group" role="group" aria-label="Edit history"><span>History</span>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-undo" title="Undo (Ctrl+Z)">Undo</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-redo" title="Redo (Ctrl+Y)">Redo</button>
+          </div>
         </div>
         <div class="slicer-toolbar" id="view-tools" hidden>
-          <div class="slicer-mode" role="tablist" aria-label="View">
-            <button id="mode-prepare" class="btn btn-sm" type="button" role="tab">Plate</button>
-            <button id="mode-preview" class="btn btn-sm" type="button" role="tab">Layer preview</button>
+          <div class="slicer-mode" role="group" aria-label="View">
+            <button id="mode-prepare" class="btn btn-sm" type="button">Plate</button>
+            <button id="mode-preview" class="btn btn-sm" type="button">Layer preview</button>
           </div>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-fit-preview" title="Fit the view (F)">Fit view</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-printer" title="Show the Centauri Carbon around the bed (P)" aria-pressed="false">Printer</button>
@@ -186,7 +198,7 @@
           <label>Explode <input id="split-explode" type="range" min="0" max="100" value="0" /></label>
           <button id="btn-split-fit" class="btn btn-secondary btn-sm" type="button">Reset view</button>
         </div>
-        <div id="split-progress" class="split-progress" hidden>
+        <div id="split-progress" class="split-progress" role="status" hidden>
           <div class="split-progress-text"></div>
           <div class="job-progress"><div class="job-progress-bar"></div></div>
         </div>
@@ -263,6 +275,6 @@
 
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
-  <script type="module" src="slicer/main.js?v=22"></script>
+  <script type="module" src="slicer/main.js?v=23"></script>
 </body>
 </html>

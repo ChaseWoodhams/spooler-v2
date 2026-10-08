@@ -2957,9 +2957,11 @@ def plate_status(project_id: int) -> dict:
                                 "AND state IN ('queued', 'starting', 'printing')", (project_id,)).fetchall()
         print_rows = conn.execute("SELECT plate_id, outcome, filament_g FROM prints WHERE project_id = ? AND plate_id IS NOT NULL "
                                   "ORDER BY started_at, id", (project_id,)).fetchall()
-    latest = {}  # plate id → outcome of its latest Print (None while it is still printing)
+    latest = {}  # plate id → outcome of its latest known Print (None while it is still printing)
+    latest_recorded = {}  # includes unknown Outcomes without changing existing status precedence
     consumed = {}  # plate id → grams its finished Prints used, as the printer counted them
     for row in print_rows:
+        latest_recorded[row['plate_id']] = row['outcome']
         if row["outcome"] in ("completed", "failed", "cancelled") and row["filament_g"]:
             consumed[row["plate_id"]] = consumed.get(row["plate_id"], 0.0) + row["filament_g"]
         if row["outcome"] == "unknown":
@@ -3018,6 +3020,7 @@ def plate_status(project_id: int) -> dict:
             group["unknown_plates"] += 0 if grams else 1
         job = open_job.get(n)
         plates.append({"id": n, "name": plate.get("name"), "status": status,
+                       "outcome_unknown": latest_recorded.get(n) == 'unknown',
                        "outdated": bool(entry.get("outdated")) if sliced else False,
                        "mixed": mixed, "filament": choice_label(found[0]) if found and not mixed else None,
                        "parts": parts.get(n, 0), "layout": fingerprint(record, n), "job_id": job["id"] if job else None,
@@ -3029,6 +3032,7 @@ def plate_status(project_id: int) -> dict:
     return {"project_id": project_id, "plates": plates,
             "print_order": [p["id"] for p in time_estimate.longest_first(plates, lambda p: p["time_estimate"])],
             "progress":{"total": total, "counts": counts, "printed_ok": counts["printed_ok"],
+                         "outcome_unknown": sum(p['outcome_unknown'] for p in plates),
                          "percent": round(100 * counts["printed_ok"] / total) if total else 0,
                          "filament_g": {"used": round(filament["used"], 1), "total": round(filament["total"], 1),
                                         "unknown_plates": filament["unknown_plates"], "spool": _spool_level(record),

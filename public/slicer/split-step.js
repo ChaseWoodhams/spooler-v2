@@ -26,7 +26,7 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const clone = value => JSON.parse(JSON.stringify(value));
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const sizeText = size => `${size.map(v => Math.round(v)).join(" × ")} mm`;
+const sizeText = size => `${size.map(v => Number(v.toFixed(2))).join(" × ")} mm`;
 const cssColor = number => `#${PART_COLORS[(number - 1) % PART_COLORS.length].toString(16).padStart(6, "0")}`;
 
 let host = null;        // { api, toast, onStep(step), onLayout(), onWhole(), onChanged(split) }
@@ -408,7 +408,7 @@ function renderSide() {
 
 function failedBlock() {
   if (current.state !== "failed") return "";
-  return `<div class="split-section split-failed"><div class="job-error">${esc(current.error || "Something went wrong")}</div>
+  return `<div class="split-section split-failed"><div class="job-error" role="alert">${esc(current.error || "Something went wrong")}</div>
     <div class="split-actions-row"><button class="btn btn-secondary btn-sm" data-action="retry">Try again</button></div></div>`;
 }
 
@@ -418,9 +418,9 @@ function numberField(id, label, value, min, stepValue = 1) {
 
 function viewToggle() {
   if (!current.result) return "";
-  return `<div class="split-seg split-view-toggle" role="tablist">
-    <button class="btn btn-sm ${sub === "cuts" ? "btn-primary" : "btn-secondary"}" type="button" data-action="sub" data-sub="cuts">Cuts</button>
-    <button class="btn btn-sm ${sub === "parts" ? "btn-primary" : "btn-secondary"}" type="button" data-action="sub" data-sub="parts">Parts</button>
+  return `<div class="split-seg split-view-toggle" role="group" aria-label="Split review view">
+    <button aria-pressed="${sub === 'cuts'}" class="btn btn-sm ${sub === "cuts" ? "btn-primary" : "btn-secondary"}" type="button" data-action="sub" data-sub="cuts">Cuts</button>
+    <button aria-pressed="${sub === 'parts'}" class="btn btn-sm ${sub === "parts" ? "btn-primary" : "btn-secondary"}" type="button" data-action="sub" data-sub="parts">Parts</button>
   </div>`;
 }
 
@@ -429,25 +429,31 @@ function sideModel() {
   if (!a) return failedBlock() || `<section class="split-section"><h4>${esc(current.source_name)}</h4>
     <p class="split-note">Checking the model: reading it, repairing small holes and preparing a lighter copy for the preview.</p></section>`;
   const raw = Math.max(...a.raw_size);
-  const hint = raw < 5 ? "This model looks like it's in metres — try ×1000."
+  const hint = Math.max(...a.size) > 3000 ? 'Check the units: a dimension exceeds 3000 mm. If millimetres were treated as metres, enter scale 1 and analyse again; for oversized source coordinates, try scale 0.001.' : raw < 5 && s.scale === 1 ? "This model looks like it's in metres — try ×1000."
              : raw < 60 && s.scale === 1 ? "This is small — if it was modelled in centimetres use ×10, or ×25.4 for inches." : "";
+  const blocked = RUNNING.has(current.state) || current.state === 'failed';
   const next = a.fits_whole
-    ? `<button class="btn btn-secondary" data-action="go-split">Split it anyway</button>
-       <button class="btn btn-primary" data-action="whole">Put it on a plate →</button>`
-    : `<button class="btn btn-primary" data-action="go-split">Plan the cuts →</button>`;
+    ? `<button class="btn btn-secondary" data-action="go-split"${blocked ? ' disabled' : ''}>Split it anyway</button>
+       <button class="btn btn-primary" data-action="whole"${blocked ? ' disabled' : ''}>Put it on a plate →</button>`
+    : `<button class="btn btn-primary" data-action="go-split"${blocked ? ' disabled' : ''}>Plan the cuts →</button>`;
   return `${failedBlock()}
   <section class="split-section"><h4>${esc(current.source_name)}</h4>
     ${hint ? `<p class="split-hint split-bad">${esc(hint)}</p>` : ""}
     <dl class="split-facts">
       <dt>Size</dt><dd><strong>${sizeText(a.size)}</strong> · scale ×${s.scale}</dd>
+      <dt>Source units</dt><dd>${({1:'Millimetres',10:'Centimetres',25.4:'Inches',1000:'Metres'})[s.scale] || 'Custom scale'} · up axis ${esc(s.up.toUpperCase())}</dd>
+      <dt>Target bed</dt><dd>${s.printer.bed_x} × ${s.printer.bed_y} mm · height ${s.printer.height} mm</dd>
       <dt>Volume</dt><dd>${a.volume_cm3.toLocaleString()} cm³</dd>
       <dt>Triangles</dt><dd>${a.source_triangles.toLocaleString()}${a.triangles !== a.source_triangles ? ` → ${a.triangles.toLocaleString()} (simplified 0.01 mm)` : ""}</dd>
       <dt>Mesh</dt><dd>${a.repairs.length ? esc(a.repairs.join("; ")) : "Closed solid, no repairs needed"}</dd>
+      <dt>Repair state</dt><dd>${current.state === 'failed' ? 'Not ready — resolve the error and retry' : RUNNING.has(current.state) ? 'Processing — wait for analysis and planning to finish' : 'Ready to continue after analysis'}</dd>
       <dt>Average wall</dt><dd>${a.mean_wall_mm} mm</dd>
       <dt>One piece?</dt><dd>${a.fits_whole ? "Fits the printer without splitting" : `No — about ${plural(a.estimated_parts, "part")} for this printer`}</dd>
     </dl>
+    <p class="split-hint">Original source is retained. Unit and orientation changes reanalyse that source; they do not overwrite it. Keep your source file to export or import it again.</p>
   </section>
   <section class="split-section"><h4>Units and orientation</h4>
+    <p id="split-input-error" class="slicer-error" role="alert"></p>
     <div class="split-row">
       ${numberField("split-scale", "Scale", s.scale, 0.0001, "any")}
       <label>Up axis<select id="split-up">${["z", "y", "x"].map(x => `<option value="${x}"${s.up === x ? " selected" : ""}>${x.toUpperCase()}</option>`).join("")}</select></label>
@@ -480,9 +486,9 @@ function axisName(normal) {
 function cutListHtml() {
   if (!cuts.length) return '<p class="queue-empty">No cuts.</p>';
   return cuts.map(cut => `<div class="split-cut${cut.id === selectedCut ? " selected" : ""}" data-action="select-cut" data-cut="${cut.id}">
-    <span>Cut ${cut.id}</span><span class="split-cut-axis">${axisName(cut.normal)}</span>
+    <button type="button" class="btn btn-secondary btn-sm" aria-label="Select Cut ${cut.id}" aria-pressed="${cut.id === selectedCut}" data-action="select-cut" data-cut="${cut.id}">Cut ${cut.id}</button><span class="split-cut-axis">${axisName(cut.normal)}</span>
     <input type="number" step="0.5" data-cut-offset="${cut.id}" value="${cut.offset.toFixed(1)}" aria-label="Cut ${cut.id} position (mm)">
-    <button class="btn btn-danger btn-sm" data-action="delete-cut" data-cut="${cut.id}" title="Remove this cut and the cuts made inside it">✕</button>
+    <button type="button" class="btn btn-danger btn-sm" data-action="delete-cut" data-cut="${cut.id}" aria-label="Remove Cut ${cut.id} and its child cuts" title="Remove this cut and the cuts made inside it">✕</button>
   </div>`).join("");
 }
 
@@ -516,9 +522,9 @@ function sideCuts() {
       <button class="btn btn-secondary btn-sm" data-action="autofix"${busy || !oversize || checkDirty ? " disabled" : ""}
         title="Keep these cuts and add more where parts are still too big">Auto-fix</button>
     </div>
-    <div id="split-check" class="split-check">${checkText()}</div>
+    <div id="split-check" class="split-check" role="status">${checkText()}</div>
     <div id="split-cut-list" class="split-cut-list">${cutListHtml()}</div>
-    <p class="split-hint">Drag a blue cut plane in the preview to move it, or type its position. Select a cut and press Delete to remove it.</p>
+    <p class="split-hint">Select a numbered cut and type its position in mm, or drag its plane in the preview. The Remove button deletes that cut and any cuts inside it.</p>
   </section>
   <section class="split-section"><h4>Alignment holes</h4>
     <label>Type<select id="split-conn-preset">${CONNECTOR_PRESETS.map(x => `<option value="${x.id}"${x.id === preset ? " selected" : ""}>${x.label}</option>`).join("")}
@@ -557,7 +563,7 @@ function sideParts() {
     <div class="split-table-wrap"><table class="split-table">
       <thead><tr><th>#</th><th>Print size (mm)</th><th>Holes</th><th>Notes</th><th></th></tr></thead>
       <tbody>${r.parts.map(p => `<tr data-part-row="${p.number}">
-        <td><span class="split-swatch" style="background:${cssColor(p.number)}"></span>${p.number}</td>
+        <td><button type="button" class="btn btn-secondary btn-sm" data-part-highlight="${p.number}" aria-label="Highlight Part ${p.number}">${p.number}</button><span class="split-swatch" style="background:${cssColor(p.number)}"></span></td>
         <td>${p.print_size.map(v => Math.round(v)).join(" × ")}</td>
         <td>${p.holes}</td>
         <td class="split-notes">${[p.needs_supports ? `<span class="split-warn" title="${p.overhang_pct}% of the surface overhangs more than 45°">supports</span>` : "",
@@ -609,8 +615,10 @@ function updateConnectorHint() {
 }
 
 function selectCut(id) {
+  const focused = document.activeElement?.matches('[data-action="select-cut"]');
   selectedCut = id;
   if ($("split-cut-list")) $("split-cut-list").innerHTML = cutListHtml();
+  if (focused) $('split-cut-list')?.querySelector(`button[data-action="select-cut"][data-cut="${id}"]`)?.focus();
   viewer?.showCuts(view === "split" && sub === "cuts" ? cuts : [], selectedCut);
 }
 
@@ -739,6 +747,10 @@ function bindEvents() {
         case "retry":        started(await host.api("POST", `/api/splits/${current.id}/retry`, {})); render(); break;
         case "scale-preset": $("split-scale").value = el.dataset.scale; break;
         case "apply-size": {
+          if (!$('split-scale').checkValidity() || !Number.isFinite(Number($('split-scale').value)) || Number($('split-scale').value) <= 0) {
+            $('split-input-error').textContent = 'Enter a positive scale of at least 0.0001, then analyse again.';
+            $('split-scale').focus(); break;
+          }
           current = await host.api("POST", `/api/splits/${current.id}/settings`, { scale: Number($("split-scale").value), up: $("split-up").value });
           cuts = clone(current.cuts?.cuts || []);
           geometryKey = "";
@@ -755,6 +767,7 @@ function bindEvents() {
         case "split":        await startSplit(); break;
       }
     } catch (err) {
+      if ($('split-input-error')) $('split-input-error').textContent = err.message;
       host.toast(err.message, true);
     }
   });
@@ -776,6 +789,14 @@ function bindEvents() {
   side.addEventListener("mouseover", (e) => {
     const row = e.target.closest("[data-part-row]");
     viewer?.highlight(row ? Number(row.dataset.partRow) : null);
+  });
+  side.addEventListener('focusin', e => {
+    const row = e.target.closest('[data-part-row]');
+    viewer?.highlight(row ? Number(row.dataset.partRow) : null);
+  });
+  side.addEventListener('click', e => {
+    const button = e.target.closest('[data-part-highlight]');
+    if (button) viewer?.highlight(Number(button.dataset.partHighlight));
   });
   $("split-explode").addEventListener("input", (e) => viewer?.setExplode(Number(e.target.value) / 100));
   $("btn-split-fit").addEventListener("click", () => viewer?.fit());
