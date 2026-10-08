@@ -1,11 +1,6 @@
 /* ─── Reset & Variables ─────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 [hidden] { display: none !important; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible,
-textarea:focus-visible, [tabindex]:focus-visible {
-  outline: 3px solid var(--accent);
-  outline-offset: 3px;
-}
 .modal-box {
   max-height: calc(100vh - 32px);
   max-height: calc(100dvh - 32px);
@@ -213,7 +208,7 @@ header {
   text-align: left;
   cursor: pointer;
 }
-.mobile-more-menu button:hover, .mobile-more-menu button:focus-visible { background: var(--surface2); outline: none; }
+.mobile-more-menu button:hover, .mobile-more-menu button:focus-visible { background: var(--surface2); }
 .mobile-more-menu #btn-mobile-signout { color: var(--red); }
 
 /* ─── Main / Grid ─────────────────────────────────────────────────────────── */
@@ -2123,3 +2118,9 @@ body.import-dropping::after { content: "Drop to import"; position: fixed; inset:
 .qp-more .set-reset { background: transparent; border: 0; color: var(--accent); cursor: pointer; padding: 0; font-size: 13px; visibility: hidden; }
 .qp-more .set-row.modified .set-reset { visibility: visible; }
 @media (max-width: 760px) { .qp-more .set-fields input[type="text"], .qp-more .set-fields select { min-height: 44px; font-size: 16px; } .qp-more-pages button { min-height: 44px; } }
+
+/* Keep keyboard focus visible over field and menu resets. */
+body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
