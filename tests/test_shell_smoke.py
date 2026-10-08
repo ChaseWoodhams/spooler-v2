@@ -119,7 +119,8 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.dir = Path(self._tmp.name)
         database.configure(self.dir / "spooler.db")
         jobs.init(self.dir)
-        slicer.configure(self.dir)
+        from tests.test_slicer import make_fake_orca
+        slicer.configure(self.dir, orca_path=make_fake_orca(self.dir / "tools"))   # a locked profile: the server judges placement by its bed
         slicer.init()
         splits.configure(self.dir)
         projects.configure(self.dir)
