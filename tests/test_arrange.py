@@ -316,6 +316,40 @@ class ArrangeApiTests(unittest.TestCase):
         self.assertEqual(len(runner.calls), 2)
         self.assertEqual([o["position"] for o in result["data"]["objects"]], [[70.0, 70.0], [70.0, 70.0]])
 
+    def orca_refused(self, placements, expect):
+        """Orca's answer `placements` for two 20 mm cubes on plate 1 is refused with a reason containing `expect`, and the
+        plate stays as it was (the choice of engine is still kept)."""
+        project = self.project_with(cube_stl(20), cube_stl(20))
+        project = self.lay(project, [(1, 1, (50, 50), False), (2, 1, (120, 120), False)])
+        with mock.patch.object(slicer, "runner", arrange_runner(placements)):
+            status, refused = self.arrange(project, plate=1, engine="orca")
+        self.assertEqual(status, 409, refused)
+        self.assertIn(expect, refused["error"])
+        after = self.call("GET", f"/api/projects/{project['id']}")[1]
+        self.assertEqual([(o["id"], o["position"], o["rotation"]) for o in after["data"]["objects"]],
+                         [(o["id"], o["position"], o["rotation"]) for o in project["data"]["objects"]])
+
+    def test_an_orca_arrangement_with_overlapping_objects_is_refused_and_the_plate_stays(self):
+        self.orca_refused([(100.0, 100.0, 0.0), (105.0, 100.0, 0.0)], "overlap")
+
+    def test_an_orca_arrangement_too_close_to_keep_the_clearance_is_refused(self):
+        self.orca_refused([(100.0, 100.0, 0.0), (120.5, 100.0, 0.0)], "overlap")        # 0.5 mm apart
+
+    def test_an_orca_arrangement_off_the_bed_is_refused_and_the_plate_stays(self):
+        self.orca_refused([(100.0, 100.0, 0.0), (250.0, 100.0, 0.0)], "off the bed")
+
+    def test_an_orca_arrangement_over_the_purge_area_is_refused_and_the_plate_stays(self):
+        self.orca_refused([(100.0, 100.0, 0.0), (240.0, 10.0, 0.0)], "purge")
+
+    def test_a_valid_orca_arrangement_is_applied_with_its_outcome(self):
+        project = self.project_with(cube_stl(20), cube_stl(20))
+        project = self.lay(project, [(1, 1, (50, 50), False), (2, 1, (50, 50), False)])
+        with mock.patch.object(slicer, "runner", arrange_runner([(60.0, 60.0, 0.0), (150.0, 150.0, 0.0)])):
+            status, result = self.arrange(project, plate=1, engine="orca")
+        self.assertEqual(status, 200, result)
+        self.assertEqual([o["position"] for o in result["data"]["objects"]], [[60.0, 60.0], [150.0, 150.0]])
+        self.assertEqual(result["outcome"], "Arranged")
+
     def test_a_project_saved_without_the_engine_choice_stays_as_it_was(self):
         project = self.project_with(cube_stl(20))
         self.assertNotIn("arrange_engine", project["data"])

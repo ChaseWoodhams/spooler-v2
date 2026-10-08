@@ -2564,6 +2564,7 @@ def _arrange_with_orca(project_id: int, plate_id: int) -> dict:
         if code != 0 or not out.is_file():
             raise jobs.JobError(slicer.explain_exit(code) if code else "OrcaSlicer didn't arrange the plate")
         placements = read_arrangement(out)
+    _require_valid_arrangement(project_id, record, plate_id, placements)
     with database.transaction() as conn:
         row = conn.execute("SELECT data FROM projects WHERE id = ?", (project_id,)).fetchone()
         current = json.loads(row["data"])
@@ -2575,6 +2576,33 @@ def _arrange_with_orca(project_id: int, plate_id: int) -> dict:
         conn.execute("UPDATE projects SET data = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
                      (json.dumps(current), time.time(), project_id))
     return get_project(project_id)
+
+
+def _require_valid_arrangement(project_id: int, record: dict, plate_id: int, placements: dict) -> None:
+    """Hold OrcaSlicer's answer to the nester's definition of a valid layout (`placement_problems`): on the bed, off the
+    purge area, objects as far apart as Arrange keeps them. An answer that fails is refused with the reason and nothing
+    is changed, so choosing OrcaSlicer is never worse than the nester."""
+    data = json.loads(json.dumps(record["data"]))
+    for obj in data["objects"]:
+        if obj["id"] in placements:
+            x, y, turn = placements[obj["id"]]
+            obj["position"] = [round(x, 3), round(y, 3)]
+            obj["rotation"][2] = round((obj["rotation"][2] + turn) % 360, 3)
+    names = {o["id"]: o.get("name") or f"Object {o['id']}" for o in data["objects"]}
+    found = placement_problems(project_id, {**record, "data": data}, [plate_id])
+    if not found:
+        return
+    texts, seen = [], set()
+    for p in found:
+        pair = frozenset((p["key"], p["other"])) if p["problem"] == "overlaps" else None
+        if pair is not None and pair in seen:
+            continue
+        seen.add(pair)
+        what = f"overlaps {names.get(p['other'])}" if p["problem"] == "overlaps" else f"is {p['problem']}"
+        texts.append(f"{names.get(p['key'])} {what}")
+    more = f"; and {len(texts) - 3} more" if len(texts) > 3 else ""
+    raise jobs.JobError(f"OrcaSlicer's arrangement was not used, the plate is unchanged: {'; '.join(texts[:3])}{more}. "
+                        "Arrange again, use the nester, or move the objects by hand", 409)
 
 
 def read_arrangement(path: Path) -> dict:
