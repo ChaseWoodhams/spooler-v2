@@ -40,6 +40,12 @@ export function parseMeshes(buffer) {
   return meshes;
 }
 
+/** The kinds of problem an object can have: the strings the server sends in plate_problems (problem_kinds.py). The viewport's own
+ *  box checks only add marking while an object is being moved; the server's list is what decides. */
+export const PROBLEM = {
+  offTheBed: "off the bed", overThePurgeArea: "over the purge area", overlaps: "overlaps", tooClose: "too close", failedModel: "failed model",
+};
+
 export class Viewport {
   constructor(container, callbacks) {
     this.container = container;
@@ -71,6 +77,7 @@ export class Viewport {
     this.head = null;              // [x, y, z] of the nozzle tip in printer coordinates
     this.geometries = new Map();   // model id → centred BufferGeometry
     this.holders = new Map();      // object id → { holder, mesh, object }
+    this.serverIssues = new Map(); // object id → problems the server found (overlaps, failed model…): the one definition of a problem Object
     this.selected = null;
     this.mode = "prepare";
     this.limits = { bed: [0, 0, 256, 256], exclude: [246, 0, 256, 20], height: 256 };
@@ -323,18 +330,28 @@ export class Viewport {
     const out = new Map();
     const [x0, y0, x1, y1] = this.limits.bed;
     for (const [id, entry] of this.holders) {
-      const box = new THREE.Box3().setFromObject(entry.holder, false);
+      // by the mesh's own vertices, as _place centres it: the box of the turned bounding box is bigger for any part turned off the axes, so Arrange's valid layouts showed red
+      const box = new THREE.Box3().setFromObject(entry.holder, !!entry.geometry);
       const issues = [];
-      if (entry.failed) issues.push("import failed");
-      if (box.min.x < x0 - 0.01 || box.min.y < y0 - 0.01 || box.max.x > x1 + 0.01 || box.max.y > y1 + 0.01) issues.push("off the bed");
+      if (entry.failed) issues.push(PROBLEM.failedModel);
+      if (box.min.x < x0 - 0.01 || box.min.y < y0 - 0.01 || box.max.x > x1 + 0.01 || box.max.y > y1 + 0.01) issues.push(PROBLEM.offTheBed);
       if (box.max.z > this.limits.height + 0.01) issues.push("too tall");
       if (this.limits.exclude) {
         const [ex0, ey0, ex1, ey1] = this.limits.exclude;
-        if (box.max.x > ex0 && box.min.x < ex1 && box.max.y > ey0 && box.min.y < ey1) issues.push("over the purge area");
+        if (box.max.x > ex0 && box.min.x < ex1 && box.max.y > ey0 && box.min.y < ey1) issues.push(PROBLEM.overThePurgeArea);
+      }
+      for (const issue of this.serverIssues.get(id) || []) {
+        if (!issues.includes(issue)) issues.push(issue);
       }
       out.set(id, { box, issues });
     }
     return out;
+  }
+
+  /** The server's problem list (object id → issues) marks objects red too, e.g. for overlaps the viewport doesn't measure. */
+  setServerIssues(map) {
+    this.serverIssues = map;
+    this._refreshWarnings();
   }
 
   _refreshWarnings() {

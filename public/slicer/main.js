@@ -39,6 +39,8 @@ const state = {
   playing: null,        // { frame } while the preview plays the print
   hiddenFeatures: new Set(),
   problems: new Map(),
+  serverProblems: [],   // the server's list of problem objects (GET /status): off the bed, over the purge area, overlaps, failed model
+  problemReasons: {},   // plate id → why the server says that plate has a problem
   importFiles: [],
   jobs: [],             // queue jobs sent from this project
   printers: [],
@@ -131,6 +133,47 @@ const data = () => state.project.data;
 const plateById = id => data().plates.find(p => p.id === id) || null;
 const currentPlate = () => plateById(state.plate);
 const plateObjects = (plateId = state.plate) => data().objects.filter(o => o.plate === plateId);
+
+// One definition of a problem object: the server's list (loadProblems). The viewport's live measure only adds to it while an
+// object is being dragged or its move is not saved yet, so the step bar never disagrees with what the server will refuse.
+function objectIssues(objectId) {
+  const issues = state.serverProblems.filter(p => p.key === objectId).map(p => p.problem);
+  const moving = state.viewport?.transform?.dragging || state.saving || state.saveTimer || state.pendingSave;
+  const live = moving ? state.problems.get(objectId) : null;
+  return live ? [...new Set([...issues, ...live.issues])] : issues;
+}
+const plateHasProblem = plateId => plateObjects(plateId).some(o => objectIssues(o.id).length);
+const anyProblem = () => state.project ? data().objects.some(o => objectIssues(o.id).length) : false;
+
+async function loadProblems() {
+  if (!state.project) return;
+  const revision = state.project.revision;
+  let status = null;
+  try {
+    status = await api("GET", `/api/projects/${state.project.id}/status`);
+  } catch { /* the viewport's own measure still marks what it can */ }
+  if (!state.project) return;
+  if (state.project.revision !== revision) { loadProblems(); return; }   // edited meanwhile: this answer is for an older layout, ask again
+  state.serverProblems = status ? status.plates.flatMap(p => p.problems || []) : [];
+  state.problemReasons = status ? Object.fromEntries(status.plates.map(p => [p.id, p.problem_reason])) : {};
+  const byObject = new Map();
+  for (const p of state.serverProblems) byObject.set(p.key, [...(byObject.get(p.key) || []), p.problem]);
+  state.viewport?.setServerIssues(byObject);
+  renderObjects();
+  renderSteps();
+  renderSliceState();
+}
+
+// Select the first problem object (this plate's first) so the person sees what to fix.
+async function showProblem() {
+  const mine = plateObjects().find(o => objectIssues(o.id).length);
+  const target = mine || data().objects.find(o => objectIssues(o.id).length);
+  if (!target) return;
+  if (state.step !== "plates") await setStep("plates");
+  if (target.plate !== state.plate) await selectPlate(target.plate);
+  selectObject(target.id);
+  state.viewport?.fit(state.viewport.objectBox(target.id));
+}
 const selectedObject = () => data().objects.find(o => o.id === state.selected) || null;
 const sliceEntry = (plateId = state.plate) => state.project?.slices?.[String(plateId)] || null;
 // A G-code import is a project whose plate has no objects, only an imported Slice: Model, Split, Plates and Slice don't apply.
@@ -165,13 +208,14 @@ const openJobPlates = () => new Set(state.jobs.filter(j => OPEN_JOB_STATES.has(j
 // ── Loading ─────────────────────────────────────────────────────────────────────
 async function boot() {
   document.querySelectorAll("[data-steps], #prepare-tools").forEach(el => { el.hidden = true; });  // shown once a project is open
+  bindUi();   // first, so "Open or create a project" works even if the slower setup below fails
   const viewport = $("viewport");
   try {
     state.viewport = new Viewport(viewport, {
       onSelect: id => selectObject(id),
       onFace: face => faceClicked(face),
       onTransform: (id, change) => updateObject(id, change),
-      onProblems: problems => { state.problems = problems; renderObjects(); renderSliceState(); },
+      onProblems: problems => { state.problems = problems; renderObjects(); renderSteps(); renderSliceState(); },
     });
   } catch (err) {
     showMessage(`The 3D view isn't available in this browser: ${err.message}`);
@@ -208,7 +252,6 @@ async function boot() {
   });
   $("settings-mode").value = remember("slicer.mode") || (remember("slicer.advanced") === "1" ? "advanced" : "simple");
   $("settings-mode").addEventListener("change", e => remember("slicer.mode", e.target.value));
-  bindUi();
   try {
     state.schema = await (await fetch("/orca/settings.json")).json();
     state.settings.setSchema(state.schema);
@@ -405,6 +448,7 @@ async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   // A push deep link (?printer=) lands on the Print step, where that printer's card is.
   const landing = toPrinter && stepAvailable("print") ? "print" : saved && stepAvailable(saved) ? saved : defaultStep();
   await setStep(landing, { force: true });
+  loadProblems();
   schedulePoll();
 }
 
@@ -462,7 +506,7 @@ function stepDone(step) {
   switch (step) {
     case "model":  return !!split?.analysis;
     case "split":  return !!split?.result || data().objects.some(o => state.project.models.find(m => m.id === o.model)?.split?.part === 0);
-    case "plates": return data().objects.length > 0;
+    case "plates": return data().objects.length > 0 && !anyProblem();   // no check mark while a problem object remains
     case "slice":  return platesWithObjects().length > 0 && platesWithObjects().every(p => isUpToDate(p.id));
     case "queue":  return state.jobs.length > 0;
   }
@@ -605,6 +649,7 @@ async function save() {
     applyProject(project, { keepLocalData: localChangedMeanwhile });
     if (localChangedMeanwhile) state.project.revision = project.revision;
     $("save-state").textContent = "Saved";
+    loadProblems();
   } catch (err) {
     $("save-state").textContent = "Not saved";
     toast(err.message, true);
@@ -654,6 +699,7 @@ function schedulePoll() {
       const sliceChanged = JSON.stringify(fresh.slices) !== JSON.stringify(before.slices);
       state.project = { ...before, models: fresh.models, slices: fresh.slices };
       if (!state.saving && !state.saveTimer && fresh.revision !== before.revision) applyProject(fresh);
+      if (newModels.length || fresh.models.some((m, i) => m.state !== before.models[i]?.state)) loadProblems();   // a model failed or finished
       if (newModels.length) {
         await loadGeometry();
         // placeholders were fitted while importing; the real parts are usually far bigger
@@ -926,20 +972,26 @@ function renderPlates() {
   $("plate-tabs").innerHTML = tabs.join("");
 }
 
+function shortReason(error) {
+  const text = String(error || "the file couldn't be read").replace(/\s+/g, " ").trim();
+  return text.length > 60 ? `${text.slice(0, 57)}…` : text;
+}
+
 function renderObjects() {
   if (!state.project) return;
   const models = state.project.models;
   const rows = plateObjects().map(object => {
     const model = models.find(m => m.id === object.model);
-    const issues = state.problems.get(object.id)?.issues || [];
+    const issues = objectIssues(object.id);
     const status = model?.state === "importing" ? '<small>importing…</small>'
-      : model?.state === "failed" ? `<small class="bad" title="${esc(model.error)}">failed</small>`
+      : model?.state === "failed" ? `<small class="bad" title="${esc(model.error || "")}">Couldn't import — ${esc(shortReason(model.error))}</small>`
       : issues.length ? `<small class="bad">${esc(issues.join(", "))}</small>`
       : `<small>${(model?.size || []).map(v => Math.round(v * (object.scale[0] || 1))).join(" × ")} mm</small>`;
     const overrides = Object.keys(object.overrides || {}).length;
-    return `<div class="slicer-object${object.id === state.selected ? " selected" : ""}" data-object="${object.id}">
+    return `<div class="slicer-object${object.id === state.selected ? " selected" : ""}${model?.state === "failed" ? " failed" : ""}" data-object="${object.id}">
       <div class="slicer-object-name" title="${esc(object.name)}">${esc(object.name)}<br>${status}</div>
-      ${overrides ? `<span class="slicer-badge" title="Settings changed for this object">${overrides}</span>` : "<span></span>"}
+      ${model?.state === "failed" ? `<button class="btn btn-secondary btn-sm slicer-retry-btn" type="button" data-retry-model="${model.id}" title="Try importing this model again">Retry</button>`
+        : overrides ? `<span class="slicer-badge" title="Settings changed for this object">${overrides}</span>` : "<span></span>"}
       <button class="slicer-icon-btn" type="button" data-remove-object="${object.id}" title="Remove from the plate">✕</button>
     </div>`;
   });
@@ -1005,9 +1057,10 @@ function renderSliceState() {
   const el = $("slice-state");
   if (state.step !== "plates" && state.step !== "slice") { el.textContent = ""; return; }
   const status = plateStatus(state.plate);
-  const blocked = [...state.problems.values()].some(p => p.issues.length);
-  const text = blocked && status.cls !== "bad" ? "Fix the objects marked in red first" : `${currentPlate()?.name}: ${status.text}`;
-  el.textContent = text;
+  const blocked = anyProblem();
+  const reason = state.problemReasons[state.plate] || "Fix the objects marked in red first";
+  const text = blocked && status.cls !== "bad" ? reason : `${currentPlate()?.name}: ${status.text}`;
+  el.innerHTML = esc(text) + (blocked ? ' <button class="btn btn-secondary btn-sm" type="button" data-show-problem>Show</button>' : "");
   el.title = text;
   el.className = `slicer-slice-state ${blocked ? "bad" : status.cls}`;
 }
@@ -1338,12 +1391,11 @@ async function orientAll(wholeProject = false) {
   await flushSave();
   await withButton($("btn-orient-all"), async () => {
     const result = await api("POST", `/api/projects/${state.project.id}/orient-all`, wholeProject ? {} : { plate: state.plate });
-    const { oriented, unchanged, pinned } = result.orient;
     state.orientSuggestion = null;
     applyProject(result);
-    if (oriented.length) recordEdit();
+    if (result.orient.oriented.length) recordEdit();
     renderAll();
-    toast(`Turned ${plural(oriented.length, "object")}, ${unchanged.length} already fine` + (pinned.length ? `, ${pinned.length} pinned left alone` : ""));
+    toast(result.outcome || "Oriented");   // the server's one line, "Turned 0 objects, ..." included
   });
 }
 
@@ -1459,12 +1511,11 @@ async function arrange() {
   await flushSave();
   const button = $("btn-arrange");
   await withButton(button, async () => {
-    const before = data().plates.length;
-    applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${state.plate}/arrange`, { engine: arrangeEngine() }));
+    const result = await api("POST", `/api/projects/${state.project.id}/plates/${state.plate}/arrange`, { engine: arrangeEngine() });
+    applyProject(result);
     recordEdit();
     renderAll();
-    const added = data().plates.length - before;
-    toast(added > 0 ? `Plate arranged; objects that didn't fit or differ in filament went on ${plural(added, "new plate")}` : "Plate arranged");
+    toast(arrangeOutcome(result));
   });
 }
 
@@ -1472,15 +1523,18 @@ async function arrangeAll() {
   await flushSave();
   await withButton($("btn-arrange"), async () => {
     if (!platesWithObjects().length) { toast("Nothing to arrange"); return; }
-    const before = data().plates.length;
-    applyProject(await api("POST", `/api/projects/${state.project.id}/arrange`, { engine: arrangeEngine() }));
+    const result = await api("POST", `/api/projects/${state.project.id}/arrange`, { engine: arrangeEngine() });
+    applyProject(result);
     recordEdit();
     renderAll();
     state.viewport?.fit(state.viewport.objectsBox());
-    const after = data().plates.length;
-    toast(after < before ? `Arranged onto ${plural(after, "plate")} (was ${before})` : `Arranged — ${plural(after, "plate")}`);
+    toast(arrangeOutcome(result));
   });
 }
+
+// Every Arrange response carries "outcome", one line saying what happened (including objects skipped because their
+// model failed to import); the toast always shows it, so Arrange is never a silent no-op.
+const arrangeOutcome = result => result.outcome || "Arranged";
 
 const arrangeEngine = () => $("arrange-engine").value === "orca" ? "orca" : "nester";
 
@@ -1545,20 +1599,38 @@ function planSheetHtml(plan) {
       ${SHOW_PLAN_SECONDS && plate.time_estimate?.seconds ? `<div class="slicer-muted">${planTime(plate.time_estimate.seconds)}</div>` : ""}
     </div>`).join("");
   const kept = plan.kept.length ? `<h4>Kept as they are</h4><ul class="plan-kept">${plan.kept.map(k => `<li><b>${esc(k.name)}</b> <span class="slicer-muted">${esc(k.reason)}</span></li>`).join("")}</ul>` : "";
-  return `<p class="slicer-muted">Now ${plural(before, "plate")}. Plan: ${esc(plan.summary)}${plan.plates.length > 1 ? ", longest first" : ""}.</p>
+  const tilt = `<label class="slicer-check" title="Without this an object only goes onto a side of its own box; with it, an object may lean on an angled face"><input type="checkbox" id="plan-tilt"${state.planTilt ? " checked" : ""}> Allow tilting objects onto angled faces</label>`;
+  const refused = plan.refused ? `<p class="slicer-error" role="alert">No plan is offered: ${esc(plan.refused)}. Nothing was changed.</p>` : "";
+  const summary = plan.refused ? "" : `<p class="slicer-muted">Now ${plural(before, "plate")}. Plan: ${esc(plan.summary)}${plan.plates.length > 1 ? ", longest first" : ""}.</p>`;
+  return `${summary}
+    ${refused}${tilt}
     ${plan.plates.length ? `<div class="plan-grid">${cards}</div>` : ""}${kept}`;
 }
 
 async function planPlates() {
   await flushSave();
+  state.planTilt = false;
   await withButton($("btn-plan-plates"), async () => {
-    const plan = await api("POST", `/api/projects/${state.project.id}/plan`, {});
-    state.plan = plan;
-    $("plan-body").innerHTML = planSheetHtml(plan);
-    $("plan-error").textContent = "";
-    $("plan-accept").disabled = !plan.plates.length;
+    await showPlan();
     $("dlg-plan").showModal();
   });
+}
+
+async function showPlan() {
+  const plan = await api("POST", `/api/projects/${state.project.id}/plan`, { allow_tilt: !!state.planTilt });
+  state.plan = plan;
+  $("plan-body").innerHTML = planSheetHtml(plan);
+  $("plan-tilt").addEventListener("change", async event => {
+    state.planTilt = event.target.checked;
+    try {
+      await showPlan();
+    } catch (err) {
+      event.target.checked = state.planTilt = !state.planTilt;   // the sheet still shows the plan that was asked for
+      $("plan-error").textContent = err.message;
+    }
+  });
+  $("plan-error").textContent = "";
+  $("plan-accept").disabled = !plan.plates.length;
 }
 
 async function acceptPlan() {
@@ -1566,7 +1638,7 @@ async function acceptPlan() {
   if (!plan) return;
   await withButton($("plan-accept"), async () => {
     try {
-      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision, fingerprint: plan.fingerprint });
+      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision, fingerprint: plan.fingerprint, allow_tilt: !!state.planTilt });
       applyProject(result);
       recordEdit();
       state.plan = null;
@@ -1909,6 +1981,9 @@ function bindUi() {
     const btn = e.target.closest("[data-step]");
     if (btn && !btn.disabled) setStep(btn.dataset.step);
   });
+  $("slice-state").addEventListener("click", e => {
+    if (e.target.closest("[data-show-problem]")) showProblem();
+  });
   $("step-actions").addEventListener("click", e => {
     const btn = e.target.closest("[data-go]");
     if (btn && !btn.disabled) setStep(btn.dataset.go);
@@ -2013,7 +2088,21 @@ function bindUi() {
     }
   });
 
-  $("object-list").addEventListener("click", e => {
+  $("object-list").addEventListener("click", async e => {
+    const retry = e.target.closest("[data-retry-model]");
+    if (retry) {
+      retry.disabled = true;
+      try {
+        const fresh = await api("POST", `/api/projects/${state.project.id}/models/${retry.dataset.retryModel}/retry`);
+        state.project = { ...state.project, models: fresh.models };
+        renderAll();
+        schedulePoll();
+      } catch (err) {
+        toast(err.message, true);
+        retry.disabled = false;
+      }
+      return;
+    }
     const remove = e.target.closest("[data-remove-object]");
     if (remove) {
       const id = Number(remove.dataset.removeObject);
