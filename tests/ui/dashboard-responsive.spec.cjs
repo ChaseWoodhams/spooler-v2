@@ -1,54 +1,31 @@
 const { chromium } = require("playwright");
-const { spawn } = require("node:child_process");
-const { mkdtemp, rm } = require("node:fs/promises");
-const net = require("node:net");
-const os = require("node:os");
+const { readFile } = require("node:fs/promises");
+const http = require("node:http");
 const path = require("node:path");
 const viewports = [
   [320, 640], [360, 800], [390, 844], [430, 932],
   [667, 375], [844, 390], [768, 1024], [1024, 768], [1440, 1000],
 ];
 
-async function freePort() {
-  const server = net.createServer();
-  await new Promise((resolve, reject) => server.once("error", reject).listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
-  await new Promise(resolve => server.close(resolve));
-  return port;
-}
-
-async function waitForServer(url, child, getLogs) {
-  const until = Date.now() + 30000;
-  while (Date.now() < until) {
-    if (child.exitCode !== null) throw new Error(`Spooler test server exited with code ${child.exitCode}: ${getLogs()}`);
-    try {
-      const response = await fetch(`${url}/api/health`);
-      if (response.ok) return;
-    } catch {}
-    await new Promise(resolve => setTimeout(resolve, 150));
-  }
-  throw new Error(`Spooler test server did not become ready within 30 seconds: ${getLogs()}`);
-}
-
 (async () => {
   const root = path.resolve(__dirname, "../..");
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), "spooler-ui-test-"));
-  const httpPort = await freePort();
-  let wsPort = await freePort();
-  while (wsPort === httpPort) wsPort = await freePort();
-  const baseUrl = `http://127.0.0.1:${httpPort}`;
-  const python = process.env.SPOOLER_PYTHON || path.join(root, ".venv", "Scripts", "python.exe");
-  const server = spawn(python, ["server.py"], {
-    cwd: root,
-    env: { ...process.env, AUTH_ENABLED: "false", HTTP_PORT: String(httpPort), HTTPS_ENABLED: "false", WS_PORT: String(wsPort), DATA_DIR: dataDir, PYTHONUTF8: "1" },
-    stdio: ["ignore", "pipe", "pipe"],
+  const server = http.createServer(async (request, response) => {
+    try {
+      const pathname = new URL(request.url, "http://localhost").pathname;
+      if (pathname === "/config.js") {
+        response.setHeader("Content-Type", "text/javascript");
+        return response.end("window.SPOOLER_WS_PORT = 1;");
+      }
+      const filename = path.join(root, "public", pathname === "/" ? "index.html" : pathname);
+      const content = await readFile(filename);
+      response.setHeader("Content-Type", filename.endsWith(".js") ? "text/javascript" : filename.endsWith(".css") ? "text/css" : "text/html");
+      response.end(content);
+    } catch { response.writeHead(404).end(); }
   });
-  let serverLogs = "";
-  server.stdout.setEncoding("utf8").on("data", chunk => { serverLogs += chunk; });
-  server.stderr.setEncoding("utf8").on("data", chunk => { serverLogs += chunk; });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
   let browser;
   try {
-    await waitForServer(baseUrl, server, () => serverLogs);
     browser = await chromium.launch({ headless: true });
     for (const [width, height] of viewports) {
       const page = await browser.newPage({ viewport: { width, height }, serviceWorkers: "block" });
@@ -103,8 +80,6 @@ async function waitForServer(url, child, getLogs) {
 
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: "block" });
     page.on("pageerror", error => console.error("Browser error:", error.message));
-    page.on("response", response => { if (response.url().includes("printer-cockpit")) console.log("Cockpit response", response.status()); });
-    page.on("requestfailed", request => console.error("Request failed", request.url(), request.failure()?.errorText));
     await page.routeWebSocket(/.*/, ws => ws.close());
     let catalogueAttempts = 0;
     await page.route("**/api/**", route => {
@@ -233,8 +208,6 @@ async function waitForServer(url, child, getLogs) {
     await page.close();
   } finally {
     if (browser) await browser.close();
-    server.kill();
-    await new Promise(resolve => server.once("exit", resolve));
-    await rm(dataDir, { recursive: true, force: true });
+    await new Promise(resolve => server.close(resolve));
   }
 })().catch(error => { console.error(error); process.exit(1); });

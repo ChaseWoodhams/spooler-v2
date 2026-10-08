@@ -1211,7 +1211,11 @@ window.openSidePanel = function openSidePanel(panel, opener = document.activeEle
   document.getElementById("panel-backdrop")?.classList.add("open");
   document.body.classList.add("panel-open");
   activeSidePanel = panel;
-  requestAnimationFrame(() => panel.querySelector(sidePanelFocusable)?.focus());
+  requestAnimationFrame(() => {
+    if (panel.classList.contains("open") && !panel.contains(document.activeElement) && !document.querySelector(".modal.open")) {
+      panel.querySelector(sidePanelFocusable)?.focus();
+    }
+  });
 };
 
 window.closeSidePanel = function closeSidePanel(panel, restoreFocus = true) {

@@ -86,6 +86,11 @@ async function cockpit(fixture) {
   assert.equal(await nozzle.getAttribute('max'), '300');
   assert.equal(await page.getByRole('spinbutton', { name: 'Bed target temperature (°C)' }).getAttribute('max'), '110');
   await expectText(page.getByRole('tabpanel'), /Zero turns heating off/);
+  await nozzle.fill('301');
+  await page.getByRole('button', { name: 'Apply nozzle target', exact: true }).click();
+  assert.equal(await nozzle.evaluate(el => el.validity.rangeOverflow), true);
+  await nozzle.fill('0');
+  await temperatures.focus();
   await page.keyboard.press('ArrowRight');
   assert.equal(await page.getByRole('slider', { name: 'Print speed', exact: true }).isDisabled(), true);
   await page.keyboard.press('Home');
@@ -281,7 +286,7 @@ async function notificationRecovery(fixture) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const browser = await chromium.launch();
   try {
-    for (const width of [390, 1440]) {
+    for (const width of [320, 390, 430, 768, 1440]) {
       for (const scenario of [cockpit, inventory, settings, notificationRecovery]) {
         const fixture = await fixturePage(browser, `http://127.0.0.1:${server.address().port}`, width);
         try { await scenario(fixture); assertReadOnlyCommands(fixture); } finally { await fixture.context.close(); }
