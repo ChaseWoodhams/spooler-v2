@@ -191,6 +191,25 @@ const split = {id:1, source_name:'fixture-small.stl', state:'ready', settings:{s
     await page.locator('[data-step="queue"]').click();await page.locator('[data-step="print"]').click();
     await page.locator('.pp-progress').getByText(/1 failed/).waitFor({timeout:5000});
     console.log('PASS: Queued, printing and failed Project states transition without physical printer commands');
+    await page.addInitScript(()=>localStorage.setItem('theme','light'));
+    await page.reload();
+    assert.equal(await page.locator('body').evaluate(element=>element.classList.contains('light-mode')),true);
+    console.log('PASS: Project workspace retains the user’s chosen light theme');
+    await page.locator('.pp-chip').first().waitFor({timeout:5000});
+    for(const theme of ['light','dark']) {
+      await page.evaluate(theme=>window.dispatchEvent(new StorageEvent('storage',{key:'theme',newValue:theme})),theme);
+      const measurements=await page.evaluate(()=>{
+        const rgb=color=>color.match(/[\d.]+/g).map(Number);
+        const lum=color=>{const c=color.slice(0,3).map(x=>{x/=255;return x<=0.04045?x/12.92:((x+0.055)/1.055)**2.4;});return c[0]*0.2126+c[1]*0.7152+c[2]*0.0722;};
+        const background=element=>{const layers=[];for(let el=element;el;el=el.parentElement)layers.unshift(rgb(getComputedStyle(el).backgroundColor));return layers.reduce((base,top)=>{const a=top[3]??1;return [0,1,2].map(i=>top[i]*a+base[i]*(1-a));},[255,255,255]);};
+        return [...document.querySelectorAll('.pp-chip,.slicer-step.active .num')].filter(el=>el.getClientRects().length).map(el=>{
+          const fg=lum(rgb(getComputedStyle(el).color)),bg=lum(background(el));return {label:el.textContent,ratio:(Math.max(fg,bg)+0.05)/(Math.min(fg,bg)+0.05)};
+        });
+      });
+      assert.ok(measurements.length>0);
+      for(const sample of measurements) assert.ok(sample.ratio>=4.5,`${theme} ${sample.label}: ${sample.ratio.toFixed(2)} contrast`);
+    }
+    console.log('PASS: Project status labels and current-step numbers measure at least 4.5:1 in both themes');
   } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});
 

@@ -389,6 +389,20 @@ body.embedded .slicer-home { display: none; }
 .slicer-batch-summary { padding: 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 .slicer-batch-summary ul { padding-left: 20px; }
 .slicer-slice-state { white-space: normal; overflow: visible; }
+.slicer-float { background: var(--surface); }
+.slicer-error { color: var(--red); }
+.slicer-step.active .num, .slicer-mode .btn.active, .slicer-tabs .btn.active,
+.slicer-toolbar .btn.active, .scope-toggle button.active { background: var(--accent-dim); border-color: var(--accent-dim); color: #fff; }
+.project-page .st-unsliced { --c: var(--text-muted); }
+.project-page .st-sliced { --c: var(--blue); }
+.project-page .st-queued { --c: var(--yellow); }
+.project-page .st-waiting { --c: #c4a2ff; }
+.project-page .st-printing { --c: var(--accent); }
+.project-page .st-printed_ok { --c: var(--green); }
+.project-page .st-failed { --c: var(--red); }
+.light-mode .project-page .st-waiting { --c: #6b21a8; }
+.light-mode .pp-cell.sel { color: #fff; }
+.pp-warn, .slicer-warn { color: var(--red); }
 .slicer-tool-group { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 4px; background: var(--surface); }
 .slicer-tool-group > span { color: var(--text-muted); font-size: 12px; }
 .slicer-toolbar { flex-wrap: wrap; right: 10px; }
