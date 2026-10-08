@@ -58,28 +58,35 @@ let _fileBrowserOpener = null;
 const _cameraPreferences = new Map();
 let _cameraResizeTimer = null;
 let _materialDensityMap = {}; // material name → density g/cm³
+let _filamentMetaSequence = 0;
 let _activePrinterId = null;
 let _detailJogStep = 1;
 
 // ─── Filament metadata (brands + materials from SpoolmanDB) ───────────────────
 async function loadFilamentMeta({ preserve = true } = {}) {
+  const sequence = ++_filamentMetaSequence;
   const status = document.getElementById("spool-catalogue-status");
   const retry = document.getElementById("btn-spool-catalogue-retry");
   const bSel = document.getElementById("spool-input-brand");
   const mSel = document.getElementById("spool-input-material");
   const brandOtherInput = document.getElementById("spool-input-brand-other");
   const materialOtherInput = document.getElementById("spool-input-material-other");
-  const oldBrand = preserve ? bSel.value : "";
-  const oldMaterial = preserve ? mSel.value : "";
-  const oldBrandText = brandOtherInput.value;
-  const oldMaterialText = materialOtherInput.value;
+  let oldBrand, oldMaterial, oldBrandText, oldMaterialText;
+  const rememberSelection = () => {
+    oldBrand = preserve ? bSel.value : "";
+    oldMaterial = preserve ? mSel.value : "";
+    oldBrandText = brandOtherInput.value;
+    oldMaterialText = materialOtherInput.value;
+  };
   status.textContent = "Loading brand and material catalogue… You can enter either manually using Other.";
   status.dataset.state = "loading";
   retry.hidden = true;
   try {
-    const r = await fetch("/api/filament-meta");
+    const r = await fetch("/api/filament-meta", { signal: AbortSignal.timeout(15000) });
     if (!r.ok) throw new Error(`Catalogue request failed (${r.status})`);
     const data = await r.json();
+    if (sequence !== _filamentMetaSequence) return;
+    rememberSelection();
     const brands = Array.isArray(data.brands) ? data.brands : [];
     const materials = Array.isArray(data.materials) ? data.materials : [];
 
@@ -122,6 +129,8 @@ async function loadFilamentMeta({ preserve = true } = {}) {
       : "Catalogue is empty. Choose Other to enter the brand and material manually.";
     status.dataset.state = brands.length || materials.length ? "ok" : "empty";
   } catch (error) {
+    if (sequence !== _filamentMetaSequence) return;
+    rememberSelection();
     _materialDensityMap = {};
     bSel.innerHTML = '<option value="">Catalogue unavailable</option><option value="__other__">Other…</option>';
     mSel.innerHTML = '<option value="">Catalogue unavailable</option><option value="__other__">Other…</option>';
@@ -1558,8 +1567,26 @@ async function _pushWorkerReady() {
 
 // Notifications sub-page UI
 async function _populateNotifForm() {
-  const resp = await fetch("/api/notification-settings").catch(() => null);
-  const s = resp?.ok ? await resp.json().catch(() => ({})) : {};
+  const save = document.getElementById("btn-notif-save");
+  const retry = document.getElementById("btn-notif-load-retry");
+  const fields = [..._settingsNotifPage.querySelectorAll("input")];
+  save.disabled = true;
+  fields.forEach(field => field.disabled = true);
+  retry.hidden = true;
+  _settingsNotifPage.setAttribute("aria-busy", "true");
+  _settingsFeedback("Loading notification settings…", "info");
+  let s;
+  try {
+    const resp = await fetch("/api/notification-settings", { signal: AbortSignal.timeout(15000) });
+    if (!resp.ok) throw new Error(`Request failed (${resp.status})`);
+    s = await resp.json();
+    if (!s || typeof s !== "object" || Array.isArray(s)) throw new Error("Invalid settings response");
+  } catch (error) {
+    _settingsFeedback(`Could not load notification settings: ${error.message}. Check the connection and retry before saving.`, "error");
+    retry.hidden = false;
+    _settingsNotifPage.setAttribute("aria-busy", "false");
+    return;
+  }
   const set = (id, val) => {
     const el = document.getElementById(id);
     if (el) el[typeof val === "boolean" ? "checked" : "value"] = val;
@@ -1574,7 +1601,12 @@ async function _populateNotifForm() {
   set("notif-spool-low-on",              s.spool_low?.enabled       ?? false);
   set("notif-spool-low-threshold",       s.spool_low?.threshold     ?? 100);
   _syncNotifParams();
+  save.disabled = false;
+  fields.forEach(field => field.disabled = false);
+  _settingsNotifPage.setAttribute("aria-busy", "false");
+  _settingsFeedback("Notification settings loaded.", "info");
 }
+document.getElementById("btn-notif-load-retry")?.addEventListener("click", _populateNotifForm);
 
 function _syncNotifParams() {
   const show = (paramId, checkId) => {

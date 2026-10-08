@@ -7,7 +7,7 @@
     "test": "tests"
   },
   "scripts": {
-    "test:ui": "node tests/ui/dashboard-responsive.spec.cjs"
+    "test:ui": "node tests/ui/run.cjs"
   },
   "repository": {
     "type": "git",

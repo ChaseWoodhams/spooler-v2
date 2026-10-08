@@ -135,12 +135,16 @@ async function inventory(fixture) {
   await waitState(page, 'spool-catalogue-status', 'loading');
   await page.locator('#spool-input-weight').fill('750');
   await page.locator('#spool-input-color').fill('Entered blue');
+  await page.locator('#spool-input-material').selectOption('__other__');
+  await page.getByRole('textbox', { name: 'Material name', exact: true }).fill('Manual PLA');
   await waitForFixture(() => fixture.catalogueRelease, 'Catalogue loading fixture');
   fixture.catalogueMode = 'empty'; fixture.catalogueRelease();
   await waitState(page, 'spool-catalogue-status', 'empty');
   await expectText(page.locator('#spool-catalogue-status'), /Other/);
   assert.equal(await page.locator('#spool-input-weight').inputValue(), '750');
   assert.equal(await page.locator('#spool-input-color').inputValue(), 'Entered blue');
+  assert.equal(await page.getByRole('textbox', { name: 'Material name', exact: true }).inputValue(), 'Manual PLA', 'Manual selection made during loading is preserved');
+  assert.equal(await page.locator('#spool-input-material').inputValue(), '__other__', 'Manual material remains selected when catalogue finishes');
   await page.locator('#spool-input-material').selectOption('__other__');
   await page.getByRole('textbox', { name: 'Material name', exact: true }).fill('Manual PLA');
   await page.locator('#btn-add-spool-confirm').click();

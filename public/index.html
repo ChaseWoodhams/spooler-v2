@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=58" />
+  <link rel="stylesheet" href="style.css?v=59" />
   <link rel="stylesheet" href="history-quality.css?v=1" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
@@ -580,6 +580,7 @@
       </div>
       <!-- Notifications sub-page -->
       <div id="settings-notifications" style="display:none">
+        <button id="btn-notif-load-retry" class="btn btn-secondary" hidden>Retry notification settings</button>
         <div class="settings-subpage-header">
           <button id="btn-settings-back-notif" class="settings-back-btn" aria-label="Back to Settings" title="Back">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
@@ -820,16 +821,16 @@
   <div id="toast-area"></div>
 
   <script src="/config.js"></script>
-  <script src="health.js?v=1"></script>
-  <script src="jobs.js?v=6"></script>
-  <script src="preview.js?v=1"></script>
+  <script src="health.js?v=2"></script>
+  <script src="jobs.js?v=7"></script>
+  <script src="preview.js?v=2"></script>
   <script src="history.js?v=8"></script>
   <script src="outcome-prompt.js?v=4"></script>
-  <script src="app.js?v=67"></script>
-  <script src="quick-print.js?v=4"></script>
+  <script src="app.js?v=68"></script>
+  <script src="quick-print.js?v=5"></script>
   <script src="import.js?v=4"></script>
   <script src="dashboard.js?v=2"></script>
-  <script src="printer-cockpit.js"></script>
+  <script src="printer-cockpit.js?v=1"></script>
   <script>
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
