@@ -134,12 +134,13 @@ const plateById = id => data().plates.find(p => p.id === id) || null;
 const currentPlate = () => plateById(state.plate);
 const plateObjects = (plateId = state.plate) => data().objects.filter(o => o.plate === plateId);
 
-// One definition of a problem object: the server's list (loadProblems), with the viewport's live measure on top while an
-// object is being dragged. The viewport already folds the server list in, so its answer wins where it has one.
+// One definition of a problem object: the server's list (loadProblems). The viewport's live measure only adds to it while an
+// object is being dragged or its move is not saved yet, so the step bar never disagrees with what the server will refuse.
 function objectIssues(objectId) {
-  const live = state.problems.get(objectId);
-  if (live) return live.issues;
-  return state.serverProblems.filter(p => p.key === objectId).map(p => p.problem);
+  const issues = state.serverProblems.filter(p => p.key === objectId).map(p => p.problem);
+  const moving = state.viewport?.transform?.dragging || state.saving || state.saveTimer || state.pendingSave;
+  const live = moving ? state.problems.get(objectId) : null;
+  return live ? [...new Set([...issues, ...live.issues])] : issues;
 }
 const plateHasProblem = plateId => plateObjects(plateId).some(o => objectIssues(o.id).length);
 const anyProblem = () => state.project ? data().objects.some(o => objectIssues(o.id).length) : false;
@@ -151,7 +152,8 @@ async function loadProblems() {
   try {
     status = await api("GET", `/api/projects/${state.project.id}/status`);
   } catch { /* the viewport's own measure still marks what it can */ }
-  if (!state.project || state.project.revision !== revision) return;   // edited meanwhile: the next save asks again
+  if (!state.project) return;
+  if (state.project.revision !== revision) { loadProblems(); return; }   // edited meanwhile: this answer is for an older layout, ask again
   state.serverProblems = status ? status.plates.flatMap(p => p.problems || []) : [];
   state.problemReasons = status ? Object.fromEntries(status.plates.map(p => [p.id, p.problem_reason])) : {};
   const byObject = new Map();
@@ -1597,9 +1599,10 @@ function planSheetHtml(plan) {
       ${SHOW_PLAN_SECONDS && plate.time_estimate?.seconds ? `<div class="slicer-muted">${planTime(plate.time_estimate.seconds)}</div>` : ""}
     </div>`).join("");
   const kept = plan.kept.length ? `<h4>Kept as they are</h4><ul class="plan-kept">${plan.kept.map(k => `<li><b>${esc(k.name)}</b> <span class="slicer-muted">${esc(k.reason)}</span></li>`).join("")}</ul>` : "";
-  const tilt = `<label class="slicer-check" title="Without this a part only goes onto a side of its own box; with it, a part may lean on an angled face"><input type="checkbox" id="plan-tilt"${state.planTilt ? " checked" : ""}> Allow tilting parts onto angled faces</label>`;
+  const tilt = `<label class="slicer-check" title="Without this an object only goes onto a side of its own box; with it, an object may lean on an angled face"><input type="checkbox" id="plan-tilt"${state.planTilt ? " checked" : ""}> Allow tilting objects onto angled faces</label>`;
   const refused = plan.refused ? `<p class="slicer-error" role="alert">No plan is offered: ${esc(plan.refused)}. Nothing was changed.</p>` : "";
-  return `<p class="slicer-muted">Now ${plural(before, "plate")}. Plan: ${esc(plan.summary)}${plan.plates.length > 1 ? ", longest first" : ""}.</p>
+  const summary = plan.refused ? "" : `<p class="slicer-muted">Now ${plural(before, "plate")}. Plan: ${esc(plan.summary)}${plan.plates.length > 1 ? ", longest first" : ""}.</p>`;
+  return `${summary}
     ${refused}${tilt}
     ${plan.plates.length ? `<div class="plan-grid">${cards}</div>` : ""}${kept}`;
 }
@@ -1619,7 +1622,12 @@ async function showPlan() {
   $("plan-body").innerHTML = planSheetHtml(plan);
   $("plan-tilt").addEventListener("change", async event => {
     state.planTilt = event.target.checked;
-    await showPlan();
+    try {
+      await showPlan();
+    } catch (err) {
+      event.target.checked = state.planTilt = !state.planTilt;   // the sheet still shows the plan that was asked for
+      $("plan-error").textContent = err.message;
+    }
   });
   $("plan-error").textContent = "";
   $("plan-accept").disabled = !plan.plates.length;
