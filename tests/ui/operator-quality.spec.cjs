@@ -24,7 +24,8 @@ async function fixturePage(browser, baseUrl, width) {
   const page = await context.newPage();
   page.on("pageerror", error => console.error("Operator browser error:", error.message));
   const fixture = { page, context, commands: [], sockets: [], inventory: [], inventoryMode: 'ready', assignmentFail: true,
-    catalogueMode: 'ready', notificationLoadFail: false, notificationSaved: {}, inventoryRelease: null, catalogueRelease: null, patches: [], notificationPosts: 0 };
+    catalogueMode: 'ready', notificationLoadFail: false, notificationSaved: {}, notificationSaveOk: false,
+    notificationPosts: 0, notificationSavedBody: null, inventoryRelease: null, catalogueRelease: null, patches: [] };
   await page.routeWebSocket(/.*/, socket => {
     fixture.sockets.push(socket);
     socket.onMessage(message => {
@@ -59,6 +60,8 @@ async function fixturePage(browser, baseUrl, width) {
       : route.fulfill({ json: fixture.notificationSaved });
     if (url.pathname === '/api/notification-settings' && request.method() === 'POST') {
       fixture.notificationPosts++;
+      fixture.notificationSavedBody = request.postDataJSON();
+      if (fixture.notificationSaveOk) return route.fulfill({ json: { ok: true } });
       return route.fulfill({ status: 503, json: { error: 'Fixture notification save unavailable' } });
     }
     return route.fulfill({ json: {} });
@@ -103,6 +106,15 @@ async function cockpit(fixture) {
   assert.equal(await page.getByRole('tab', { name: 'Files', exact: true }).getAttribute('aria-selected'), 'true');
   await page.keyboard.press('ArrowLeft');
   assert.equal(await page.getByRole('slider', { name: 'Print speed', exact: true }).isEnabled(), true);
+  const fanSlider = page.getByRole('slider', { name: 'Model fan', exact: true });
+  await fanSlider.evaluate(el => { el.value = '40'; el.dispatchEvent(new Event('input', { bubbles: true })); el.focus(); });
+  await fixture.updatePrinter({ status: { ...printer.status, CurrentFanSpeed: { ModelFan: 85 }, PrintInfo: { Status: 3, PrintSpeedPct: 130 } } });
+  await page.waitForFunction(() => document.querySelector('#detail-speed-slider')?.value === '130');
+  assert.equal(await fanSlider.evaluate(el => document.activeElement === el), true);
+  assert.equal(await fanSlider.inputValue(), '40');
+  assert.equal(await page.locator('#detail-model-value').innerText(), '40%');
+  assert.equal(await page.evaluate(() => typeof window.protoTab), 'undefined');
+  assert.equal(await page.evaluate(() => typeof window.selectPrinterTab), 'function');
   await fixture.updatePrinter({ connected: false });
   await expectText(page.getByRole('tabpanel'), /Printer offline/);
   assert.equal(await page.getByRole('slider', { name: 'Model fan', exact: true }).isDisabled(), true);
@@ -177,6 +189,14 @@ async function inventory(fixture) {
   assert.equal(await pickerOpener.evaluate(el => document.activeElement === el), true);
   await pickerOpener.click();
   const spoolButton = page.getByRole('button', { name: /Fixture brand PLA Blue/ });
+  fixture.inventoryMode = 'loading';fixture.inventoryRelease = null;
+  for (const socket of fixture.sockets) socket.close();
+  await waitForFixture(() => typeof fixture.inventoryRelease === 'function', 'reconnected inventory refresh');
+  assert.equal(await spoolButton.isEnabled(), false, 'Open picker disables stale assignment rows as soon as inventory refresh starts');
+  await spoolButton.evaluate(button => button.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+  assert.equal(fixture.patches.length, 0, 'Loading inventory cannot be assigned even by an already-dispatched click');
+  fixture.inventoryMode = 'ready';fixture.inventoryRelease();
+  await waitState(page, 'spools-status', 'ready');
   await spoolButton.focus();
   await page.keyboard.press('Enter');
   await waitState(page, 'spool-picker-feedback', 'error');
@@ -210,6 +230,12 @@ async function settings(fixture) {
   assert.equal(await page.locator('#settings-edit-access-code').evaluate(el => document.activeElement === el), true);
   await page.locator('#settings-edit-type').selectOption('prusa');
   await expectText(page.locator('#settings-printer-edit'), /experimental.*API address.*credentials/s);
+  assert.equal(fixture.commands.some(command => ['add_printer', 'update_printer'].includes(command.action)), false);
+  await page.locator('#btn-settings-back-printer-edit').click();
+  await page.locator('#settings-printer-list').getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.locator('#settings-edit-ip').fill('');
+  await page.locator('#btn-settings-printer-save').click();
+  assert.equal(await page.locator('#settings-edit-ip').evaluate(el => document.activeElement === el), true);
   assert.equal(fixture.commands.some(command => ['add_printer', 'update_printer'].includes(command.action)), false);
   await page.locator('#btn-settings-back-printer-edit').click();
   await page.locator('#settings-printer-list').getByRole('button', { name: 'Edit', exact: true }).click();
@@ -249,6 +275,29 @@ async function settings(fixture) {
   assert.equal(await page.evaluate(() => document.activeElement.id), page.viewportSize().width < 641 ? 'btn-mobile-more' : 'btn-app-settings');
   console.log(`Settings printer/notification validation PASS ${page.viewportSize().width}`);
 }
+
+async function pushDeliveryWarning(fixture) {
+  const { page } = fixture;
+  fixture.notificationSaveOk = true;
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'Notification', { configurable: true, value: { permission: 'granted', requestPermission: async () => 'granted' } });
+    Object.defineProperty(window, 'PushManager', { configurable: true, value: function PushManager() {} });
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { register: async () => ({ pushManager: { subscribe: async () => { throw new Error('Fixture push failure'); } } }) } });
+  });
+  await page.reload();
+  if (page.viewportSize().width < 641) { await page.locator('#btn-mobile-more').click(); await page.locator('#btn-mobile-settings').click(); }
+  else await page.locator('#btn-app-settings').click();
+  await page.locator('#btn-settings-goto-notifications').click();
+  await page.locator('#notif-layer-on').check();
+  await page.locator('#btn-notif-save').click();
+  await page.waitForFunction(() => document.getElementById('settings-feedback').textContent.includes('push delivery is not registered'));
+  assert.equal(await page.locator('#settings-notifications').isVisible(), true);
+  assert.match(await page.locator('#settings-feedback').innerText(), /browser notification permission.*service worker/i);
+  assert.equal(fixture.notificationSavedBody?.layer?.enabled, true);
+  assert.equal(fixture.notificationPosts, 1);
+  fixture.notificationSaveOk = false;
+  console.log(`Push warning remains persistent after settings save PASS ${page.viewportSize().width}`);
+}
 async function notificationRecovery(fixture) {
   const { page } = fixture;
   fixture.notificationLoadFail = true;
@@ -287,7 +336,7 @@ async function notificationRecovery(fixture) {
   const browser = await chromium.launch();
   try {
     for (const width of [320, 390, 430, 768, 1440]) {
-      for (const scenario of [cockpit, inventory, settings, notificationRecovery]) {
+      for (const scenario of [cockpit, inventory, settings, notificationRecovery, pushDeliveryWarning]) {
         const fixture = await fixturePage(browser, `http://127.0.0.1:${server.address().port}`, width);
         try { await scenario(fixture); assertReadOnlyCommands(fixture); } finally { await fixture.context.close(); }
       }

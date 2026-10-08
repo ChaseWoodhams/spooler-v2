@@ -743,6 +743,28 @@ window.addEventListener("resize", () => {
   }, 120);
 });
 
+function _validatePrinterFields({ ipInput, ipError, credentialInput, credentialError, credentialRequired }) {
+  if (!ipInput.value.trim()) {
+    ipInput.setAttribute("aria-invalid", "true");
+    ipError.textContent = "Enter the printer IP address before saving.";
+    ipError.hidden = false;
+    ipInput.focus();
+    return false;
+  }
+  ipInput.removeAttribute("aria-invalid");
+  ipError.hidden = true;
+  if (credentialRequired && !credentialInput.value.trim()) {
+    credentialInput.setAttribute("aria-invalid", "true");
+    credentialError.textContent = "Enter the credential required by this printer type.";
+    credentialError.hidden = false;
+    credentialInput.focus();
+    return false;
+  }
+  credentialInput.removeAttribute("aria-invalid");
+  credentialError.hidden = true;
+  return true;
+}
+
 function _printerCoords(printer) {
   const raw = printer.status?.CurrenCoord ?? printer.status?.CurrentCoord;
   const values = Array.isArray(raw) ? raw : String(raw || "").split(",");
@@ -818,6 +840,7 @@ function renderPrinterDetail(printer) {
   const activeInput = detail.contains(document.activeElement) ? document.activeElement : null;
   const activeInputId = activeInput?.id;
   const activeInputValue = activeInput?.value;
+  const activeSliderDirty = activeInput?.matches('input[type="range"]') && activeInput.dataset.userEdited === "true";
   const detailCamera = detail.querySelector(".detail-camera img");
   const previousCamera = (detailCamera?.dataset.printerId === printer.id ? detailCamera : null) ||
     document.querySelector(`#card-${CSS.escape(printer.id)} .card-camera img`);
@@ -855,12 +878,12 @@ function renderPrinterDetail(printer) {
     </div>`;
 
   // Cockpit layout lives in printer-cockpit.js; the original markup below is the fallback if it fails to load.
-  const protoHtml = window.cockpitPrinterHtml?.({
+  const cockpitHtml = window.cockpitPrinterHtml?.({
     printer, status, sc, connected, controlsEnabled, coords, nozzle, nozzleTarget, bed, bedTarget, chamber,
     modelFan, auxiliaryFan, chamberFan, lightOn, printing, paused, detailProgress, detailFilename,
     detailRemaining, speed, cameraUrl, disableMotion, disableConnected, jogStep: _detailJogStep,
   });
-  detail.innerHTML = protoHtml ?? `
+  detail.innerHTML = cockpitHtml ?? `
     <div class="detail-nav">
       <button class="detail-back" onclick="returnToPrinterGrid()" aria-label="Back to all printers">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
@@ -983,14 +1006,33 @@ function renderPrinterDetail(printer) {
     if (img.naturalWidth) { placeholder.style.display = "none"; setLive("live"); }
   }
 
+  for (const [id, value] of _cockpitDraftValues) {
+    const draft = document.getElementById(id);
+    if (!draft || !detail.contains(draft)) { _cockpitDraftValues.delete(id); continue; }
+    draft.value = value;
+    const label = document.getElementById(id.replace(/-slider$/, "-value"));
+    if (label) label.textContent = `${value}%`;
+  }
   if (activeInputId) {
     const restored = document.getElementById(activeInputId);
     if (restored) {
-      restored.value = activeInputValue;
+      if (!activeSliderDirty) restored.value = activeInputValue;
+      if (restored.matches('input[type="range"]')) restored.dataset.userEdited = String(activeSliderDirty);
       restored.focus();
     }
   }
 }
+
+const _cockpitDraftValues = new Map();
+document.addEventListener("input", event => {
+  if (event.target.matches('#printer-detail input[type="range"]')) {
+    event.target.dataset.userEdited = "true";
+    _cockpitDraftValues.set(event.target.id, event.target.value);
+  }
+});
+document.addEventListener("change", event => {
+  if (event.target.matches('#printer-detail input[type="range"]')) _cockpitDraftValues.delete(event.target.id);
+});
 
 function setJogStep(step) {
   _detailJogStep = step;
@@ -1428,28 +1470,12 @@ document.getElementById("btn-settings-printer-save")?.addEventListener("click", 
   const access_code = document.getElementById("settings-edit-access-code").value.trim();
   const ipInput = document.getElementById("settings-edit-ip");
   const ipError = document.getElementById("settings-edit-ip-error");
-  if (!ip) {
-    ipInput.setAttribute("aria-invalid", "true");
-    ipError.textContent = "Enter the printer IP address before saving.";
-    ipError.hidden = false;
-    ipInput.focus();
-    _settingsFeedback("Printer was not saved. Fix the highlighted field.", "error");
-    return;
-  }
-  ipInput.removeAttribute("aria-invalid");
-  ipError.hidden = true;
   const credentialInput = document.getElementById("settings-edit-access-code");
-  const credentialError = document.getElementById("settings-edit-access-code-error");
-  if (credentialInput.required && !credentialInput.value.trim()) {
-    credentialInput.setAttribute("aria-invalid", "true");
-    credentialError.textContent = "Enter the credential required by this printer type.";
-    credentialError.hidden = false;
-    credentialInput.focus();
+  if (!_validatePrinterFields({ ipInput, ipError, credentialInput,
+    credentialError: document.getElementById("settings-edit-access-code-error"), credentialRequired: credentialInput.required })) {
     _settingsFeedback("Printer was not saved. Fix the highlighted field.", "error");
     return;
   }
-  credentialInput.removeAttribute("aria-invalid");
-  credentialError.hidden = true;
   _settingsFeedback("");
   if (_settingsEditingPrinterId) {
     send({ action: "update_printer", printer_id: _settingsEditingPrinterId, name, ip, access_code });
@@ -1517,6 +1543,7 @@ function _urlBase64ToUint8Array(b64) {
 }
 
 async function _subscribePush() {
+  window._pushSubscriptionReady = false;
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) return null;
   try {
     const reg = await _pushWorkerReady();
@@ -1533,6 +1560,7 @@ async function _subscribePush() {
       body: JSON.stringify(sub.toJSON()),
     });
     if (!r.ok) { console.warn("Push: server rejected subscription", r.status); return null; }
+    window._pushSubscriptionReady = true;
     return sub;
   } catch (e) {
     console.warn("Push subscribe failed:", e);
@@ -1679,9 +1707,14 @@ document.getElementById("btn-notif-save")?.addEventListener("click", async () =>
       body: JSON.stringify(s),
     });
     if (r.ok) {
-      _settingsFeedback("Notification settings saved.", "ok");
-      toast("Notification settings saved");
-      _backToSettingsMenu();
+      if (anyEnabled && !window._pushSubscriptionReady) {
+        const warning = "Settings saved, but push delivery is not registered. Notifications may not arrive while Spooler is closed. Recheck browser notification permission and service worker availability, then save again.";
+        _settingsFeedback(warning, "warn");
+      } else {
+        _settingsFeedback("Notification settings saved.", "ok");
+        toast("Notification settings saved");
+        _backToSettingsMenu();
+      }
     } else {
       const d = await r.json().catch(() => ({}));
       _settingsFeedback(d.error || "Failed to save notification settings. Check the connection and retry.", "error");
@@ -1855,26 +1888,9 @@ document.getElementById("btn-modal-confirm").addEventListener("click", () => {
   const name        = document.getElementById("input-name").value.trim();
   const access_code = inputAccessCode.value.trim();
   const ipError = document.getElementById("input-ip-error");
-  if (!ip) {
-    ipInput.setAttribute("aria-invalid", "true");
-    ipError.textContent = "Enter the printer IP address before saving.";
-    ipError.hidden = false;
-    ipInput.focus();
-    return;
-  }
-  ipInput.removeAttribute("aria-invalid");
-  ipError.hidden = true;
   const credentialRequired = ["cc2", "prusa"].includes(inputType.value) && !_editingPrinterId;
   const credentialError = document.getElementById("input-access-code-error");
-  if (credentialRequired && !access_code) {
-    inputAccessCode.setAttribute("aria-invalid", "true");
-    credentialError.textContent = "Enter the access credential required by this printer type.";
-    credentialError.hidden = false;
-    inputAccessCode.focus();
-    return;
-  }
-  inputAccessCode.removeAttribute("aria-invalid");
-  credentialError.hidden = true;
+  if (!_validatePrinterFields({ ipInput, ipError, credentialInput: inputAccessCode, credentialError, credentialRequired })) return;
   if (_editingPrinterId) {
     if (!name) {
       document.getElementById("input-name").setAttribute("aria-invalid", "true");
@@ -2262,6 +2278,7 @@ async function fetchSpools() {
   _spoolLoadState = "loading";
   _spoolLoadMessage = "Loading Spool inventory…";
   renderSpoolPanel();
+  if (document.getElementById("modal-spool-picker").classList.contains("open")) renderPickerList(currentPickerPrinterId);
   try {
     const r = await fetch(`${SPOOLMAN_URL}/spool`, { signal: AbortSignal.timeout(15000) });
     if (!r.ok) throw new Error(`Spoolman returned ${r.status}`);
@@ -2431,6 +2448,7 @@ function renderPickerList(printerId) {
 }
 
 async function assignSpool(printerId, spoolId) {
+  if (_spoolLoadState !== "ready") return;
   const loc = printerLocation(printerId);
   const feedback = document.getElementById("spool-picker-feedback");
   feedback.hidden = false;
@@ -2468,6 +2486,7 @@ async function assignSpool(printerId, spoolId) {
 }
 
 function linkTray(printerId, trayId, spoolId) {
+  if (_spoolLoadState !== "ready") return;
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       action:     "link_tray",

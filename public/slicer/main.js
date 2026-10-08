@@ -217,6 +217,7 @@ async function boot() {
       onTransform: (id, change) => updateObject(id, change),
       onProblems: problems => { state.problems = problems; renderObjects(); renderSteps(); renderSliceState(); },
     });
+    state.viewport.setEditable(!document.body.classList.contains('defer-edit'));
   } catch (err) {
     showMessage(`The 3D view isn't available in this browser: ${err.message}`);
   }
@@ -2019,8 +2020,12 @@ function bindUi() {
     if (heading) { heading.id ||= `${dialog.id}-title`; dialog.setAttribute('aria-labelledby', heading.id); }
   });
   document.body.classList.add('defer-edit');
+  document.body.dataset.viewportEditable = 'false';
+  state.viewport?.setEditable(false);
   $('btn-mobile-edit').addEventListener('click', e => {
     const defer = document.body.classList.toggle('defer-edit');
+    document.body.dataset.viewportEditable = String(!defer);
+    state.viewport?.setEditable(!defer);
     e.currentTarget.textContent = defer ? 'Show editing controls' : 'Defer 3D editing';
     e.currentTarget.setAttribute('aria-expanded', String(!defer));
   });

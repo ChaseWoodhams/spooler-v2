@@ -86,11 +86,15 @@ const split = {id:1, source_name:'fixture-small.stl', state:'ready', settings:{s
     project.data.objects=[{id:1,name:'Cube A',model:1,plate:1,position:[20,20,0],rotation:[0,0,0],scale:[1,1,1]},
       {id:2,name:'Cube B',model:1,plate:2,position:[30,30,0],rotation:[0,0,0],scale:[1,1,1]}];
     await page.reload();
-    const controls=page.getByRole('button',{name:'Show editing controls'});
-    await controls.click();
+    assert.equal(await page.locator('body').getAttribute('data-viewport-editable'),'false');
     const object=page.getByRole('button',{name:'Select Cube A'});
     await object.focus();await page.keyboard.press('Enter');
     assert.equal(await object.getAttribute('aria-pressed'),'true');
+    assert.deepEqual(project.data.objects[0].position,[20,20,0]);
+    assert.equal(await page.locator('body').getAttribute('data-viewport-editable'),'false');
+    const controls=page.getByRole('button',{name:'Show editing controls'});
+    await controls.click();
+    assert.equal(await page.locator('body').getAttribute('data-viewport-editable'),'true');
     assert.equal(await page.getByRole('spinbutton',{name:'Position X (mm)'}).count(),1);
     assert.equal(await page.getByRole('spinbutton',{name:'Rotation Z (degrees)'}).count(),1);
     assert.equal(await page.evaluate(()=>document.body.scrollWidth<=innerWidth),true);

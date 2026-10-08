@@ -255,7 +255,7 @@ export class Viewport {
   select(objectId) {
     this.selected = objectId ?? null;
     const entry = this.holders.get(this.selected);
-    if (entry && this.mode === "prepare") this.transform.attach(entry.holder);
+    if (entry && this.mode === "prepare" && this.editable !== false) this.transform.attach(entry.holder);
     else this.transform.detach();
     this._refreshWarnings();
   }
@@ -268,6 +268,18 @@ export class Viewport {
     this.transform.showZ = tool === "rotate" || tool === "scale";
   }
 
+  setEditable(editable) {
+    this.editable = !!editable;
+    this.container.dataset.editable = String(this.editable);
+    if (this.editable && this.mode === "prepare") {
+      const entry = this.holders.get(this.selected);
+      if (entry) this.transform.attach(entry.holder);
+    } else {
+      this.transform.detach();
+      if (this.transform.dragging) this._commitTransform();
+    }
+  }
+
   _pick(event) {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.raycaster.setFromCamera(new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1,
@@ -278,6 +290,7 @@ export class Viewport {
   }
 
   _commitTransform() {
+    if (this.editable === false) return;
     const entry = this.holders.get(this.selected);
     if (!entry) return;
     const { holder, object } = entry;
@@ -379,7 +392,8 @@ export class Viewport {
     this.mode = mode;
     this.objectGroup.visible = mode === "prepare";
     this.toolpathGroup.visible = mode === "preview";
-    this.select(mode === "prepare" ? this.selected : null);
+    if (mode === "prepare") this.select(this.selected);
+    else { this.transform.detach(); this.selected = null; }
     this._placePrinter();
   }
 

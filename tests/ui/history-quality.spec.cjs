@@ -9,7 +9,7 @@ const records = ['completed', 'cancelled', 'failed', 'unknown'].map((outcome, i)
   started_at: 1700000000 + i * 86400, ended_at: 1700000010 + i * 86400, outcome,
   outcome_unconfirmed: i === 3, duration_s: i === 0 ? 0 : null,
   filament_g: i === 0 ? 0 : null, filament_mm: null, cost: i === 0 ? 0 : null,
-  estimate_s: 120, estimate_g: 10, notes: '',
+  estimate_s: i === 0 ? 0 : 120, estimate_g: 10, notes: '',
 }));
 (async () => {
   const server = http.createServer(async (req, res) => {
@@ -61,6 +61,9 @@ const records = ['completed', 'cancelled', 'failed', 'unknown'].map((outcome, i)
       await page.locator('.history-events').waitFor();
       const facts = await page.locator('.history-facts').innerText();
       assert.match(facts, /0 g/);
+      assert.match(facts, /Observed duration\s+0s/);
+      assert.match(facts, /Slicer estimate[^\n]*duration\s+0s/);
+      assert.match(await page.locator('.history-row').first().innerText(), /0s observed/);
       assert.match(facts, /Length not recorded/);
       assert.match(facts, /Slicer estimate/);
       assert.equal(await page.locator('.history-row').first().evaluate(el => el === document.activeElement), true);

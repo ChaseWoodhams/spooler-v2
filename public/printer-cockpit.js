@@ -18,7 +18,7 @@
   const rerender = () => {
     if (_activePrinterId && printers[_activePrinterId]) renderPrinterDetail(printers[_activePrinterId]);
   };
-  window.protoTab = t => {
+  window.selectPrinterTab = t => {
     tab = t; rerender();
     document.getElementById(`printer-tab-${t}`)?.focus();
   };
@@ -31,7 +31,7 @@
     else if (event.key === "Home") index = 0;
     else if (event.key === "End") index = keys.length - 1;
     else return;
-    event.preventDefault(); window.protoTab(keys[index]);
+    event.preventDefault(); window.selectPrinterTab(keys[index]);
   });
 
   function setFs(on) {
@@ -68,14 +68,14 @@
   const fan = (c, key, label, v) => `
     <label class="pv-slider">
       <span>${label}</span><strong id="detail-${key}-value">${v}%</strong>
-      <input type="range" min="0" max="100" step="5" value="${v}" aria-label="${label}"
+      <input id="detail-${key}-slider" type="range" min="0" max="100" step="5" value="${v}" aria-label="${label}"
         oninput="document.getElementById('detail-${key}-value').textContent=this.value+'%'"
         onchange="setPrinterFan('${id(c)}','${key}',+this.value)" ${c.disableConnected}>
     </label>`;
   const speed = c => `
     <label class="pv-slider">
       <span>Print speed</span><strong id="detail-speed-value">${c.speed}%</strong>
-      <input type="range" min="10" max="200" step="5" value="${c.speed}" aria-label="Print speed"
+      <input id="detail-speed-slider" type="range" min="10" max="200" step="5" value="${c.speed}" aria-label="Print speed"
         oninput="document.getElementById('detail-speed-value').textContent=this.value+'%'"
         onchange="setSpeed('${id(c)}',+this.value)" ${c.printing || c.paused ? "" : "disabled"}>
     </label>`;
@@ -135,7 +135,7 @@
           ${c.printing || c.paused ? `<div class="pv-hudjob"><b>${escHtml(c.detailFilename || "Print")}</b><div class="pv-bar"><span style="width:${pct(c)}%"></span></div><small>${pct(c)}% · ${eta(c)} left</small><span class="pv-btns">${jobBtns(c)}</span></div>` : `<div class="pv-hudjob idle"><b>Idle</b>${browseBtn(c)}</div>`}
         </div>
       </div>
-      <div class="pv-tabs" role="tablist" aria-label="Printer controls">${Object.entries(tabs).map(([k, v]) => `<button id="printer-tab-${k}" role="tab" aria-selected="${tab === k}" aria-controls="printer-panel" tabindex="${tab === k ? 0 : -1}" class="${tab === k ? "on" : ""}" onclick="protoTab('${k}')">${v}</button>`).join("")}</div>
+      <div class="pv-tabs" role="tablist" aria-label="Printer controls">${Object.entries(tabs).map(([k, v]) => `<button id="printer-tab-${k}" role="tab" aria-selected="${tab === k}" aria-controls="printer-panel" tabindex="${tab === k ? 0 : -1}" class="${tab === k ? "on" : ""}" onclick="selectPrinterTab('${k}')">${v}</button>`).join("")}</div>
       <div id="printer-panel" class="pv-tabbody" role="tabpanel" tabindex="0" aria-labelledby="printer-tab-${tab}">${controlReason ? `<p role="status">${controlReason}</p>` : ""}${body[tab]}</div>
     </div>`;
   };

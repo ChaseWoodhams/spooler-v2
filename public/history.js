@@ -140,7 +140,7 @@ function historyItem(p) {
   const when = new Date(p.started_at * 1000).toLocaleString(undefined,
     { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const stats = [
-    p.duration_s != null ? `${formatTime(p.duration_s)} observed` : "Duration not recorded",
+    p.duration_s != null ? `${(p.duration_s === 0 ? '0s' : formatTime(p.duration_s))} observed` : "Duration not recorded",
     p.filament_g != null ? `${p.filament_g} g observed` : "Filament not recorded",
     p.cost != null ? formatCost(p.cost) : "",
   ].filter(Boolean);
@@ -166,8 +166,8 @@ function historyDetail(p) {
   const facts = [
     ["Started", at(p.started_at)],
     ["Ended", p.ended_at != null ? at(p.ended_at) : p.outcome ? "End time not recorded" : "Still printing"],
-    ["Observed duration", p.duration_s != null ? formatTime(p.duration_s) : "Not recorded"],
-    ["Slicer estimate · duration", p.estimate_s != null ? formatTime(p.estimate_s) : "Not available"],
+    ["Observed duration", p.duration_s != null ? (p.duration_s === 0 ? '0s' : formatTime(p.duration_s)) : "Not recorded"],
+    ["Slicer estimate · duration", p.estimate_s != null ? (p.estimate_s === 0 ? '0s' : formatTime(p.estimate_s)) : "Not available"],
     ["Layers", p.total_layers != null ? `${p.layer != null ? p.layer : "Not recorded"} of ${p.total_layers}` : "Not recorded"],
     ["Observed filament", (p.filament_g != null ? `${p.filament_g} g` : "Weight not recorded") +
       " · " + (p.filament_mm != null ? `${(p.filament_mm / 1000).toFixed(2)} m` : "Length not recorded")],
