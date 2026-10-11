@@ -359,6 +359,19 @@ body.slicer-page a.btn { text-decoration: none; }
 .plan-steps .n { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 12px; }
 .plan-steps small { display: block; color: var(--text-muted); font-size: 12px; }
 .plan-mixed, .plan-reason { margin: 0; font-size: 12px; }
+.pack { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+.pack-presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.pack-presets button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; text-align: left; padding: 6px 8px; }
+.pack-presets button small { color: var(--text-muted); font-size: 11px; }
+.pack-presets button[aria-pressed="true"] { border-color: var(--accent); background: rgba(255, 107, 43, .10); }
+.pack-custom { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.pack-custom input { width: 5em; }
+.pack-note { margin: 0; font-size: 12px; }
+.pack-preview { display: flex; flex-direction: column; gap: 6px; min-height: 2em; font-size: 12px; }
+.pack-maps { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; max-height: 190px; overflow: auto; }
+.pack-map-card { display: flex; flex-direction: column; gap: 2px; }
+.pack-map-card small { color: var(--text-muted); font-size: 11px; }
+.pack-map-card .plan-map { width: 100%; height: auto; }
 .plan-reason:empty { display: none; }
 .plan-reason { color: var(--yellow); }
 .intake { display: flex; flex-direction: column; gap: 6px; min-width: 0; }

@@ -65,7 +65,7 @@ class RememberedDefaultsApiTests(unittest.TestCase):
     def test_nothing_remembered_yet(self):
         status, defaults = self.call("GET", "/api/defaults")
         self.assertEqual(status, 200)
-        self.assertEqual(defaults["defaults"], {"printer": None, "profile": None, "spool": None, "plate_side": None, "options": {}})
+        self.assertEqual(defaults["defaults"], {"printer": None, "profile": None, "spool": None, "plate_side": None, "options": {}, "pack": None})
 
     def test_saved_defaults_are_served_back_and_merge(self):
         bundle = self.custom_bundle()
@@ -73,7 +73,7 @@ class RememberedDefaultsApiTests(unittest.TestCase):
         status, saved = self.call("PATCH", "/api/defaults", {"spool": 7, "plate_side": "smooth", "options": {"leveling": True, "timelapse": False}})
         self.assertEqual(status, 200)
         expected = {"printer": "p2", "profile": bundle["id"], "spool": 7, "plate_side": "smooth",
-                    "options": {"leveling": True, "timelapse": False}}
+                    "options": {"leveling": True, "timelapse": False}, "pack": None}
         self.assertEqual(saved["defaults"], expected)
         self.assertEqual(self.call("GET", "/api/defaults")[1]["defaults"], expected)
 

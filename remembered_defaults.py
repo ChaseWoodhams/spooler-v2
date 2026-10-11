@@ -11,7 +11,7 @@ import jobs
 import slicer
 import state
 
-KEYS = ("printer", "profile", "spool", "plate_side", "options")
+KEYS = ("printer", "profile", "spool", "plate_side", "options", "pack")
 OPTION_KEYS = ("leveling", "timelapse")
 
 
@@ -38,6 +38,9 @@ def _clean(key: str, value):
         if isinstance(value, bool) or not isinstance(value, (int, str)) or not str(value).isdigit() or int(value) < 1:
             raise jobs.JobError("spool must be a spool number")
         return int(value)
+    if key == "pack":   # the packing density a new project starts with (projects._clean_pack)
+        import projects
+        return projects._clean_pack(value)
     if key == "plate_side":
         if value not in slicer.BED_TYPES:
             raise jobs.JobError(f"plate_side must be one of: {', '.join(slicer.BED_TYPES)}")

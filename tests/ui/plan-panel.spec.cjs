@@ -162,9 +162,11 @@ const reasonHas = (page, re) => page.waitForFunction(re => new RegExp(re, 'i').t
     await c.page.waitForFunction(() => !document.getElementById('btn-new-create').disabled);
     await c.page.locator('#btn-new-create').click();
     await c.page.waitForFunction(() => location.search.includes('project=50'));
-    for (let i = 0; i < 60 && !c.server.calls.some(x => x.path === '/api/projects/50/plan/accept'); i++) await c.page.waitForTimeout(100);
-    assert.ok(c.server.calls.some(x => x.path === '/api/projects/50/plan/accept'), 'the models that fit are planned onto plates');
-    assert.equal(await c.page.locator('.slicer-step.active').getAttribute('data-step'), 'split', 'planning the small models does not pull the page off the Split step');
+    for (let i = 0; i < 60 && !c.server.calls.some(x => x.path === '/api/projects/50/create'); i++) await c.page.waitForTimeout(100);
+    const created = c.server.calls.find(x => x.path === '/api/projects/50/create');
+    assert.equal(JSON.parse(created.body).arrange, true, 'Create asks the server to arrange the models that fit, at the chosen density');
+    assert.equal(c.server.calls.some(x => x.path === '/api/projects/50/plan/accept'), false, 'the page no longer plans after Create');
+    assert.equal(await c.page.locator('.slicer-step.active').getAttribute('data-step'), 'split', 'arranging the small models does not pull the page off the Split step');
     console.log('PASS: A mixed project opens on Split and plans the small models');
     await c.page.close();
 

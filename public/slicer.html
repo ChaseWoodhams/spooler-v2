@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="style.css?v=60" />
   <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=31" />
+  <link rel="stylesheet" href="slicer.css?v=32" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -165,6 +165,18 @@
             <option value="nester">Nester</option>
             <option value="orca">OrcaSlicer</option>
           </select>
+          <select id="pack-select" class="slicer-toolbar-select" aria-label="How close objects are packed" title="How far apart Arrange and Plan plates keep objects, and what counts as too close. Choose for this plate or for the whole project.">
+            <optgroup label="This plate">
+              <option value="plate:tight">Tight (3 mm)</option><option value="plate:normal">Normal (6 mm)</option><option value="plate:roomy">Roomy (12 mm)</option>
+            </optgroup>
+            <optgroup label="Whole project">
+              <option value="project:tight">Tight (3 mm)</option><option value="project:normal">Normal (6 mm)</option><option value="project:roomy">Roomy (12 mm)</option>
+              <option value="project:custom">Custom…</option>
+            </optgroup>
+            <option value="plate:inherit">This plate follows the project</option>
+          </select>
+          <label class="pack-gap-field" id="pack-gap-field" hidden>Gap <input type="number" id="pack-gap" min="2" max="40" step="0.5" aria-label="Gap between objects in millimetres"> mm</label>
+          <label class="slicer-check" title="Objects that need supports are kept 22 mm apart so the supports don't collide. Tick this to pack them as close as the gap says."><input type="checkbox" id="pack-supports"> Close supports</label>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-plan-plates" title="Plan plates: turn objects, pack them across plates by filament and order the plates. You review it first; Undo reverses it.">Plan plates</button>
           <select id="merge-plate" class="slicer-toolbar-select" aria-label="Merge this plate into another"></select>
@@ -264,6 +276,15 @@
             <h5>What happens next</h5>
             <ol class="plan-steps"></ol>
             <p class="plan-mixed slicer-muted" hidden></p>
+            <section class="pack" aria-label="How close to pack" hidden>
+              <h5>How close to pack</h5>
+              <div class="pack-presets" role="group" aria-label="Packing density"></div>
+              <label class="pack-custom" hidden>Gap between models <input type="number" min="2" max="40" step="0.5" data-pack-gap aria-label="Gap between models in millimetres"> mm</label>
+              <label class="slicer-check" title="Models that need supports are kept 22 mm apart so the supports don't collide. Tick this to pack them as close as the gap says."><input type="checkbox" data-pack-supports> Pack closer than supports reach</label>
+              <p class="pack-note slicer-muted"></p>
+              <div class="pack-preview" role="status" aria-live="polite"></div>
+              <label class="slicer-check"><input type="checkbox" data-pack-arrange checked> Arrange onto plates when I create</label>
+            </section>
             <p id="new-create-reason" class="plan-reason" role="status"></p>
           </aside>
         </div>
@@ -322,6 +343,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=38"></script>
+  <script type="module" src="slicer/main.js?v=40"></script>
 </body>
 </html>

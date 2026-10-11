@@ -1209,7 +1209,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             def create_it():
                 body = self._json_body()
                 self._guard_draft(self._job_id(), body)
-                return projects.create_draft(self._job_id(), body.get("name", ""))
+                return projects.create_draft(self._job_id(), body.get("name", ""), arrange=body.get("arrange") is not False)
             self._jobs_call(create_it, broadcast=False)
             return
         if len(parts) == 5 and parts[3].isdigit() and parts[4] == "discard-draft":   # navigator.sendBeacon on page close
@@ -1236,7 +1236,25 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(actions[parts[4]], broadcast=False)
             return
         if len(parts) == 5 and parts[4] == "plan":
-            self._jobs_call(lambda: projects.plan_plates(self._job_id(), bool(self._json_body().get("allow_tilt"))), broadcast=False)
+            def plan():
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                return projects.plan_plates(self._job_id(), bool(body.get("allow_tilt")), body.get("pack"))
+            self._jobs_call(plan, broadcast=False)
+            return
+        if len(parts) == 6 and parts[4] == "plan" and parts[5] == "densities":
+            def densities():
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                return projects.plan_densities(self._job_id(), bool(body.get("allow_tilt")))
+            self._jobs_call(densities, broadcast=False)
+            return
+        if len(parts) == 5 and parts[4] == "pack":
+            def pack():
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                return projects.set_pack(self._job_id(), body)
+            self._jobs_call(pack, broadcast=False)
             return
         if len(parts) == 6 and parts[4] == "plan" and parts[5] == "accept":
             def accept():

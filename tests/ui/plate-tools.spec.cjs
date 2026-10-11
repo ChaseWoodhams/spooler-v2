@@ -30,7 +30,7 @@ const object = (id, plate, x, y) => ({ id, model: id, plate, name: `box${id}`, p
 
 async function open(browser, { tooClose = false } = {}) {
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
-  const server = { patches: [], revision: 1,
+  const server = { patches: [], packs: [], revision: 1,
     data: { plates: [{ id: 1, name: 'Plate 1' }, { id: 2, name: 'Plate 2' }], bed: 'textured', profile: { bundle_id: null, process: {}, filament: {} },
             objects: [object(1, 1, 50, 50), object(2, 1, 120, 50), object(3, 1, 200, 150), object(4, 2, 128, 128)] } };
   const project = () => ({ id: 70, name: 'Plates', revision: server.revision, split_id: null, split_ids: [], models: [1, 2, 3, 4].map(model), slices: {},
@@ -47,6 +47,17 @@ async function open(browser, { tooClose = false } = {}) {
       server.data = JSON.parse(body).data;
       server.revision += 1;
       server.patches.push(server.data);
+      return route.fulfill({ json: project() });
+    }
+    if (p === '/api/projects/70/pack') {
+      const change = JSON.parse(body);
+      server.packs.push(change);
+      if ('pack' in change) { if (change.pack) server.data.pack = change.pack; else delete server.data.pack; }
+      if (change.plate_id) {
+        const plate = server.data.plates.find(x => x.id === change.plate_id);
+        if (change.plate_pack) plate.pack = { ...change.plate_pack, gap: { tight: 3, normal: 6, roomy: 12 }[change.plate_pack.preset] }; else delete plate.pack;
+      }
+      server.revision += 1;
       return route.fulfill({ json: project() });
     }
     if (p === '/api/projects/70') return route.fulfill({ json: project() });
@@ -181,6 +192,34 @@ const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer
       assert.equal(plateIds.length, 3, 'a plate was added');
       assert.deepEqual(server.data.objects.filter(o => o.plate === 3).map(o => o.id).sort(), [1, 2]);
       console.log('PASS: The selection moves to a new plate from the panel');
+      await page.close();
+    }
+
+    // Spacing: a plate can have its own density, the project has one, and Close supports is its own choice
+    {
+      const { page, server } = await open(browser);
+      const select = page.locator('#pack-select');
+      const lastPack = async n => { for (let i = 0; i < 50 && server.packs.length < n; i++) await page.waitForTimeout(100); return server.packs.at(-1); };
+      assert.equal(await select.inputValue(), 'project:normal', 'Normal until something is chosen');
+      await select.selectOption('plate:tight');
+      await page.waitForFunction(() => document.getElementById('pack-select').value === 'plate:tight');
+      assert.deepEqual(await lastPack(1), { plate_id: 1, plate_pack: { preset: 'tight' } });
+      await select.selectOption('plate:inherit');
+      assert.deepEqual(await lastPack(2), { plate_id: 1, plate_pack: null });
+      await select.selectOption('project:roomy');
+      await page.waitForFunction(() => document.getElementById('pack-select').value === 'project:roomy');
+      assert.deepEqual(await lastPack(3), { pack: { preset: 'roomy' } });
+      await page.locator('#pack-supports').check();
+      await page.waitForFunction(() => document.getElementById('pack-supports').checked);
+      assert.deepEqual(await lastPack(4), { pack: { preset: 'roomy', tight_supports: true } });
+      await page.waitForTimeout(300);   // the page has taken the server's answer before the next choice
+      await select.selectOption('project:custom');
+      await page.locator('#pack-gap-field').waitFor({ state: 'visible' });
+      await page.locator('#pack-gap').fill('9');
+      await page.locator('#pack-gap').press('Tab');
+      await page.waitForFunction(() => document.getElementById('pack-gap').value === '9');
+      assert.deepEqual(await lastPack(6), { pack: { preset: 'custom', gap: 9, tight_supports: true } });
+      console.log('PASS: Spacing can be chosen for a plate or the project, with a custom gap and Close supports');
       await page.close();
     }
 

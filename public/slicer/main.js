@@ -6,7 +6,7 @@ import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=2";
 import { projectPage } from "./project-page.js?v=2";
-import { newProject } from "./new-project.js?v=7";
+import { newProject } from "./new-project.js?v=8";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 
 const $ = id => document.getElementById(id);
@@ -219,6 +219,7 @@ const openJobPlates = () => new Set(state.jobs.filter(j => OPEN_JOB_STATES.has(j
 async function boot() {
   document.querySelectorAll("[data-steps], #prepare-tools").forEach(el => { el.hidden = true; });  // shown once a project is open
   newProject.attach({ api, upload, toast, openCreated, importNotes: showImportNotes });
+  bindPack();
   bindUi();   // first, so "Open or create a project" works even if the slower setup below fails
   const viewport = $("viewport");
   try {
@@ -1319,6 +1320,7 @@ function renderTools() {
   $('mode-preview').setAttribute('aria-pressed',String(preview));
   $("mode-preview").disabled = sliceEntry()?.state !== "sliced";
   $("align-menu").disabled = !selectionIds().length;
+  renderPackControls();
   document.querySelectorAll("#prepare-tools [data-tool]").forEach(b => {
     const active = b.dataset.tool === state.viewport?.tool;
     b.classList.toggle("active", active); b.setAttribute('aria-pressed', String(active));
@@ -1452,6 +1454,55 @@ function updateObject(id, change) {
   changed();
   renderViewport();
   renderObjectPanel();
+}
+
+// ── Packing density ─────────────────────────────────────────────────────────────
+// How far apart Arrange and Plan plates keep objects. The project has one choice and a plate may have its own; "too close" is judged by it.
+function renderPackControls() {
+  if (!state.project) return;
+  const project = data().pack || { preset: "normal", gap: 6 }, plate = currentPlate()?.pack;
+  const value = plate ? `plate:${plate.preset}` : `project:${project.preset}`;
+  $("pack-select").value = [...$("pack-select").options].some(o => o.value === value) ? value : "project:custom";
+  const custom = !plate && project.preset === "custom";
+  $("pack-gap-field").hidden = !custom;
+  if (custom && document.activeElement !== $("pack-gap")) $("pack-gap").value = project.gap;
+  $("pack-supports").checked = !!project.tight_supports;
+  $("pack-select").title = plate ? `This plate keeps objects ${plate.gap} mm apart; the project default is ${project.gap} mm.`
+    : `Objects are kept ${project.gap} mm apart${project.tight_supports ? "" : ", 22 mm when they need supports"}.`;
+}
+
+async function setPack(change) {
+  await flushSave();
+  await withButton(null, async () => {
+    const result = await api("POST", `/api/projects/${state.project.id}/pack`, change);
+    applyProject(result);
+    recordEdit();
+    renderAll();
+    loadProblems();
+  });
+}
+
+const projectPack = () => {
+  const { tight_supports, ...rest } = data().pack || { preset: "normal", gap: 6 };
+  return { rest, tight_supports: !!tight_supports };
+};
+const withSupports = (pack, tight) => (tight ? { ...pack, tight_supports: true } : pack);
+
+function bindPack() {
+  $("pack-select").addEventListener("change", e => {
+    const [scope, preset] = e.target.value.split(":");
+    if (scope === "plate") setPack({ plate_id: state.plate, plate_pack: preset === "inherit" ? null : { preset } });
+    else if (preset === "custom") setPack({ pack: withSupports({ preset: "custom", gap: projectPack().rest.gap || 6 }, projectPack().tight_supports) });
+    else setPack({ pack: withSupports({ preset }, projectPack().tight_supports) });
+  });
+  $("pack-gap").addEventListener("change", e => {
+    const gap = Math.min(40, Math.max(2, Number(e.target.value) || 6));
+    setPack({ pack: withSupports({ preset: "custom", gap }, projectPack().tight_supports) });
+  });
+  $("pack-supports").addEventListener("change", e => {
+    const { rest } = projectPack();
+    setPack({ pack: withSupports({ preset: rest.preset, ...(rest.preset === "custom" ? { gap: rest.gap } : {}) }, e.target.checked) });
+  });
 }
 
 // Several objects change in one step of the history. `changes`: Map of object id → fields to set.
@@ -1935,10 +1986,14 @@ function planSheetHtml(plan) {
     </div>`).join("");
   const kept = plan.kept.length ? `<h4>Kept as they are</h4><ul class="plan-kept">${plan.kept.map(k => `<li><b>${esc(k.name)}</b> <span class="slicer-muted">${esc(k.reason)}</span></li>`).join("")}</ul>` : "";
   const tilt = `<label class="slicer-check" title="Without this an object only goes onto a side of its own box; with it, an object may lean on an angled face"><input type="checkbox" id="plan-tilt"${state.planTilt ? " checked" : ""}> Allow tilting objects onto angled faces</label>`;
+  const here = data().pack || { preset: "normal", gap: 6 };
+  const density = `<label class="slicer-field">Spacing <select id="plan-pack" title="How far apart the plan keeps objects (22 mm for objects that need supports unless you chose otherwise). The same choice is in the toolbar.">${
+    [["tight", "Tight (3 mm)"], ["normal", "Normal (6 mm)"], ["roomy", "Roomy (12 mm)"]].map(([v, l]) => `<option value="${v}"${here.preset === v ? " selected" : ""}>${l}</option>`).join("")
+  }${here.preset === "custom" ? `<option value="custom" selected>Custom (${here.gap} mm)</option>` : ""}</select></label>`;
   const refused = plan.refused ? `<p class="slicer-error" role="alert">No plan is offered: ${esc(plan.refused)}. Nothing was changed.</p>` : "";
   const summary = plan.refused ? "" : `<p class="slicer-muted">Now ${plural(before, "plate")}. Plan: ${esc(plan.summary)}${plan.plates.length > 1 ? ", longest first" : ""}.</p>`;
   return `${summary}
-    ${refused}${tilt}
+    ${refused}${density}${tilt}
     ${plan.plates.length ? `<div class="plan-grid">${cards}</div>` : ""}${kept}`;
 }
 
@@ -1961,6 +2016,20 @@ async function showPlan() {
       await showPlan();
     } catch (err) {
       event.target.checked = state.planTilt = !state.planTilt;   // the sheet still shows the plan that was asked for
+      $("plan-error").textContent = err.message;
+    }
+  });
+  $("plan-pack").addEventListener("change", async event => {
+    const previous = (data().pack || { preset: "normal" }).preset;
+    try {
+      const { rest, tight_supports } = projectPack();
+      applyProject(await api("POST", `/api/projects/${state.project.id}/pack`, { pack: withSupports({ preset: event.target.value }, tight_supports) }));
+      recordEdit();
+      renderAll();
+      loadProblems();
+      await showPlan();
+    } catch (err) {
+      event.target.value = previous;
       $("plan-error").textContent = err.message;
     }
   });
@@ -2314,7 +2383,7 @@ function uploadNew(files, folder = "") {
 
 // Create promoted the draft: open it on the step the server named (Model while an oversized model waits, then Split once its
 // cuts are planned; else Plates). The models that fit are planned onto plates too, so they don't sit stacked on plate 1.
-async function openCreated({ project, step }, { plan, id }) {
+async function openCreated({ project, step, arranged }, { plan, id }) {
   if (plan && project.data.objects.length > 1) requestAutoPlan(id);   // every model starts on plate 1 at one spot
   $("dlg-projects").close();
   await openProject(project.id);
@@ -2324,6 +2393,8 @@ async function openCreated({ project, step }, { plan, id }) {
     if (splitStep.split?.analysis && splitStep.split.state === "ready") { target = "split"; state.landOnSplit = null; }   // already analysed and planned
   }
   if (stepAvailable(target)) await setStep(target, { force: true });
+  if (arranged?.summary) toast(`Arranged: ${arranged.summary}. Undo puts it back`, !!arranged.too_big?.length);
+  else if (arranged?.error) toast(`The models are on plate 1: ${arranged.error}`, true);
 }
 
 async function openSplitDialog() {

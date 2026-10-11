@@ -270,6 +270,8 @@ def create_project(name: str = "", split_id: int | None = None, quick: bool = Fa
             "profile": {"bundle_id": remembered["profile"] or _default_bundle_id(), "process": {}, "filament": {},
                         "spool_id": remembered["spool"]},
             "plates": [plate], "objects": []}
+    if remembered.get("pack"):   # the density last chosen for a project
+        data["pack"] = remembered["pack"]
     now = time.time()
     with database.transaction() as conn:
         project_id = conn.execute("INSERT INTO projects (name, data, split_id, quick, draft, created_at, updated_at) "
@@ -452,7 +454,7 @@ def _create_blocker(rows: list, summary: dict) -> str:
     return "" if rows else "Add a model first."
 
 
-def create_draft(project_id: int, name: str) -> dict:
+def create_draft(project_id: int, name: str, arrange: bool = True) -> dict:
     """Create: give the draft its final name and make it a normal, visible project. Returns the project and the first
     step to open: `model` while any of its split models is not yet placed, else `plates`. Every row too big for the bed
     becomes a split of its own first (make_split); the fits-whole models stay where they are. The conversion comes first
@@ -473,8 +475,27 @@ def create_draft(project_id: int, name: str) -> dict:
                                 (final, time.time(), project_id)).rowcount
     if not promoted:
         raise jobs.JobError(DRAFT_GONE, 409)
+    arranged = None
+    if arrange and len(get_project(project_id)["data"]["objects"]) > 1:   # every model starts on plate 1 at one spot
+        arranged = _arrange_new_project(project_id)
     project = get_project(project_id)
-    return {"project": project, "step": "model" if unplaced_splits(project) else "plates"}
+    return {"project": project, "step": "model" if unplaced_splits(project) else "plates", "arranged": arranged}
+
+
+def _arrange_new_project(project_id: int):
+    """Apply the plan the New project dialog showed (Plan plates at the chosen density), once. A plan that cannot be made
+    leaves the models as they are and is said in plain words: Create has already succeeded. Returns the plan's summary, or
+    {"error": text}."""
+    try:
+        record = get_project(project_id)
+        planned = _plan_data(project_id, record)
+        view = _plan_view(record, planned)
+        if planned.get("refused") or not planned["plates"]:
+            return {"error": view["summary"]}
+        _save_data(project_id, record, planned["data"], planned["emptied"])
+        return {"summary": view["summary"], "plates": len(planned["plates"]), "too_big": planned.get("too_big", [])}
+    except jobs.JobError as e:
+        return {"error": str(e)}
 
 
 def unplaced_splits(project: dict) -> list:
@@ -641,7 +662,8 @@ def validate_data(raw, record: dict) -> dict:
         plates.append({"id": plate_id, "name": _clean_name(plate.get("name")) or f"Plate {plate_id}",
                        "overrides": slicer.normalize_overrides({"process": overrides}, base).get("process", {}) if overrides else {},
                        "bricklayers": brick_post.validate(plate.get("bricklayers")),
-                       "printer_id": plate.get("printer_id") if plate.get("printer_id") in state.printers else None})
+                       "printer_id": plate.get("printer_id") if plate.get("printer_id") in state.printers else None,
+                       **({"pack": chosen} if (chosen := _clean_pack(plate.get("pack"), project=False)) else {})})
 
     objects_raw = raw.get("objects") or []
     if not isinstance(objects_raw, list) or len(objects_raw) > MAX_OBJECTS:
@@ -680,6 +702,8 @@ def validate_data(raw, record: dict) -> dict:
         out["filaments"] = filaments
     if raw.get("arrange_engine") == ORCA:  # likewise only when OrcaSlicer's arranger is chosen over the nester
         out["arrange_engine"] = ORCA
+    if pack := _clean_pack(raw.get("pack")):   # likewise only when a density is chosen
+        out["pack"] = pack
     # A quick print's chosen orientation is the server's alone: whatever a save sends, the stored value is kept (the
     # other writers, _mutate on "data", change a copy of the stored data and so keep it too).
     for key in ("orientation", "orientations", "split_copies"):    # one orientation per split once a project has turned several; Copies a split was made with
@@ -1077,9 +1101,54 @@ def _machine_limits_for(record: dict) -> dict:
     return machine_limits(slicer.bundle_settings(bundle_id)["machine"])
 
 
-def _gap_for(process: dict) -> float:
+PACK_PRESETS = {"tight": 3.0, "normal": packing.GAP_MM, "roomy": 12.0}   # how far apart Arrange and Plan plates keep objects
+PACK_GAP_RANGE = (2.0, 40.0)                                              # a custom gap, mm
+
+
+def _clean_pack(raw, project: bool = True) -> dict | None:
+    """A packing density as stored: {"preset": tight | normal | roomy | custom, "gap": mm} and, on the project only,
+    "tight_supports": true (objects with supports may then be as close as the gap says, not the supports' reach). None
+    when nothing is chosen."""
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise jobs.JobError("Packing density must be an object")
+    preset = raw.get("preset")
+    if preset in PACK_PRESETS:
+        gap = PACK_PRESETS[preset]
+    elif preset == "custom":
+        try:
+            gap = float(raw.get("gap"))
+        except (TypeError, ValueError):
+            raise jobs.JobError("Give the gap between objects in millimetres")
+        low, high = PACK_GAP_RANGE
+        if not low <= gap <= high:
+            raise jobs.JobError(f"The gap between objects must be between {low:g} and {high:g} mm")
+        gap = round(gap, 1)
+    else:
+        raise jobs.JobError(f"Packing density is one of: {', '.join([*PACK_PRESETS, 'custom'])}")
+    out = {"preset": preset, "gap": gap}
+    if project and raw.get("tight_supports"):
+        out["tight_supports"] = True
+    return out
+
+
+def pack_for(data: dict, plate_id=None) -> dict:
+    """The packing density in force for a plate: its own choice, else the project's, else Normal. {"preset", "gap" (mm
+    between plain objects), "support_gap" (between objects that need tree supports: never less than their reach unless the
+    project allows it)}."""
+    project = data.get("pack") or {}
+    plate = next((p for p in data.get("plates", []) if p["id"] == plate_id), {}).get("pack") or {}
+    chosen = plate or project
+    gap = float(chosen.get("gap", packing.GAP_MM))
+    support = gap if project.get("tight_supports") else max(gap, packing.SUPPORT_GAP_MM)
+    return {"preset": chosen.get("preset", "normal"), "gap": gap, "support_gap": support, "tight_supports": bool(project.get("tight_supports"))}
+
+
+def _gap_for(process: dict, data: dict | None = None) -> float:
     """Room to leave between objects printed with these process settings: supports need far more than the objects alone."""
-    return packing.SUPPORT_GAP_MM if str((process or {}).get("enable_support")) == "1" else packing.GAP_MM
+    pack = pack_for(data or {})
+    return pack["support_gap"] if str((process or {}).get("enable_support")) == "1" else pack["gap"]
 
 
 def _drop_split_models(data: dict, models: list, split_id: int) -> tuple:
@@ -1188,7 +1257,7 @@ def lay_out_split(project_id: int, numbers=None, split_id: int | None = None, ad
     profile = record["data"]["profile"]["process"]
     layout = [plate for supported in (False, True)   # plain plates first, then the ones with supports
               for plate in packing.pack([i for i in items if i["group"] == supported], limits["bed"], limits["exclude"],
-                                        gap=_gap_for({**profile, **(SUPPORT_OVERRIDES if supported else {})}))]
+                                        gap=_gap_for({**profile, **(SUPPORT_OVERRIDES if supported else {})}, record["data"]))]
     stem, first_id, new_models = Path(split["source_name"]).stem, _next_id(record["models"]), []
     try:
         for offset, part in enumerate(parts):
@@ -1852,13 +1921,14 @@ def _needs_supports(process: dict, verts, tris, obj: dict) -> bool:
 
 
 class _Shapes:
-    """What the nester needs to know of each object of a project: its outline from above and its clearance
-    (SUPPORT_CLEARANCE_MM when it needs tree supports in its orientation, else CLEARANCE_MM), cached."""
+    """What the nester needs to know of each object of a project: its outline from above and its clearance (the packing
+    density's support gap when it needs tree supports in its orientation, else its gap; `pack_for`), cached."""
 
     def __init__(self, project_id: int, record: dict, data: dict):
         import nesting
         self.nesting, self.project_id, self.record = nesting, project_id, record
         self.plates = {p["id"]: p for p in data["plates"]}
+        self.data = data
         self.processes, self.meshes, self.shapes = {}, {}, {}
 
     def mesh(self, model_id: int):
@@ -1867,14 +1937,16 @@ class _Shapes:
         return self.meshes[model_id]
 
     def outline_and_clearance(self, obj: dict) -> tuple:
-        key = (obj["model"], obj["plate"], tuple(obj["rotation"]), tuple(obj["scale"]), json.dumps(obj.get("overrides") or {}, sort_keys=True))
+        pack = pack_for(self.data, obj["plate"])
+        key = (obj["model"], obj["plate"], tuple(obj["rotation"]), tuple(obj["scale"]), json.dumps(obj.get("overrides") or {}, sort_keys=True),
+               pack["gap"], pack["support_gap"])
         if key not in self.shapes:
             if obj["plate"] not in self.processes:
                 self.processes[obj["plate"]] = _plate_process(self.record, self.plates[obj["plate"]])
             verts, tris = self.mesh(obj["model"])
             hull = self.nesting.hull_outline(place(verts, {**obj, "position": [0.0, 0.0]})[:, :2])
             needs = _needs_supports({**self.processes[obj["plate"]], **(obj.get("overrides") or {})}, verts, tris, obj)
-            self.shapes[key] = hull, self.nesting.SUPPORT_CLEARANCE_MM if needs else self.nesting.CLEARANCE_MM
+            self.shapes[key] = hull, pack["support_gap"] if needs else pack["gap"]
         return self.shapes[key]
 
     def polygon(self, obj: dict) -> list:
@@ -2399,7 +2471,7 @@ def _plan_problems(project_id: int, record: dict, data: dict, plate_ids, oversiz
             if p["key"] not in oversize and not (p["key"] in pinned and (p["other"] is None or p["other"] in pinned))]
 
 
-def _plan_data(project_id: int, record: dict, allow_tilt: bool = False) -> dict:
+def _plan_data(project_id: int, record: dict, allow_tilt: bool = False, pack=None) -> dict:
     """The project data as Plan plates would leave it, changing nothing. Plates that are queued, printing, have a Print on
     record, or hold a model still importing are kept as they are. On the others, every unpinned object is oriented
     (in memory, as Orient all would) and packed with `arrange_layout` (a pinned object keeps its plate and place; a plate
@@ -2408,6 +2480,11 @@ def _plan_data(project_id: int, record: dict, allow_tilt: bool = False) -> dict:
     the numbers the kept plates leave free. Returns {"data", "plates": [{"id", "new", "objects", "turned", "features"}],
     "kept": [{"id", "name", "reason"}], "emptied": [plate ids removed]}; "plates" is empty when there is nothing to plan."""
     data = json.loads(json.dumps(record["data"]))
+    if pack is not None:   # "what if": plan with this density without keeping it
+        chosen = _clean_pack({"tight_supports": bool((data.get("pack") or {}).get("tight_supports")), **pack})
+        data["pack"] = chosen
+        for plate in data["plates"]:
+            plate.pop("pack", None)
     ready = {m["id"] for m in record["models"] if m["state"] == READY}
     failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
     importing = {o["plate"] for o in data["objects"] if o["model"] not in ready and o["model"] not in failed}
@@ -2574,12 +2651,13 @@ def _plan_view(record: dict, planned: dict) -> dict:
         summary = "Nothing to plan"
     summary += _skipped_failed(record)
     return {"revision": record["revision"], "fingerprint": planned["fingerprint"], "plates": plates, "kept": kept,
+            "bed": list(_machine_limits_for(record)["bed"]), "pack": pack_for(data),
             "summary": summary, "outcome": summary,   # "outcome" is the key every Arrange-like answer carries: the page shows it as is, "summary" is the plan's own name for it
             "tilts_withheld": planned.get("tilts_withheld", 0), "too_big": planned.get("too_big", []), "tippy": planned.get("tippy", []),
             "problems": planned.get("problems", []), "refused": planned.get("refused")}
 
 
-def plan_plates(project_id: int, allow_tilt: bool = False) -> dict:
+def plan_plates(project_id: int, allow_tilt: bool = False, pack=None) -> dict:
     """Plan the project's plates and change nothing: {"revision", "plates": [{"id", "name", "new", "filament", "parts" (how many
     objects it holds; the key keeps its name), "turned", "time_estimate" (approximate seconds, layers, volume_cm3), "objects"}] in plan order (longest first by
     layers, then volume), "kept": [{"id", "name", "reason"}] (plates with a Job or a Print on record, which are never
@@ -2589,7 +2667,44 @@ def plan_plates(project_id: int, allow_tilt: bool = False) -> dict:
     for any plate) off the bed, over the purge area, overlapping or too close to another is not offered: "plates" is empty, "refused" says why and "problems" lists them.
     `accept_plan` applies it."""
     record = get_project(project_id)
-    return _plan_view(record, _plan_data(project_id, record, allow_tilt))
+    return _plan_view(record, _plan_data(project_id, record, allow_tilt, pack))
+
+
+def plan_densities(project_id: int, allow_tilt: bool = False) -> dict:
+    """How many plates the plan needs at each preset density, changing nothing: {"tight": {"plates", "refused"}, "normal":
+    …, "roomy": …}. "plates" counts the plates the plan fills (plates kept as they are not included)."""
+    record = get_project(project_id)
+    found = {}
+    for preset in PACK_PRESETS:
+        planned = _plan_data(project_id, record, allow_tilt, {"preset": preset})
+        found[preset] = {"plates": len(planned["plates"]), "refused": planned.get("refused")}
+    return found
+
+
+def set_pack(project_id: int, body: dict) -> dict:
+    """Choose the packing density: `pack` for the project ({"preset": tight | normal | roomy | custom, "gap" for custom,
+    "tight_supports"}; null goes back to Normal), and/or `plate_id` with `plate_pack` for one plate (null follows the
+    project). Objects already on plates are not moved: Arrange and Plan plates use it from now on, and "too close" is
+    judged by it."""
+    record = get_project(project_id)
+    data = json.loads(json.dumps(record["data"]))
+    if "plate_id" in body and body["plate_id"] is not None:
+        plate = next((p for p in data["plates"] if p["id"] == body["plate_id"]), None)
+        if plate is None:
+            raise jobs.JobError("Plate not found", 404)
+        chosen = _clean_pack(body.get("plate_pack"), project=False)
+        plate.pop("pack", None)
+        if chosen:
+            plate["pack"] = chosen
+    if "pack" in body:
+        chosen = _clean_pack(body["pack"])
+        data.pop("pack", None)
+        if chosen:
+            data["pack"] = chosen
+    if data != record["data"]:
+        _save_data(project_id, record, data)
+        _problem_cache.pop(project_id, None)
+    return get_project(project_id)
 
 
 def accept_plan(project_id: int, plan, fingerprint=None, allow_tilt: bool = False) -> dict:

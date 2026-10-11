@@ -43,6 +43,11 @@ let existing = null;   // adding to an open project instead: { id, plate, known:
 let importNotes = [];  // what an OrcaSlicer 3MF added to an open project had to leave out or change (from the upload responses)
 let message = "";      // the last thing worth saying inline (toasts sit behind the dialog)
 let unitsOpen = null;  // the model whose "units and up axis" choice is open
+let pack = null;       // the packing density the draft holds: { preset, gap, tight_supports? }
+let arrangeOn = true;  // Create arranges the models onto plates at that density
+let preview = null;    // the plan the dialog shows: { key, state: planning | ready | error, plan, counts, error }
+let previewTimer = null;
+let previewRun = 0;    // bumped per plan asked for, so an answer for an older question is dropped
 
 /** Say something where the dialog shows it, and as a toast for when the dialog is closed */
 function say(text, error = true) {
@@ -155,11 +160,107 @@ function renderPlan() {
   const s = intake?.summary, box = $("new-intake");
   const steps = s?.steps || ["plates", "slice", "queue"];
   box.querySelector(".plan-steps").innerHTML = s ? steps.map((step, i) => `<li><span class="n">${i + 1}</span><div><b>${STEP_NAME[step]}</b><small>${STEP_TEXT[step](s)}</small></div></li>`).join("") : "";
+  maybePreview();
+  renderPack();
   const mixed = box.querySelector(".plan-mixed");
   mixed.hidden = !(s?.split && s.fits);
   if (!mixed.hidden) {
     mixed.innerHTML = `Only the ${plural(s.split, "oversized model")} ${s.split === 1 ? "is" : "are"} split; the other ${s.fits} go to plates. <button class="intake-link" type="button" data-plan-change>Change</button>`;
   }
+}
+
+// ── Packing density and the plan preview ─────────────────────────────────────────
+const PRESETS = [["tight", "Tight", 3], ["normal", "Normal", 6], ["roomy", "Roomy", 12]];
+
+/** The plan can be made once every model is analysed and sized, and there is more than one object to place */
+function planReady() {
+  const s = view()?.summary;
+  return !existing && !!projectId && !!s && s.objects > 1 && !s.analysing && !s.failed && !s.check_units && !uploading && !queue.length;
+}
+
+const previewKey = () => JSON.stringify([(view()?.rows || []).map(r => [r.model, r.state, r.status, r.scale, r.up, r.copies]), pack]);
+
+/** Ask for a fresh plan when what it depends on has changed (shortly after, so typing or several fixes make one request) */
+function maybePreview() {
+  if (!planReady()) { clearTimeout(previewTimer); if (!projectId) preview = null; return; }
+  const key = previewKey();
+  if (preview?.key === key) return;
+  preview = { key, state: "planning" };
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => runPreview(key), 350);
+}
+
+async function runPreview(key) {
+  const run = ++previewRun, mine = generation, id = projectId;
+  try {
+    const plan = await host.api("POST", guarded(`/api/projects/${id}/plan`), {});
+    if (run !== previewRun || mine !== generation) return;
+    preview = { key, state: "ready", plan, counts: null };
+    renderPack();
+    const counts = await host.api("POST", guarded(`/api/projects/${id}/plan/densities`), {});   // plates at each preset: slower, so after the plan
+    if (run !== previewRun || mine !== generation) return;
+    preview.counts = counts;
+  } catch (err) {
+    if (run !== previewRun || mine !== generation) return;
+    if (isGone(err)) { lostDraft(); return; }
+    preview = { key, state: "error", error: err.message };
+  }
+  renderPack();
+}
+
+/** The plates of the plan that hold models staying whole: a model too big for the bed becomes a split, so the plate the plan gave it is not shown */
+function shownPlates() {
+  const oversized = new Set((view()?.rows || []).filter(r => r.status === "split").map(r => r.object));
+  return (preview?.plan?.plates || []).filter(plate => plate.objects.some(o => !oversized.has(o.id)));
+}
+
+function mapHtml(plate, bed) {
+  const [x0, y0, x1, y1] = bed;
+  const shapes = plate.objects.filter(o => o.outline?.length > 2)
+    .map(o => `<polygon class="plan-object" points="${o.outline.map(([x, y]) => `${x.toFixed(1)},${(y1 - y + y0).toFixed(1)}`).join(" ")}"><title>${esc(o.name)}</title></polygon>`).join("");
+  return `<svg class="plan-map" viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" role="img" aria-label="${esc(plate.name)}: ${plural(plate.parts, "model")}"><rect class="plan-bed" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}"/>${shapes}</svg>`;
+}
+
+const sentence = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+
+function renderPack() {
+  const section = $("new-intake").querySelector(".pack"), s = view()?.summary;
+  section.hidden = !(s && s.objects > 1 && pack);
+  if (section.hidden) return;
+  if (section.contains(document.activeElement) && document.activeElement.matches("input[type=number]")) return;   // not under a field being typed in
+  const counts = preview?.counts, hiddenPlates = s.split || 0;
+  section.querySelector(".pack-presets").innerHTML = [...PRESETS, ["custom", "Custom", pack.preset === "custom" ? pack.gap : null]].map(([key, label, gap]) => {
+    const plates = counts?.[key] && !counts[key].refused ? Math.max(1, counts[key].plates - hiddenPlates) : null;
+    const sub = key === "custom" ? (gap == null ? "your own gap" : `${gap} mm`) : `${gap} mm apart`;
+    return `<button class="btn btn-secondary btn-sm" type="button" data-pack="${key}" aria-pressed="${pack.preset === key}">${label}<small>${sub}${plates ? ` · ${sentence(plates, "plate")}` : ""}</small></button>`;
+  }).join("");
+  const custom = section.querySelector(".pack-custom");
+  custom.hidden = pack.preset !== "custom";
+  if (!custom.hidden) custom.querySelector("input").value = pack.gap;
+  section.querySelector("[data-pack-supports]").checked = !!pack.tight_supports;
+  section.querySelector(".pack-note").textContent = pack.tight_supports ? "Models with supports are packed as close as the gap says."
+    : "Models that need supports keep 22 mm apart; the rest keep the gap.";
+  section.querySelector("[data-pack-arrange]").checked = arrangeOn;
+  const box = section.querySelector(".pack-preview");
+  if (!arrangeOn) { box.textContent = "Everything stays on plate 1 until you arrange it."; return; }
+  if (!preview || preview.state === "planning") { box.textContent = "Planning…"; return; }
+  if (preview.state === "error") { box.innerHTML = `<span class="warn">Couldn't plan: ${esc(preview.error)}. The models are added to plate 1.</span>`; return; }
+  const plan = preview.plan;
+  if (plan.refused) { box.innerHTML = `<span class="warn">No plan: ${esc(plan.refused)}. The models are added to plate 1.</span>`; return; }
+  const plates = shownPlates();
+  const later = s.split ? `<span class="slicer-muted">The ${sentence(s.split, "oversized model")} will be cut on the Split step, then packed the same way.</span>` : "";
+  box.innerHTML = `<span>${plates.length ? `${sentence(plates.length, "plate")} for ${sentence(plates.reduce((n, p) => n + p.parts, 0), "model")}` : "Nothing to place yet"}${
+    plates.some(p => p.turned) ? ` · ${plates.reduce((n, p) => n + p.turned, 0)} turned` : ""}</span>
+    <div class="pack-maps">${plates.map(p => `<div class="pack-map-card">${mapHtml(p, plan.bed)}<small>${esc(p.name)} · ${p.parts}</small></div>`).join("")}</div>${later}`;
+}
+
+/** Choose a density: the draft holds it (so the plan and Create use it) and it is remembered for the next project */
+async function choosePack(next) {
+  pack = next;
+  preview = null;
+  renderPack();
+  await act(() => host.api("POST", guarded(`/api/projects/${projectId}/pack`), { pack: next }));
+  host.api("PATCH", "/api/defaults", { pack: next }).catch(() => { /* remembering is best effort */ });
 }
 
 /** Create's (or Done's) state and the plain reason beside it */
@@ -251,6 +352,7 @@ async function ensureDraft() {
     if (mine !== generation) { beacon(project.id, project.created_at); return null; }   // closed while it was being made
     projectId = project.id;
     draftToken = project.created_at ?? null;
+    pack = project.data?.pack || { preset: "normal", gap: 6 };
   } finally { drafting = null; }
   return projectId;
 }
@@ -303,7 +405,8 @@ function dropDraft() {
   generation++;
   $("new-message").hidden = $("add-message").hidden = true;
   clearTimeout(timer);
-  projectId = draftToken = drafting = intake = unitsOpen = null;
+  projectId = draftToken = drafting = intake = unitsOpen = pack = preview = null;
+  clearTimeout(previewTimer);
   importNotes = [];
   message = "";
   queue = [];
@@ -386,10 +489,10 @@ async function create() {
   render();
   try {
     const objects = intake.summary.objects;
-    const result = await host.api("POST", guarded(`/api/projects/${projectId}/create`), { name: $("new-project-name").value.trim() });
+    const result = await host.api("POST", guarded(`/api/projects/${projectId}/create`), { name: $("new-project-name").value.trim(), arrange: arrangeOn });
     const id = projectId;
     dropDraft();
-    await host.openCreated(result, { plan: objects > 1, id });   // the project opens planned, so the models don't sit stacked on plate 1
+    await host.openCreated(result, { plan: false, id });   // Create has already arranged the models at the chosen density, so they don't sit stacked on plate 1
   } catch (err) {
     creating = false;
     if (isGone(err)) { lostDraft(); return; }
@@ -397,7 +500,22 @@ async function create() {
   }
 }
 
+function bindPack() {
+  const section = $("new-intake").querySelector(".pack");
+  section.querySelector("[data-pack-gap]").addEventListener("change", e => {
+    const gap = Math.min(40, Math.max(2, Number(e.target.value) || 6));
+    choosePack({ preset: "custom", gap, ...(pack?.tight_supports ? { tight_supports: true } : {}) });
+  });
+  section.querySelector("[data-pack-supports]").addEventListener("change", e => {
+    if (!pack) return;
+    const { tight_supports, ...rest } = pack;
+    choosePack(e.target.checked ? { ...rest, tight_supports: true } : rest);
+  });
+  section.querySelector("[data-pack-arrange]").addEventListener("change", e => { arrangeOn = e.target.checked; renderPack(); });
+}
+
 function bind() {
+  bindPack();
   $("new-project-name").addEventListener("input", e => { nameTouched = !!e.target.value.trim(); nameCleared = !e.target.value; refreshAction(); });
   $("btn-new-create").addEventListener("click", create);
   $("dlg-projects").addEventListener("close", discard);
@@ -407,6 +525,13 @@ function bind() {
       const remove = e.target.closest("[data-remove]"), retry = e.target.closest("[data-retry]");
       const units = e.target.closest("[data-units]"), apply = e.target.closest("[data-units-apply]");
       const fix = e.target.closest("[data-fix]"), dismiss = e.target.closest("[data-dismiss]"), change = e.target.closest("[data-plan-change]");
+      const density = e.target.closest("[data-pack]");
+      if (density && pack) {
+        const key = density.dataset.pack;
+        choosePack(key === "custom" ? { preset: "custom", gap: pack.preset === "custom" ? pack.gap : pack.gap || 6, ...(pack.tight_supports ? { tight_supports: true } : {}) }
+          : { preset: key, gap: PRESETS.find(p => p[0] === key)[2], ...(pack.tight_supports ? { tight_supports: true } : {}) });
+        return;
+      }
       const base = `/api/projects/${projectId}/models`;
       if (change) changePlan();
       else if (dismiss) { queue = queue.filter(q => q.key !== Number(dismiss.dataset.dismiss)); render(); }
