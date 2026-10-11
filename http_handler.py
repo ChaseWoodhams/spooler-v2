@@ -1210,13 +1210,18 @@ class SPHandler(SimpleHTTPRequestHandler):
                 return {"ok": True}
             self._jobs_call(discard, broadcast=False)
             return
+        def split_of(body):   # which of a project's splits the call is about; none = the first (Quick print has one)
+            try:
+                return int(body["split_id"]) if body.get("split_id") not in (None, "") else None
+            except (TypeError, ValueError):
+                raise jobs.JobError("split_id must be a split number")
         if len(parts) == 5 and parts[4] in ("auto-place", "fix-scale", "print", "open-as-project", "lay-flat", "rotate"):
             actions = {
-                "auto-place": lambda: projects.auto_place(self._job_id()),
-                "fix-scale":  lambda: projects.fix_scale(self._job_id()),
+                "auto-place": lambda: projects.auto_place(self._job_id(), split_of(self._json_body())),
+                "fix-scale":  lambda: projects.fix_scale(self._job_id(), split_of(self._json_body())),
                 "open-as-project": lambda: projects.open_as_project(self._job_id()),
-                "lay-flat":   lambda: projects.lay_flat(self._job_id()),
-                "rotate":     lambda: projects.rotate_quarter(self._job_id()),
+                "lay-flat":   lambda: projects.lay_flat(self._job_id(), split_of(self._json_body())),
+                "rotate":     lambda: projects.rotate_quarter(self._job_id(), split_of(self._json_body())),
                 "print":      lambda: projects.slice_and_print(self._job_id(), self._json_body()),
             }
             self._jobs_call(actions[parts[4]], broadcast=False)
@@ -1238,8 +1243,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if len(parts) == 5 and parts[4] in ("layout", "whole", "arrange", "slice", "queue"):
             actions = {
-                "layout":  lambda: projects.lay_out_split(self._job_id(), self._json_body().get("parts")),
-                "whole":   lambda: projects.place_whole_model(self._job_id()),
+                "layout":  lambda: (lambda body: projects.lay_out_split(self._job_id(), body.get("parts"), split_of(body)))(self._json_body()),
+                "whole":   lambda: projects.place_whole_model(self._job_id(), split_of(self._json_body())),
                 "arrange": lambda: (lambda body: projects.arrange(self._job_id(), body.get("plates"), body.get("engine")))(self._json_body()),
                 "slice":   lambda: (lambda body: projects.request_slices(self._job_id(), body.get("plates"), bool(body.get("send"))))(self._json_body()),
                 "queue":   lambda: projects.queue_plates(self._job_id(), self._json_body()),

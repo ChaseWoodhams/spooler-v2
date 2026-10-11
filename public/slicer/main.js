@@ -236,7 +236,7 @@ async function boot() {
     sliceState: plateId => sliceEntry(plateId)?.state,
     onSlice: plateId => requestPlateSlice(plateId),
     onOpenPlate: plateId => { selectPlate(plateId); setStep("plates"); },
-    hasAssembly: () => !!(state.project.split_id && splitStep.split?.result?.assembly),
+    hasAssembly: () => !!(splitIdsOf(state.project).length && splitStep.split?.result?.assembly),
     onOpenAssembly: async () => { await setStep("split"); document.querySelector(".split-assembly")?.scrollIntoView({ block: "center" }); },
     onSetPrinter: (plateId, printerId) => {
       const plate = data().plates.find(p => p.id === plateId);
@@ -447,7 +447,7 @@ async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   history.replaceState(null, "", `?project=${id}`);
   syncShellRoute(id);
   await bundleSettings(project.data.profile.bundle_id).catch(err => toast(err.message, true));
-  if (project.split_id) await splitStep.open(project.split_id).catch(err => toast(err.message, true));
+  if (splitIdsOf(project).length) await splitStep.open(unplacedSplitIds(project)[0] ?? splitIdsOf(project)[0]).catch(err => toast(err.message, true));
   else splitStep.close();
   await loadJobs({ quiet: true });
   renderAll();
@@ -538,15 +538,19 @@ async function loadGeometry() {
 }
 
 // ── Steps ───────────────────────────────────────────────────────────────────────
+// A project can own several splits (one per oversized file); each is laid out, or placed whole, on its own.
+const splitIdsOf = project => project.split_ids || (project.split_id ? [project.split_id] : []);
+const unplacedSplitIds = project => splitIdsOf(project).filter(id => !project.models.some(m => m.split?.id === id));
+
 function stepAvailable(step) {
   const project = state.project;
   if (!project) return false;
-  const split = project.split_id ? splitStep.split : null;
+  const split = splitIdsOf(project).length ? splitStep.split : null;
   if (isGcodeProject() && step !== "queue") return false;
   switch (step) {
-    case "model":  return !!project.split_id;
+    case "model":  return !!splitIdsOf(project).length;
     case "split":  return !!split?.analysis;
-    case "plates": return !project.split_id || data().objects.length > 0;
+    case "plates": return !splitIdsOf(project).length || data().objects.length > 0;
     case "slice":  return data().objects.length > 0;
     case "queue":  return platesWithObjects().some(p => isUpToDate(p.id)) || state.jobs.length > 0;
     case "print":  return Object.values(project.slices).some(s => s.state === "sliced") || state.jobs.length > 0;
@@ -568,7 +572,7 @@ function stepDone(step) {
 
 function defaultStep() {
   if (isGcodeProject()) return "queue";
-  if (state.project.split_id && !data().objects.length) return splitStep.split?.result ? "split" : "model";
+  if (unplacedSplitIds(state.project).length || splitIdsOf(state.project).length && !data().objects.length) return splitStep.split?.result ? "split" : "model";
   if (!data().objects.length) return "plates";
   if (state.jobs.some(j => OPEN_JOB_STATES.has(j.state))) return "queue";
   return platesWithObjects().every(p => isUpToDate(p.id)) ? "slice" : "plates";
@@ -609,7 +613,7 @@ async function setStep(step, { force = false } = {}) {
 
 function renderSteps() {
   if (!state.project) { $("step-bar").innerHTML = ""; return; }
-  const steps = STEPS.filter(([id]) => isGcodeProject() ? id === "queue" : state.project.split_id || (id !== "model" && id !== "split"));
+  const steps = STEPS.filter(([id]) => isGcodeProject() ? id === "queue" : splitIdsOf(state.project).length || (id !== "model" && id !== "split"));
   $("step-bar").innerHTML = steps.map(([id, label], index) => {
     const skipped = id === "split" && splitSkipped();   // a model that fits the bed skips Split, but the step stays openable
     return `${index ? '<span class="slicer-step-sep"></span>' : ""}
@@ -1769,28 +1773,38 @@ async function acceptPlan() {
   });
 }
 
+// After one split is laid out, the next unplaced one opens on Model; with none left the project goes on to Plates
+async function afterSplitPlaced() {
+  const next = unplacedSplitIds(state.project)[0];
+  if (next === undefined) return setStep("plates");
+  await splitStep.open(next).catch(err => toast(err.message, true));
+  return setStep("model");
+}
+
 async function layOutParts() {
-  const placed = state.project.models.some(m => m.split?.id === state.project.split_id);
+  const splitId = splitStep.split?.id ?? state.project.split_id;
+  const placed = state.project.models.some(m => m.split?.id === splitId);
   if (placed && !confirm("Lay the parts out again? This replaces the parts on your plates, including any moves or settings you gave them.")) return;
   await flushSave();
-  applyProject(await api("POST", `/api/projects/${state.project.id}/layout`, {}));
+  applyProject(await api("POST", `/api/projects/${state.project.id}/layout`, { split_id: splitId }));
   resetEdits();
   state.plate = data().plates.find(p => plateObjects(p.id).length)?.id || data().plates[0].id;
   renderAll();
   schedulePoll();
-  await setStep("plates");
+  await afterSplitPlaced();
   state.viewport?.fit(state.viewport.objectsBox());
   toast(`Parts packed onto ${plural(platesWithObjects().length, "plate")} — importing them now`);
 }
 
 async function placeWhole() {
-  const placed = state.project.models.some(m => m.split?.id === state.project.split_id);
+  const splitId = splitStep.split?.id ?? state.project.split_id;
+  const placed = state.project.models.some(m => m.split?.id === splitId);
   if (placed && !confirm("Put the model on a plate again? This replaces what's on your plates from this model.")) return;
   await flushSave();
-  applyProject(await api("POST", `/api/projects/${state.project.id}/whole`, {}));
+  applyProject(await api("POST", `/api/projects/${state.project.id}/whole`, { split_id: splitId }));
   renderAll();
   schedulePoll();
-  await setStep("plates");
+  await afterSplitPlaced();
 }
 
 async function setMode(mode) {
@@ -2109,8 +2123,8 @@ async function openSplitDialog() {
 }
 
 // A model that fits the bed can go on one plate whole ("Put it on a plate" on the Model step), and then Split is shown as not needed
-const modelOnPlateWhole = () => !!state.project?.split_id
-  && state.project.models.some(m => m.split?.id === state.project.split_id && m.split.part === 0);
+const modelOnPlateWhole = () => !!splitStep.split
+  && !!state.project?.models.some(m => m.split?.id === splitStep.split.id && m.split.part === 0);
 const splitSkipped = () => modelOnPlateWhole() && !!splitStep.split?.analysis?.fits_whole;
 
 // ── Wiring ──────────────────────────────────────────────────────────────────────

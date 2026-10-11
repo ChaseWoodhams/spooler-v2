@@ -248,6 +248,15 @@ MIGRATIONS = [
     """
     ALTER TABLE projects ADD COLUMN draft INTEGER NOT NULL DEFAULT 0 CHECK (draft IN (0, 1));
     """,
+    # 12 — Several splits per project (additive): projects.split_id stays the first split; the others are listed here
+    """
+    CREATE TABLE project_splits (
+        project_id  INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+        split_id    INTEGER NOT NULL REFERENCES splits (id) ON DELETE CASCADE,
+        PRIMARY KEY (project_id, split_id)
+    );
+    CREATE INDEX project_splits_by_split ON project_splits (split_id);
+    """,
 ]
 
 _lock = threading.RLock()
