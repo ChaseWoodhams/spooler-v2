@@ -219,6 +219,7 @@ const openJobPlates = () => new Set(state.jobs.filter(j => OPEN_JOB_STATES.has(j
 async function boot() {
   document.querySelectorAll("[data-steps], #prepare-tools").forEach(el => { el.hidden = true; });  // shown once a project is open
   newProject.attach({ api, upload, toast, openCreated, importNotes: showImportNotes });
+  bindFolds();
   bindPack();
   bindUi();   // first, so "Open or create a project" works even if the slower setup below fails
   const viewport = $("viewport");
@@ -892,6 +893,24 @@ function renderProfile() {
   }
   $("bed-select").value = data().bed;
   renderFarm();
+  renderFoldSummaries();
+}
+
+// The folded sections say what is in them in one line, and remember whether they were open
+const shortName = name => String(name || "").replace(/ @.*$/, "").replace(/^Elegoo /, "");
+function renderFoldSummaries() {
+  const text = id => { const o = $(id).selectedOptions?.[0]; return o && o.value ? shortName(o.textContent.replace(/ \*$/, "")) : ""; };
+  $("material-summary").textContent = [text("preset-machine-select"), text("preset-filament-select"), text("preset-process-select"), text("bed-select").replace(/ \(Side .\)/, "")]
+    .filter(Boolean).join(" · ") || "Choose a printer and profile";
+  $("settings-summary").textContent = `${$("settings-mode").selectedOptions[0]?.textContent || "Simple"} · ${state.settingsTab === "object" ? "this object" : "project and plates"}`;
+}
+
+function bindFolds() {
+  for (const fold of document.querySelectorAll(".slicer-fold")) {
+    const saved = remember(`slicer.fold.${fold.id}`);
+    if (saved) fold.open = saved === "1";
+    fold.addEventListener("toggle", () => remember(`slicer.fold.${fold.id}`, fold.open ? "1" : "0"));
+  }
 }
 
 // Pick another preset: the choice is locked in as a new profile; the other kinds keep their changes
@@ -1117,6 +1136,7 @@ function effectiveProcess(base) {
 
 function renderSettings() {
   if (!state.project || !state.schema) return;
+  if (state.settingsTab === "object" && !$("fold-settings").open) $("fold-settings").open = true;
   const base = state.bundleSettings.get(data().profile.bundle_id);
   const plate = currentPlate();
   const object = state.step === "plates" ? selectedObject() : null;
@@ -1352,7 +1372,7 @@ function renderObjectPanel() {
   if (selectionIds().length > 1) {
     panel.innerHTML = `
     <h5>${plural(selectionIds().length, "object")} selected</h5>
-    <p class="slicer-muted">Drag, rotate or scale one and the rest follow. Arrow keys nudge (Shift 10 mm, Alt 0.1 mm), , and . turn by 15°. The Align menu lines them up.</p>
+    <p class="slicer-muted">Drag, rotate or scale one and the rest follow. Arrow keys nudge them (Shift 10 mm, Alt 0.1 mm); comma and full stop turn them 15°. The Align menu lines them up.</p>
     <label class="slicer-field">Move to <select id="group-plate"><option value="">Plate…</option>${data().plates.filter(p => p.id !== state.plate).map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}<option value="new">New plate</option></select></label>
     <div class="slicer-actions-row">
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="turn-left" title="Turn each 90° anticlockwise">Turn −90°</button>

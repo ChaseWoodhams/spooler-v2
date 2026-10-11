@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="style.css?v=60" />
   <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=34" />
+  <link rel="stylesheet" href="slicer.css?v=36" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -47,15 +47,39 @@
 
   <div class="slicer-body">
     <aside id="project-sidebar" class="slicer-sidebar">
-      <section id="object-panel" class="slicer-card slicer-object-panel" hidden></section>
       <section id="empty-state" class="slicer-card">
         <div class="slicer-card-head"><h4>Projects</h4></div>
         <button id="btn-empty-projects" class="btn btn-primary" type="button">New project</button>
       </section>
       <div id="split-side" class="split-side" hidden></div>
 
-      <section class="slicer-card" data-steps="plates slice">
-        <div class="slicer-card-head"><h4>Printer and material</h4></div>
+      <section class="slicer-card" data-steps="plates">
+        <div class="slicer-card-head">
+          <h4>Objects on this plate</h4>
+          <div class="slicer-actions-row">
+            <button id="btn-add-model" class="btn btn-primary btn-sm" type="button">Add model</button>
+            <button id="btn-add-folder" class="btn btn-secondary btn-sm" type="button" title="Add every STL file in a folder, including subfolders">Add folder</button>
+            <button id="btn-add-split" class="btn btn-secondary btn-sm" type="button">Split parts</button>
+          </div>
+        </div>
+        <input id="model-input" type="file" accept=".stl,.obj,.3mf" multiple hidden />
+        <input id="folder-input" type="file" webkitdirectory hidden />
+        <div id="upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
+        <div id="object-list" class="slicer-object-list"></div>
+      </section>
+
+      <section id="object-panel" class="slicer-card slicer-object-panel" hidden></section>
+
+      <section class="slicer-card slicer-this-plate" data-steps="plates slice" aria-label="This plate">
+        <div class="preset-row"><label for="plate-printer-select">Print on</label>
+          <select id="plate-printer-select" title="The printer this plate is meant for"></select></div>
+        <div id="plate-fit" class="plate-fit"></div>
+        <div class="slicer-actions-row"><button id="btn-slice-send" class="btn btn-secondary btn-sm" type="button" disabled
+          title="Slice this plate and put it in the queue for its printer">Slice &amp; send</button></div>
+      </section>
+
+      <details class="slicer-card slicer-fold" id="fold-material" data-steps="plates slice">
+        <summary><span>Printer and material</span><small id="material-summary"></small></summary>
         <div class="preset-row"><label for="preset-machine-select">Printer</label>
           <select id="preset-machine-select"></select></div>
         <div class="preset-row"><label for="preset-filament-select">Filament</label>
@@ -75,27 +99,7 @@
         <div class="preset-row"><label for="spool-select">Spool</label>
           <select id="spool-select" title="Use a Spoolman spool: its density, temperatures and cost are applied as filament settings"></select></div>
         <p id="spool-note" class="slicer-muted" hidden></p>
-        <div class="preset-row"><label for="plate-printer-select">Print on</label>
-          <select id="plate-printer-select" title="The printer this plate is meant for"></select></div>
-        <div id="plate-fit" class="plate-fit"></div>
-        <div class="slicer-actions-row"><button id="btn-slice-send" class="btn btn-secondary btn-sm" type="button" disabled
-          title="Slice this plate and put it in the queue for its printer">Slice &amp; send</button></div>
-      </section>
-
-      <section class="slicer-card" data-steps="plates">
-        <div class="slicer-card-head">
-          <h4>Objects on this plate</h4>
-          <div class="slicer-actions-row">
-            <button id="btn-add-model" class="btn btn-primary btn-sm" type="button">Add model</button>
-            <button id="btn-add-folder" class="btn btn-secondary btn-sm" type="button" title="Add every STL file in a folder, including subfolders">Add folder</button>
-            <button id="btn-add-split" class="btn btn-secondary btn-sm" type="button">Split parts</button>
-          </div>
-        </div>
-        <input id="model-input" type="file" accept=".stl,.obj,.3mf" multiple hidden />
-        <input id="folder-input" type="file" webkitdirectory hidden />
-        <div id="upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
-        <div id="object-list" class="slicer-object-list"></div>
-      </section>
+      </details>
 
       <section class="slicer-card" data-steps="slice">
         <div class="slicer-card-head">
@@ -131,8 +135,8 @@
         <div id="job-batches" class="slicer-batches"></div>
       </section>
 
-      <section class="slicer-card slicer-settings" data-steps="plates slice">
-        <p class="slicer-muted">Simple shows common settings; Advanced and Expert reveal more detail. An asterisk marks changes from the selected preset. Reset restores the value inherited by the selected Project, Plate or Object.</p>
+      <details class="slicer-card slicer-settings slicer-fold" id="fold-settings" data-steps="plates slice">
+        <summary><span>Print settings</span><small id="settings-summary"></small></summary>
         <div id="settings-scope-toggle" class="scope-toggle" role="group" aria-label="Settings apply to">
           <button type="button" data-scope-tab="global">Global</button>
           <button type="button" data-scope-tab="objects">Objects</button>
@@ -141,12 +145,12 @@
         <div id="settings-scope" class="slicer-actions-row" hidden></div>
         <div class="slicer-settings-tools">
           <input id="settings-search" type="search" placeholder="Search settings" aria-label="Search settings" />
-          <select id="settings-mode" aria-label="Setting detail" title="Which settings to show, as in OrcaSlicer's Simple / Advanced / Expert modes">
+          <select id="settings-mode" aria-label="Setting detail" title="Simple shows common settings; Advanced and Expert reveal more, as in OrcaSlicer. An asterisk marks changes from the selected preset. Reset restores the value inherited from the Project, Plate or Object.">
             <option value="simple">Simple</option><option value="advanced">Advanced</option><option value="expert">Expert</option></select>
         </div>
         <div id="settings-pages" class="slicer-pages"></div>
         <div id="settings-body" class="slicer-settings-body"></div>
-      </section>
+      </details>
     </aside>
 
     <main class="slicer-main">
@@ -350,6 +354,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=41"></script>
+  <script type="module" src="slicer/main.js?v=43"></script>
 </body>
 </html>

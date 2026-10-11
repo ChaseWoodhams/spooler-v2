@@ -515,3 +515,17 @@ body.embedded .slicer-home { display: none; }
 .slicer-project-name { min-width: 110px; text-overflow: ellipsis; }
 .slicer-steps { flex-wrap: nowrap; }
 .plate-tools .slicer-toolbar-select { max-width: 130px; }
+
+/* Sidebar: what you work on comes first; printer and material, and print settings, fold away behind a one-line summary */
+.slicer-fold > summary { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; cursor: pointer; list-style: none; }
+.slicer-fold > summary::-webkit-details-marker { display: none; }
+.slicer-fold > summary > span { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); white-space: nowrap; }
+.slicer-fold > summary > span::before { content: "\25B8"; display: inline-block; margin-right: 6px; transition: transform .12s; }
+.slicer-fold[open] > summary > span::before { transform: rotate(90deg); }
+.slicer-fold > summary > small { color: var(--text); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slicer-fold[open] > summary { margin-bottom: 6px; }
+.slicer-fold[open] > summary > small { display: none; }
+.slicer-this-plate .plate-fit:empty { display: none; }
+.slicer-fold { display: block; }
+.slicer-fold[open] > :not(summary) { margin-top: 8px; }
+.slicer-fold[open] > summary + * { margin-top: 0; }
