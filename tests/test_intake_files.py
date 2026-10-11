@@ -87,7 +87,7 @@ class IntakeFilesTests(unittest.TestCase):
         self.assertEqual((small["file"], small["state"], small["status"], small["fits"], small["size"]), ("small.stl", "ready", "fits", True, [20.0, 20.0, 20.0]))
         self.assertEqual((huge["file"], huge["status"], huge["fits"], huge["scale_ok"]), ("huge.stl", "split", False, True))
         self.assertEqual((small["model"], small["object"], small["copies"], small["scale"], small["up"]), (1, 1, 1, 1.0, "z"))
-        self.assertEqual(body["summary"], {"files": 2, "items": 2, "split": 1, "fits": 1, "check_units": 0, "analysing": 0, "failed": 0,
+        self.assertEqual(body["summary"], {"models": 2, "objects": 2, "split": 1, "fits": 1, "check_units": 0, "analysing": 0, "failed": 0,
                                            "can_create": True, "steps": ["split", "plates", "slice", "queue"]})
 
     def test_a_model_that_fits_everywhere_skips_the_split_step(self):

@@ -1,4 +1,4 @@
-/* Drop files on the dashboard: one file opens Quick print, several files or a folder make one Project and open it on the stepper.
+/* Drop files on the dashboard: one model opens Quick print, several models or a folder make one Project and open it on the stepper.
    Starting a Project by name (New project) is the Projects page's job, in slicer/main.js. */
 (() => {
   const MODEL = /\.(stl|obj|3mf|gcode)$/i;
@@ -26,16 +26,16 @@
         return;
       }
       if (xhr.status === 401) { location.replace("/login"); return; }
-      say(body.error || `Couldn't add the file (HTTP ${xhr.status})`, true);
+      say(body.error || `Couldn't add the model (HTTP ${xhr.status})`, true);
     };
-    xhr.onerror = () => say("Couldn't add the file: the server couldn't be reached", true);
+    xhr.onerror = () => say("Couldn't add the model: the server couldn't be reached", true);
     xhr.send(file);
   }
 
   // Several files or a folder: one project holding every model
   async function importBatch(files, folder) {
     const models = files.filter(f => FolderImport.MODEL.test(f.name));
-    if (!models.length) { say("There are no STL, OBJ or 3MF files to add", true); return; }
+    if (!models.length) { say("There are no STL, OBJ or 3MF models to add", true); return; }
     try {
       const result = await FolderImport.toNewProject(models, { name: folder });
       if (result.failed.length) say(FolderImport.summary(result, models.length), true);
@@ -59,7 +59,7 @@
     document.body.classList.remove("import-dropping");
     FolderImport.dropped(e.dataTransfer).then(({ files, folder }) => {
       if (files.length > 1 || folder) { importBatch(files, folder); return; } // a folder or several files make one Project
-      if (window.QuickPrint) window.QuickPrint.open({ file: files[0] }); // a dropped file is a Quick print
+      if (window.QuickPrint) window.QuickPrint.open({ file: files[0] }); // a dropped model is a Quick print
       else importFile(files[0]);
     });
   });

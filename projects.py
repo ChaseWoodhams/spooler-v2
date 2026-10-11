@@ -10,7 +10,7 @@ Files (DATA_DIR/projects/<id>/)
 Record
   split_id  the split model the project was started from, if any; its parts (or the whole model) are laid out on plates
   split_ids (read-only) every split the project owns: split_id first, then the rest from the project_splits table — a drop of
-            several oversized files is one project with one split each
+            several oversized models is one project with one split each
   data    {"bed": "textured" | "smooth",
            "profile": {"bundle_id", "process": {…changes}, "filament": {…changes}, "bricklayers": {…} | null},
            "plates": [{"id", "name", "overrides": {…process changes for this plate}, "bricklayers": {…} | null}],
@@ -227,7 +227,7 @@ def get_project(project_id: int) -> dict:
 
 def list_projects(include_quick: bool = False) -> list:
     """Projects, newest first. Quick projects (hidden behind Quick print) are left out unless `include_quick`;
-    drafts (files uploaded before Create) are always left out."""
+    drafts (models uploaded before Create) are always left out."""
     with database.transaction() as conn:
         rows = conn.execute("SELECT * FROM projects WHERE draft = 0" + ("" if include_quick else " AND quick = 0")
                             + " ORDER BY updated_at DESC, id DESC").fetchall()
@@ -484,12 +484,10 @@ def unplaced_splits(project: dict) -> list:
 
 
 def make_split(project_id: int, model_id: int) -> dict:
-    """Turn an imported model (one too big for the bed) into a split of this project: the file is stored as a new split
+    """Turn an imported model (one too big for the bed) into a split of this project: the model is stored as a new split
     model with the model's scale and up axis and analysed again, and the model and its object are removed."""
     record = get_project(project_id)
-    model = next((m for m in record["models"] if m["id"] == model_id), None)
-    if model is None:
-        raise jobs.JobError("Model not found", 404)
+    model = _find_model(record, model_id)
     if model.get("split") or model["state"] != READY:
         raise jobs.JobError("Only a model that has been analysed and is not split parts can become a split", 409)
     source = model_dir(project_id, model_id) / "source" / model["file"]
@@ -1059,6 +1057,14 @@ def add_split_parts(project_id: int, split_id: int, numbers=None) -> dict:
 
 # ── Laying out plates ──────────────────────────────────────────────────────────
 
+def _find_model(record: dict, model_id: int) -> dict:
+    """The project's model with this id, or a 404."""
+    model = next((m for m in record["models"] if m["id"] == model_id), None)
+    if model is None:
+        raise jobs.JobError("Model not found", 404)
+    return model
+
+
 def _split_or_first(record: dict, split_id: int | None) -> int | None:
     """The split a call is about: the one asked for, else the project's first (a Quick print has just one)."""
     return split_id if split_id is not None else record.get("split_id")
@@ -1216,7 +1222,7 @@ def _whole_position(size, limits: dict):
 
 
 def place_whole_model(project_id: int, split_id: int | None = None) -> dict:
-    """Put one of the project's uploaded models (the first split unless `split_id`) on a plate in one piece, for a model
+    """Put one of the project's uploaded models (the first split unless `split_id`) on a plate whole, for a model
     that fits the printer without splitting."""
     _require_geometry()
     record = get_project(project_id)
@@ -1467,13 +1473,13 @@ def fix_scale(project_id: int, split_id: int | None = None) -> dict:
         raise jobs.JobError("There is no scale correction to apply", 409)
     if info["placed"]:
         raise jobs.JobError("The model is already on a plate; change its scale there", 409)
-    splits.update_settings(split_id if split_id is not None else get_project(project_id)["split_id"], {"scale": info["scale_fix"]["scale"]})
+    splits.update_settings(_split_or_first(get_project(project_id), split_id), {"scale": info["scale_fix"]["scale"]})
     return intake(project_id, split_id)
 
 
 def intake_files(project_id: int) -> dict:
     """The intake table: one row per imported model with what it needs before the project is created (the per-model slice of
-    intake), and a summary. `status` is the row's chip: fits, split (too big for the bed), check_units, or None while it has
+    intake), and a summary (`models`, `objects` made by the Copies, how many are too big, fit, need a units check, ...). `status` is the row's chip: fits, split (too big for the bed), check_units, or None while it has
     no verdict. Fit is worked out here against the project's own machine, never the engine's default printer."""
     record = get_project(project_id)
     limits = _loose_limits(record)
@@ -1495,7 +1501,7 @@ def intake_files(project_id: int) -> dict:
     count = lambda status: sum(1 for r in rows if r["status"] == status)
     analysing = sum(1 for r in rows if r["state"] not in (READY, FAILED))
     failed = sum(1 for r in rows if r["state"] == FAILED)
-    summary = {"files": len(rows), "items": sum(r["copies"] for r in rows), "split": count("split"), "fits": count("fits"),
+    summary = {"models": len(rows), "objects": sum(r["copies"] for r in rows), "split": count("split"), "fits": count("fits"),
                "check_units": count("check_units"), "analysing": analysing, "failed": failed}
     summary["can_create"] = bool(rows) and not (summary["check_units"] or analysing or failed)
     summary["steps"] = (["split"] if summary["split"] else []) + ["plates", "slice", "queue"]
@@ -2614,8 +2620,7 @@ def accept_plan(project_id: int, plan, fingerprint=None, allow_tilt: bool = Fals
 
 def delete_model(project_id: int, model_id: int) -> dict:
     record = get_project(project_id)
-    if not any(m["id"] == model_id for m in record["models"]):
-        raise jobs.JobError("Model not found", 404)
+    _find_model(record, model_id)
     with database.transaction() as conn:
         row = conn.execute("SELECT data, models FROM projects WHERE id = ?", (project_id,)).fetchone()
         data, models = json.loads(row["data"]), json.loads(row["models"])
@@ -2635,9 +2640,7 @@ def retry_model(project_id: int, model_id: int) -> dict:
     """Re-queue a failed import. The model goes back to importing with no claim, so the workers take it under the
     same atomic rule as a fresh upload."""
     record = get_project(project_id)
-    model = next((m for m in record["models"] if m["id"] == model_id), None)
-    if model is None:
-        raise jobs.JobError("Model not found", 404)
+    model = _find_model(record, model_id)
     if model["state"] != FAILED:
         raise jobs.JobError("Only a model that failed to import can be retried", 409)
 
@@ -2654,9 +2657,7 @@ def rescale_model(project_id: int, model_id: int, scale=None, up=None) -> dict:
     """Change an imported model's scale and/or up axis (the unit fix) and analyse it again. A model that is already
     parts laid out from a split can't be changed this way."""
     record = get_project(project_id)
-    model = next((m for m in record["models"] if m["id"] == model_id), None)
-    if model is None:
-        raise jobs.JobError("Model not found", 404)
+    model = _find_model(record, model_id)
     if model.get("split"):
         raise jobs.JobError("This model is already laid out as parts; change its scale on the plate", 409)
     if model["state"] == IMPORTING and model.get("claimed_at"):
