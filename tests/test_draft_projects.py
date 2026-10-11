@@ -115,7 +115,7 @@ class DraftProjectTests(unittest.TestCase):
 
     def test_create_names_and_reveals_the_draft_keeping_its_models(self):
         draft = self.draft()
-        projects._mutate(draft["id"], "models", lambda m: m.append({"id": 1, "name": "bracket.stl", "state": "ready"}))
+        projects._mutate(draft["id"], "models", lambda m: m.append({"id": 1, "name": "bracket.stl", "file": "bracket.stl", "state": "ready", "import": [1.0, "z"]}))
         status, result = self.call("POST", f"/api/projects/{draft['id']}/create", {"name": "  Brackets  "})
         self.assertEqual(status, 200, result)
         self.assertEqual((result["project"]["name"], result["project"]["draft"]), ("Brackets", False))
