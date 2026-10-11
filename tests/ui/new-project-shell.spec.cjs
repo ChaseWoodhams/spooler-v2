@@ -28,7 +28,9 @@ const created = { id: 9, name: 'bracket', revision: 1, split_id: null, models: [
       if (method !== 'GET') calls.push({ method, path: url.pathname, params: Object.fromEntries(url.searchParams), body: route.request().postData() });
       const data = url.pathname === '/api/projects' && method === 'GET' ? { projects: [existing] }
         : url.pathname === '/api/splits' ? { splits: [] }
-        : url.pathname === '/api/projects/upload' ? created
+        : url.pathname === '/api/projects' && method === 'POST' ? created
+        : url.pathname === '/api/projects/9/models/upload' ? created
+        : url.pathname === '/api/projects/9/intake-files' ? { rows: [], summary: { files: 0, items: 0, analysing: 0, can_create: false } }
         : url.pathname === '/api/projects/9' ? created
         : url.pathname.endsWith('/status') ? { plates: [], progress: { counts: {}, filament_g: {} } }
         : url.pathname.endsWith('/jobs') ? { jobs: [] } : url.pathname === '/api/printers' ? []
@@ -59,12 +61,16 @@ const created = { id: 9, name: 'bracket', revision: 1, split_id: null, models: [
       dt.items.add(new File(['solid x\nendsolid x\n'], 'bracket.stl'));
       document.getElementById('dlg-projects').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
     });
-    await page.waitForFunction(() => !document.getElementById('dlg-projects').open);
-    const upload = calls.find(c => c.path === '/api/projects/upload');
-    assert.ok(upload, 'a drop anywhere on the page starts a project');
+    await page.locator('#new-intake').getByText('bracket.stl', { exact: true }).waitFor();   // the intake table takes over (tests/ui/intake-table.spec.cjs)
+    const draft = calls.find(c => c.path === '/api/projects' && c.method === 'POST');
+    assert.ok(draft, 'a drop anywhere on the page starts a draft project');
+    assert.equal(JSON.parse(draft.body).draft, true);
+    for (let i = 0; i < 50 && !calls.some(c => c.path === '/api/projects/9/models/upload'); i++) await page.waitForTimeout(100);   // the draft is made first
+    const upload = calls.find(c => c.path === '/api/projects/9/models/upload');
+    assert.ok(upload, 'the file is uploaded into the draft');
     assert.equal(upload.params.filename, 'bracket.stl');
     assert.equal(upload.params.scale, '1');
     assert.equal(upload.params.up, 'z');
-    console.log('PASS: A drop on the page starts a project with millimetre, Z-up defaults');
+    console.log('PASS: A drop on the page starts a draft with millimetre, Z-up defaults');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exit(1); });
