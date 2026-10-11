@@ -27,6 +27,7 @@ let drafting = null; // the pending POST /api/projects (concurrent drops wait fo
 let queue = [];      // files not yet on the server: { key, name, state: queued | uploading | failed, pct, error }
 let intake = null;   // the last GET intake-files
 let nameTouched = false;
+let nameCleared = false;  // the name field was emptied by hand: leave it empty (Create says why) until something is typed
 let timer = null;
 let generation = 0;  // bumped when the draft is dropped, so work for the old one stops
 let uploading = false;
@@ -59,7 +60,7 @@ function autoName() {
 }
 
 function syncName() {
-  if (!nameTouched && !existing) $("new-project-name").value = autoName();
+  if (!nameTouched && !existing && !nameCleared) $("new-project-name").value = autoName();
 }
 
 function chipFor(row) {
@@ -125,28 +126,66 @@ function summaryText() {
   return bits.join(" · ");
 }
 
+const STEP_TEXT = {
+  split: s => `${plural(s.split, "model")} bigger than the bed will be cut into parts that fit.`,
+  plates: s => `${plural(s.items, "item")} (copies included) arranged onto plates automatically.`,
+  slice: () => "Default settings; change anything in All settings later.",
+  queue: () => "Send the plates to a printer.",
+};
+const STEP_NAME = { split: "Split", plates: "Plates", slice: "Slice", queue: "Queue" };
+
+/** The "What happens next" panel: the steps this project will take, the mixed-upload sentence and why Create is blocked */
+function renderPlan() {
+  const s = intake?.summary, box = $("new-intake");
+  const steps = s?.steps || ["plates", "slice", "queue"];
+  box.querySelector(".plan-steps").innerHTML = s ? steps.map((step, i) => `<li><span class="n">${i + 1}</span><div><b>${STEP_NAME[step]}</b><small>${STEP_TEXT[step](s)}</small></div></li>`).join("") : "";
+  const mixed = box.querySelector(".plan-mixed");
+  mixed.hidden = !(s?.split && s.fits);
+  if (!mixed.hidden) {
+    mixed.innerHTML = `Only the ${plural(s.split, "oversized model")} ${s.split === 1 ? "is" : "are"} split; the other ${s.fits} go to plates. <button class="intake-link" type="button" data-plan-change>Change</button>`;
+  }
+}
+
+/** Create's state and the plain reason beside it. Done (adding to an open project) only waits for the work in flight */
+function refreshAction() {
+  if (existing) { $("btn-add-done").disabled = busy(); return; }
+  $("btn-new-create").disabled = !canCreate();
+  $("new-create-reason").textContent = $("new-intake").hidden || creating ? "" : blocker();
+}
+
 function render() {
   const rows = view()?.rows || [], pending = queue.length;
   const box = $(existing ? "add-intake" : "new-intake");
   box.hidden = !rows.length && !pending;
   if (!existing) $("dlg-projects").classList.toggle("has-intake", !box.hidden);
-  const action = existing ? $("btn-add-done") : $("btn-new-create");   // Done only waits for the work in flight; Create also wants a clean table
+  if (!existing) renderPlan();
   if (document.activeElement?.matches?.(".intake-copies, .intake-units-panel select")) {
     // Don't rebuild the list under a field being typed in; the next poll catches up.
-    action.disabled = existing ? busy() : !canCreate();
+    refreshAction();
     return;
   }
   box.querySelector(".intake-list").innerHTML = rows.map(rowHtml).join("") + queue.map(queuedHtml).join("");
   box.querySelector(".intake-summary").textContent = summaryText();
   const notes = box.querySelector(".intake-notes");
   if (notes) { notes.hidden = !importNotes.length; notes.textContent = importNotes.length ? `Opened with ${importNotes.length === 1 ? "a note" : `${importNotes.length} notes`}: ${importNotes.join(" · ")}` : ""; }
-  if (!existing) action.hidden = box.hidden;
-  action.disabled = existing ? busy() : !canCreate();
-  syncName();
+  if (!existing) $("btn-new-create").hidden = box.hidden;
+  syncName();   // before the action, which wants the name
+  refreshAction();
 }
 
 const busy = () => uploading || queue.some(q => q.state !== "failed") || (view()?.summary.analysing || 0) > 0;
-const canCreate = () => !!draft && !creating && !busy() && !!intake?.summary.can_create;
+
+/** Why Create can't be pressed yet, in plain words ("" when it can) */
+function blocker() {
+  const s = intake?.summary;
+  if (!s?.files && !queue.length) return "Add a model file to continue.";
+  if (busy()) return "Waiting for the files to be checked.";
+  if (s?.failed || queue.some(q => q.state === "failed")) return "Retry or remove the file that couldn't be read.";
+  if (s?.check_units) return `Check the size of ${plural(s.check_units, "file")} marked Check units.`;
+  if (!$("new-project-name").value.trim()) return "Give the project a name.";
+  return "";
+}
+const canCreate = () => !!draft && !creating && !blocker() && !!intake?.summary.can_create;
 
 async function refresh() {
   if (!draft) return;
@@ -224,7 +263,7 @@ function dropDraft() {
   creating = false;
   if (existing) { existing = null; $("add-intake").hidden = true; return; }
   if (!nameTouched) $("new-project-name").value = "";
-  nameTouched = false;
+  nameTouched = nameCleared = false;
   $("new-intake").hidden = true;
   $("btn-new-create").hidden = true;
   $("dlg-projects").classList.remove("has-intake");
@@ -259,6 +298,16 @@ function discard() {
   if (!navigator.sendBeacon?.(url)) fetch(url, { method: "POST", keepalive: true }).catch(() => { /* the idle sweep removes it */ });
 }
 
+/** Change (mixed upload): a model is usually only "too big" because of its units or up axis, so open the units choice of the
+    first oversized file, where it can be put right */
+function changePlan() {
+  const row = view()?.rows.find(r => r.status === "split");
+  if (!row) return;
+  unitsOpen = row.model;
+  render();
+  $("new-intake").querySelector(`[data-units-panel="${row.model}"] select`)?.focus();
+}
+
 async function act(handler) {
   try { await handler(); } catch (err) { host.toast(err.message, true); }
   await refresh();
@@ -273,7 +322,7 @@ async function create() {
     const result = await host.api("POST", `/api/projects/${draft}/create`, { name: $("new-project-name").value.trim() });
     const id = draft;
     dropDraft();
-    await host.openCreated(result, { plan: items > 1, id });
+    await host.openCreated(result, { plan: items > 1 && result.step === "plates", id });   // the plan jumps to Plates, so only when that is where it opens
   } catch (err) {
     creating = false;
     host.toast(err.message, true);
@@ -282,7 +331,7 @@ async function create() {
 }
 
 function bind() {
-  $("new-project-name").addEventListener("input", e => { nameTouched = !!e.target.value.trim(); });
+  $("new-project-name").addEventListener("input", e => { nameTouched = !!e.target.value.trim(); nameCleared = !e.target.value; refreshAction(); });
   $("btn-new-create").addEventListener("click", create);
   $("dlg-projects").addEventListener("close", discard);
   window.addEventListener("pagehide", discard);
@@ -290,8 +339,9 @@ function bind() {
   list.addEventListener("click", e => {
     const remove = e.target.closest("[data-remove]"), retry = e.target.closest("[data-retry]");
     const units = e.target.closest("[data-units]"), apply = e.target.closest("[data-units-apply]");
-    const fix = e.target.closest("[data-fix]"), dismiss = e.target.closest("[data-dismiss]");
-    if (dismiss) { queue = queue.filter(q => q.key !== Number(dismiss.dataset.dismiss)); render(); }
+    const fix = e.target.closest("[data-fix]"), dismiss = e.target.closest("[data-dismiss]"), change = e.target.closest("[data-plan-change]");
+    if (change) changePlan();
+    else if (dismiss) { queue = queue.filter(q => q.key !== Number(dismiss.dataset.dismiss)); render(); }
     else if (units) { unitsOpen = unitsOpen === Number(units.dataset.units) ? null : Number(units.dataset.units); render(); }
     else if (apply) {
       const panel = apply.closest("[data-units-panel]");
