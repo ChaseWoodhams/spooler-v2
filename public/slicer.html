@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="style.css?v=60" />
   <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=27" />
+  <link rel="stylesheet" href="slicer.css?v=28" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -29,6 +29,7 @@
     <div class="slicer-project">
       <input id="project-name" class="slicer-project-name" aria-label="Project name" maxlength="120" />
       <button id="btn-projects" class="btn btn-secondary btn-sm" type="button">Projects</button>
+      <button id="btn-add-files" class="btn btn-secondary btn-sm" type="button" title="Add STL, OBJ or 3MF files to this project, on any step">Add files</button>
       <button id="btn-export-3mf" class="btn btn-secondary btn-sm" type="button" title="Download the project as an OrcaSlicer project (3MF) with its plates, placements and settings">Export 3MF</button>
       <span id="save-state" class="slicer-muted"></span>
     </div>
@@ -242,18 +243,15 @@
     </div>
   </dialog>
 
-  <dialog id="dlg-import" class="slicer-dialog">
-    <h3>Add models</h3>
-    <p id="import-files" class="slicer-muted"></p>
-    <label class="slicer-field">Units
-      <select id="import-scale"><option value="1">Millimetres</option><option value="10">Centimetres (×10)</option><option value="25.4">Inches (×25.4)</option><option value="1000">Metres (×1000)</option></select>
-    </label>
-    <label class="slicer-field">Up axis
-      <select id="import-up"><option value="z">Z (most slicers and CAD)</option><option value="y">Y (many sculpting and game tools)</option></select>
-    </label>
+  <dialog id="dlg-add" class="slicer-dialog" aria-labelledby="dlg-add-title">
+    <h3 id="dlg-add-title">Add files</h3>
+    <p id="add-note" class="slicer-muted"></p>
+    <div id="add-intake" class="intake" hidden>
+      <ul class="intake-list" aria-label="Files added to this project"></ul>
+      <p class="intake-summary slicer-muted" role="status"></p>
+    </div>
     <div class="slicer-dialog-actions">
-      <button class="btn btn-secondary" type="button" data-close>Cancel</button>
-      <button id="btn-import" class="btn btn-primary" type="button">Add</button>
+      <button id="btn-add-done" class="btn btn-primary" type="button" data-close>Done</button>
     </div>
   </dialog>
 
@@ -287,6 +285,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=31"></script>
+  <script type="module" src="slicer/main.js?v=32"></script>
 </body>
 </html>

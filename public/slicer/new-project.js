@@ -2,7 +2,8 @@
    goes through the project's model upload, and the rows come from GET /api/projects/<id>/intake-files (polled while any model
    is still being analysed). Create promotes the draft (POST .../create); closing the Projects page first discards it with a
    beacon. A draft id is never remembered as the last-open project: it is only opened once it has been created.
-   Mounted by main.js, which passes { api, upload, toast, openCreated }. */
+   The same table also adds files to a project that is already open (addTo): the rows are just the files added now, and they
+   stay in the project when the dialog closes. Mounted by main.js, which passes { api, upload, toast, openCreated }. */
 
 const POLL_MS = 1500;
 const MODEL = /\.(stl|obj|3mf)$/i;
@@ -28,9 +29,21 @@ let generation = 0;  // bumped when the draft is dropped, so work for the old on
 let uploading = false;
 let creating = false;
 let seq = 0;
+let existing = null; // adding to an open project instead: { id, plate, known: ids of the models already in it }
+
+/** The table's rows and summary. For an open project only the files added in this session, not what was already there */
+function view() {
+  if (!existing || !intake) return intake;
+  const rows = intake.rows.filter(r => !existing.known.has(r.model));
+  const count = status => rows.filter(r => r.status === status).length;
+  const summary = { files: rows.length, items: rows.reduce((n, r) => n + r.copies, 0), split: count("split"), fits: count("fits"),
+    check_units: count("check_units"), analysing: rows.filter(r => r.state !== "ready" && r.state !== "failed").length,
+    failed: rows.filter(r => r.state === "failed").length };
+  return { rows, summary };
+}
 
 function fileNames() {
-  return [...(intake?.rows || []).map(r => r.file), ...queue.filter(q => q.state !== "failed").map(q => q.name)];
+  return [...(view()?.rows || []).map(r => r.file), ...queue.filter(q => q.state !== "failed").map(q => q.name)];
 }
 
 /** One file: its name; several: "first + N more" */
@@ -40,7 +53,7 @@ function autoName() {
 }
 
 function syncName() {
-  if (!nameTouched) $("new-project-name").value = autoName();
+  if (!nameTouched && !existing) $("new-project-name").value = autoName();
 }
 
 function chipFor(row) {
@@ -79,7 +92,7 @@ function queuedHtml(item) {
 }
 
 function summaryText() {
-  const s = intake?.summary;
+  const s = view()?.summary;
   if (!s) return "";
   const bits = [plural(s.files, "file")];
   if (s.items !== s.files) bits.push(plural(s.items, "item"));
@@ -91,23 +104,24 @@ function summaryText() {
 }
 
 function render() {
-  const rows = intake?.rows || [], pending = queue.length;
-  const box = $("new-intake");
+  const rows = view()?.rows || [], pending = queue.length;
+  const box = $(existing ? "add-intake" : "new-intake");
   box.hidden = !rows.length && !pending;
-  $("dlg-projects").classList.toggle("has-intake", !box.hidden);
+  if (!existing) $("dlg-projects").classList.toggle("has-intake", !box.hidden);
+  const action = existing ? $("btn-add-done") : $("btn-new-create");   // Done only waits for the work in flight; Create also wants a clean table
   if (document.activeElement?.matches?.(".intake-copies")) {
     // Don't rebuild the list under a field being typed in; the next poll catches up.
-    $("btn-new-create").disabled = !canCreate();
+    action.disabled = existing ? busy() : !canCreate();
     return;
   }
   box.querySelector(".intake-list").innerHTML = rows.map(rowHtml).join("") + queue.map(queuedHtml).join("");
   box.querySelector(".intake-summary").textContent = summaryText();
-  $("btn-new-create").hidden = box.hidden;
-  $("btn-new-create").disabled = !canCreate();
+  if (!existing) action.hidden = box.hidden;
+  action.disabled = existing ? busy() : !canCreate();
   syncName();
 }
 
-const busy = () => uploading || queue.some(q => q.state !== "failed") || (intake?.summary.analysing || 0) > 0;
+const busy = () => uploading || queue.some(q => q.state !== "failed") || (view()?.summary.analysing || 0) > 0;
 const canCreate = () => !!draft && !creating && !busy() && !!intake?.summary.can_create;
 
 async function refresh() {
@@ -149,6 +163,7 @@ async function drain() {
         const id = await ensureDraft();
         if (!id) return;
         const params = new URLSearchParams({ filename: item.name, scale: "1", up: "z" });   // millimetres, Z up; a wrong guess is fixed per file
+        if (existing) params.set("plate", existing.plate);
         await host.upload(`/api/projects/${id}/models/upload?${params}`, item.file, pct => { item.pct = pct; render(); });
         if (mine !== generation) return;
         queue = queue.filter(q => q !== item);
@@ -180,18 +195,36 @@ function dropDraft() {
   draft = drafting = intake = null;
   queue = [];
   uploading = false;
+  creating = false;
+  if (existing) { existing = null; $("add-intake").hidden = true; return; }
   if (!nameTouched) $("new-project-name").value = "";
   nameTouched = false;
-  creating = false;
   $("new-intake").hidden = true;
   $("btn-new-create").hidden = true;
   $("dlg-projects").classList.remove("has-intake");
 }
 
+/** Files for a project that is already open: they upload straight into it and show here until Done */
+function addTo(project, files) {
+  if (existing && existing.id !== project.id) dropDraft();
+  if (!existing) {
+    draft = project.id;
+    existing = { id: project.id, plate: project.plate, known: new Set(project.models) };
+  }
+  add(files);
+}
+
+/** Done: forget the table and say how many files it holds (the project keeps them) */
+function finishAdding() {
+  const added = view()?.rows.length || 0;
+  if (existing) dropDraft();
+  return added;
+}
+
 /** The page was cancelled or closed: delete the draft (best effort, also when the tab is going away) */
 function discard() {
   const id = draft;
-  if (!id || creating) return;
+  if (!id || creating || existing) return;
   dropDraft();
   const url = `/api/projects/${id}/discard-draft`;
   if (!navigator.sendBeacon?.(url)) fetch(url, { method: "POST", keepalive: true }).catch(() => { /* the idle sweep removes it */ });
@@ -224,7 +257,7 @@ function bind() {
   $("btn-new-create").addEventListener("click", create);
   $("dlg-projects").addEventListener("close", discard);
   window.addEventListener("pagehide", discard);
-  const list = $("new-intake");
+  for (const list of [$("new-intake"), $("add-intake")]) {
   list.addEventListener("click", e => {
     const remove = e.target.closest("[data-remove]"), retry = e.target.closest("[data-retry]");
     const fix = e.target.closest("[data-fix]"), dismiss = e.target.closest("[data-dismiss]");
@@ -239,10 +272,14 @@ function bind() {
     const copies = Math.max(1, Math.round(Number(field.value) || 1));
     act(() => host.api("POST", `/api/projects/${draft}/copies`, { object: Number(field.dataset.copies), copies }));
   });
+  }
 }
 
 export const newProject = {
   attach(deps) { host = deps; bind(); },
   add,
+  addTo,
+  finishAdding,
+  busy: () => busy(),
   discard,
 };
