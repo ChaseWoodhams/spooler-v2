@@ -67,11 +67,19 @@ function chipFor(row) {
   return chip ? `<span class="intake-chip ${chip[0]}">${chip[1]}</span>` : '<span class="intake-chip wait">Checking…</span>';
 }
 
+/** Up to three one-click unit choices, each with the size the model would have (the server lists the most common units first) */
+function fixButtons(row) {
+  const fixes = row.scale_fixes?.length ? row.scale_fixes.slice(0, 3)
+    : [{ scale: row.scale_fix.scale, label: `Use ×${row.scale_fix.factor}` }];   // an older server: the single guess
+  return fixes.map(f => `<button class="btn btn-secondary btn-sm" type="button" data-fix="${row.model}" data-scale="${f.scale}">${
+    f.unit ? `${esc(f.unit[0].toUpperCase() + f.unit.slice(1))}: ${f.size.join(" × ")} mm` : esc(f.label)}</button>`).join(" ");
+}
+
 function rowHtml(row) {
   const size = row.size ? `${row.size.map(dim).join(" × ")} mm` : "";
   const note = row.state === "failed" ? `<small class="bad">${esc(row.error || "The file couldn't be analysed")}</small>`
-    : row.status === "check_units" && row.scale_fix
-      ? `<small class="warn">Looks wrong. <button class="btn btn-secondary btn-sm" type="button" data-fix="${row.model}" data-scale="${row.scale_fix.scale}">Use ×${row.scale_fix.factor}</button></small>`
+    : row.status === "check_units" && (row.scale_fixes?.length || row.scale_fix)
+      ? `<small class="warn">Looks wrong. ${fixButtons(row)}</small>`
       : row.status === "check_units" ? `<small class="warn">${esc(row.reason || "This size looks wrong")}</small>` : "";
   const choice = row.state === "ready" ? `<button class="intake-link" type="button" data-units="${row.model}" aria-expanded="${unitsOpen === row.model}">Units and up axis</button>` : "";
   const panel = unitsOpen === row.model && row.state === "ready" ? `<div class="intake-units-panel" data-units-panel="${row.model}">
