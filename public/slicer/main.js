@@ -6,7 +6,7 @@ import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=2";
 import { projectPage } from "./project-page.js?v=2";
-import { newProject } from "./new-project.js?v=6";
+import { newProject } from "./new-project.js?v=7";
 import { Viewport, featureColor } from "./viewport.js?v=4";
 
 const $ = id => document.getElementById(id);
@@ -250,7 +250,7 @@ async function boot() {
     onStep: step => setStep(step),
     onLayout: layOutParts,
     onWhole: placeWhole,
-    onChanged: () => { renderSteps(); renderStepActions(); },
+    onChanged: split => { renderSteps(); renderStepActions(); landOnSplit(split); },
   });
   $("settings-mode").value = remember("slicer.mode") || (remember("slicer.advanced") === "1" ? "advanced" : "simple");
   $("settings-mode").addEventListener("change", e => remember("slicer.mode", e.target.value));
@@ -486,7 +486,7 @@ async function maybeAutoPlan() {
   if (state.project.models.some(m => m.state === "importing")) return;   // the poller calls this again as imports finish
   try { sessionStorage.removeItem("slicer.autoplan"); } catch (_) { /* storage blocked */ }
   if (!data().objects.length || $("dlg-plan").open) return;
-  if (state.step !== "plates") await setStep("plates", { force: true });
+  if (state.step !== "plates" && !unplacedSplitIds(state.project).length) await setStep("plates", { force: true });   // a split still to be cut keeps its step
   try {
     await flushSave();
     state.planTilt = false;
@@ -502,6 +502,22 @@ async function maybeAutoPlan() {
     toast(`Arranged automatically: ${result.plan.summary}. Undo puts it back`, !!(plan.too_big.length || plan.tippy?.length));
   } catch (err) {
     toast(`Couldn't arrange the models automatically: ${err.message}`, true);
+  }
+}
+
+/** Ask maybeAutoPlan to plan this project's plates once its models have imported */
+function requestAutoPlan(id) {
+  try { sessionStorage.setItem("slicer.autoplan", String(id)); } catch (_) { /* storage blocked */ }
+}
+
+/** After Create with an oversized model the project opens on Model while that model is analysed and its cuts planned; the
+    moment they are ready it moves on to Split, where the planned cuts wait (unless the user has gone elsewhere meanwhile) */
+function landOnSplit(split) {
+  if (!state.landOnSplit || !split || split.id !== state.landOnSplit) return;
+  if (split.state === "failed") { state.landOnSplit = null; return; }
+  if (split.analysis && split.state === "ready") {
+    state.landOnSplit = null;
+    if (state.step === "model" && stepAvailable("split")) setStep("split");
   }
 }
 
@@ -2076,7 +2092,7 @@ async function uploadNewModel(file) {
     if (name && name !== project.name) project = await api("PATCH", `/api/projects/${project.id}`, { name });
     // A 3MF holding several objects on one plate opens crammed together: plan it like a batch import does
     if (project.data?.objects?.length > 1 && new Set(project.data.objects.map(o => o.plate)).size === 1) {
-      try { sessionStorage.setItem("slicer.autoplan", String(project.id)); } catch (_) { /* storage blocked */ }
+      requestAutoPlan(project.id);
     }
     $("dlg-projects").close();
     await openProject(project.id);
@@ -2096,12 +2112,18 @@ function uploadNew(files, folder = "") {
   else if (files.length) newProject.add(files);
 }
 
-// Create promoted the draft: open it on the step the server named (Split while an oversized model waits, else Plates)
+// Create promoted the draft: open it on the step the server named (Model while an oversized model waits, then Split once its
+// cuts are planned; else Plates). The models that fit are planned onto plates too, so they don't sit stacked on plate 1.
 async function openCreated({ project, step }, { plan, id }) {
-  if (plan) { try { sessionStorage.setItem("slicer.autoplan", String(id)); } catch (_) { /* storage blocked */ } }   // every model starts on plate 1 at one spot
+  if (plan && project.data.objects.length > 1) requestAutoPlan(id);   // every model starts on plate 1 at one spot
   $("dlg-projects").close();
   await openProject(project.id);
-  if (stepAvailable(step)) await setStep(step, { force: true });
+  let target = step;
+  if (step === "model") {
+    state.landOnSplit = unplacedSplitIds(state.project)[0] ?? null;
+    if (splitStep.split?.analysis && splitStep.split.state === "ready") { target = "split"; state.landOnSplit = null; }   // already analysed and planned
+  }
+  if (stepAvailable(target)) await setStep(target, { force: true });
 }
 
 async function openSplitDialog() {
@@ -2201,7 +2223,7 @@ function bindUi() {
   $("new-folder-input").addEventListener("change", e => {
     const { files, folder } = FolderImport.picked(e.target.files);
     e.target.value = "";
-    if (files.length) newProject.add(files); else toast("That folder has no STL, OBJ or 3MF files", true);
+    if (files.length) newProject.add(files); else toast("That folder has no STL, OBJ or 3MF models", true);
   });
   $("btn-new-project").addEventListener("click", async () => {
     try {
@@ -2265,7 +2287,7 @@ function bindUi() {
   $("folder-input").addEventListener("change", e => { chooseFolder([...e.target.files]); e.target.value = ""; });
   $("btn-add-files").addEventListener("click", () => $("model-input").click());
   $("dlg-add").addEventListener("close", finishAdd);
-  $("dlg-add").addEventListener("cancel", e => { if (newProject.busy()) e.preventDefault(); });   // Escape waits for the uploads
+  $("dlg-add").addEventListener("cancel", e => { if (newProject.blocked()) e.preventDefault(); });   // Escape waits for the uploads and the unit checks
   $("btn-add-split").addEventListener("click", openSplitDialog);
   $("split-choices").addEventListener("click", async e => {
     const btn = e.target.closest("[data-add-split]");
@@ -2573,8 +2595,7 @@ function bindUi() {
 
 // Files for the open project, on any step: they go through the same intake table as New project
 function chooseImport(files) {
-  const models = files.filter(f => /\.(stl|obj|3mf)$/i.test(f.name));
-  if (!models.length) { toast("Choose STL, OBJ or 3MF files", true); return; }
+  if (!files.some(f => FolderImport.MODEL.test(f.name))) { toast("Choose STL, OBJ or 3MF models", true); return; }   // the table names anything it leaves out
   if (!state.project) { toast("Open or create a project first", true); return; }
   if (isGcodeProject()) { toast("A G-code project has no models to add to", true); return; }
   if (!$("dlg-add").open) {
@@ -2582,29 +2603,35 @@ function chooseImport(files) {
     $("add-note").textContent = ADD_NOTES[state.step] || ADD_NOTES.plates;
     $("dlg-add").showModal();
   }
-  newProject.addTo({ id: state.project.id, plate: state.plate, models: state.project.models.map(m => m.id) }, models);
+  newProject.addTo({ id: state.project.id, plate: state.plate, models: state.project.models.map(m => m.id) }, files);
 }
 
-// What adding files does to the work already done, by step
+// What adding models does to the work already done, by step
+const TOO_BIG = " A model too big for the bed becomes a split of its own, on the Model step.";
 const ADD_NOTES = {
-  model: "The files join the project as whole models on the Plates step. The split you are working on is not changed.",
-  split: "The files join the project as whole models on the Plates step. The split you are working on is not changed.",
-  plates: "The files are added to the current plate. Plates with a finished Slice become outdated and need slicing again.",
-  slice: "The files are added to the current plate, which marks its Slice outdated: slice it again before queueing.",
+  model: `The models join the project as whole models on the Plates step. The split you are working on is not changed.${TOO_BIG}`,
+  split: `The models join the project as whole models on the Plates step. The split you are working on is not changed.${TOO_BIG}`,
+  plates: `The models are added to the current plate. Plates with a finished Slice become outdated and need slicing again.${TOO_BIG}`,
+  slice: `The models are added to the current plate, which marks its Slice outdated: slice it again before queueing.${TOO_BIG}`,
 };
 
-// Done: the project now holds the added files, so bring the workspace up to date
+// Done: the project now holds the added models (a too-big one as a split), so bring the workspace up to date
 async function finishAdd() {
-  const added = newProject.finishAdding();
+  const { added, splits } = await newProject.finishAdding();
   if (!added || !state.project) return;
   try {
     await flushSave();
     applyProject(await api("GET", `/api/projects/${state.project.id}`));
+    if (splits) await splitStep.open(unplacedSplitIds(state.project)[0] ?? splitIdsOf(state.project)[0]).catch(err => toast(err.message, true));
     renderAll();
     await loadGeometry();
-    if (state.addedWasEmpty && added > 1) {   // they all landed on one plate at the same spot: plan once they've imported
-      try { sessionStorage.setItem("slicer.autoplan", String(state.project.id)); } catch (_) { /* storage blocked */ }
+    if (state.addedWasEmpty && added - splits > 1) {   // they all landed on one plate at the same spot: plan once they've imported
+      requestAutoPlan(state.project.id);
       maybeAutoPlan();
+    }
+    if (splits) {
+      toast(`${plural(splits, "model")} too big for the bed became ${splits === 1 ? "a split" : "splits"}: cut ${splits === 1 ? "it" : "them"} on the Model step`);
+      await setStep("model");
     }
     schedulePoll();
   } catch (err) {
@@ -2615,7 +2642,7 @@ async function finishAdd() {
 // A folder pick: every STL inside it (subfolders included), in path order
 function chooseFolder(files) {
   const stls = FolderImport.picked(files).files.filter(f => /\.stl$/i.test(f.name));
-  if (!stls.length) { toast("That folder has no STL files", true); return; }
+  if (!stls.length) { toast("That folder has no STL models", true); return; }
   chooseImport(stls);
 }
 

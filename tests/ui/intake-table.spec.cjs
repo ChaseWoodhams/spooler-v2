@@ -47,7 +47,7 @@ async function open(browser, viewport) {
     });
     const count = status => out.filter(r => r.status === status).length;
     const analysing = out.filter(r => r.state === 'analysing').length;
-    const summary = { files: out.length, items: out.reduce((a, r) => a + r.copies, 0), split: count('split'), fits: count('fits'), check_units: count('check_units'),
+    const summary = { models: out.length, objects: out.reduce((a, r) => a + r.copies, 0), split: count('split'), fits: count('fits'), check_units: count('check_units'),
       analysing, failed: 0, steps: ['plates'] };
     summary.can_create = out.length > 0 && !summary.check_units && !analysing;
     return { rows: out, summary };

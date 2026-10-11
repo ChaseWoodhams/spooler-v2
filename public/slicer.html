@@ -29,7 +29,7 @@
     <div class="slicer-project">
       <input id="project-name" class="slicer-project-name" aria-label="Project name" maxlength="120" />
       <button id="btn-projects" class="btn btn-secondary btn-sm" type="button">Projects</button>
-      <button id="btn-add-files" class="btn btn-secondary btn-sm" type="button" title="Add STL, OBJ or 3MF files to this project, on any step">Add files</button>
+      <button id="btn-add-files" class="btn btn-secondary btn-sm" type="button" title="Add STL, OBJ or 3MF models to this project, on any step">Add models</button>
       <button id="btn-export-3mf" class="btn btn-secondary btn-sm" type="button" title="Download the project as an OrcaSlicer project (3MF) with its plates, placements and settings">Export 3MF</button>
       <span id="save-state" class="slicer-muted"></span>
     </div>
@@ -223,18 +223,20 @@
         <input id="new-project-name" placeholder="Untitled project" maxlength="120" autocomplete="off" />
       </label>
       <div id="new-drop" class="slicer-dropzone">
-        <strong>Drop STL, OBJ or 3MF files or a folder here</strong>
+        <strong>Drop STL, OBJ or 3MF models or a folder here</strong>
         <span>or <button id="btn-new-upload" class="btn btn-secondary btn-sm" type="button" title="STL, OBJ, 3MF or G-code">Choose files</button>
         <button id="btn-new-folder" class="btn btn-secondary btn-sm" type="button" title="Make one project from every STL, OBJ or 3MF in a folder">Choose folder</button></span>
         <input id="new-model-input" type="file" accept=".stl,.obj,.3mf,.gcode" multiple hidden />
         <input id="new-folder-input" type="file" webkitdirectory hidden />
       </div>
       <div id="new-upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
+      <p id="new-message" class="slicer-error" role="alert" hidden></p>
       <div id="new-intake" class="intake" hidden>
         <div class="intake-layout">
           <div class="intake-main">
-            <ul class="intake-list" aria-label="Files in this project"></ul>
+            <ul class="intake-list" aria-label="Models in this project"></ul>
             <p class="intake-summary slicer-muted" role="status"></p>
+            <p class="intake-notes slicer-muted" role="status" hidden></p>
           </div>
           <aside class="intake-plan" aria-label="What happens next">
             <h5>What happens next</h5>
@@ -254,13 +256,15 @@
   </dialog>
 
   <dialog id="dlg-add" class="slicer-dialog" aria-labelledby="dlg-add-title">
-    <h3 id="dlg-add-title">Add files</h3>
+    <h3 id="dlg-add-title">Add models</h3>
     <p id="add-note" class="slicer-muted"></p>
+    <p id="add-message" class="slicer-error" role="alert" hidden></p>
     <div id="add-intake" class="intake" hidden>
-      <ul class="intake-list" aria-label="Files added to this project"></ul>
+      <ul class="intake-list" aria-label="Models added to this project"></ul>
       <p class="intake-summary slicer-muted" role="status"></p>
       <p class="intake-notes slicer-muted" role="status" hidden></p>
     </div>
+    <p id="add-reason" class="plan-reason" role="status"></p>
     <div class="slicer-dialog-actions">
       <button id="btn-add-done" class="btn btn-primary" type="button" data-close>Done</button>
     </div>
@@ -296,6 +300,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=35"></script>
+  <script type="module" src="slicer/main.js?v=36"></script>
 </body>
 </html>

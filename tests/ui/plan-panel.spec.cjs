@@ -27,6 +27,14 @@ async function open(browser, viewport = { width: 1280, height: 800 }) {
   const page = await browser.newPage({ viewport });
   const server = { calls: [], models: [], nextModel: 1, holdAnalysis: false, created: false };
   const hasBig = () => server.created && server.models.some(x => SHAPES[x.file].status === 'split');
+  // the created project: oversized models are splits, the others are objects stacked on plate 1
+  const created = (name) => {
+    const small = server.models.filter(x => SHAPES[x.file].status !== 'split');
+    return shell(50, { draft: false, name, split_id: hasBig() ? 1 : null, split_ids: hasBig() ? [1] : [],
+      models: small.map(x => ({ id: x.id, file: x.file, state: 'ready', import: [1, 'z'] })),
+      data: { plates: [{ id: 1, name: 'Plate 1' }], bed: 'textured', profile: { bundle_id: null, process: {}, filament: {} },
+        objects: small.map(x => ({ id: x.id + 100, model: x.id, plate: 1, name: x.file, position: [128, 128], rotation: [0, 0, 0], scale: [1, 1, 1] })) } });
+  };
   await page.route('http://spooler.test/**', route => {
     const file = path.join(root, new URL(route.request().url()).pathname);
     if (!file.startsWith(root) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return route.fulfill({ status: 404 });
@@ -43,7 +51,7 @@ async function open(browser, viewport = { width: 1280, height: 800 }) {
     });
     const count = status => out.filter(r => r.status === status).length;
     const analysing = out.filter(r => r.state === 'analysing').length;
-    const summary = { files: out.length, items: out.reduce((a, r) => a + r.copies, 0), split: count('split'), fits: count('fits'), check_units: count('check_units'), analysing, failed: 0 };
+    const summary = { models: out.length, objects: out.reduce((a, r) => a + r.copies, 0), split: count('split'), fits: count('fits'), check_units: count('check_units'), analysing, failed: 0 };
     summary.can_create = out.length > 0 && !summary.check_units && !analysing;
     summary.steps = (summary.split ? ['split'] : []).concat(['plates', 'slice', 'queue']);
     return { rows: out, summary };
@@ -72,10 +80,12 @@ async function open(browser, viewport = { width: 1280, height: 800 }) {
     if (p === '/api/projects/50/create') {
       server.created = true;
       const big = hasBig();
-      return route.fulfill({ json: { step: big ? 'model' : 'plates', project: shell(50, { draft: false, name: JSON.parse(body).name, split_id: big ? 1 : null, split_ids: big ? [1] : [] }) } });
+      return route.fulfill({ json: { step: big ? 'model' : 'plates', project: created(JSON.parse(body).name) } });
     }
     if (p === '/api/projects/50/discard-draft') return route.fulfill({ json: { ok: true } });
-    if (p === '/api/projects/50') return route.fulfill({ json: shell(50, { draft: false, split_id: hasBig() ? 1 : null, split_ids: hasBig() ? [1] : [] }) });
+    if (p === '/api/projects/50/plan' && method === 'POST') return route.fulfill({ json: { plates: [{ id: 1 }], problems: [], refused: false, too_big: [], revision: 1, fingerprint: 'f' } });
+    if (p === '/api/projects/50/plan/accept') return route.fulfill({ json: { ...created('x'), plan: { summary: 'planned' } } });
+    if (p === '/api/projects/50') return route.fulfill({ json: created('Untitled project') });
     if (p === '/api/splits/1') return route.fulfill({ json: makeSplit(1) });
     return route.fulfill({ json: p === '/api/splits' ? { splits: [] }
       : p.endsWith('/status') ? { plates: [], progress: { counts: {}, filament_g: {} } }
@@ -106,12 +116,12 @@ const reasonHas = (page, re) => page.waitForFunction(re => new RegExp(re, 'i').t
     await chips(a.page, 'ok', 2);
     assert.deepEqual(await stepNames(a.page), ['Plates', 'Slice', 'Queue']);
     const plan = a.page.locator('#new-intake .intake-plan');
-    assert.match(await plan.innerText(), /2 items/);
+    assert.match(await plan.innerText(), /2 objects/);
     assert.match(await plan.innerText(), /default settings/i);
     const copies = a.page.locator('#new-intake [data-intake-row]', { hasText: 'small.stl' }).getByLabel(/Copies/);
     await copies.fill('4');
     await copies.press('Tab');
-    await plan.getByText(/5 items/).waitFor({ timeout: 5000 });
+    await plan.getByText(/5 objects/).waitFor({ timeout: 5000 });
     assert.equal(await a.page.locator('#new-intake .plan-mixed:not([hidden])').count(), 0, 'no mixed sentence when nothing is too big');
     await a.page.waitForFunction(() => !document.getElementById('btn-new-create').disabled);
     await a.page.locator('#btn-new-create').click();
@@ -133,8 +143,8 @@ const reasonHas = (page, re) => page.waitForFunction(re => new RegExp(re, 'i').t
     await b.page.locator('#btn-new-create').click();
     await b.page.waitForFunction(() => location.search.includes('project=50'));
     await b.page.waitForSelector('.slicer-step.active');
-    assert.equal(await b.page.locator('.slicer-step.active').getAttribute('data-step'), 'model');
-    console.log('PASS: One big model: Split step with the count, Create opens the split flow');
+    assert.equal(await b.page.locator('.slicer-step.active').getAttribute('data-step'), 'split', 'the split is analysed and planned, so Create lands on Split');
+    console.log('PASS: One big model: Split step with the count, Create opens on Split with the cuts planned');
     await b.page.close();
 
     // Mixed: says only the oversized model is split; Change opens that file's units choice
@@ -148,6 +158,14 @@ const reasonHas = (page, re) => page.waitForFunction(re => new RegExp(re, 'i').t
     await c.page.locator('#new-intake [data-intake-row]', { hasText: 'big.stl' }).locator('.intake-units-panel').waitFor({ timeout: 3000 });
     assert.equal(await c.page.locator('#new-intake .intake-units-panel').count(), 1, 'only the oversized file opens');
     console.log('PASS: A mixed upload says only the oversized model is split; Change opens its units choice');
+    // Create: the oversized model opens on Split, and the small models are planned onto plates rather than left stacked on plate 1
+    await c.page.waitForFunction(() => !document.getElementById('btn-new-create').disabled);
+    await c.page.locator('#btn-new-create').click();
+    await c.page.waitForFunction(() => location.search.includes('project=50'));
+    for (let i = 0; i < 60 && !c.server.calls.some(x => x.path === '/api/projects/50/plan/accept'); i++) await c.page.waitForTimeout(100);
+    assert.ok(c.server.calls.some(x => x.path === '/api/projects/50/plan/accept'), 'the models that fit are planned onto plates');
+    assert.equal(await c.page.locator('.slicer-step.active').getAttribute('data-step'), 'split', 'planning the small models does not pull the page off the Split step');
+    console.log('PASS: A mixed project opens on Split and plans the small models');
     await c.page.close();
 
     // Create is disabled with a plain reason
@@ -159,7 +177,7 @@ const reasonHas = (page, re) => page.waitForFunction(re => new RegExp(re, 'i').t
     assert.equal(await d.page.locator('#btn-new-create').isDisabled(), true);
     d.server.holdAnalysis = false;
     await reasonHas(d.page, 'units');
-    assert.match(await d.page.locator('#new-create-reason').innerText(), /Check the size of 1 file marked Check units/);
+    assert.match(await d.page.locator('#new-create-reason').innerText(), /Check the size of 1 model marked Check units/);
     assert.equal(await d.page.locator('#btn-new-create').isDisabled(), true);
     await d.page.locator('#new-intake [data-intake-row]', { hasText: 'metres.stl' }).getByRole('button', { name: 'Remove metres.stl' }).click();
     await d.page.waitForFunction(() => !document.getElementById('btn-new-create').disabled, null, { timeout: 8000 });

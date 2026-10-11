@@ -30,7 +30,7 @@ const created = { id: 9, name: 'bracket', revision: 1, split_id: null, models: [
         : url.pathname === '/api/splits' ? { splits: [] }
         : url.pathname === '/api/projects' && method === 'POST' ? created
         : url.pathname === '/api/projects/9/models/upload' ? created
-        : url.pathname === '/api/projects/9/intake-files' ? { rows: [], summary: { files: 0, items: 0, analysing: 0, can_create: false } }
+        : url.pathname === '/api/projects/9/intake-files' ? { rows: [], summary: { models: 0, objects: 0, analysing: 0, can_create: false } }
         : url.pathname === '/api/projects/9' ? created
         : url.pathname.endsWith('/status') ? { plates: [], progress: { counts: {}, filament_g: {} } }
         : url.pathname.endsWith('/jobs') ? { jobs: [] } : url.pathname === '/api/printers' ? []
@@ -51,7 +51,7 @@ const created = { id: 9, name: 'bracket', revision: 1, split_id: null, models: [
     assert.equal(await dialog.locator('#new-scale, #new-up').count(), 0, 'Units and Up axis are not asked up front');
     assert.doesNotMatch(await dialog.innerText(), /Quick print on the dashboard/);
     assert.match(await dialog.locator('#project-list').innerText(), /Existing project/);
-    assert.match(await dialog.innerText(), /Drop STL, OBJ or 3MF files or a folder here/);
+    assert.match(await dialog.innerText(), /Drop STL, OBJ or 3MF models or a folder here/);
     assert.match(await dialog.locator('#new-model-input').getAttribute('accept'), /\.stl.*\.obj.*\.3mf/);
     assert.equal(await dialog.locator('#new-folder-input').getAttribute('webkitdirectory') !== null, true);
     console.log('PASS: New project page shows Name first, drop zone, pickers and existing projects');

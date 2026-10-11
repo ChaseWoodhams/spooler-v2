@@ -11,7 +11,7 @@ const { chromium } = playwright;
 const root = path.resolve(__dirname, '../../public');
 
 // An existing project (id 60) with one model on plate 1. Adding a file on any step goes through the intake table.
-const SIZES = { 'small.stl': [40, 30, 20], 'big.stl': [650, 400, 300] };
+const SIZES = { 'small.stl': [40, 30, 20], 'big.stl': [650, 400, 300], 'metres.stl': [0.2, 0.1, 0.05] };
 const model = (id, file, state = 'ready') => ({ id, file, state, sha256: `sha${id}`, import: [1, 'z'], size: [10, 10, 10], triangles: 12, volume_cm3: 1, repairs: [] });
 const object = (id, modelId, name) => ({ id, model: modelId, plate: 1, name, position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] });
 
@@ -22,7 +22,8 @@ const split = { id: 1, source_name: 'existing.stl', state: 'ready', settings: { 
 async function open(browser, step, { fromSplit = false } = {}) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const server = { calls: [], name: 'Chair', models: [model(1, 'existing.stl')], objects: [object(1, 1, 'existing')], outdated: false };
-  const project = () => ({ id: 60, name: server.name, revision: 1, split_id: fromSplit ? 1 : null, models: server.models, slices: {},
+  const hasSplit = () => fromSplit || server.madeSplit;
+  const project = () => ({ id: 60, name: server.name, revision: 1, split_id: hasSplit() ? 1 : null, split_ids: hasSplit() ? [1] : [], models: server.models, slices: {},
     server_time: Date.now() / 1000, data: { plates: [{ id: 1, name: 'Plate 1' }], objects: server.objects, bed: 'textured', profile: { bundle_id: null, process: {}, filament: {} } } });
   await page.route('http://spooler.test/**', route => {
     const file = path.join(root, new URL(route.request().url()).pathname);
@@ -44,11 +45,23 @@ async function open(browser, step, { fromSplit = false } = {}) {
       return route.fulfill({ json: file === 'orca.3mf' ? { ...project(), import_notes: ['Some User Preset was left out'] } : project() });
     }
     if (p === '/api/splits/1') return route.fulfill({ json: split });
+    let made;
+    if ((made = p.match(/^\/api\/projects\/60\/models\/(\d+)\/make-split$/))) {
+      server.models = server.models.filter(x => x.id !== Number(made[1]));
+      server.objects = server.objects.filter(x => x.model !== Number(made[1]));
+      server.madeSplit = true;
+      return route.fulfill({ json: project() });
+    }
+    if ((made = p.match(/^\/api\/projects\/60\/models\/(\d+)$/)) && method === 'DELETE') {
+      server.models = server.models.filter(x => x.id !== Number(made[1]));
+      server.objects = server.objects.filter(x => x.model !== Number(made[1]));
+      return route.fulfill({ json: project() });
+    }
     if (p === '/api/projects/60/intake-files') {
       const rows = server.models.map(m => ({ model: m.id, object: m.id, file: m.file, kind: 'model', state: 'ready', error: null, size: SIZES[m.file] || [10, 10, 10], scale: 1, up: 'z',
-        status: m.file === 'big.stl' ? 'split' : 'fits', fits: m.file !== 'big.stl', scale_fix: null, reason: null, copies: 1 }));
+        status: m.file === 'big.stl' ? 'split' : m.file === 'metres.stl' ? 'check_units' : 'fits', fits: m.file !== 'big.stl', scale_fix: null, scale_fixes: [], reason: 'This size looks wrong', copies: 1 }));
       const count = status => rows.filter(r => r.status === status).length;
-      return route.fulfill({ json: { rows, summary: { files: rows.length, items: rows.length, split: count('split'), fits: count('fits'), check_units: 0, analysing: 0, failed: 0, can_create: true } } });
+      return route.fulfill({ json: { rows, summary: { models: rows.length, objects: rows.length, split: count('split'), fits: count('fits'), check_units: 0, analysing: 0, failed: 0, can_create: true } } });
     }
     return route.fulfill({ json: p === '/api/splits' ? { splits: [] }
       : p.endsWith('/status') ? { plates: [], progress: { counts: {}, filament_g: {} } }
@@ -117,6 +130,31 @@ const dropOn = (page, selector, names) => page.evaluate(([selector, names]) => {
     await page.locator('#object-list').getByText('small', { exact: false }).first().waitFor({ timeout: 5000 });
     assert.equal(server.calls.some(c => c.method === 'DELETE'), false, 'closing keeps the added files');
     console.log('PASS: A drop on the Slice step goes through the intake table, warns about outdated plates and joins the project');
+
+    // Models too big for the bed become splits on Done; Done waits while a size needs checking
+    {
+      const s = await open(browser, 'plates');
+      await dropOn(s.page, '#viewport', ['big.stl', 'metres.stl']);
+      const box = s.page.locator('#dlg-add');
+      await box.locator('[data-intake-row]', { hasText: 'metres.stl' }).getByText('Check units').waitFor({ timeout: 5000 });
+      await box.locator('[data-intake-row]', { hasText: 'big.stl' }).getByText('Too big, will be split').waitFor({ timeout: 5000 });
+      const done = box.getByRole('button', { name: 'Done', exact: true });
+      assert.equal(await done.isDisabled(), true, 'Done waits while a model is marked Check units');
+      assert.match(await box.locator('#add-reason').innerText(), /Check the size of 1 model marked Check units/);
+      await s.page.keyboard.press('Escape');
+      assert.equal(await box.evaluate(d => d.open), true, 'Escape cannot skip the check either');
+      await box.locator('[data-intake-row]', { hasText: 'metres.stl' }).getByRole('button', { name: 'Remove metres.stl' }).click();
+      await s.page.waitForFunction(() => !document.getElementById('btn-add-done').disabled, null, { timeout: 5000 });
+      await done.click();
+      await s.page.waitForFunction(() => !document.getElementById('dlg-add').open);
+      for (let i = 0; i < 50 && !s.server.calls.some(c => /make-split$/.test(c.path)); i++) await s.page.waitForTimeout(100);
+      assert.equal(s.server.calls.filter(c => /\/models\/\d+\/make-split$/.test(c.path)).length, 1, 'the model too big for the bed becomes a split');
+      assert.equal(s.server.calls.some(c => /make-split$/.test(c.path) && /\/models\/3\//.test(c.path)), false, 'the model with a doubtful size is left alone');
+      await s.page.locator('.toast', { hasText: 'too big for the bed became a split' }).waitFor({ timeout: 5000 });
+      await s.page.waitForFunction(() => document.querySelector('.slicer-step.active')?.dataset.step === 'model', null, { timeout: 5000 });
+      await s.page.close();
+      console.log('PASS: Adding a model too big for the bed makes it a split on Done, and Done waits for unit checks');
+    }
 
     // A drop on each step opens the table for those files, adds them and says what that step does to the work
     const drops = [['model', '#split-stage', /whole models on the Plates step/], ['split', '#split-stage', /whole models on the Plates step/],
