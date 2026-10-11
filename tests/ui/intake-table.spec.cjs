@@ -14,6 +14,7 @@ const root = path.resolve(__dirname, '../../public');
 // metres is a unit mix-up, bad is refused at upload.
 // A model reads as analysing for 1.2 s after its upload (the page polls every 1.5 s); a unit fix is answered at once.
 const SHAPES = {
+  'seat.stl': { size: [0.65, 0.974, 0.617], status: 'check_units', fits: true, after: 'split', fix: { factor: 1000, scale: 1000, label: "It's in metres: scale x1000" } },
   'small.stl': { size: [40, 30, 20], status: 'fits', fits: true },
   'big.stl': { size: [650, 400, 300], status: 'split', fits: false },
   'metres.stl': { size: [0.2, 0.1, 0.05], status: 'check_units', fits: true, fix: { factor: 1000, scale: 1000, label: "It's in metres: scale x1000" } },
@@ -34,8 +35,8 @@ async function open(browser, viewport) {
         const out = server.models.map(m => {
       const s = SHAPES[m.file], done = m.analysed || Date.now() - m.at > 1200;
       return { model: m.id, object: m.id + 100, file: m.file, kind: 'model', state: done ? 'ready' : 'analysing', error: null, size_bytes: 1000,
-        size: done ? s.size.map(v => v * (m.scale || 1)) : null, scale: m.scale || 1, up: 'z',
-        status: !done ? null : (m.scale === 1000 ? 'fits' : s.status), fits: done ? (m.scale === 1000 ? true : s.fits) : null,
+        size: done ? s.size.map(v => v * (m.scale || 1)) : null, scale: m.scale || 1, up: m.up || 'z',
+        status: !done ? null : (m.scale === 1000 ? (s.after || 'fits') : s.status), fits: done ? (m.scale === 1000 ? !s.after : s.fits) : null,
         scale_ok: done ? s.status !== 'check_units' || m.scale === 1000 : null, scale_fix: done && s.fix && !m.scale ? s.fix : null,
         reason: null, repairs: [], triangles: 12, volume_cm3: 1, copies: m.copies || 1, estimate: null };
     });
@@ -66,7 +67,7 @@ async function open(browser, viewport) {
       return route.fulfill({ json: shell(50) });
     }
     if ((m = p.match(/^\/api\/projects\/50\/models\/(\d+)\/settings$/))) {
-      Object.assign(server.models.find(x => x.id === Number(m[1])), { scale: JSON.parse(body).scale, analysed: true });
+      Object.assign(server.models.find(x => x.id === Number(m[1])), { ...JSON.parse(body), analysed: true });
       return route.fulfill({ json: shell(50) });
     }
     if (p === '/api/projects/50/copies') {
@@ -158,6 +159,23 @@ const noPageScroll = page => page.evaluate(() => ({ doc: document.documentElemen
     await page.waitForFunction(() => !document.getElementById('btn-new-create').disabled);
     console.log('PASS: Check units blocks Create until the one-click fix is applied');
 
+    // Set units and up axis: per file, offered on every ready row, and no units question on a plausible model
+    assert.equal(await row('small.stl').getByText(/Check units|Looks wrong/).count(), 0, 'a plausible model shows no units question');
+    assert.equal(await table.locator('.intake-units-panel').count(), 0, 'the choice stays closed until asked for');
+    await row('small.stl').getByRole('button', { name: /units and up axis/i }).click();
+    const panel = row('small.stl').locator('.intake-units-panel');
+    assert.deepEqual(await panel.getByLabel('Units').locator('option').allInnerTexts(), ['Millimetres', 'Centimetres', 'Inches', 'Metres']);
+    assert.deepEqual(await panel.getByLabel('Up axis').locator('option').allInnerTexts(), ['Z', 'Y']);
+    assert.equal(await panel.getByLabel('Units').inputValue(), '1');
+    await panel.getByLabel('Units').selectOption({ label: 'Inches' });
+    await panel.getByLabel('Up axis').selectOption({ label: 'Y' });
+    await panel.getByRole('button', { name: 'Apply' }).click();
+    await page.waitForFunction(() => document.querySelector('[data-intake-row] .intake-units-panel') === null);
+    const unitCall = server.calls.filter(c => c.path === '/api/projects/50/models/1/settings').map(c => JSON.parse(c.body));
+    assert.deepEqual(unitCall, [{ scale: 25.4, up: 'y' }], 'only that file is changed');
+    assert.equal(server.calls.filter(c => c.path.endsWith('/settings')).length, 2, 'the other rows are untouched (this one plus the earlier fix)');
+    console.log('PASS: Set units and up axis changes one file only');
+
     // Create promotes the draft and opens the returned step; closing afterwards does not discard it
     await createButton.click();
     await page.waitForFunction(() => !document.getElementById('dlg-projects').open);
@@ -179,6 +197,17 @@ const noPageScroll = page => page.evaluate(() => ({ doc: document.documentElemen
     assert.equal(await second.page.evaluate(() => localStorage.getItem('slicer.project')), null);
     console.log('PASS: Closing without Create discards the draft');
     await second.page.close();
+
+    // SEAT: 0.65 x 0.974 x 0.617 read as metres; after x1000 it is 650 x 974 x 617 mm, too big for the bed, not Check units
+    const seat = await open(browser, { width: 1280, height: 800 });
+    await drop(seat.page, ['seat.stl']);
+    const seatRow = seat.page.locator('#new-intake [data-intake-row]');
+    await seatRow.getByRole('button', { name: /×1000/ }).click({ timeout: 8000 });
+    await seatRow.getByText('Too big, will be split').waitFor({ timeout: 8000 });
+    assert.doesNotMatch(await seatRow.innerText(), /Check units|Looks wrong/);
+    assert.match(await seatRow.innerText(), /650 × 974 × 617 mm/);
+    console.log('PASS: SEAT at x1000 is Too big, will be split');
+    await seat.page.close();
 
     // Narrow screen
     const narrow = await open(browser, { width: 390, height: 844 });

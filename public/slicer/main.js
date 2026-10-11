@@ -6,7 +6,7 @@ import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=2";
 import { projectPage } from "./project-page.js?v=2";
-import { newProject } from "./new-project.js?v=2";
+import { newProject } from "./new-project.js?v=3";
 import { Viewport, featureColor } from "./viewport.js?v=4";
 
 const $ = id => document.getElementById(id);

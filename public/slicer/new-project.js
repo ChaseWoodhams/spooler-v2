@@ -14,6 +14,9 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const dim = v => v >= 10 ? String(Math.round(v)) : v.toFixed(v >= 1 ? 1 : 2);
 const stem = file => file.replace(/\.[^.]+$/, "");
 
+const UNITS = [["Millimetres", 1], ["Centimetres", 10], ["Inches", 25.4], ["Metres", 1000]];   // the scale that reads a file in that unit
+const options = (list, current) => list.map(([label, value]) => `<option value="${value}"${String(value) === String(current) ? " selected" : ""}>${label}</option>`).join("");
+
 const CHIPS = {
   fits: ["ok", "Fits the bed"], split: ["split", "Too big, will be split"], check_units: ["chk", "Check units"],
 };
@@ -42,6 +45,8 @@ function view() {
   return { rows, summary };
 }
 
+let unitsOpen = null; // the model whose "units and up axis" choice is open
+
 function fileNames() {
   return [...(view()?.rows || []).map(r => r.file), ...queue.filter(q => q.state !== "failed").map(q => q.name)];
 }
@@ -68,13 +73,21 @@ function rowHtml(row) {
     : row.status === "check_units" && row.scale_fix
       ? `<small class="warn">Looks wrong. <button class="btn btn-secondary btn-sm" type="button" data-fix="${row.model}" data-scale="${row.scale_fix.scale}">Use ×${row.scale_fix.factor}</button></small>`
       : row.status === "check_units" ? `<small class="warn">${esc(row.reason || "This size looks wrong")}</small>` : "";
+  const choice = row.state === "ready" ? `<button class="intake-link" type="button" data-units="${row.model}" aria-expanded="${unitsOpen === row.model}">Units and up axis</button>` : "";
+  const panel = unitsOpen === row.model && row.state === "ready" ? `<div class="intake-units-panel" data-units-panel="${row.model}">
+      <label>Units <select data-units-scale>${options(UNITS, row.scale)}</select></label>
+      <label>Up axis <select data-units-up>${options([["Z", "z"], ["Y", "y"]], row.up)}</select></label>
+      <button class="btn btn-primary btn-sm" type="button" data-units-apply="${row.model}">Apply</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-units="${row.model}">Cancel</button>
+    </div>` : "";
   return `<li class="intake-row" data-intake-row>
-    <span class="intake-file" title="${esc(row.file)}">${esc(row.file)}${note}</span>
+    <span class="intake-file" title="${esc(row.file)}">${esc(row.file)}${note}${choice}</span>
     <span class="intake-size">${size}</span>
     <input class="intake-copies" type="number" min="1" max="999" value="${row.copies}" aria-label="Copies of ${esc(row.file)}" data-copies="${row.object ?? ""}" ${row.state === "ready" && row.object ? "" : "disabled"} />
     ${chipFor(row)}
     ${row.state === "failed" ? `<button class="btn btn-secondary btn-sm" type="button" data-retry="${row.model}">Retry</button>` : ""}
     <button class="btn btn-secondary btn-sm intake-remove" type="button" data-remove="${row.model}" aria-label="Remove ${esc(row.file)}">✕</button>
+    ${panel}
   </li>`;
 }
 
@@ -109,7 +122,7 @@ function render() {
   box.hidden = !rows.length && !pending;
   if (!existing) $("dlg-projects").classList.toggle("has-intake", !box.hidden);
   const action = existing ? $("btn-add-done") : $("btn-new-create");   // Done only waits for the work in flight; Create also wants a clean table
-  if (document.activeElement?.matches?.(".intake-copies")) {
+  if (document.activeElement?.matches?.(".intake-copies, .intake-units-panel select")) {
     // Don't rebuild the list under a field being typed in; the next poll catches up.
     action.disabled = existing ? busy() : !canCreate();
     return;
@@ -192,7 +205,7 @@ function add(files) {
 function dropDraft() {
   generation++;
   clearTimeout(timer);
-  draft = drafting = intake = null;
+  draft = drafting = intake = unitsOpen = null;
   queue = [];
   uploading = false;
   creating = false;
@@ -260,8 +273,16 @@ function bind() {
   for (const list of [$("new-intake"), $("add-intake")]) {
   list.addEventListener("click", e => {
     const remove = e.target.closest("[data-remove]"), retry = e.target.closest("[data-retry]");
+    const units = e.target.closest("[data-units]"), apply = e.target.closest("[data-units-apply]");
     const fix = e.target.closest("[data-fix]"), dismiss = e.target.closest("[data-dismiss]");
     if (dismiss) { queue = queue.filter(q => q.key !== Number(dismiss.dataset.dismiss)); render(); }
+    else if (units) { unitsOpen = unitsOpen === Number(units.dataset.units) ? null : Number(units.dataset.units); render(); }
+    else if (apply) {
+      const panel = apply.closest("[data-units-panel]");
+      unitsOpen = null;
+      act(() => host.api("POST", `/api/projects/${draft}/models/${apply.dataset.unitsApply}/settings`,
+        { scale: Number(panel.querySelector("[data-units-scale]").value), up: panel.querySelector("[data-units-up]").value }));
+    }
     else if (remove) act(() => host.api("DELETE", `/api/projects/${draft}/models/${remove.dataset.remove}`));
     else if (retry) act(() => host.api("POST", `/api/projects/${draft}/models/${retry.dataset.retry}/retry`, {}));
     else if (fix) act(() => host.api("POST", `/api/projects/${draft}/models/${fix.dataset.fix}/settings`, { scale: Number(fix.dataset.scale) }));
