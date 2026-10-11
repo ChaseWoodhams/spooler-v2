@@ -1196,6 +1196,13 @@ def _scale_suggestion(longest: float, scale: float):
     return None
 
 
+def _scale_fixes(longest: float, scale: float, size: list) -> list:
+    """Every unit mix-up that would make `longest` (mm) a believable size (10 to 1000 mm), most common units first, each with
+    the scale it sets and the model size it gives. `size` is the model's size at `scale`."""
+    return [{"factor": factor, "unit": unit, "scale": round(scale * factor, 6), "size": [round(x * factor, 1) for x in size]}
+            for factor, unit in SCALE_GUESSES if 10.0 <= longest * factor <= 1000.0]
+
+
 def _loose_limits(record: dict) -> dict:
     """The project's machine limits, or the defaults while it has no profile yet."""
     bundle_id = record["data"]["profile"].get("bundle_id")
@@ -1220,7 +1227,8 @@ def _verdict(analysis: dict, scale: float, limits: dict, rotation, turned=None) 
         reason = f"The model is {' x '.join(f'{x:g}' for x in size)} mm (longest side {longest:.3g} mm), which looks like the wrong scale"
     elif not fits:
         reason = "The model doesn't fit the bed whole, so it needs the Model and Split steps"
-    return {"size": size, "scale": scale, "fix": fix, "fits": fits, "doubtful": doubtful, "reason": reason}
+    return {"size": size, "scale": scale, "fix": fix, "scale_fixes": _scale_fixes(longest, scale, size) if doubtful else [],
+            "fits": fits, "doubtful": doubtful, "reason": reason}
 
 
 def intake(project_id: int, split_id: int | None = None) -> dict:
@@ -1392,12 +1400,12 @@ def intake_files(project_id: int) -> dict:
         row = {"model": model["id"], "object": objects[0]["id"] if objects else None, "file": model["file"], "kind": "model",
                "state": model["state"], "error": model.get("error"), "size_bytes": model.get("size_bytes"),
                "size": None, "scale": model["import"][0], "up": model["import"][1], "status": None, "fits": None,
-               "scale_ok": None, "scale_fix": None, "reason": None, "repairs": model.get("repairs") or [],
+               "scale_ok": None, "scale_fix": None, "scale_fixes": [], "reason": None, "repairs": model.get("repairs") or [],
                "triangles": model.get("triangles"), "volume_cm3": model.get("volume_cm3"), "copies": len(objects), "estimate": None}
         if model["state"] == READY and model.get("size"):
             verdict = _verdict(model, float(row["scale"]), limits, (0.0, 0.0, 0.0))
             grams = (model.get("volume_cm3") or 0) * ROUGH_G_PER_CM3
-            row.update(size=verdict["size"], fits=verdict["fits"], scale_ok=not verdict["doubtful"], scale_fix=verdict["fix"],
+            row.update(size=verdict["size"], fits=verdict["fits"], scale_ok=not verdict["doubtful"], scale_fix=verdict["fix"], scale_fixes=verdict["scale_fixes"],
                        reason=verdict["reason"], status="check_units" if verdict["doubtful"] else "fits" if verdict["fits"] else "split",
                        estimate={"grams": round(grams), "seconds": round(grams / ROUGH_G_PER_HOUR * 3600), "rough": True})
         rows.append(row)

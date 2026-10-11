@@ -6,7 +6,7 @@ import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=2";
 import { projectPage } from "./project-page.js?v=2";
-import { newProject } from "./new-project.js?v=4";
+import { newProject } from "./new-project.js?v=6";
 import { Viewport, featureColor } from "./viewport.js?v=4";
 
 const $ = id => document.getElementById(id);
@@ -208,7 +208,7 @@ const openJobPlates = () => new Set(state.jobs.filter(j => OPEN_JOB_STATES.has(j
 // ── Loading ─────────────────────────────────────────────────────────────────────
 async function boot() {
   document.querySelectorAll("[data-steps], #prepare-tools").forEach(el => { el.hidden = true; });  // shown once a project is open
-  newProject.attach({ api, upload, toast, openCreated });
+  newProject.attach({ api, upload, toast, openCreated, importNotes: showImportNotes });
   bindUi();   // first, so "Open or create a project" works even if the slower setup below fails
   const viewport = $("viewport");
   try {

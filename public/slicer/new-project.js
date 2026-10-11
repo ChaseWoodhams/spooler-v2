@@ -46,6 +46,7 @@ function view() {
   return { rows, summary };
 }
 
+let importNotes = []; // what an OrcaSlicer 3MF added to an open project had to leave out or change (from the upload responses)
 let unitsOpen = null; // the model whose "units and up axis" choice is open
 
 function fileNames() {
@@ -68,11 +69,19 @@ function chipFor(row) {
   return chip ? `<span class="intake-chip ${chip[0]}">${chip[1]}</span>` : '<span class="intake-chip wait">Checking…</span>';
 }
 
+/** Up to three one-click unit choices, each with the size the model would have (the server lists the most common units first) */
+function fixButtons(row) {
+  const fixes = row.scale_fixes?.length ? row.scale_fixes.slice(0, 3)
+    : [{ scale: row.scale_fix.scale, label: `Use ×${row.scale_fix.factor}` }];   // an older server: the single guess
+  return fixes.map(f => `<button class="btn btn-secondary btn-sm" type="button" data-fix="${row.model}" data-scale="${f.scale}">${
+    f.unit ? `${esc(f.unit[0].toUpperCase() + f.unit.slice(1))}: ${f.size.join(" × ")} mm` : esc(f.label)}</button>`).join(" ");
+}
+
 function rowHtml(row) {
   const size = row.size ? `${row.size.map(dim).join(" × ")} mm` : "";
   const note = row.state === "failed" ? `<small class="bad">${esc(row.error || "The file couldn't be analysed")}</small>`
-    : row.status === "check_units" && row.scale_fix
-      ? `<small class="warn">Looks wrong. <button class="btn btn-secondary btn-sm" type="button" data-fix="${row.model}" data-scale="${row.scale_fix.scale}">Use ×${row.scale_fix.factor}</button></small>`
+    : row.status === "check_units" && (row.scale_fixes?.length || row.scale_fix)
+      ? `<small class="warn">Looks wrong. ${fixButtons(row)}</small>`
       : row.status === "check_units" ? `<small class="warn">${esc(row.reason || "This size looks wrong")}</small>` : "";
   const choice = row.state === "ready" ? `<button class="intake-link" type="button" data-units="${row.model}" aria-expanded="${unitsOpen === row.model}">Units and up axis</button>` : "";
   const panel = unitsOpen === row.model && row.state === "ready" ? `<div class="intake-units-panel" data-units-panel="${row.model}">
@@ -157,6 +166,8 @@ function render() {
   }
   box.querySelector(".intake-list").innerHTML = rows.map(rowHtml).join("") + queue.map(queuedHtml).join("");
   box.querySelector(".intake-summary").textContent = summaryText();
+  const notes = box.querySelector(".intake-notes");
+  if (notes) { notes.hidden = !importNotes.length; notes.textContent = importNotes.length ? `Opened with ${importNotes.length === 1 ? "a note" : `${importNotes.length} notes`}: ${importNotes.join(" · ")}` : ""; }
   if (!existing) $("btn-new-create").hidden = box.hidden;
   syncName();   // before the action, which wants the name
   refreshAction();
@@ -216,8 +227,9 @@ async function drain() {
         if (!id) return;
         const params = new URLSearchParams({ filename: item.name, scale: "1", up: "z" });   // millimetres, Z up; a wrong guess is fixed per file
         if (existing) params.set("plate", existing.plate);
-        await host.upload(`/api/projects/${id}/models/upload?${params}`, item.file, pct => { item.pct = pct; render(); });
+        const result = await host.upload(`/api/projects/${id}/models/upload?${params}`, item.file, pct => { item.pct = pct; render(); });
         if (mine !== generation) return;
+        if (existing) importNotes = [...new Set([...importNotes, ...(result?.import_notes || [])])];
         queue = queue.filter(q => q !== item);
         await refresh();
       } catch (err) {
@@ -245,6 +257,7 @@ function dropDraft() {
   generation++;
   clearTimeout(timer);
   draft = drafting = intake = unitsOpen = null;
+  importNotes = [];
   queue = [];
   uploading = false;
   creating = false;
@@ -269,7 +282,10 @@ function addTo(project, files) {
 /** Done: forget the table and say how many files it holds (the project keeps them) */
 function finishAdding() {
   const added = view()?.rows.length || 0;
-  if (existing) dropDraft();
+  if (existing) {
+    if (importNotes.length) host.importNotes({ import_notes: importNotes });   // the dialog hides toasts, so say it once it has closed
+    dropDraft();
+  }
   return added;
 }
 

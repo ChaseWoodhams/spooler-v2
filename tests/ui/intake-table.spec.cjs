@@ -15,10 +15,13 @@ const root = path.resolve(__dirname, '../../public');
 // A model reads as analysing for 1.2 s after its upload (the page polls every 1.5 s); a unit fix is answered at once.
 const SHAPES = {
   'seat.stl': { size: [0.65, 0.974, 0.617], status: 'check_units', fits: true, after: 'split', fix: { factor: 1000, scale: 1000, label: "It's in metres: scale x1000" } },
+  // the believable unit guesses, most common first; three of them make a row offer three choices
+  'three.stl': { size: [0.974, 0.65, 0.617], status: 'check_units', fits: true, units: [[1000, 'metres'], [25.4, 'inches'], [100, 'decimetres']] },
   'small.stl': { size: [40, 30, 20], status: 'fits', fits: true },
   'big.stl': { size: [650, 400, 300], status: 'split', fits: false },
   'metres.stl': { size: [0.2, 0.1, 0.05], status: 'check_units', fits: true, fix: { factor: 1000, scale: 1000, label: "It's in metres: scale x1000" } },
 };
+const guesses = s => s.units || (s.fix ? [[s.fix.factor, 'metres']] : []);
 const shell = id => ({ id, name: 'Untitled project', revision: 1, split_id: null, draft: true, models: [], slices: {}, server_time: Date.now() / 1000,
   data: { plates: [{ id: 1, name: 'Plate 1' }], objects: [], bed: 'textured', profile: { bundle_id: null, process: {}, filament: {} } } });
 
@@ -31,13 +34,15 @@ async function open(browser, viewport) {
     return route.fulfill({ body: fs.readFileSync(file), contentType: file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : file.endsWith('.html') ? 'text/html' : 'application/octet-stream' });
   });
   page.on('pageerror', e => console.error('Page error:', e.message));
+  const fixed = (s, m) => guesses(s).some(([factor]) => factor === m.scale);
   const rows = () => {
         const out = server.models.map(m => {
       const s = SHAPES[m.file], done = m.analysed || Date.now() - m.at > 1200;
       return { model: m.id, object: m.id + 100, file: m.file, kind: 'model', state: done ? 'ready' : 'analysing', error: null, size_bytes: 1000,
         size: done ? s.size.map(v => v * (m.scale || 1)) : null, scale: m.scale || 1, up: m.up || 'z',
-        status: !done ? null : (m.scale === 1000 ? (s.after || 'fits') : s.status), fits: done ? (m.scale === 1000 ? !s.after : s.fits) : null,
-        scale_ok: done ? s.status !== 'check_units' || m.scale === 1000 : null, scale_fix: done && s.fix && !m.scale ? s.fix : null,
+        status: !done ? null : (fixed(s, m) ? (s.after || 'fits') : s.status), fits: done ? (fixed(s, m) ? !s.after : s.fits) : null,
+        scale_ok: done ? s.status !== 'check_units' || fixed(s, m) : null, scale_fix: done && s.fix && !m.scale ? s.fix : null,
+        scale_fixes: done && !m.scale ? guesses(s).map(([factor, unit]) => ({ factor, unit, scale: factor, size: s.size.map(v => Math.round(v * factor * 10) / 10) })) : [],
         reason: null, repairs: [], triangles: 12, volume_cm3: 1, copies: m.copies || 1, estimate: null };
     });
     const count = status => out.filter(r => r.status === status).length;
@@ -153,7 +158,7 @@ const noPageScroll = page => page.evaluate(() => ({ doc: document.documentElemen
     const createButton = page.getByRole('button', { name: 'Create project', exact: true });
     assert.equal(await createButton.isDisabled(), true, 'Create is blocked while a row says Check units');
     assert.deepEqual(await noPageScroll(page), { doc: true, dialog: true }, 'no horizontal scroll at 1280');
-    await row('metres.stl').getByRole('button', { name: /×1000/ }).click();
+    await row('metres.stl').getByRole('button', { name: /^Metres/ }).click();
     await row('metres.stl').getByText('Fits the bed').waitFor({ timeout: 8000 });
     assert.deepEqual(JSON.parse(server.calls.find(c => c.path === '/api/projects/50/models/3/settings').body), { scale: 1000 });
     await page.waitForFunction(() => !document.getElementById('btn-new-create').disabled);
@@ -202,12 +207,26 @@ const noPageScroll = page => page.evaluate(() => ({ doc: document.documentElemen
     const seat = await open(browser, { width: 1280, height: 800 });
     await drop(seat.page, ['seat.stl']);
     const seatRow = seat.page.locator('#new-intake [data-intake-row]');
-    await seatRow.getByRole('button', { name: /×1000/ }).click({ timeout: 8000 });
+    await seatRow.getByRole('button', { name: /^Metres/ }).click({ timeout: 8000 });
     await seatRow.getByText('Too big, will be split').waitFor({ timeout: 8000 });
     assert.doesNotMatch(await seatRow.innerText(), /Check units|Looks wrong/);
     assert.match(await seatRow.innerText(), /650 × 974 × 617 mm/);
     console.log('PASS: SEAT at x1000 is Too big, will be split');
     await seat.page.close();
+
+    // Several believable guesses: up to three choices, each with its resulting size; the second one is applied alone
+    const choices = await open(browser, { width: 1280, height: 800 });
+    await drop(choices.page, ['three.stl']);
+    const choiceRow = choices.page.locator('#new-intake [data-intake-row]');
+    await choiceRow.locator('[data-fix]').first().waitFor({ timeout: 8000 });
+    assert.deepEqual(await choiceRow.locator('[data-fix]').allInnerTexts(),
+      ['Metres: 974 × 650 × 617 mm', 'Inches: 24.7 × 16.5 × 15.7 mm', 'Decimetres: 97.4 × 65 × 61.7 mm']);
+    assert.equal(await choiceRow.getByRole('button', { name: 'Units and up axis' }).count(), 1, 'the units link stays');
+    await choiceRow.getByRole('button', { name: /^Inches/ }).click();
+    await choiceRow.getByText('Fits the bed').waitFor({ timeout: 8000 });
+    assert.deepEqual(choices.server.calls.filter(c => c.path.endsWith('/settings')).map(c => JSON.parse(c.body)), [{ scale: 25.4 }]);
+    console.log('PASS: A row offers up to three unit choices with resulting sizes and applies the one picked');
+    await choices.page.close();
 
     // Narrow screen
     const narrow = await open(browser, { width: 390, height: 844 });

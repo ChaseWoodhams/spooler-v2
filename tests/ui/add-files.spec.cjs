@@ -15,10 +15,14 @@ const SIZES = { 'small.stl': [40, 30, 20], 'big.stl': [650, 400, 300] };
 const model = (id, file, state = 'ready') => ({ id, file, state, sha256: `sha${id}`, import: [1, 'z'], size: [10, 10, 10], triangles: 12, volume_cm3: 1, repairs: [] });
 const object = (id, modelId, name) => ({ id, model: modelId, plate: 1, name, position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] });
 
-async function open(browser, step) {
+// A model upload and its split (the Model and Split steps exist only for a project made from one)
+const split = { id: 1, source_name: 'existing.stl', state: 'ready', settings: { scale: 1, up: 'z', printer: { bed_x: 240, bed_y: 240, height: 250 }, planner: { mode: 'smart', balanced: false }, connectors: { kind: 'none' } },
+  cuts: { cuts: [] }, analysis: { raw_size: [40, 30, 20], size: [40, 30, 20], volume_cm3: 1, source_triangles: 12, triangles: 12, repairs: [], mean_wall_mm: 2, fits_whole: true, estimated_parts: 1 } };
+
+async function open(browser, step, { fromSplit = false } = {}) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const server = { calls: [], name: 'Chair', models: [model(1, 'existing.stl')], objects: [object(1, 1, 'existing')], outdated: false };
-  const project = () => ({ id: 60, name: server.name, revision: 1, split_id: null, models: server.models, slices: {},
+  const project = () => ({ id: 60, name: server.name, revision: 1, split_id: fromSplit ? 1 : null, models: server.models, slices: {},
     server_time: Date.now() / 1000, data: { plates: [{ id: 1, name: 'Plate 1' }], objects: server.objects, bed: 'textured', profile: { bundle_id: null, process: {}, filament: {} } } });
   await page.route('http://spooler.test/**', route => {
     const file = path.join(root, new URL(route.request().url()).pathname);
@@ -37,8 +41,9 @@ async function open(browser, step) {
       server.models.push(model(id, file));
       server.objects.push(object(id, id, file.replace(/\.stl$/, '')));
       server.outdated = true;
-      return route.fulfill({ json: project() });
+      return route.fulfill({ json: file === 'orca.3mf' ? { ...project(), import_notes: ['Some User Preset was left out'] } : project() });
     }
+    if (p === '/api/splits/1') return route.fulfill({ json: split });
     if (p === '/api/projects/60/intake-files') {
       const rows = server.models.map(m => ({ model: m.id, object: m.id, file: m.file, kind: 'model', state: 'ready', error: null, size: SIZES[m.file] || [10, 10, 10], scale: 1, up: 'z',
         status: m.file === 'big.stl' ? 'split' : 'fits', fits: m.file !== 'big.stl', scale_fix: null, reason: null, copies: 1 }));
@@ -98,7 +103,7 @@ const dropOn = (page, selector, names) => page.evaluate(([selector, names]) => {
     const dialog = page.locator('#dlg-add');
     await dialog.waitFor({ state: 'visible' });
     const table = dialog.locator('.intake');
-    await table.getByText('small.stl', { exact: true }).waitFor({ timeout: 5000 });
+    await table.locator('[data-intake-row]', { hasText: 'small.stl' }).waitFor({ timeout: 5000 });
     await table.getByText('Too big, will be split').waitFor({ timeout: 5000 });
     assert.equal(await table.locator('[data-intake-row]').count(), 2, 'only the new files are listed, not the ones already in the project');
     assert.match(await dialog.innerText(), /outdated/i, 'the panel says what adding does to the sliced plates');
@@ -112,6 +117,35 @@ const dropOn = (page, selector, names) => page.evaluate(([selector, names]) => {
     await page.locator('#object-list').getByText('small', { exact: false }).first().waitFor({ timeout: 5000 });
     assert.equal(server.calls.some(c => c.method === 'DELETE'), false, 'closing keeps the added files');
     console.log('PASS: A drop on the Slice step goes through the intake table, warns about outdated plates and joins the project');
+
+    // A drop on each step opens the table for those files, adds them and says what that step does to the work
+    const drops = [['model', '#split-stage', /whole models on the Plates step/], ['split', '#split-stage', /whole models on the Plates step/],
+      ['plates', '#viewport', /current plate.*outdated/], ['slice', '#viewport', /Slice outdated/]];
+    for (const [step, stage, note] of drops) {
+      const s = await open(browser, step, { fromSplit: step === 'model' || step === 'split' });
+      await dropOn(s.page, stage, ['small.stl']);
+      const box = s.page.locator('#dlg-add');
+      await box.waitFor({ state: 'visible' });
+      await box.locator('[data-intake-row]', { hasText: 'small.stl' }).waitFor({ timeout: 5000 });
+      assert.match(await box.locator('#add-note').innerText(), note, `the note for the ${step} step`);
+      assert.equal(s.server.calls.filter(c => c.path === '/api/projects/60/models/upload').length, 1);
+      await box.getByRole('button', { name: 'Done', exact: true }).click();
+      await s.page.waitForFunction(() => !document.getElementById('dlg-add').open);
+      assert.ok(s.server.models.some(m => m.file === 'small.stl'), `the file joined the project from ${step}`);
+      assert.equal(s.server.calls.some(c => c.method === 'DELETE'), false);
+      await s.page.close();
+    }
+    console.log('PASS: A drop on Model, Split, Plates and Slice adds the files and shows that step\'s note');
+
+    // An Orca project 3MF added to an open project says what the import left out, in the dialog and again once it is closed
+    const orca = await open(browser, 'plates');
+    await dropOn(orca.page, '#viewport', ['orca.3mf']);
+    const orcaBox = orca.page.locator('#dlg-add');
+    await orcaBox.locator('.intake-notes').getByText(/Opened with a note: Some User Preset was left out/).waitFor({ timeout: 5000 });
+    await orcaBox.getByRole('button', { name: 'Done', exact: true }).click();
+    await orca.page.locator('.toast', { hasText: 'Opened with a note: Some User Preset was left out' }).waitFor({ timeout: 5000 });
+    await orca.page.close();
+    console.log('PASS: Adding an Orca project 3MF shows its import notes');
 
     // Add files is in the header on every step
     for (const step of ['plates', 'slice']) {

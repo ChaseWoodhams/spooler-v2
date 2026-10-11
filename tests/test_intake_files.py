@@ -108,6 +108,28 @@ class IntakeFilesTests(unittest.TestCase):
         self.assertEqual(tiny["size"], [0.2, 0.2, 0.2])
         self.assertEqual((body["summary"]["check_units"], body["summary"]["can_create"]), (1, False))
 
+    def test_every_believable_unit_guess_is_offered_metres_first(self):
+        limits = projects.machine_limits({})
+        def fixes(raw):
+            verdict = projects._verdict({"size": [0.0, 0.0, 0.0], "raw_size": raw}, 1.0, limits, (0.0, 0.0, 0.0))
+            return [(f["unit"], f["factor"], f["size"]) for f in verdict["scale_fixes"]], verdict
+        seat, verdict = fixes([0.974, 0.65, 0.617])   # a SEAT in metres: the single guess says inches, the list leads with metres
+        self.assertEqual([u for u, _, _ in seat], ["metres", "inches", "decimetres"])
+        self.assertEqual(seat[0][2], [974.0, 650.0, 617.0])
+        self.assertEqual(seat[1][2], [24.7, 16.5, 15.7])
+        self.assertEqual(verdict["fix"]["factor"], 25.4)   # scale_fix is unchanged
+        self.assertEqual(fixes([0.2, 0.2, 0.2])[0][0][0], "metres")
+        self.assertEqual([u for u, _, _ in fixes([0.45, 0.3, 0.1])[0]], ["metres", "inches", "decimetres"])
+        self.assertEqual(fixes([20.0, 20.0, 20.0])[1]["scale_fixes"], [])   # a plausible model has nothing to fix
+        self.assertEqual(verdict["scale_fixes"][0]["scale"], 1000.0)
+
+    def test_rows_carry_the_unit_guesses(self):
+        project = projects.create_project("Guesses")
+        self.add(project, "tiny.stl", 1, scale=0.2)
+        self.settle()
+        fixes = self.files(project)["rows"][0]["scale_fixes"]
+        self.assertEqual((fixes[0]["unit"], fixes[0]["factor"], fixes[0]["scale"], fixes[0]["size"]), ("metres", 1000.0, 200.0, [200.0, 200.0, 200.0]))
+
     def test_a_model_still_being_analysed_has_no_verdict(self):
         project = projects.create_project("Busy")
         self.add(project, "small.stl", 20)
