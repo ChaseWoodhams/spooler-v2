@@ -38,7 +38,7 @@ const created = { id: 9, name: 'bracket', revision: 1, split_id: null, models: [
         : url.pathname === '/api/slicer/presets' ? { machines: [], processes: {}, filaments: {} } : {};
       return route.fulfill({ json: data });
     });
-    await page.goto('http://spooler.test/slicer.html');
+    await page.goto('http://spooler.test/slicer.html?new=1');
     const dialog = page.locator('#dlg-projects');
     await dialog.waitFor({ state: 'visible' });   // with no project open the Projects page opens by itself
     await dialog.getByRole('button', { name: 'Close', exact: true }).click();
@@ -50,7 +50,7 @@ const created = { id: 9, name: 'bracket', revision: 1, split_id: null, models: [
     assert.equal(await dialog.getByRole('button', { name: 'Choose folder', exact: true }).isVisible(), true);
     assert.equal(await dialog.locator('#new-scale, #new-up').count(), 0, 'Units and Up axis are not asked up front');
     assert.doesNotMatch(await dialog.innerText(), /Quick print on the dashboard/);
-    assert.match(await dialog.locator('#project-list').innerText(), /Existing project/);
+    assert.match(await page.locator('#projects-dashboard #project-list').innerText(), /Existing project/);
     assert.match(await dialog.innerText(), /Drop STL, OBJ or 3MF models or a folder here/);
     assert.match(await dialog.locator('#new-model-input').getAttribute('accept'), /\.stl.*\.obj.*\.3mf/);
     assert.equal(await dialog.locator('#new-folder-input').getAttribute('webkitdirectory') !== null, true);

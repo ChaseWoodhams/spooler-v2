@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="style.css?v=60" />
   <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=36" />
+  <link rel="stylesheet" href="slicer.css?v=37" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -44,6 +44,17 @@
     <button id="btn-mobile-edit" type="button" class="btn btn-secondary btn-sm" aria-expanded="false">Show editing controls</button>
   </div>
   <button id="btn-sidebar" type="button" class="btn btn-secondary btn-sm slicer-sidebar-toggle" aria-expanded="true" aria-controls="project-sidebar">Hide sidebar</button>
+
+  <section id="projects-dashboard" class="projects-dashboard" aria-label="Projects" hidden>
+    <div class="pd-wrap">
+      <div class="pd-head">
+        <h2>Projects</h2>
+        <input id="pd-search" type="search" placeholder="Search projects" aria-label="Search projects" autocomplete="off" />
+        <button id="btn-pd-new" class="btn btn-primary" type="button">New project</button>
+      </div>
+      <div id="project-list" class="slicer-project-list pd-list"></div>
+    </div>
+  </section>
 
   <div class="slicer-body">
     <aside id="project-sidebar" class="slicer-sidebar">
@@ -261,9 +272,8 @@
   </div>
 
   <dialog id="dlg-projects" class="slicer-dialog">
-    <h3>Projects</h3>
+    <h3>New project</h3>
     <section class="slicer-new-model">
-      <h4>New project</h4>
       <label class="slicer-field">Name
         <input id="new-project-name" placeholder="Untitled project" maxlength="120" autocomplete="off" />
       </label>
@@ -301,7 +311,6 @@
         </div>
       </div>
     </section>
-    <div id="project-list" class="slicer-project-list"></div>
     <div class="slicer-dialog-actions">
       <button id="btn-new-project" class="btn btn-secondary" type="button">Create empty project</button>
       <button id="btn-new-create" class="btn btn-primary" type="button" hidden disabled>Create project</button>
@@ -354,6 +363,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=43"></script>
+  <script type="module" src="slicer/main.js?v=44"></script>
 </body>
 </html>

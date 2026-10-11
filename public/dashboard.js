@@ -139,7 +139,7 @@ function syncShellView() {
       frame.src = target;
     } else if (!wasShown) {
       // The same project kept in the frame since Projects was last shown: bring it up to date (a Quick print, another tab, a slice finishing).
-      try { frame.contentWindow?.spoolerRefresh?.(); } catch (_) { /* still loading */ }
+      try { (hash === "#projects" ? frame.contentWindow?.spoolerHome : frame.contentWindow?.spoolerRefresh)?.call(frame.contentWindow); } catch (_) { /* still loading */ }
     }
   } else {
     loadDashboard();
@@ -158,7 +158,10 @@ document.addEventListener("click", event => {
 window.addEventListener("hashchange", syncShellView);
 // Clicking Projects when the hash already says #projects fires no hashchange, so apply the view here too.
 document.getElementById("btn-slicer").addEventListener("click", () => {
-  if (location.hash === "#projects") syncShellView();
+  if (location.hash === "#projects") {
+    syncShellView();
+    try { const frame = document.getElementById("projects-frame"); frame.contentWindow?.spoolerHome?.(); } catch (_) { /* still loading */ }
+  }
 });
 if (typeof applyJobs === "function") {
   const _applyJobs = applyJobs;

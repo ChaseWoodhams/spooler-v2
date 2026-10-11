@@ -280,18 +280,18 @@ async function boot() {
   applySendDefaults();
   const params = new URLSearchParams(location.search);
   const asked = Number(params.get("project")) || 0;
-  const id = asked || (params.has("new") ? 0 : Number(remember("slicer.project")) || 0);
-  if (id) {
+  if (asked) {
     try {
-      await openProject(id, { toPrinter: !!params.get("printer"), restoring: !asked });
+      await openProject(asked, { toPrinter: !!params.get("printer") });
       return;
     } catch (err) {
-      // A deleted or hidden project falls through to the list. Anything else (Spooler busy or restarting) says so,
-      // rather than silently showing the list as if the project were gone.
-      if (err.status !== 404 && !err.quick) toast(`Couldn't reopen project #${id}: ${err.message}. Choose it below, or reload to try again`, true);
+      // A deleted or hidden project falls through to the Projects page. Anything else (Spooler busy or restarting) says so,
+      // rather than silently showing the page as if the project were gone.
+      if (err.status !== 404 && !err.quick) toast(`Couldn't open project #${asked}: ${err.message}. Choose it below, or reload to try again`, true);
     }
   }
-  openProjectsDialog();
+  await showProjectsPage();
+  if (params.has("new")) openProjectsDialog();   // the header's New project: the form over the page
 }
 
 async function loadBundles() {
@@ -446,6 +446,8 @@ async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   const project = await api("GET", `/api/projects/${id}`);
   if (restoring && (project.quick || project.draft)) throw Object.assign(new Error("A hidden quick project is never reopened on its own"), { quick: true });   // the caller falls back to the list
   clearTimeout(state.jobsTimer);
+  document.body.classList.remove("view-dashboard");
+  $("projects-dashboard").hidden = true;
   state.clockSkew = project.server_time - Date.now() / 1000;
   state.project = project;
   state.plate = project.data.plates[0].id;
@@ -825,7 +827,11 @@ async function refreshProject() {
 // Bring the page up to date when it is shown again: switching back to this tab, or to Projects in the app shell.
 // Skipped while an edit is unsaved or a step is mid-request, so it never overwrites what is being changed here.
 function refreshWhenShown() {
-  if (!state.project || state.saving || state.saveTimer || state.pendingSave) return;
+  if (!state.project) {   // the Projects page: its list may have moved on (a slice finished, another tab)
+    if (document.body.classList.contains("view-dashboard") && !document.querySelector("dialog[open]")) loadProjectsPage();
+    return;
+  }
+  if (state.saving || state.saveTimer || state.pendingSave) return;
   refreshProject().catch(() => { /* Spooler may be restarting; the poll or the next show tries again */ });
   loadJobs();
   loadPrinters();
@@ -834,6 +840,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) refr
 // The app shell asks before reloading for an update (net.js), and refreshes this page when Projects is shown again.
 window.spoolerBusy = () => !!(state.saving || state.saveTimer || state.pendingSave || document.querySelector("dialog[open]"));
 window.spoolerRefresh = refreshWhenShown;
+window.spoolerHome = showProjectsPage;   // the shell's Projects button: back to the page that lists them
 
 // ── Rendering ───────────────────────────────────────────────────────────────────
 function renderAll({ geometry = true } = {}) {
@@ -2345,31 +2352,80 @@ async function assignPrinters(batchKey, button) {
 }
 
 // ── Dialogs ─────────────────────────────────────────────────────────────────────
-async function openProjectsDialog() {
+// The New project form: a dialog over whatever page is showing
+function openProjectsDialog() {
   const dialog = $("dlg-projects");
-  $("project-list").innerHTML = '<p class="slicer-muted">Loading…</p>';
   if (!dialog.open) dialog.showModal();
   $("new-project-name").focus();
+}
+
+// ── The Projects page: every project with where it has got to ────────────────────
+const projectChips = p => {
+  const chips = [];
+  if (p.busy && p.slicing) chips.push(["busy", p.slicing === 1 ? "Slicing a plate" : `Slicing ${p.slicing} plates`]);
+  if (p.printing) chips.push(["busy", p.printing === 1 ? "Printing" : `${p.printing} printing`]);
+  if (p.queued) chips.push(["go", `${p.queued} in the queue`]);
+  if (p.sliced && !p.queued && !p.printing) chips.push(["go", p.sliced === p.plates ? "All plates sliced" : `${p.sliced} of ${plural(p.plates, "plate")} sliced`]);
+  if (!p.sliced && !p.slicing && !p.queued && !p.printing) chips.push(["", p.objects ? "Not sliced yet" : "Empty"]);
+  return chips.map(([kind, text]) => `<span class="pd-chip ${kind}">${esc(text)}</span>`).join("");
+};
+
+function projectRow(p) {
+  return `<div class="slicer-project-row" data-name="${esc(p.name.toLowerCase())}">
+      <div><strong>${esc(p.name)}</strong>${p.split_id ? '<span class="slicer-tag">from a model upload</span>' : ""}
+        <small>${plural(p.plates, "plate")} · ${plural(p.objects, "object")} · edited ${new Date(p.updated_at * 1000).toLocaleString()}</small>
+        <div class="pd-chips">${projectChips(p)}</div></div>
+      <button class="btn btn-primary btn-sm" type="button" data-open-project="${p.id}">Open</button>
+      <button class="btn btn-danger btn-sm" type="button" data-delete-project="${p.id}">Delete</button>
+    </div>`;
+}
+
+async function loadProjectsPage() {
+  const list = $("project-list");
+  if (!list.children.length) list.innerHTML = '<p class="slicer-muted">Loading…</p>';
   try {
     const [{ projects }, { splits }] = await Promise.all([api("GET", "/api/projects"), api("GET", "/api/splits").catch(() => ({ splits: [] }))]);
     const loose = splits.filter(s => !s.project_id);   // the server marks splits owned by any project, hidden quick ones included
-    $("project-list").innerHTML = (projects.length ? '<h4 class="slicer-list-heading">Your projects</h4>' : "") + projects.map(p => `
-      <div class="slicer-project-row">
-        <div><strong>${esc(p.name)}</strong>${p.split_id ? '<span class="slicer-tag">from a model upload</span>' : ""}
-          <small>${plural(p.plates, "plate")} · ${plural(p.objects, "object")} · edited ${new Date(p.updated_at * 1000).toLocaleString()}</small></div>
-        <button class="btn btn-primary btn-sm" type="button" data-open-project="${p.id}">Open</button>
-        <button class="btn btn-danger btn-sm" type="button" data-delete-project="${p.id}">Delete</button>
-      </div>`).join("")
+    list.innerHTML = (projects.length ? `<h4 class="slicer-list-heading">Your projects</h4>${projects.map(projectRow).join("")}` : `<div class="pd-empty">
+        <p>No projects yet. Name one, drop your models in, and Spooler arranges them onto plates.</p>
+        <button class="btn btn-primary" type="button" data-pd-new>New project</button></div>`)
       + (loose.length ? '<h4 class="slicer-list-heading">Split models without a project</h4>' + loose.map(s => `
       <div class="slicer-project-row">
         <div><strong>${esc(s.source_name)}</strong><small>${s.parts ? plural(s.parts, "part") : esc(s.state)}</small></div>
         <span></span>
         <button class="btn btn-secondary btn-sm" type="button" data-adopt-split="${s.id}" data-name="${esc(s.source_name.replace(/\.[^.]+$/, ""))}">Open as project</button>
-      </div>`).join("") : "")
-      || '<p class="slicer-muted">No projects yet. Name your first one above and add your models.</p>';
+      </div>`).join("") : "");
+    filterProjects();
   } catch (err) {
-    $("project-list").innerHTML = `<p class="slicer-muted">${esc(err.message)}</p>`;
+    list.innerHTML = `<p class="slicer-muted">${esc(err.message)}</p>`;
   }
+}
+
+function filterProjects() {
+  const q = $("pd-search").value.trim().toLowerCase();
+  document.querySelectorAll("#project-list .slicer-project-row[data-name]").forEach(row => { row.hidden = !!q && !row.dataset.name.includes(q); });
+}
+
+/** Leave the open project (its changes are saved first) and show the Projects page */
+async function showProjectsPage() {
+  if (state.project) {
+    try { await flushSave(); } catch (err) { toast(err.message, true); return; }
+  }
+  clearTimeout(state.poller);
+  clearTimeout(state.jobsTimer);
+  state.project = null;
+  state.selected = null;
+  state.group = [];
+  splitStep.close();
+  document.body.classList.add("view-dashboard");
+  $("projects-dashboard").hidden = false;
+  document.title = "Projects – Spooler";
+  history.replaceState(null, "", location.pathname);
+  try {   // inside the app shell the address says Projects, with no project in it
+    const frame = window.frameElement;
+    if (frame && window.self !== window.top) { frame.dataset.route = ""; parent.history.replaceState(null, "", "#projects"); }
+  } catch (_) { /* not the Spooler shell */ }
+  await loadProjectsPage();
 }
 
 async function uploadNewModel(file) {
@@ -2502,8 +2558,10 @@ function bindUi() {
     }
   });
   $("btn-export-3mf").addEventListener("click", exportProject);
-  $("btn-projects").addEventListener("click", openProjectsDialog);
-  $("btn-empty-projects").addEventListener("click", openProjectsDialog);
+  $("btn-projects").addEventListener("click", showProjectsPage);
+  $("btn-empty-projects").addEventListener("click", showProjectsPage);
+  $("btn-pd-new").addEventListener("click", openProjectsDialog);
+  $("pd-search").addEventListener("input", filterProjects);
   $("btn-new-upload").addEventListener("click", () => $("new-model-input").click());
   const projectsDialog = $("dlg-projects");   // dropping a file on the Projects list imports it
   projectsDialog.addEventListener("dragover", e => { e.preventDefault(); projectsDialog.classList.add("dropping"); });
@@ -2534,7 +2592,8 @@ function bindUi() {
     const remove = e.target.closest("[data-delete-project]");
     const adopt = e.target.closest("[data-adopt-split]");
     try {
-      if (open) {
+      if (e.target.closest("[data-pd-new]")) openProjectsDialog();
+      else if (open) {
         $("dlg-projects").close();
         await openProject(Number(open.dataset.openProject));
       } else if (adopt) {
@@ -2547,7 +2606,7 @@ function bindUi() {
           state.project = null;
           $("empty-state").hidden = false;
         }
-        openProjectsDialog();
+        loadProjectsPage();
       }
     } catch (err) {
       toast(err.message, true);

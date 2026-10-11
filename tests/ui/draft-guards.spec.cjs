@@ -72,7 +72,7 @@ async function open(browser) {
       : p === '/api/defaults' ? { defaults: { options: {} } } : p === '/api/slicer/spools' ? { spools: [] }
       : p === '/api/slicer/presets' ? { machines: [], processes: {}, filaments: {} } : {} });
   });
-  await page.goto('http://spooler.test/slicer.html');
+  await page.goto('http://spooler.test/slicer.html?new=1');
   await page.locator('#dlg-projects').waitFor({ state: 'visible' });
   return { page, server };
 }

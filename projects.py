@@ -231,12 +231,20 @@ def list_projects(include_quick: bool = False) -> list:
     with database.transaction() as conn:
         rows = conn.execute("SELECT * FROM projects WHERE draft = 0" + ("" if include_quick else " AND quick = 0")
                             + " ORDER BY updated_at DESC, id DESC").fetchall()
+        open_jobs = {}   # project id → {job state → how many}: what the Projects page shows beside each project
+        for row in conn.execute("SELECT project_id, state, COUNT(*) AS n FROM jobs WHERE project_id IS NOT NULL "
+                                "AND state IN ('queued', 'starting', 'printing') GROUP BY project_id, state"):
+            open_jobs.setdefault(row["project_id"], {})[row["state"]] = row["n"]
     out = []
     for record in map(_to_project, rows):
         data = record["data"]
+        slices = [s.get("state") for s in record["slices"].values()]
+        jobs_here = open_jobs.get(record["id"], {})
         out.append({"id": record["id"], "name": record["name"], "updated_at": record["updated_at"], "created_at": record["created_at"],
                     "split_id": record.get("split_id"), "quick": record["quick"],
                     "plates": len(data.get("plates", [])), "objects": len(data.get("objects", [])), "models": len(record["models"]),
+                    "sliced": slices.count(SLICED), "slicing": sum(s in (QUEUED, SLICING) for s in slices),
+                    "queued": jobs_here.get("queued", 0), "printing": jobs_here.get("starting", 0) + jobs_here.get("printing", 0),
                     "busy": any(m["state"] == IMPORTING for m in record["models"])
                     or any(s.get("state") in (QUEUED, SLICING) for s in record["slices"].values())})
     return out

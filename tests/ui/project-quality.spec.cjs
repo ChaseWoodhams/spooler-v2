@@ -146,7 +146,7 @@ const split = {id:1, source_name:'fixture-small.stl', state:'ready', settings:{s
       return route.fulfill({json:project});
     });
     await page.route('**/orca/settings.json',route=>route.fulfill({json:{options:{wall_loops:{type:'int',mode:'simple',label:'Wall loops',min:0,max:100},advanced_fixture:{type:'int',mode:'advanced',label:'Advanced fixture'},expert_fixture:{type:'int',mode:'expert',label:'Expert fixture'}},tabs:{process:[{page:'Strength',groups:[{group:'Walls',rows:[{options:['wall_loops']},{options:['advanced_fixture']},{options:['expert_fixture']}]}]}],filament:[]}}}));
-    await page.reload();await page.locator('[data-step="plates"]').click();
+    await page.reload();await page.locator('[data-step="plates"]').click();await page.locator('#fold-settings > summary').click();
     assert.equal(await page.getByRole('textbox',{name:'Wall loops',exact:true}).inputValue(),'4');
     await page.getByRole('button',{name:'Reset Wall loops to inherited value'}).click();
     await page.waitForTimeout(800);
