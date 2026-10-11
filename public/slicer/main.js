@@ -1489,6 +1489,10 @@ const projectPack = () => {
 const withSupports = (pack, tight) => (tight ? { ...pack, tight_supports: true } : pack);
 
 function bindPack() {
+  const more = document.querySelector(".tool-more");   // the More menu closes after a button in it is used, or on a click anywhere else
+  more.addEventListener("click", e => { if (e.target.closest("button")) more.open = false; });
+  document.addEventListener("click", e => { if (more.open && !more.contains(e.target)) more.open = false; });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && more.open) more.open = false; });
   $("pack-select").addEventListener("change", e => {
     const [scope, preset] = e.target.value.split(":");
     if (scope === "plate") setPack({ plate_id: state.plate, plate_pack: preset === "inherit" ? null : { preset } });

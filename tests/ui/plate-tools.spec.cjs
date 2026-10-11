@@ -29,7 +29,7 @@ const model = id => ({ id, file: `box${id}.stl`, state: 'ready', sha256: `sha${i
 const object = (id, plate, x, y) => ({ id, model: id, plate, name: `box${id}`, position: [x, y], rotation: [0, 0, 0], scale: [1, 1, 1] });
 
 async function open(browser, { tooClose = false } = {}) {
-  const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  const page = await browser.newPage({ viewport: process.env.VIEW ? { width: +process.env.VIEW.split('x')[0], height: +process.env.VIEW.split('x')[1] } : { width: 1400, height: 900 } });
   const server = { patches: [], packs: [], revision: 1,
     data: { plates: [{ id: 1, name: 'Plate 1' }, { id: 2, name: 'Plate 2' }], bed: 'textured', profile: { bundle_id: null, process: {}, filament: {} },
             objects: [object(1, 1, 50, 50), object(2, 1, 120, 50), object(3, 1, 200, 150), object(4, 2, 128, 128)] } };
@@ -86,6 +86,9 @@ async function saved(page, server, before) {
   for (let i = 0; i < 40 && server.patches.length === before; i++) await page.waitForTimeout(100);
   assert.ok(server.patches.length > before, 'the change is saved');
 }
+// Select all, the supports choice and the custom gap live in the More menu
+const more = page => page.locator('.tool-more > summary').click();
+const selectAll = async page => { await more(page); await page.locator('#btn-select-all').click(); };
 const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer-object-select`);
 
 (async () => {
@@ -99,9 +102,10 @@ const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer
       assert.match(await page.locator('#object-panel').innerText(), /2 objects selected/);
       await row(page, 2).click({ modifiers: ['Shift'] });
       assert.equal(await page.locator('#object-panel h5').innerText(), 'box1', 'Shift-click again takes it out');
-      await page.locator('#btn-select-all').click();
+      await selectAll(page);
       assert.match(await page.locator('#object-panel').innerText(), /3 objects selected/);
       assert.equal(await page.locator('#align-menu').isDisabled(), false);
+      if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT });
       console.log('PASS: Shift-click and Select all build a selection');
       await page.close();
     }
@@ -109,7 +113,7 @@ const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer
     // Arrow keys nudge the whole selection; Shift is 10 mm
     {
       const { page, server } = await open(browser);
-      await page.locator('#btn-select-all').click();
+      await selectAll(page);
       await page.keyboard.press('ArrowRight');
       await page.keyboard.press('Shift+ArrowUp');
       await saved(page, server, 0);
@@ -123,7 +127,7 @@ const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer
     // Align left edges, spread evenly, and place on the bed
     {
       const { page, server } = await open(browser);
-      await page.locator('#btn-select-all').click();
+      await selectAll(page);
       await page.locator('#align-menu').selectOption('left');
       await saved(page, server, 0);
       assert.deepEqual([1, 2, 3].map(id => positions(server)[id][0]), [50, 50, 50], 'left edges line up on the leftmost');
@@ -209,11 +213,14 @@ const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer
       await select.selectOption('project:roomy');
       await page.waitForFunction(() => document.getElementById('pack-select').value === 'project:roomy');
       assert.deepEqual(await lastPack(3), { pack: { preset: 'roomy' } });
+      await more(page);
       await page.locator('#pack-supports').check();
+      await more(page);
       await page.waitForFunction(() => document.getElementById('pack-supports').checked);
       assert.deepEqual(await lastPack(4), { pack: { preset: 'roomy', tight_supports: true } });
       await page.waitForTimeout(300);   // the page has taken the server's answer before the next choice
       await select.selectOption('project:custom');
+      await more(page);
       await page.locator('#pack-gap-field').waitFor({ state: 'visible' });
       await page.locator('#pack-gap').fill('9');
       await page.locator('#pack-gap').press('Tab');

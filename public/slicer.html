@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="style.css?v=60" />
   <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=32" />
+  <link rel="stylesheet" href="slicer.css?v=34" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -152,19 +152,16 @@
     <main class="slicer-main">
       <div id="project-page" class="project-page" hidden></div>
       <div id="plate-tabs" class="slicer-plates"></div>
-      <div id="viewport" class="slicer-viewport">
-        <div class="slicer-toolbar" id="prepare-tools">
-          <div class="slicer-tool-group" role="group" aria-label="Transform"><span>Transform</span>
+      <div class="slicer-toolbar plate-tools" id="prepare-tools" role="toolbar" aria-label="Plate tools">
+        <div class="tool-seg" role="group" aria-label="Transform">
           <button class="btn btn-secondary btn-sm" type="button" data-tool="translate" title="Move (M)">Move</button>
           <button class="btn btn-secondary btn-sm" type="button" data-tool="rotate" title="Rotate (R)">Rotate</button>
           <button class="btn btn-secondary btn-sm" type="button" data-tool="scale" title="Scale, keeping proportions (S)">Scale</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-face" title="Lay a face flat: click it on the model (F)">Lay on face</button>
-          </div><div class="slicer-tool-group" role="group" aria-label="Arrange"><span>Arrange</span>
+        </div>
+        <div class="tool-seg" role="group" aria-label="Arrange">
           <button class="btn btn-secondary btn-sm" type="button" id="btn-arrange" title="Arrange this plate (A); Shift+A arranges every plate onto as few as fit. Pinned objects stay put and plates never mix filaments.">Arrange</button>
-          <select id="arrange-engine" class="slicer-toolbar-select" aria-label="What arranges the plates" title="The nester keeps room for each object's supports and brim. OrcaSlicer's own arranger is a fallback: it can't work around pinned objects (a plate holding one is refused) and ignores filaments and supports.">
-            <option value="nester">Nester</option>
-            <option value="orca">OrcaSlicer</option>
-          </select>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-plan-plates" title="Plan plates: turn objects, pack them across plates by filament and order the plates. You review it first; Undo reverses it.">Plan plates</button>
           <select id="pack-select" class="slicer-toolbar-select" aria-label="How close objects are packed" title="How far apart Arrange and Plan plates keep objects, and what counts as too close. Choose for this plate or for the whole project.">
             <optgroup label="This plate">
               <option value="plate:tight">Tight (3 mm)</option><option value="plate:normal">Normal (6 mm)</option><option value="plate:roomy">Roomy (12 mm)</option>
@@ -175,13 +172,8 @@
             </optgroup>
             <option value="plate:inherit">This plate follows the project</option>
           </select>
-          <label class="pack-gap-field" id="pack-gap-field" hidden>Gap <input type="number" id="pack-gap" min="2" max="40" step="0.5" aria-label="Gap between objects in millimetres"> mm</label>
-          <label class="slicer-check" title="Objects that need supports are kept 22 mm apart so the supports don't collide. Tick this to pack them as close as the gap says."><input type="checkbox" id="pack-supports"> Close supports</label>
-          <button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button>
-          <button class="btn btn-secondary btn-sm" type="button" id="btn-plan-plates" title="Plan plates: turn objects, pack them across plates by filament and order the plates. You review it first; Undo reverses it.">Plan plates</button>
-          <select id="merge-plate" class="slicer-toolbar-select" aria-label="Merge this plate into another"></select>
-          </div><div class="slicer-tool-group" role="group" aria-label="Position"><span>Position</span>
-          <button class="btn btn-secondary btn-sm" type="button" id="btn-select-all" title="Select every object on this plate (Ctrl+A). Shift-click adds or removes one.">Select all</button>
+        </div>
+        <div class="tool-seg" role="group" aria-label="Position">
           <select id="align-menu" class="slicer-toolbar-select" aria-label="Align, centre or spread the selected objects" title="Line up, spread or place the selected objects. Arrow keys nudge them; Shift moves 10 mm, Alt 0.1 mm." disabled>
             <option value="">Align…</option>
             <optgroup label="Line up (2 or more)">
@@ -202,13 +194,28 @@
           <select id="snap-step" class="slicer-toolbar-select" aria-label="Snap grid" disabled>
             <option value="1">1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option>
           </select>
-          </div><div class="slicer-tool-group" role="group" aria-label="View"><span>View</span>
-          <button class="btn btn-secondary btn-sm" type="button" id="btn-fit" title="Fit the view (Z zooms to the selection; 0-6 pick a side)">Fit view</button>
-          </div><div class="slicer-tool-group" role="group" aria-label="Edit history"><span>History</span>
+        </div>
+        <div class="tool-seg" role="group" aria-label="View and history">
           <button class="btn btn-secondary btn-sm" type="button" id="btn-undo" title="Undo (Ctrl+Z)">Undo</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-redo" title="Redo (Ctrl+Y)">Redo</button>
-          </div>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-fit" title="Fit the view (Z zooms to the selection; 0-6 pick a side)">Fit view</button>
         </div>
+        <details class="tool-more">
+          <summary class="btn btn-secondary btn-sm" title="Select all, the arranger, orienting, merging plates and the spacing details">More</summary>
+          <div class="tool-more-panel">
+            <div class="tool-more-row"><button class="btn btn-secondary btn-sm" type="button" id="btn-select-all" title="Select every object on this plate (Ctrl+A). Shift-click adds or removes one.">Select all</button></div>
+            <div class="tool-more-row"><button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button></div>
+            <label class="tool-more-row">Arranged by <select id="arrange-engine" class="slicer-toolbar-select" aria-label="What arranges the plates" title="The nester keeps room for each object's supports and brim. OrcaSlicer's own arranger is a fallback: it can't work around pinned objects (a plate holding one is refused) and ignores filaments and supports.">
+            <option value="nester">Nester</option>
+            <option value="orca">OrcaSlicer</option>
+          </select></label>
+            <label class="tool-more-row">Merge this plate into <select id="merge-plate" class="slicer-toolbar-select" aria-label="Merge this plate into another"></select></label>
+            <div class="tool-more-row"><label class="pack-gap-field" id="pack-gap-field" hidden>Gap <input type="number" id="pack-gap" min="2" max="40" step="0.5" aria-label="Gap between objects in millimetres"> mm</label></div>
+            <div class="tool-more-row"><label class="slicer-check" title="Objects that need supports are kept 22 mm apart so the supports don't collide. Tick this to pack them as close as the gap says."><input type="checkbox" id="pack-supports"> Close supports</label></div>
+          </div>
+        </details>
+      </div>
+      <div id="viewport" class="slicer-viewport">
         <div class="slicer-toolbar" id="view-tools" hidden>
           <div class="slicer-mode" role="group" aria-label="View">
             <button id="mode-prepare" class="btn btn-sm" type="button">Plate</button>
@@ -343,6 +350,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=40"></script>
+  <script type="module" src="slicer/main.js?v=41"></script>
 </body>
 </html>
