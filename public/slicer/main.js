@@ -2025,6 +2025,7 @@ async function openProjectsDialog() {
   const dialog = $("dlg-projects");
   $("project-list").innerHTML = '<p class="slicer-muted">Loading…</p>';
   if (!dialog.open) dialog.showModal();
+  $("new-project-name").focus();
   try {
     const [{ projects }, { splits }] = await Promise.all([api("GET", "/api/projects"), api("GET", "/api/splits").catch(() => ({ splits: [] }))]);
     const loose = splits.filter(s => !s.project_id);   // the server marks splits owned by any project, hidden quick ones included
@@ -2054,8 +2055,10 @@ async function uploadNewModel(file) {
   bar.style.width = "0%";
   $("btn-new-upload").disabled = true;
   try {
-    const params = new URLSearchParams({ filename: file.name, scale: $("new-scale").value, up: $("new-up").value });
-    const project = await upload(`/api/projects/upload?${params}`, file, pct => { bar.style.width = `${pct}%`; });
+    const params = new URLSearchParams({ filename: file.name, scale: "1", up: "z" });   // millimetres, Z up; a wrong guess is fixed per file later
+    let project = await upload(`/api/projects/upload?${params}`, file, pct => { bar.style.width = `${pct}%`; });
+    const name = $("new-project-name").value.trim();
+    if (name && name !== project.name) project = await api("PATCH", `/api/projects/${project.id}`, { name });
     // A 3MF holding several objects on one plate opens crammed together: plan it like a batch import does
     if (project.data?.objects?.length > 1 && new Set(project.data.objects.map(o => o.plate)).size === 1) {
       try { sessionStorage.setItem("slicer.autoplan", String(project.id)); } catch (_) { /* storage blocked */ }
@@ -2082,7 +2085,7 @@ async function uploadNewBatch(files, folder) {
   $("btn-new-upload").disabled = $("btn-new-folder").disabled = true;
   try {
     const result = await FolderImport.toNewProject(models, {
-      name: folder, scale: $("new-scale").value, up: $("new-up").value,
+      name: $("new-project-name").value.trim() || folder,
       onProgress: (done, total, part) => { bar.style.width = `${(done + part) / total * 100}%`; },
     });
     $("dlg-projects").close();
@@ -2197,7 +2200,6 @@ function bindUi() {
     try {
       const project = await api("POST", "/api/projects", { name: $("new-project-name").value });
       $("dlg-projects").close();
-      $("new-project-name").value = "";
       await openProject(project.id);
     } catch (err) {
       toast(err.message, true);

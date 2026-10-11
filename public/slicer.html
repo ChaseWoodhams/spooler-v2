@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="style.css?v=60" />
   <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=25" />
+  <link rel="stylesheet" href="slicer.css?v=26" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -48,9 +48,8 @@
     <aside id="project-sidebar" class="slicer-sidebar">
       <section id="object-panel" class="slicer-card slicer-object-panel" hidden></section>
       <section id="empty-state" class="slicer-card">
-        <div class="slicer-card-head"><h4>No project open</h4></div>
-        <p class="slicer-muted">Open an existing project, or upload an STL, OBJ or 3MF to start a new one.</p>
-        <button id="btn-empty-projects" class="btn btn-primary" type="button">Open or create a project</button>
+        <div class="slicer-card-head"><h4>Projects</h4></div>
+        <button id="btn-empty-projects" class="btn btn-primary" type="button">New project</button>
       </section>
       <div id="split-side" class="split-side" hidden></div>
 
@@ -218,17 +217,14 @@
   <dialog id="dlg-projects" class="slicer-dialog">
     <h3>Projects</h3>
     <section class="slicer-new-model">
-      <h4>Start from a model</h4>
-      <p class="slicer-muted">Import an STL, OBJ, 3MF or G-code file, or drop one here. It opens as a Project on the Model step, where a model that fits the bed goes on a plate whole and a bigger one is split. For one model that fits, Quick print on the dashboard is quicker. G-code becomes a ready-to-print project, and an OrcaSlicer project 3MF keeps its plates and settings.</p>
-      <div class="slicer-new-row">
-        <label class="slicer-field">Units
-          <select id="new-scale"><option value="1">Millimetres</option><option value="10">Centimetres (×10)</option><option value="25.4">Inches (×25.4)</option><option value="1000">Metres (×1000)</option></select>
-        </label>
-        <label class="slicer-field">Up axis
-          <select id="new-up"><option value="z">Z (most slicers and CAD)</option><option value="y">Y (many sculpting and game tools)</option></select>
-        </label>
-        <button id="btn-new-upload" class="btn btn-primary" type="button" title="STL, OBJ, 3MF or G-code. You can also drop a file here.">Import</button>
-        <button id="btn-new-folder" class="btn btn-secondary" type="button" title="Make one project from every STL, OBJ or 3MF in a folder. You can also drop a folder here.">Import folder</button>
+      <h4>New project</h4>
+      <label class="slicer-field">Name
+        <input id="new-project-name" placeholder="Untitled project" maxlength="120" autocomplete="off" />
+      </label>
+      <div id="new-drop" class="slicer-dropzone">
+        <strong>Drop STL, OBJ or 3MF files or a folder here</strong>
+        <span>or <button id="btn-new-upload" class="btn btn-secondary btn-sm" type="button" title="STL, OBJ, 3MF or G-code">Choose files</button>
+        <button id="btn-new-folder" class="btn btn-secondary btn-sm" type="button" title="Make one project from every STL, OBJ or 3MF in a folder">Choose folder</button></span>
         <input id="new-model-input" type="file" accept=".stl,.obj,.3mf,.gcode" multiple hidden />
         <input id="new-folder-input" type="file" webkitdirectory hidden />
       </div>
@@ -236,8 +232,7 @@
     </section>
     <div id="project-list" class="slicer-project-list"></div>
     <div class="slicer-dialog-actions">
-      <input id="new-project-name" placeholder="Empty project name" maxlength="120" />
-      <button id="btn-new-project" class="btn btn-secondary" type="button">New empty project</button>
+      <button id="btn-new-project" class="btn btn-secondary" type="button">Create empty project</button>
       <button class="btn btn-secondary" type="button" data-close>Close</button>
     </div>
   </dialog>
@@ -287,6 +282,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=29"></script>
+  <script type="module" src="slicer/main.js?v=30"></script>
 </body>
 </html>
