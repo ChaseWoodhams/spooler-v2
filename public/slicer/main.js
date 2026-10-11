@@ -2042,7 +2042,7 @@ async function openProjectsDialog() {
         <span></span>
         <button class="btn btn-secondary btn-sm" type="button" data-adopt-split="${s.id}" data-name="${esc(s.source_name.replace(/\.[^.]+$/, ""))}">Open as project</button>
       </div>`).join("") : "")
-      || '<p class="slicer-muted">No projects yet — upload a model to start.</p>';
+      || '<p class="slicer-muted">No projects yet. Name your first one above and add your models.</p>';
   } catch (err) {
     $("project-list").innerHTML = `<p class="slicer-muted">${esc(err.message)}</p>`;
   }

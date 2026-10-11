@@ -35,7 +35,7 @@ const viewports = [
       const result = await page.evaluate(() => ({
         viewportWidth: document.documentElement.clientWidth,
         bodyWidth: document.body.scrollWidth,
-        actions: ["btn-quick-print", "btn-import"].map(id => {
+        actions: ["btn-quick-print", "btn-new-project"].map(id => {
           const element = document.getElementById(id);
           const { left, right } = element.getBoundingClientRect();
           return { id, reachable: getComputedStyle(element).display !== "none" && left >= 0 && right <= document.documentElement.clientWidth };

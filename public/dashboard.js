@@ -130,10 +130,11 @@ function syncShellView() {
     const frame = document.getElementById("projects-frame");
     const params = new URLSearchParams(hash.slice(1)); // #projects=<id>[&printer=<id>]
     const id = Number(params.get("projects")) || 0;
+    const fresh = params.get("projects") === "new"; // header and Queue "New project": the Projects page opens on its New project form
     const printer = id ? params.get("printer") || "" : ""; // from a push: focus that printer's card on the project page
-    const target = id ? `/slicer.html?project=${id}${printer ? `&printer=${encodeURIComponent(printer)}` : ""}` : "/slicer.html";
-    const route = `${id}|${printer}`;
-    if (!frame.getAttribute("src") || (id && frame.dataset.route !== route)) {
+    const target = id ? `/slicer.html?project=${id}${printer ? `&printer=${encodeURIComponent(printer)}` : ""}` : fresh ? "/slicer.html?new=1" : "/slicer.html";
+    const route = fresh ? "new" : `${id}|${printer}`;
+    if (!frame.getAttribute("src") || ((id || fresh) && frame.dataset.route !== route)) {
       frame.dataset.route = route;
       frame.src = target;
     } else if (!wasShown) {
