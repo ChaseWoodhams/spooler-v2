@@ -4,7 +4,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/OrbitControls.js";
 import { smoothGeometry } from "../mesh-shading.js";
-import { parseMeshes } from "./viewport.js?v=4";
+import { parseMeshes } from "./viewport.js?v=5";
 
 const STATE_LABEL = {
   analyzing: "Analysing", planning: "Planning cuts", ready: "Ready to split", checking: "Checking cuts",

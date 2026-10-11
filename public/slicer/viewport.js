@@ -46,6 +46,37 @@ export const PROBLEM = {
   offTheBed: "off the bed", overThePurgeArea: "over the purge area", overlaps: "overlaps", tooClose: "too close", failedModel: "failed model",
 };
 
+/** Whether the outline of the object from above (convex hull of its vertices where it stands) enters the rectangle [x0, y0, x1, y1]. */
+function footprintEntersRect(holder, [x0, y0, x1, y1]) {
+  const pts = [];
+  holder.updateWorldMatrix(true, true);
+  holder.traverse(node => {
+    const p = node.isMesh && node.geometry?.getAttribute("position");
+    if (!p) return;
+    const step = Math.max(1, Math.ceil(p.count / 20000)), v = new THREE.Vector3();
+    for (let i = 0; i < p.count; i += step) { v.fromBufferAttribute(p, i).applyMatrix4(node.matrixWorld); pts.push([v.x, v.y]); }
+  });
+  if (pts.length < 3) return true;
+  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = list => { const h = []; for (const q of list) { while (h.length > 1 && cross(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop(); h.push(q); } return h; };
+  let poly = half(pts).slice(0, -1).concat(half([...pts].reverse()).slice(0, -1));   // counter-clockwise
+  // clip the hull by the four sides of the rectangle (Sutherland-Hodgman); what is left lies inside it
+  for (const d of [p => p[0] - x0, p => x1 - p[0], p => p[1] - y0, p => y1 - p[1]]) {
+    const out = [];
+    poly.forEach((a, i) => {
+      const b = poly[(i + 1) % poly.length], da = d(a), db = d(b);
+      if (da >= 0) out.push(a);
+      if ((da >= 0) !== (db >= 0)) { const t = da / (da - db); out.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]); }
+    });
+    poly = out;
+    if (poly.length < 3) return false;
+  }
+  let area = 0;
+  poly.forEach((a, i) => { const b = poly[(i + 1) % poly.length]; area += a[0] * b[1] - b[0] * a[1]; });
+  return Math.abs(area) / 2 > 0.01;
+}
+
 export class Viewport {
   constructor(container, callbacks) {
     this.container = container;
@@ -351,7 +382,8 @@ export class Viewport {
       if (box.max.z > this.limits.height + 0.01) issues.push("too tall");
       if (this.limits.exclude) {
         const [ex0, ey0, ex1, ey1] = this.limits.exclude;
-        if (box.max.x > ex0 && box.min.x < ex1 && box.max.y > ey0 && box.min.y < ey1) issues.push(PROBLEM.overThePurgeArea);
+        // the box only says where to look: a big part turned on the diagonal has its box corner in the purge area while its outline is clear, as the server judges it
+        if (box.max.x > ex0 && box.min.x < ex1 && box.max.y > ey0 && box.min.y < ey1 && footprintEntersRect(entry.holder, this.limits.exclude)) issues.push(PROBLEM.overThePurgeArea);
       }
       for (const issue of this.serverIssues.get(id) || []) {
         if (!issues.includes(issue)) issues.push(issue);

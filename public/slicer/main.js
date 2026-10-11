@@ -7,7 +7,7 @@ import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=2";
 import { projectPage } from "./project-page.js?v=2";
 import { newProject } from "./new-project.js?v=7";
-import { Viewport, featureColor } from "./viewport.js?v=4";
+import { Viewport, featureColor } from "./viewport.js?v=5";
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
