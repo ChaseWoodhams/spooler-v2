@@ -40,6 +40,7 @@ const state = {
   playing: null,        // { frame } while the preview plays the print
   hiddenFeatures: new Set(),
   problems: new Map(),
+  group: [],            // the other selected objects (Shift-click, Ctrl+A) besides state.selected
   serverProblems: [],   // the server's list of problem objects (GET /status): off the bed, over the purge area, overlaps, failed model
   problemReasons: {},   // plate id → why the server says that plate has a problem
   jobs: [],             // queue jobs sent from this project
@@ -142,8 +143,11 @@ function objectIssues(objectId) {
   const live = moving ? state.problems.get(objectId) : null;
   return live ? [...new Set([...issues, ...live.issues])] : issues;
 }
-const plateHasProblem = plateId => plateObjects(plateId).some(o => objectIssues(o.id).length);
-const anyProblem = () => state.project ? data().objects.some(o => objectIssues(o.id).length) : false;
+// "Too close" is a warning: it marks the object amber and does not stop a Slice or a send; every other problem does
+const SOFT_ISSUES = new Set(["too close"]);
+const hardIssues = objectId => objectIssues(objectId).filter(issue => !SOFT_ISSUES.has(issue));
+const plateHasProblem = plateId => plateObjects(plateId).some(o => hardIssues(o.id).length);
+const anyProblem = () => state.project ? data().objects.some(o => hardIssues(o.id).length) : false;
 
 async function loadProblems() {
   if (!state.project) return;
@@ -166,8 +170,8 @@ async function loadProblems() {
 
 // Select the first problem object (this plate's first) so the person sees what to fix.
 async function showProblem() {
-  const mine = plateObjects().find(o => objectIssues(o.id).length);
-  const target = mine || data().objects.find(o => objectIssues(o.id).length);
+  const mine = plateObjects().find(o => hardIssues(o.id).length);
+  const target = mine || data().objects.find(o => hardIssues(o.id).length);
   if (!target) return;
   if (state.step !== "plates") await setStep("plates");
   if (target.plate !== state.plate) await selectPlate(target.plate);
@@ -175,6 +179,12 @@ async function showProblem() {
   state.viewport?.fit(state.viewport.objectBox(target.id));
 }
 const selectedObject = () => data().objects.find(o => o.id === state.selected) || null;
+// The selection is the selected object plus state.group, the others picked with Shift or Ctrl; only this plate's objects count
+const selectionIds = () => {
+  const here = new Set(plateObjects().map(o => o.id));
+  return [state.selected, ...state.group].filter(id => id != null && here.has(id));
+};
+const selectedObjects = () => selectionIds().map(id => data().objects.find(o => o.id === id));
 const sliceEntry = (plateId = state.plate) => state.project?.slices?.[String(plateId)] || null;
 // A G-code import is a project whose plate has no objects, only an imported Slice: Model, Split, Plates and Slice don't apply.
 const isImportedPlate = plateId => !!sliceEntry(plateId)?.imported;
@@ -213,12 +223,13 @@ async function boot() {
   const viewport = $("viewport");
   try {
     state.viewport = new Viewport(viewport, {
-      onSelect: id => selectObject(id),
+      onSelect: (id, how) => selectObject(id, how),
       onFace: face => faceClicked(face),
-      onTransform: (id, change) => updateObject(id, change),
+      onTransform: (id, change) => transformSelection(id, change),
       onProblems: problems => { state.problems = problems; renderObjects(); renderSteps(); renderSliceState(); },
     });
     state.viewport.setEditable(!document.body.classList.contains('defer-edit'));
+    state.applySnap?.();
   } catch (err) {
     showMessage(`The 3D view isn't available in this browser: ${err.message}`);
   }
@@ -1084,11 +1095,12 @@ function renderObjects() {
     const issues = objectIssues(object.id);
     const status = model?.state === "importing" ? '<small>importing…</small>'
       : model?.state === "failed" ? `<small class="bad" title="${esc(model.error || "")}">Couldn't import — ${esc(shortReason(model.error))}</small>`
-      : issues.length ? `<small class="bad">${esc(issues.join(", "))}</small>`
+      : issues.length ? `<small class="${issues.some(i => !SOFT_ISSUES.has(i)) ? "bad" : "warn"}">${esc(issues.join(", "))}</small>`
       : `<small>${(model?.size || []).map(v => Math.round(v * (object.scale[0] || 1))).join(" × ")} mm</small>`;
     const overrides = Object.keys(object.overrides || {}).length;
-    return `<div class="slicer-object${object.id === state.selected ? " selected" : ""}${model?.state === "failed" ? " failed" : ""}" data-object="${object.id}">
-      <div class="slicer-object-name"><button type="button" class="slicer-object-select" aria-label="Select ${esc(object.name)}" aria-pressed="${object.id === state.selected}">${esc(object.name)}</button><br>${status}</div>
+    const chosen = selectionIds().includes(object.id);
+    return `<div class="slicer-object${chosen ? " selected" : ""}${model?.state === "failed" ? " failed" : ""}" data-object="${object.id}" draggable="true" title="Drag onto a plate tab to move it there. Shift-click adds to the selection.">
+      <div class="slicer-object-name"><button type="button" class="slicer-object-select" aria-label="Select ${esc(object.name)}" aria-pressed="${chosen}">${esc(object.name)}</button><br>${status}</div>
       ${model?.state === "failed" ? `<button class="btn btn-secondary btn-sm slicer-retry-btn" type="button" data-retry-model="${model.id}" title="Try importing this model again">Retry</button>`
         : overrides ? `<span class="slicer-badge" title="Settings changed for this object">${overrides}</span>` : "<span></span>"}
       <button class="slicer-icon-btn" type="button" data-remove-object="${object.id}" title="Remove from the plate">✕</button>
@@ -1293,6 +1305,7 @@ function renderViewport() {
   const base = state.bundleSettings.get(data().profile.bundle_id);
   viewport.setBed(bedLimits(base?.machine), data().bed === "smooth");
   viewport.setObjects(plateObjects(), state.project.models, state.selected);
+  viewport.setGroup(state.group.filter(id => plateObjects().some(o => o.id === id)));
 }
 
 function renderTools() {
@@ -1305,6 +1318,7 @@ function renderTools() {
   $('mode-prepare').setAttribute('aria-pressed',String(!preview));
   $('mode-preview').setAttribute('aria-pressed',String(preview));
   $("mode-preview").disabled = sliceEntry()?.state !== "sliced";
+  $("align-menu").disabled = !selectionIds().length;
   document.querySelectorAll("#prepare-tools [data-tool]").forEach(b => {
     const active = b.dataset.tool === state.viewport?.tool;
     b.classList.toggle("active", active); b.setAttribute('aria-pressed', String(active));
@@ -1333,6 +1347,20 @@ function renderObjectPanel() {
   const object = selectedObject();
   if (!object || state.mode !== "prepare" || state.step !== "plates") { panel.hidden = true; return; }
   panel.hidden = false;
+  if (selectionIds().length > 1) {
+    panel.innerHTML = `
+    <h5>${plural(selectionIds().length, "object")} selected</h5>
+    <p class="slicer-muted">Drag, rotate or scale one and the rest follow. Arrow keys nudge (Shift 10 mm, Alt 0.1 mm), , and . turn by 15°. The Align menu lines them up.</p>
+    <label class="slicer-field">Move to <select id="group-plate"><option value="">Plate…</option>${data().plates.filter(p => p.id !== state.plate).map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}<option value="new">New plate</option></select></label>
+    <div class="slicer-actions-row">
+      <button class="btn btn-secondary btn-sm" type="button" data-object-action="turn-left" title="Turn each 90° anticlockwise">Turn −90°</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-object-action="turn-right" title="Turn each 90° clockwise">Turn +90°</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-object-action="flat-all">Lay flat</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-object-action="remove-all">Remove</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-object-action="single">Select only one</button>
+    </div>`;
+    return;
+  }
   const input = (field, index, value, step) =>
     `<input type="number" aria-label="${{position:'Position',rotation:'Rotation',scale:'Scale'}[field]} ${'XYZ'[index]} (${field === 'position' ? 'mm' : field === 'rotation' ? 'degrees' : 'factor'})" step="${step}" data-field="${field}" data-index="${index}" value="${Math.round(value * 1000) / 1000}">`;
   const uniform = object.scale.every(s => Math.abs(s - object.scale[0]) < 1e-9);
@@ -1353,6 +1381,8 @@ function renderObjectPanel() {
     <div class="slicer-actions-row">
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="flat" title="Rotate so the largest flat face is on the bed">Lay flat</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="orient" title="Suggest an orientation, to accept or ignore (O)">Suggest orientation</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-object-action="turn-left" title="Turn 90° anticlockwise (Shift+, )">Turn −90°</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-object-action="turn-right" title="Turn 90° clockwise (Shift+. )">Turn +90°</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="reset">Reset rotation</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="duplicate">Duplicate</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="settings">Settings</button>
@@ -1384,10 +1414,21 @@ function showMessage(text) {
 }
 
 // ── Editing ─────────────────────────────────────────────────────────────────────
-function selectObject(id) {
-  state.selected = id;
-  if (!id && state.settingsTab === "object") state.settingsTab = "process";
-  state.viewport?.select(id);
+function selectObject(id, { additive = false } = {}) {
+  if (additive) {   // Shift or Ctrl adds the object to the selection, or takes it out again
+    if (!id) return;
+    if (id === state.selected) state.selected = state.group.shift() ?? null;
+    else if (state.group.includes(id)) state.group = state.group.filter(g => g !== id);
+    else if (state.selected == null) state.selected = id;
+    else state.group = [...state.group, id];
+  } else {
+    state.selected = id;
+    state.group = [];
+  }
+  if (!state.selected && state.settingsTab === "object") state.settingsTab = "process";
+  state.viewport?.select(state.selected);
+  state.viewport?.setGroup(state.group);
+  renderTools();
   renderObjects();
   renderObjectPanel();
   renderSettings();
@@ -1397,6 +1438,7 @@ async function selectPlate(plateId) {
   if (!plateById(plateId)) return;
   state.plate = plateId;
   state.selected = null;
+  state.group = [];
   state.preview = null;
   await setMode(state.step === "slice" && sliceEntry()?.state === "sliced" ? "preview" : "prepare");
   renderAll();
@@ -1410,6 +1452,163 @@ function updateObject(id, change) {
   changed();
   renderViewport();
   renderObjectPanel();
+}
+
+// Several objects change in one step of the history. `changes`: Map of object id → fields to set.
+function updateObjects(changes, { merge = false } = {}) {
+  for (const [id, change] of changes) {
+    const object = data().objects.find(o => o.id === id);
+    if (object) Object.assign(object, change);
+  }
+  changed({ merge });
+  renderViewport();
+  renderObjectPanel();
+}
+
+const round2 = v => Math.round(v * 100) / 100;
+
+// A drag with the Move, Rotate or Scale tool changes the selected object; the rest of the selection changes by the same amount
+function transformSelection(id, change) {
+  const primary = data().objects.find(o => o.id === id);
+  const others = selectedObjects().filter(o => o.id !== id);
+  if (!primary || !selectionIds().includes(id) || !others.length) return updateObject(id, change);
+  const changes = new Map([[id, change]]);
+  for (const o of others) {
+    const c = {};
+    if (change.position) c.position = [round2(o.position[0] + change.position[0] - primary.position[0]), round2(o.position[1] + change.position[1] - primary.position[1])];
+    if (change.rotation) c.rotation = [o.rotation[0], o.rotation[1], round2(((o.rotation[2] + change.rotation[2] - primary.rotation[2]) % 360 + 360) % 360)];
+    if (change.scale) c.scale = o.scale.map((v, i) => Math.round(Math.min(100, Math.max(0.01, v * change.scale[i] / primary.scale[i])) * 10000) / 10000);
+    changes.set(o.id, c);
+  }
+  updateObjects(changes);
+}
+
+function selectAllHere() {
+  const ids = plateObjects().map(o => o.id);
+  state.selected = ids[0] ?? null;
+  state.group = ids.slice(1);
+  state.viewport?.select(state.selected);
+  renderViewport();
+  renderTools();
+  renderObjects();
+  renderObjectPanel();
+}
+
+function nudge([dx, dy]) {
+  const merge = Date.now() - (state.nudgedAt || 0) < 800;   // a held arrow key is one step to undo
+  state.nudgedAt = Date.now();
+  updateObjects(new Map(selectedObjects().map(o => [o.id, { position: [round2(o.position[0] + dx), round2(o.position[1] + dy)] }])), { merge });
+}
+
+function turnSelection(degrees) {
+  const merge = Date.now() - (state.nudgedAt || 0) < 800;
+  state.nudgedAt = Date.now();
+  updateObjects(new Map(selectedObjects().map(o => [o.id,
+    { rotation: [o.rotation[0], o.rotation[1], round2(((o.rotation[2] + degrees) % 360 + 360) % 360)] }])), { merge });
+}
+
+// Align, centre or spread the selection by where each object stands (its exact box from above)
+const BED_EDGE_GAP_MM = 5;
+const LINE_UP = ["left", "right", "front", "back", "centre-x", "centre-y"];
+function layOutSelection(action) {
+  const ids = selectionIds();
+  if (!ids.length || !state.viewport) return;
+  const list = ids.map(id => [id, state.viewport.footprint(id)]).filter(([, b]) => b);
+  if (!list.length) return;
+  if (LINE_UP.includes(action) && list.length < 2) { toast("Select two or more objects to line them up. “On the bed” works on one.", true); return; }
+  if (action.startsWith("spread") && list.length < 3) { toast("Select three or more objects to spread them out", true); return; }
+  const all = { x0: Math.min(...list.map(([, b]) => b.min.x)), x1: Math.max(...list.map(([, b]) => b.max.x)),
+                y0: Math.min(...list.map(([, b]) => b.min.y)), y1: Math.max(...list.map(([, b]) => b.max.y)) };
+  const [bx0, by0, bx1, by1] = state.viewport.limits.bed;
+  const moves = new Map();   // object id → [dx, dy]
+  const each = fn => { for (const [id, b] of list) moves.set(id, fn(b)); };
+  const unit = (dx, dy) => each(() => [dx, dy]);   // the selection moves as one
+  const spread = axis => {
+    const x = axis === "x";
+    const lo = b => x ? b.min.x : b.min.y, hi = b => x ? b.max.x : b.max.y;
+    const sorted = [...list].sort(([, a], [, b]) => lo(a) + hi(a) - lo(b) - hi(b));
+    const gap = ((x ? all.x1 - all.x0 : all.y1 - all.y0) - sorted.reduce((sum, [, b]) => sum + hi(b) - lo(b), 0)) / (sorted.length - 1);
+    let cursor = x ? all.x0 : all.y0;
+    for (const [id, b] of sorted) {
+      moves.set(id, x ? [cursor - lo(b), 0] : [0, cursor - lo(b)]);
+      cursor += hi(b) - lo(b) + gap;
+    }
+  };
+  switch (action) {
+    case "left": each(b => [all.x0 - b.min.x, 0]); break;
+    case "right": each(b => [all.x1 - b.max.x, 0]); break;
+    case "front": each(b => [0, all.y0 - b.min.y]); break;
+    case "back": each(b => [0, all.y1 - b.max.y]); break;
+    case "centre-x": each(b => [(all.x0 + all.x1) / 2 - (b.min.x + b.max.x) / 2, 0]); break;
+    case "centre-y": each(b => [0, (all.y0 + all.y1) / 2 - (b.min.y + b.max.y) / 2]); break;
+    case "spread-x": spread("x"); break;
+    case "spread-y": spread("y"); break;
+    case "bed-centre": unit((bx0 + bx1) / 2 - (all.x0 + all.x1) / 2, (by0 + by1) / 2 - (all.y0 + all.y1) / 2); break;
+    case "bed-left": unit(bx0 + BED_EDGE_GAP_MM - all.x0, 0); break;
+    case "bed-right": unit(bx1 - BED_EDGE_GAP_MM - all.x1, 0); break;
+    case "bed-front": unit(0, by0 + BED_EDGE_GAP_MM - all.y0); break;
+    case "bed-back": unit(0, by1 - BED_EDGE_GAP_MM - all.y1); break;
+    default: return;
+  }
+  updateObjects(new Map(selectedObjects().map(o => {
+    const [dx, dy] = moves.get(o.id) || [0, 0];
+    return [o.id, { position: [round2(o.position[0] + dx), round2(o.position[1] + dy)] }];
+  })));
+}
+
+// Move objects to another plate ("new" makes one), then give them a free spot there so they don't land on what is already on it
+async function moveToPlate(ids, target) {
+  const moving = data().objects.filter(o => ids.includes(o.id));
+  if (!moving.length) return;
+  if (target === "new") {
+    target = nextId(data().plates);
+    data().plates.push({ id: target, name: `Plate ${target}`, overrides: {} });
+  }
+  if (moving.every(o => o.plate === target)) return;
+  const there = plateObjects(target).length;
+  for (const o of moving) o.plate = target;
+  changed();
+  await selectPlate(target);
+  selectObject(moving[0].id);
+  if (moving.length > 1) {
+    state.group = moving.slice(1).map(o => o.id);
+    state.viewport?.setGroup(state.group);
+    renderObjects();
+    renderObjectPanel();
+  }
+  const placed = there ? settleOnPlate(moving.map(o => o.id)) : true;
+  toast(`${plural(moving.length, "object")} moved to ${plateById(target).name}${placed ? "" : ". There was no free spot for all of them: press A to arrange the plate"}`);
+}
+
+// Put these objects on the first free spot of the current plate (scanning from the front left), clear of the others and the purge area
+function settleOnPlate(ids) {
+  const viewport = state.viewport;
+  if (!viewport) return true;
+  const [bx0, by0, bx1, by1] = viewport.limits.bed, gap = 8;
+  const solid = [];   // [x0, y0, x1, y1] of what is in the way, grown by the gap
+  if (viewport.limits.exclude) { const [a, b, c, d] = viewport.limits.exclude; solid.push([a - gap, b - gap, c + gap, d + gap]); }
+  for (const o of plateObjects()) {
+    const b = ids.includes(o.id) ? null : viewport.footprint(o.id);
+    if (b) solid.push([b.min.x - gap, b.min.y - gap, b.max.x + gap, b.max.y + gap]);
+  }
+  let ok = true;
+  for (const id of ids) {
+    const object = data().objects.find(o => o.id === id), box = viewport.footprint(id);
+    if (!box) continue;
+    const w = box.max.x - box.min.x, h = box.max.y - box.min.y;
+    let spot = null;
+    for (let y = by0 + BED_EDGE_GAP_MM; !spot && y + h <= by1 - BED_EDGE_GAP_MM + 0.01; y += 5) {
+      for (let x = bx0 + BED_EDGE_GAP_MM; x + w <= bx1 - BED_EDGE_GAP_MM + 0.01; x += 5) {
+        if (!solid.some(([a, b, c, d]) => x < c && x + w > a && y < d && y + h > b)) { spot = [x, y]; break; }
+      }
+    }
+    if (!spot) { ok = false; continue; }
+    object.position = [round2(object.position[0] + spot[0] - box.min.x), round2(object.position[1] + spot[1] - box.min.y)];
+    solid.push([spot[0] - gap, spot[1] - gap, spot[0] + w + gap, spot[1] + h + gap]);
+  }
+  changed();
+  renderViewport();
+  return ok;
 }
 
 function changesFor(target) {
@@ -1570,10 +1769,11 @@ async function setCopies(object, asked) {
 }
 
 function removeSelected() {
-  const object = selectedObject();
-  if (!object) return;
-  data().objects = data().objects.filter(o => o.id !== object.id);
+  const ids = new Set(selectionIds());
+  if (!ids.size) return;
+  data().objects = data().objects.filter(o => !ids.has(o.id));
   state.selected = null;
+  state.group = [];
   changed();
   renderAll();
 }
@@ -2331,7 +2531,32 @@ function bindUi() {
       return;
     }
     const row = e.target.closest("[data-object]");
-    if (row) selectObject(Number(row.dataset.object));
+    if (row) selectObject(Number(row.dataset.object), { additive: e.shiftKey || e.ctrlKey || e.metaKey });
+  });
+  // Drag an object (or the whole selection, when the object is in it) onto a plate tab
+  $("object-list").addEventListener("dragstart", e => {
+    const id = Number(e.target.closest("[data-object]")?.dataset.object);
+    if (!id) return;
+    const ids = selectionIds().includes(id) ? selectionIds() : [id];
+    e.dataTransfer.setData("application/x-spooler-objects", JSON.stringify(ids));
+    e.dataTransfer.effectAllowed = "move";
+  });
+  const dropTab = e => e.target.closest("[data-plate]");
+  const droppable = e => e.dataTransfer.types.includes("application/x-spooler-objects");
+  $("plate-tabs").addEventListener("dragover", e => {
+    const tab = dropTab(e);
+    if (!tab || !droppable(e) || tab.dataset.plate === "remove") return;
+    e.preventDefault();
+    document.querySelectorAll(".slicer-plate-tab.drop").forEach(t => t.classList.remove("drop"));
+    tab.classList.add("drop");
+  });
+  $("plate-tabs").addEventListener("dragleave", e => dropTab(e)?.classList.remove("drop"));
+  $("plate-tabs").addEventListener("drop", e => {
+    const tab = dropTab(e);
+    if (!tab || !droppable(e)) return;
+    e.preventDefault();
+    tab.classList.remove("drop");
+    moveToPlate(JSON.parse(e.dataTransfer.getData("application/x-spooler-objects")), tab.dataset.plate === "new" ? "new" : Number(tab.dataset.plate));
   });
 
   $("plate-tabs").addEventListener("click", e => {
@@ -2429,6 +2654,10 @@ function bindUi() {
   });
 
   $("object-panel").addEventListener("change", e => {
+    if (e.target.id === "group-plate") {
+      if (e.target.value) moveToPlate(selectionIds(), e.target.value === "new" ? "new" : Number(e.target.value));
+      return;
+    }
     const object = selectedObject();
     if (!object) return;
     const field = e.target.dataset.field;
@@ -2436,6 +2665,7 @@ function bindUi() {
     if (e.target.id === "object-plate") {
       object.plate = Number(e.target.value);
       state.selected = null;
+      state.group = [];
       changed();
       renderAll();
       return;
@@ -2473,7 +2703,11 @@ function bindUi() {
     const action = e.target.closest("[data-object-action]")?.dataset.objectAction;
     const object = selectedObject();
     if (!action || !object) return;
-    if (action === "flat") await layFlat(object);
+    if (action === "turn-left" || action === "turn-right") turnSelection(action === "turn-left" ? -90 : 90);
+    else if (action === "flat-all") for (const o of selectedObjects()) await layFlat(o);
+    else if (action === "remove-all") removeSelected();
+    else if (action === "single") selectObject(state.selected);
+    else if (action === "flat") await layFlat(object);
     else if (action === "orient") suggestOrientation(object);
     else if (action === "reset") updateObject(object.id, { rotation: [0, 0, 0] });
     else if (action === "settings") { state.settingsTab = "object"; renderSettings(); }
@@ -2486,6 +2720,23 @@ function bindUi() {
     }
   });
 
+  $("align-menu").addEventListener("change", e => {
+    const action = e.target.value;
+    e.target.value = "";
+    if (action) layOutSelection(action);
+  });
+  $("btn-select-all").addEventListener("click", selectAllHere);
+  const applySnap = () => {
+    const on = $("snap-on").checked;
+    remember("slicer.snap", on ? $("snap-step").value : "off");
+    state.viewport?.setSnap(on ? Number($("snap-step").value) : 0, on ? 15 : 0);
+    $("snap-step").disabled = !on;
+  };
+  const savedSnap = remember("slicer.snap");
+  if (savedSnap && savedSnap !== "off" && [...$("snap-step").options].some(o => o.value === savedSnap)) { $("snap-on").checked = true; $("snap-step").value = savedSnap; }
+  $("snap-on").addEventListener("change", applySnap);
+  $("snap-step").addEventListener("change", applySnap);
+  state.applySnap = applySnap;
   document.querySelectorAll("#prepare-tools [data-tool]").forEach(btn => btn.addEventListener("click", () => {
     state.viewport?.setTool(btn.dataset.tool);
     renderTools();
@@ -2557,12 +2808,18 @@ function bindUi() {
     if (state.step === "plates" && command) {
       if (key === "z" && !e.shiftKey) undo();
       else if (key === "y" || (key === "z" && e.shiftKey)) redo();
+      else if (key === "a") selectAllHere();
       else if (key === "c") copyObject();
       else if (key === "v") pasteObject();
       else return;
       e.preventDefault();
     } else if (state.step === "plates") {
       if ((e.key === "Delete" || e.key === "Backspace") && selectedObject()) removeSelected();
+      else if (e.key.startsWith("Arrow") && selectionIds().length) {   // nudge: 1 mm, Shift 10 mm, Alt 0.1 mm
+        const step = e.shiftKey ? 10 : e.altKey ? 0.1 : 1;
+        nudge({ ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] }[e.key]);
+        e.preventDefault();
+      } else if ((e.key === "," || e.key === ".") && selectionIds().length) turnSelection((e.key === "." ? 1 : -1) * (e.shiftKey ? 90 : 15));
       else if (key === "m" || key === "w") { state.viewport?.setTool("translate"); renderTools(); }
       else if (key === "r" || key === "e") { state.viewport?.setTool("rotate"); renderTools(); }
       else if (key === "s") { state.viewport?.setTool("scale"); renderTools(); }

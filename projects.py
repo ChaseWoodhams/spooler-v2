@@ -1942,6 +1942,11 @@ def plate_problems(project_id: int, record: dict, plate_ids=None) -> list:
     return [p for p in problem_kinds.describe(found, problem_kinds.object_names(data)) if covered is None or p["plate"] in covered]
 
 
+def hard_plate_problems(project_id: int, record: dict, plate_ids=None) -> list:
+    """`plate_problems` without the warnings (`problem_kinds.SOFT`): the ones that stop a Slice or a send."""
+    return [p for p in plate_problems(project_id, record, plate_ids) if not p["soft"]]
+
+
 def arrange_layout(project_id: int, record: dict, plate_ids=None) -> list:
     """Where the nester would put the unpinned objects on these plates (all by default), changing nothing. Each object
     is nested by the hull of the shape it has now, turned about Z, with its own clearance (SUPPORT_CLEARANCE_MM when it
@@ -3110,7 +3115,7 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
 def _placement_findings(project_id: int, record: dict, plate_id: int) -> list:
     """A slice of a plate with a problem Object records each problem as a failing finding."""
     return [{"line": None, "command": "placement", "reason": p["text"], "level": "fail"}
-            for p in plate_problems(project_id, record, {plate_id})]
+            for p in hard_plate_problems(project_id, record, {plate_id})]
 
 
 def add_thumbnails(project_id: int, objects: list, machine: dict, gcode: Path, log: Path) -> None:
@@ -3221,7 +3226,7 @@ def queue_plates(project_id: int, body: dict) -> dict:
         raise jobs.JobError("There are no plates with objects to send", 409)
     if body.get("printer_id"):
         jobs._require_printer(body["printer_id"])
-    problems = plate_problems(project_id, record, {p["id"] for p in plates})
+    problems = hard_plate_problems(project_id, record, {p["id"] for p in plates})
     if problems:
         raise jobs.JobError(f"Fix the objects marked in red first: {problem_kinds.reason(problems)}", 409)
     unsliced = [p["name"] for p in plates if (record["slices"].get(str(p["id"])) or {}).get("state") != SLICED]
@@ -3340,7 +3345,9 @@ def plate_status(project_id: int) -> dict:
                        "mixed": mixed, "filament": choice_label(found[0]) if found and not mixed else None,
                        "parts": parts.get(n, 0), "layout": fingerprint(record, n), "job_id": job["id"] if job else None,
                        "printer_id": (job["printer_id"] if job else None) or plate.get("printer_id"),
-                       "problems": by_plate.get(n, []), "problem_reason": problem_kinds.reason(by_plate.get(n, [])),
+                       "problems": by_plate.get(n, []),
+                       "problem_reason": problem_kinds.reason([p for p in by_plate.get(n, []) if not p["soft"]]),
+                       "warning_reason": problem_kinds.reason([p for p in by_plate.get(n, []) if p["soft"]]),
                        "estimate_s": entry.get("estimate_s") if sliced else None, "estimate_g": grams,
                        "time_estimate": plate_time(project_id, record, n, entry)})
     total = len(plates)

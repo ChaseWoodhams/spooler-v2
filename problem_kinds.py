@@ -10,6 +10,7 @@ OVER_THE_PURGE_AREA = "over the purge area"
 OVERLAPS = "overlaps"        # two outlines touch or cross
 TOO_CLOSE = "too close"      # two outlines are apart, but closer than the clearance Arrange keeps
 FAILED_MODEL = "failed model"
+SOFT = (TOO_CLOSE,)         # a warning, not an error: the person may print objects closer than Arrange would put them
 PAIRED = (OVERLAPS, TOO_CLOSE)   # kinds that involve a second Object (`other`), reported for both
 
 # kind → (as a statement about an Object, as a prediction of a plan); "{other}" is the other Object's name
@@ -34,8 +35,10 @@ def say(kind: str, other_name: str | None = None, planned: bool = False) -> str:
 
 
 def describe(problems: list, names: dict) -> list:
-    """Each problem {"key", "problem", "other", …} with "name" (of the Object) and "text" ("cube overlaps lid") added."""
-    return [{**p, "name": names.get(p["key"]), "text": f"{names.get(p['key'])} {say(p['problem'], names.get(p['other']))}"}
+    """Each problem {"key", "problem", "other", …} with "name" (of the Object), "text" ("cube overlaps lid") and "soft" (a
+    warning that does not stop a Slice or a send) added."""
+    return [{**p, "name": names.get(p["key"]), "text": f"{names.get(p['key'])} {say(p['problem'], names.get(p['other']))}",
+             "soft": p["problem"] in SOFT}
             for p in problems]
 
 

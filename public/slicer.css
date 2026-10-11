@@ -91,6 +91,8 @@ body.slicer-page a.btn { text-decoration: none; }
 .slicer-object-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slicer-object small { color: var(--text-muted); }
 .slicer-object .bad { color: var(--red); }
+.slicer-object .warn { color: var(--yellow); }
+.slicer-plate-tab.drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .slicer-object.failed { border-color: var(--red); }
 .slicer-object.failed .slicer-object-name { white-space: normal; }
 .slicer-retry-btn { padding: 2px 8px; font-size: 12px; }

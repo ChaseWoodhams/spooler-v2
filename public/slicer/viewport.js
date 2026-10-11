@@ -22,6 +22,8 @@ const SEGMENT_BUDGET = 3_000_000;
 const OBJECT_COLOR = 0xd9dde6;
 const SELECTED_COLOR = 0xffa46b;
 const BAD_COLOR = 0xef4444;
+const WARN_COLOR = 0xfacc15;   // only warnings (too close): the layout can still be sliced
+const SOFT_ISSUES = ["too close"];
 
 export function parseMeshes(buffer) {
   if (String.fromCharCode(...new Uint8Array(buffer, 0, 4)) !== "SPV1") throw new Error("Unexpected preview format");
@@ -110,6 +112,7 @@ export class Viewport {
     this.holders = new Map();      // object id → { holder, mesh, object }
     this.serverIssues = new Map(); // object id → problems the server found (overlaps, failed model…): the one definition of a problem Object
     this.selected = null;
+    this.group = new Set();        // the other selected objects, moved along with the selected one
     this.mode = "prepare";
     this.limits = { bed: [0, 0, 256, 256], exclude: [246, 0, 256, 20], height: 256 };
 
@@ -119,9 +122,10 @@ export class Viewport {
     this.scene.add(this.transform.getHelper ? this.transform.getHelper() : this.transform);
     this.transform.addEventListener("dragging-changed", e => {
       this.controls.enabled = !e.value;
-      if (!e.value) this._commitTransform();
+      if (e.value) this._dragStart = this._startDrag();
+      else { this._commitTransform(); this._dragStart = null; }
     });
-    this.transform.addEventListener("objectChange", () => this._refreshWarnings());
+    this.transform.addEventListener("objectChange", () => { this._dragGroup(); this._refreshWarnings(); });
     this.setTool("translate");
 
     const canvas = this.renderer.domElement;
@@ -136,7 +140,7 @@ export class Viewport {
         if (face) this.callbacks.onFace?.(face);
         return;
       }
-      this.callbacks.onSelect?.(this._pick(e));
+      this.callbacks.onSelect?.(this._pick(e), { additive: e.shiftKey || e.ctrlKey || e.metaKey });
     });
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
@@ -283,6 +287,40 @@ export class Viewport {
     holder.updateMatrixWorld(true);
   }
 
+  /** Where the selected object and the rest of the selection stand when a drag starts. */
+  _startDrag() {
+    const entry = this.holders.get(this.selected);
+    if (!entry) return null;
+    return { at: entry.holder.position.clone(), others: [...this.group].map(id => [id, this.holders.get(id)?.holder]).filter(([, h]) => h)
+      .map(([id, holder]) => [id, holder, holder.position.clone()]) };
+  }
+
+  /** While the selected object is dragged with the Move tool, the rest of the selection follows it. */
+  _dragGroup() {
+    const entry = this.holders.get(this.selected);
+    if (!this._dragStart || !entry || this.tool !== "translate") return;
+    const delta = entry.holder.position.clone().sub(this._dragStart.at);
+    for (const [, holder, start] of this._dragStart.others) holder.position.set(start.x + delta.x, start.y + delta.y, start.z);
+  }
+
+  /** Select one object and, with `group`, others to move along with it. */
+  setGroup(ids) {
+    this.group = new Set(ids);
+    this._refreshWarnings();
+  }
+
+  /** The exact box of an object where it stands (by its vertices, not the turned bounding box). */
+  footprint(objectId) {
+    const entry = this.holders.get(objectId);
+    return entry ? new THREE.Box3().setFromObject(entry.holder, !!entry.geometry) : null;
+  }
+
+  /** Snap dragging to a grid: millimetres for Move, degrees for Rotate; 0 turns snapping off. */
+  setSnap(mm, degrees) {
+    this.transform.setTranslationSnap(mm > 0 ? mm : null);
+    this.transform.setRotationSnap(degrees > 0 ? THREE.MathUtils.degToRad(degrees) : null);
+  }
+
   select(objectId) {
     this.selected = objectId ?? null;
     const entry = this.holders.get(this.selected);
@@ -402,8 +440,10 @@ export class Viewport {
   _refreshWarnings() {
     const problems = this.problems();
     for (const [id, entry] of this.holders) {
-      const bad = problems.get(id).issues.length > 0;
-      entry.mesh.material.color.setHex(bad ? BAD_COLOR : id === this.selected ? SELECTED_COLOR : OBJECT_COLOR);
+      const issues = problems.get(id).issues;
+      const bad = issues.some(issue => !SOFT_ISSUES.includes(issue));
+      const chosen = id === this.selected || this.group.has(id);
+      entry.mesh.material.color.setHex(bad ? BAD_COLOR : issues.length ? WARN_COLOR : chosen ? SELECTED_COLOR : OBJECT_COLOR);
     }
     this.callbacks.onProblems?.(problems);
   }

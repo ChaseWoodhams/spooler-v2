@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="style.css?v=60" />
   <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=30" />
+  <link rel="stylesheet" href="slicer.css?v=31" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -168,6 +168,28 @@
           <button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-plan-plates" title="Plan plates: turn objects, pack them across plates by filament and order the plates. You review it first; Undo reverses it.">Plan plates</button>
           <select id="merge-plate" class="slicer-toolbar-select" aria-label="Merge this plate into another"></select>
+          </div><div class="slicer-tool-group" role="group" aria-label="Position"><span>Position</span>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-select-all" title="Select every object on this plate (Ctrl+A). Shift-click adds or removes one.">Select all</button>
+          <select id="align-menu" class="slicer-toolbar-select" aria-label="Align, centre or spread the selected objects" title="Line up, spread or place the selected objects. Arrow keys nudge them; Shift moves 10 mm, Alt 0.1 mm." disabled>
+            <option value="">Align…</option>
+            <optgroup label="Line up (2 or more)">
+              <option value="left">Left edges</option><option value="right">Right edges</option>
+              <option value="front">Front edges</option><option value="back">Back edges</option>
+              <option value="centre-x">Centres left to right</option><option value="centre-y">Centres front to back</option>
+            </optgroup>
+            <optgroup label="Spread evenly (3 or more)">
+              <option value="spread-x">Across the bed, left to right</option><option value="spread-y">Across the bed, front to back</option>
+            </optgroup>
+            <optgroup label="On the bed">
+              <option value="bed-centre">Centre on the bed</option>
+              <option value="bed-left">To the left edge</option><option value="bed-right">To the right edge</option>
+              <option value="bed-front">To the front edge</option><option value="bed-back">To the back edge</option>
+            </optgroup>
+          </select>
+          <label class="slicer-check" title="Snap dragging to a grid, and turning to 15°"><input type="checkbox" id="snap-on"> Snap</label>
+          <select id="snap-step" class="slicer-toolbar-select" aria-label="Snap grid" disabled>
+            <option value="1">1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option>
+          </select>
           </div><div class="slicer-tool-group" role="group" aria-label="View"><span>View</span>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-fit" title="Fit the view (Z zooms to the selection; 0-6 pick a side)">Fit view</button>
           </div><div class="slicer-tool-group" role="group" aria-label="Edit history"><span>History</span>
@@ -300,6 +322,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=37"></script>
+  <script type="module" src="slicer/main.js?v=38"></script>
 </body>
 </html>

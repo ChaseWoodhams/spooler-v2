@@ -96,7 +96,17 @@ class ProblemObjectTests(unittest.IsolatedAsyncioTestCase):
         project = await self.project_with_cube((100, 100), second=(122, 100))   # 2 mm apart, Arrange keeps 6
         plate = self.plate(project)
         self.assertEqual(sorted((p["key"], p["problem"]) for p in plate["problems"]), [(1, "too close"), (2, "too close")])
-        self.assertEqual(plate["problem_reason"], "cube is too close to cube 2")
+        self.assertTrue(all(p["soft"] for p in plate["problems"]))   # a warning: it does not stop a Slice or a send
+        self.assertIsNone(plate["problem_reason"])
+        self.assertEqual(plate["warning_reason"], "cube is too close to cube 2")
+
+    async def test_objects_that_are_only_too_close_do_not_stop_a_slice_or_a_send(self):
+        project = await self.project_with_cube((100, 100), second=(122, 100))
+        record = projects.get_project(project["id"])
+        self.assertEqual(len(projects.plate_problems(project["id"], record)), 2)
+        self.assertEqual(projects.hard_plate_problems(project["id"], record), [])
+        record = projects.get_project((await self.project_with_cube((100, 100), second=(105, 100)))["id"])
+        self.assertEqual(len(projects.hard_plate_problems(record["id"], record)), 2)   # touching is still an error
 
     async def test_an_object_of_a_failed_model_is_a_problem(self):
         project = await self.project_with_cube((100, 100))
