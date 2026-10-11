@@ -153,7 +153,7 @@ function renderQueue() {
   body.innerHTML =
     queueSection("Active", active, jobActiveCard, "Nothing from the queue is printing.") +
     `<section class="queue-section"><h4>${escHtml(`Queued (${queued.length})`)}</h4>${queuedWithBatches(queued)
-      || `<p class="queue-empty">${escHtml("The queue is empty — import a file to get started.")}</p>`}</section>` +
+      || `<p class="queue-empty">${escHtml("The queue is empty. Use New project above to add a model.")}</p>`}</section>` +
     (done.length ? queueSection("Recently finished", done, jobDoneCard) : "");
 }
 

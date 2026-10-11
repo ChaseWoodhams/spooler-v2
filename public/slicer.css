@@ -345,6 +345,32 @@ body.slicer-page a.btn { text-decoration: none; }
 .slicer-step.skipped .num { border-style: dashed; }
 .slicer-step small { font-size: 11px; opacity: .8; }
 #dlg-projects.dropping { outline: 2px dashed var(--accent); outline-offset: -8px; }
+/* New project: the intake table (slicer/new-project.js) */
+#dlg-projects.has-intake, #dlg-add { width: min(760px, 94vw); }
+.intake { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.intake-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.intake-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 64px auto auto; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.intake-row:last-child { border-bottom: 0; }
+.intake-file { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.intake-file small { display: block; white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
+.intake-file small.bad, .intake-chip.chk { color: var(--red); }
+.intake-file small.warn, .intake-chip.split { color: var(--yellow); }
+.intake-size { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+.intake-copies { width: 64px; min-width: 0; }
+.intake-chip { padding: 1px 9px; border-radius: 999px; font-size: 12px; border: 1px solid currentColor; white-space: nowrap; color: var(--text-muted); }
+.intake-chip.ok { color: var(--green); }
+.intake-row .btn { min-width: 0; }
+.intake-link { display: block; margin-top: 2px; padding: 0; border: 0; background: none; color: var(--text-muted); font-size: 12px; text-decoration: underline; cursor: pointer; }
+.intake-units-panel { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 6px 0 2px; font-size: 13px; }
+.intake-units-panel label { display: flex; gap: 6px; align-items: center; }
+@media (max-width: 640px) {
+  .intake-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: 6px; }
+  .intake-file { grid-column: 1 / -1; }
+  .intake-size { grid-column: 1; }
+  .intake-copies { grid-column: 1; width: 80px; }
+  .intake-chip { grid-column: 2; grid-row: 2; }
+  .intake-remove { grid-column: 2; grid-row: 3; }
+}
 /* Print step: the project page (slicer/project-page.js) */
 body.print-step .slicer-body { grid-template-columns: minmax(0, 1fr); }
 body.print-step .slicer-sidebar { display: none; }

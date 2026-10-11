@@ -6,6 +6,7 @@ import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=2";
 import { projectPage } from "./project-page.js?v=2";
+import { newProject } from "./new-project.js?v=3";
 import { Viewport, featureColor } from "./viewport.js?v=4";
 
 const $ = id => document.getElementById(id);
@@ -41,7 +42,6 @@ const state = {
   problems: new Map(),
   serverProblems: [],   // the server's list of problem objects (GET /status): off the bed, over the purge area, overlaps, failed model
   problemReasons: {},   // plate id → why the server says that plate has a problem
-  importFiles: [],
   jobs: [],             // queue jobs sent from this project
   printers: [],
   jobsTimer: null,
@@ -208,6 +208,7 @@ const openJobPlates = () => new Set(state.jobs.filter(j => OPEN_JOB_STATES.has(j
 // ── Loading ─────────────────────────────────────────────────────────────────────
 async function boot() {
   document.querySelectorAll("[data-steps], #prepare-tools").forEach(el => { el.hidden = true; });  // shown once a project is open
+  newProject.attach({ api, upload, toast, openCreated });
   bindUi();   // first, so "Open or create a project" works even if the slower setup below fails
   const viewport = $("viewport");
   try {
@@ -430,7 +431,7 @@ async function bundleSettings(bundleId) {
 
 async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   const project = await api("GET", `/api/projects/${id}`);
-  if (restoring && project.quick) throw Object.assign(new Error("A hidden quick project is never reopened on its own"), { quick: true });   // the caller falls back to the list
+  if (restoring && (project.quick || project.draft)) throw Object.assign(new Error("A hidden quick project is never reopened on its own"), { quick: true });   // the caller falls back to the list
   clearTimeout(state.jobsTimer);
   state.clockSkew = project.server_time - Date.now() / 1000;
   state.project = project;
@@ -442,7 +443,7 @@ async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   resetEdits();
   state.jobs = [];
   state.assigning = null;
-  if (!project.quick) remember("slicer.project", String(id));   // a hidden quick project is never restored as the last-open project
+  if (!project.quick && !project.draft) remember("slicer.project", String(id));   // a hidden quick or draft project is never restored as the last-open project
   history.replaceState(null, "", `?project=${id}`);
   syncShellRoute(id);
   await bundleSettings(project.data.profile.bundle_id).catch(err => toast(err.message, true));
@@ -2056,7 +2057,7 @@ async function openProjectsDialog() {
         <span></span>
         <button class="btn btn-secondary btn-sm" type="button" data-adopt-split="${s.id}" data-name="${esc(s.source_name.replace(/\.[^.]+$/, ""))}">Open as project</button>
       </div>`).join("") : "")
-      || '<p class="slicer-muted">No projects yet — upload a model to start.</p>';
+      || '<p class="slicer-muted">No projects yet. Name your first one above and add your models.</p>';
   } catch (err) {
     $("project-list").innerHTML = `<p class="slicer-muted">${esc(err.message)}</p>`;
   }
@@ -2089,33 +2090,18 @@ async function uploadNewModel(file) {
   }
 }
 
-// Several files, or a folder: one new project holding them all
-async function uploadNewBatch(files, folder) {
-  const models = files.filter(f => FolderImport.MODEL.test(f.name));
-  if (!models.length) { toast("Choose STL, OBJ or 3MF files", true); return; }
-  const progress = $("new-upload-progress"), bar = progress.querySelector(".job-upload-bar");
-  progress.hidden = false;
-  bar.style.width = "0%";
-  $("btn-new-upload").disabled = $("btn-new-folder").disabled = true;
-  try {
-    const result = await FolderImport.toNewProject(models, {
-      name: $("new-project-name").value.trim() || folder,
-      onProgress: (done, total, part) => { bar.style.width = `${(done + part) / total * 100}%`; },
-    });
-    $("dlg-projects").close();
-    await openProject(result.id);
-    toast(FolderImport.summary(result, models.length), !!result.failed.length);
-  } catch (err) {
-    toast(err.message, true);
-  } finally {
-    progress.hidden = true;
-    $("btn-new-upload").disabled = $("btn-new-folder").disabled = false;
-  }
+// A lone G-code or 3MF keeps its own path (a G-code project; an Orca 3MF adopts its settings). Every other drop goes to the intake table.
+function uploadNew(files, folder = "") {
+  if (files.length === 1 && !folder && /\.(3mf|gcode)$/i.test(files[0].name)) uploadNewModel(files[0]);
+  else if (files.length) newProject.add(files);
 }
 
-function uploadNew(files, folder = "") {
-  if (files.length === 1 && !folder) uploadNewModel(files[0]);
-  else if (files.length) uploadNewBatch(files, folder);
+// Create promoted the draft: open it on the step the server named (Split while an oversized model waits, else Plates)
+async function openCreated({ project, step }, { plan, id }) {
+  if (plan) { try { sessionStorage.setItem("slicer.autoplan", String(id)); } catch (_) { /* storage blocked */ } }   // every model starts on plate 1 at one spot
+  $("dlg-projects").close();
+  await openProject(project.id);
+  if (stepAvailable(step)) await setStep(step, { force: true });
 }
 
 async function openSplitDialog() {
@@ -2183,11 +2169,18 @@ function bindUi() {
     if (btn && !btn.disabled) setStep(btn.dataset.go);
   });
 
+  $("project-name").addEventListener("keydown", e => {   // Enter saves (through change), Escape puts the saved name back
+    if (e.key === "Enter") e.target.blur();
+    else if (e.key === "Escape") { e.target.value = state.project.name; e.target.blur(); }
+  });
   $("project-name").addEventListener("change", async e => {
+    const name = e.target.value.trim();
+    if (!name || name === state.project.name) { e.target.value = state.project.name; return; }   // a blank title is not a rename
     try {
-      applyProject(await api("PATCH", `/api/projects/${state.project.id}`, { name: e.target.value }), { keepLocalData: true });
+      applyProject(await api("PATCH", `/api/projects/${state.project.id}`, { name }), { keepLocalData: true });
       renderAll({ geometry: false });
     } catch (err) {
+      e.target.value = state.project.name;
       toast(err.message, true);
     }
   });
@@ -2208,7 +2201,7 @@ function bindUi() {
   $("new-folder-input").addEventListener("change", e => {
     const { files, folder } = FolderImport.picked(e.target.files);
     e.target.value = "";
-    if (files.length) uploadNewBatch(files, folder); else toast("That folder has no STL, OBJ or 3MF files", true);
+    if (files.length) newProject.add(files); else toast("That folder has no STL, OBJ or 3MF files", true);
   });
   $("btn-new-project").addEventListener("click", async () => {
     try {
@@ -2270,7 +2263,9 @@ function bindUi() {
   $("model-input").addEventListener("change", e => { chooseImport([...e.target.files]); e.target.value = ""; });
   $("btn-add-folder").addEventListener("click", () => $("folder-input").click());
   $("folder-input").addEventListener("change", e => { chooseFolder([...e.target.files]); e.target.value = ""; });
-  $("btn-import").addEventListener("click", importFiles);
+  $("btn-add-files").addEventListener("click", () => $("model-input").click());
+  $("dlg-add").addEventListener("close", finishAdd);
+  $("dlg-add").addEventListener("cancel", e => { if (newProject.busy()) e.preventDefault(); });   // Escape waits for the uploads
   $("btn-add-split").addEventListener("click", openSplitDialog);
   $("split-choices").addEventListener("click", async e => {
     const btn = e.target.closest("[data-add-split]");
@@ -2523,17 +2518,15 @@ function bindUi() {
     drawPreview();
   });
 
-  const viewport = $("viewport");
-  viewport.addEventListener("dragover", e => { e.preventDefault(); viewport.classList.add("dropping"); });
-  viewport.addEventListener("dragleave", () => viewport.classList.remove("dropping"));
-  viewport.addEventListener("drop", e => {
-    e.preventDefault();
-    viewport.classList.remove("dropping");
-    FolderImport.dropped(e.dataTransfer).then(({ files, folder }) => {
-      chooseImport(files);
-      if (folder && $("dlg-import").open) $("import-files").textContent = `${state.importFiles.length} files from ${folder}`;
+  for (const viewport of [$("viewport"), $("split-stage")]) {   // files dropped on the 3D view of any step
+    viewport.addEventListener("dragover", e => { e.preventDefault(); viewport.classList.add("dropping"); });
+    viewport.addEventListener("dragleave", () => viewport.classList.remove("dropping"));
+    viewport.addEventListener("drop", e => {
+      e.preventDefault();
+      viewport.classList.remove("dropping");
+      FolderImport.dropped(e.dataTransfer).then(({ files }) => chooseImport(files));
     });
-  });
+  }
 
   document.addEventListener("keydown", e => {
     if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement?.tagName) || document.querySelector("dialog[open]")) return;
@@ -2578,14 +2571,45 @@ function bindUi() {
   });
 }
 
+// Files for the open project, on any step: they go through the same intake table as New project
 function chooseImport(files) {
   const models = files.filter(f => /\.(stl|obj|3mf)$/i.test(f.name));
   if (!models.length) { toast("Choose STL, OBJ or 3MF files", true); return; }
   if (!state.project) { toast("Open or create a project first", true); return; }
-  if (state.step !== "plates") { toast("Go to the Plates step to add models to a plate", true); return; }
-  state.importFiles = models;
-  $("import-files").textContent = models.map(f => f.name).join(", ");
-  $("dlg-import").showModal();
+  if (isGcodeProject()) { toast("A G-code project has no models to add to", true); return; }
+  if (!$("dlg-add").open) {
+    state.addedWasEmpty = !data().objects.length;   // adding to a project that already has a layout leaves that layout alone
+    $("add-note").textContent = ADD_NOTES[state.step] || ADD_NOTES.plates;
+    $("dlg-add").showModal();
+  }
+  newProject.addTo({ id: state.project.id, plate: state.plate, models: state.project.models.map(m => m.id) }, models);
+}
+
+// What adding files does to the work already done, by step
+const ADD_NOTES = {
+  model: "The files join the project as whole models on the Plates step. The split you are working on is not changed.",
+  split: "The files join the project as whole models on the Plates step. The split you are working on is not changed.",
+  plates: "The files are added to the current plate. Plates with a finished Slice become outdated and need slicing again.",
+  slice: "The files are added to the current plate, which marks its Slice outdated: slice it again before queueing.",
+};
+
+// Done: the project now holds the added files, so bring the workspace up to date
+async function finishAdd() {
+  const added = newProject.finishAdding();
+  if (!added || !state.project) return;
+  try {
+    await flushSave();
+    applyProject(await api("GET", `/api/projects/${state.project.id}`));
+    renderAll();
+    await loadGeometry();
+    if (state.addedWasEmpty && added > 1) {   // they all landed on one plate at the same spot: plan once they've imported
+      try { sessionStorage.setItem("slicer.autoplan", String(state.project.id)); } catch (_) { /* storage blocked */ }
+      maybeAutoPlan();
+    }
+    schedulePoll();
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 // A folder pick: every STL inside it (subfolders included), in path order
@@ -2593,10 +2617,6 @@ function chooseFolder(files) {
   const stls = FolderImport.picked(files).files.filter(f => /\.stl$/i.test(f.name));
   if (!stls.length) { toast("That folder has no STL files", true); return; }
   chooseImport(stls);
-  if ($("dlg-import").open) {
-    const folder = (stls[0].webkitRelativePath || "").split("/")[0];
-    $("import-files").textContent = `${stls.length} STL file${stls.length === 1 ? "" : "s"}${folder ? ` from ${folder}` : ""}`;
-  }
 }
 
 // What an OrcaSlicer project import had to leave out or change
@@ -2622,38 +2642,6 @@ async function exportProject() {
     toast(err.message, true);
   } finally {
     button.disabled = false;
-  }
-}
-
-async function importFiles() {
-  $("dlg-import").close();
-  const progress = $("upload-progress"), bar = progress.querySelector(".job-upload-bar");
-  const files = state.importFiles, failed = [];
-  const wasEmpty = !data().objects.length;   // adding to a project that already has a layout leaves that layout alone
-  progress.hidden = false;
-  for (const [i, file] of files.entries()) {
-    bar.style.width = "0%";
-    try {
-      const params = new URLSearchParams({ filename: file.name, scale: $("import-scale").value, up: $("import-up").value, plate: state.plate });
-      const project = await upload(`/api/projects/${state.project.id}/models/upload?${params}`, file, pct => { bar.style.width = `${pct}%`; });
-      applyProject(project);
-      renderAll();
-      showImportNotes(project);
-    } catch (err) {
-      failed.push(`${file.name}: ${err.message}`);
-      if (files.length === 1) toast(failed[0], true);
-      else if (/at most \d+ objects/.test(err.message)) { failed.push(`${files.length - i - 1} more skipped`); break; }
-    }
-  }
-  progress.hidden = true;
-  if (files.length > 1) {
-    const added = files.length - failed.length;
-    toast(failed.length ? `Added ${added} of ${files.length} files. ${failed.slice(0, 3).join(" · ")}${failed.length > 3 ? " …" : ""}` : `Added ${files.length} files`, !!failed.length);
-  }
-  schedulePoll();
-  if (wasEmpty && files.length - failed.length > 1) {   // they all landed on one plate at the same spot: plan once they've imported
-    try { sessionStorage.setItem("slicer.autoplan", String(state.project.id)); } catch (_) { /* storage blocked */ }
-    maybeAutoPlan();
   }
 }
 

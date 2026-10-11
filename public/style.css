@@ -1612,7 +1612,7 @@ body.panel-open { overflow: hidden; }
   .header-actions { flex: 1; display: grid; grid-template-columns: 44px repeat(2, minmax(0, 1fr)) auto; gap: 6px; align-items: center; }
   .header-actions > #btn-system-health { grid-column: 1; grid-row: 1; width: 44px; min-height: 44px; padding: 8px; }
   .header-actions > #btn-quick-print { grid-column: 2; grid-row: 1; }
-  .header-actions > #btn-import { grid-column: 3; grid-row: 1; }
+  .header-actions > #btn-new-project { grid-column: 3; grid-row: 1; }
   .header-actions > #btn-discover, .header-actions > #btn-add { display: none; }
   .header-more-actions { display: block; grid-column: 4; grid-row: 1; }
   #btn-header-more { min-height: 44px; padding-inline: 9px; font-size: 12px; white-space: nowrap; }
@@ -1636,7 +1636,7 @@ body.panel-open { overflow: hidden; }
   .header-actions { flex: 1; display: grid; grid-template-columns: 44px repeat(2, minmax(0, 1fr)) auto; gap: 6px; align-items: center; }
   .header-actions > #btn-system-health { grid-column: 1; grid-row: 1; width: 44px; min-height: 44px; padding: 8px; }
   .header-actions > #btn-quick-print { grid-column: 2; grid-row: 1; }
-  .header-actions > #btn-import { grid-column: 3; grid-row: 1; }
+  .header-actions > #btn-new-project { grid-column: 3; grid-row: 1; }
   .header-actions > #btn-discover, .header-actions > #btn-add { display: none; }
   .header-more-actions { display: block; grid-column: 4; grid-row: 1; }
   #btn-header-more { min-height: 44px; padding-inline: 9px; font-size: 12px; white-space: nowrap; }
