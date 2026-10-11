@@ -2140,3 +2140,22 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 3px;
 }
+
+/* Shown by net.js when Spooler's UI changed while something was open; it reloads by itself once that is closed */
+.ui-update-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 10000;
+  max-width: calc(100vw - 32px);
+  padding: 10px 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}

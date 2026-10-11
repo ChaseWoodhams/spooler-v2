@@ -554,8 +554,8 @@ function sideParts() {
     <dl class="split-facts">
       <dt>Parts</dt><dd>${s.parts} from ${plural(s.cuts, "cut")}</dd>
       <dt>Rods</dt><dd>${rods}</dd>
-      <dt>Hole check</dt><dd>${s.holes_not_shared_by_two ? `<span class="split-bad">${plural(s.holes_not_shared_by_two, "hole")} don't line up</span>` : "Every hole is shared by two parts"}</dd>
-      <dt>Joints</dt><dd>${s.joints}${s.joints_without_rods ? ` · <span class="split-warn">${s.joints_without_rods} glue only</span>` : ""}</dd>
+      <dt>Hole check</dt><dd>${s.holes_not_shared_by_two ? `<span class="split-bad">${plural(s.holes_not_shared_by_two, "hole")} don't line up</span>` : "Every hole is shared by two parts"}${s.holes_removed ? ` · <span class="split-warn">${plural(s.holes_removed, "hole")} dropped</span>` : ""}</dd>
+      <dt>Joints</dt><dd>${s.joints}${s.joints_without_rods ? ` · <span class="split-warn">${s.joints_without_rods} glue only</span>` : ""}${s.joints_unkeyed ? ` · <span class="split-warn">${s.joints_unkeyed} can swivel or fit two ways</span>` : ""}</dd>
       <dt>Supports</dt><dd>${s.parts_needing_supports ? `${plural(s.parts_needing_supports, "part")} need${s.parts_needing_supports === 1 ? "s" : ""} supports — they get plates of their own with supports on` : "None needed"}</dd>
     </dl>
   </section>

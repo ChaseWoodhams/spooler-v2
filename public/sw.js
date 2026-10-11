@@ -1,9 +1,10 @@
-// Minimal service worker – required by Chrome for PWA standalone installation
-// Camera streams must not be intercepted; let the browser handle them directly.
-self.addEventListener("fetch", (e) => {
-  if (e.request.url.includes("/api/camera/")) return;
-  e.respondWith(fetch(e.request));
-});
+// Service worker for push notifications and PWA installation. It has no fetch handler on purpose: passing every request
+// through respondWith(fetch(...)) cached nothing, delayed each request, and turned any dropped connection into
+// "Failed to fetch". Without one, the browser loads pages and API calls directly.
+
+// A new version takes over open pages at once instead of waiting for every tab to close.
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
 self.addEventListener("push", (e) => {
   let data = { title: "Spooler", body: "" };

@@ -2193,11 +2193,25 @@ def _plan_data(project_id: int, record: dict, allow_tilt: bool = False) -> dict:
             else:
                 withheld += 1   # it would lean on an angled face: left as it is unless the user opts in
     layout = arrange_layout(project_id, {**record, "data": data}, replannable)
+    # The orientation chosen for printing can make a part too big for the bed that it fit in as it was (a long, thin part laid
+    # on a broad face, say): such a part goes back to the orientation it came in, and the layout is made again, but only when
+    # it stands steady that way. A sheet stood on its edge to squeeze it in would not print; it stays too big and is reported.
+    unfit = {item["key"] for plate in layout for item in plate["items"] if item["oversize"]}
+    back = [o for o in data["objects"] if o["id"] in unfit and list(o["rotation"]) != before[o["id"]]
+            and _steady(project_id, {**o, "rotation": before[o["id"]]})]
+    if back:
+        for obj in back:
+            obj["rotation"] = list(before[obj["id"]])
+        layout = arrange_layout(project_id, {**record, "data": data}, replannable)
     if not layout:
         return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "fingerprint": _plan_fingerprint(record["data"], [])}
     used = _place_layout(data, replannable, layout, lambda group: json.loads(group)["overrides"])
     names = problem_kinds.object_names(data)
     too_big = [{"id": item["key"], "name": names[item["key"]]} for plate in layout for item in plate["items"] if item["oversize"]]
+    big_ids = {big["id"] for big in too_big}
+    tippy = [{"id": o["id"], "name": names[o["id"]]} for o in data["objects"]   # fits the bed only standing on a narrow edge
+             if o["plate"] in used and o["model"] in ready and not o.get("pinned") and o["id"] not in big_ids
+             and not _steady(project_id, o)]
     problems = _plan_problems(project_id, record, data, used, {big["id"] for big in too_big})
     if problems:   # a plan that is not valid is not offered: nothing is proposed and the reason is said
         return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "problems": problems,
@@ -2240,7 +2254,27 @@ def _plan_data(project_id: int, record: dict, allow_tilt: bool = False) -> dict:
     for entry in proposed:
         entry["turned"] = sum(1 for o in entry["objects"] if _turned(before[o["id"]], o["rotation"]))
     return {"data": data, "plates": proposed, "kept": kept, "emptied": emptied, "tilts_withheld": withheld, "too_big": too_big,
-            "fingerprint": _plan_fingerprint(data, emptied)}
+            "tippy": tippy, "fingerprint": _plan_fingerprint(data, emptied)}
+
+
+STEADY_RATIO = 3.0   # a part taller than this many times its narrowest width on the bed is too tippy to print as it stands
+
+
+def _steady(project_id: int, obj: dict) -> bool:
+    """Whether the object, posed as `obj` says, stands steady: its height is at most STEADY_RATIO times the narrowest width
+    of its footprint (measured across every turn about Z, so a part lying diagonally isn't mistaken for a wide one)."""
+    import numpy as np
+    try:
+        verts = place(np.asarray(load_mesh(project_id, obj["model"], preview=True)[0], float), obj)
+    except (OSError, ValueError):
+        return False
+    height = np.ptp(verts[:, 2])
+    xy = verts[:, :2]
+    widths = []
+    for degrees in range(0, 180, 5):
+        a = np.radians(degrees)
+        widths.append(np.ptp(xy @ np.array([np.cos(a), np.sin(a)])))
+    return height <= STEADY_RATIO * min(widths)
 
 
 def _plan_fingerprint(data: dict, emptied: list) -> str:
@@ -2252,6 +2286,14 @@ def _plan_view(record: dict, planned: dict) -> dict:
     """What a plan shows: the proposed plates in plan order, the plates kept as they are, and a one-line summary."""
     data = planned["data"]
     names = {p["id"]: p["name"] for p in data["plates"]}
+    shapes = _Shapes(record["id"], record, data) if planned["plates"] else None
+
+    def outline(obj: dict) -> list | None:   # the outline from above the sheet draws: a bounding box would overlap its neighbours
+        try:
+            return [[round(x, 1), round(y, 1)] for x, y in shapes.polygon(obj)]
+        except (OSError, ValueError):
+            return None
+
     plates = []
     for entry in planned["plates"]:
         found = plate_filaments(data, entry["id"])
@@ -2263,7 +2305,8 @@ def _plan_view(record: dict, planned: dict) -> dict:
                        "filament": choice_label(found[0]) if found else None, "parts": len(entry["objects"]),
                        "turned": entry["turned"], "time_estimate": estimate,
                        "objects": [{"id": o["id"], "name": o.get("name"), "model": o["model"], "position": o["position"],
-                                    "rotation": o["rotation"], "pinned": bool(o.get("pinned"))} for o in entry["objects"]]})
+                                    "rotation": o["rotation"], "pinned": bool(o.get("pinned")), "outline": outline(o)}
+                                   for o in entry["objects"]]})
     kept = planned["kept"]
     if planned.get("refused"):
         summary = f"No valid plan: {planned['refused']}"
@@ -2275,12 +2318,17 @@ def _plan_view(record: dict, planned: dict) -> dict:
         if planned.get("tilts_withheld"):
             summary += f"; {_count(planned['tilts_withheld'], 'tilt')} left out (allow tilting to include)"
         summary += _too_big_text(len(planned.get("too_big", [])))
+        tippy = planned.get("tippy", [])
+        if tippy:
+            summary += (f"; {', '.join(t['name'] for t in tippy[:3])}{' …' if len(tippy) > 3 else ''} only "
+                        f"{'fits' if len(tippy) == 1 else 'fit'} standing on a narrow edge, too tall to print steadily "
+                        f"(too big to lie flat: {'it needs' if len(tippy) == 1 else 'they need'} splitting)")
     else:
         summary = "Nothing to plan"
     summary += _skipped_failed(record)
     return {"revision": record["revision"], "fingerprint": planned["fingerprint"], "plates": plates, "kept": kept,
             "summary": summary, "outcome": summary,   # "outcome" is the key every Arrange-like answer carries: the page shows it as is, "summary" is the plan's own name for it
-            "tilts_withheld": planned.get("tilts_withheld", 0), "too_big": planned.get("too_big", []),
+            "tilts_withheld": planned.get("tilts_withheld", 0), "too_big": planned.get("too_big", []), "tippy": planned.get("tippy", []),
             "problems": planned.get("problems", []), "refused": planned.get("refused")}
 
 

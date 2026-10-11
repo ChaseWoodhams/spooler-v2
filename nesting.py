@@ -8,7 +8,8 @@ EDGE_MARGIN_MM from the bed edge and b from the purge area. Pinned objects are f
 packing.pack returns, so an object that fits nowhere on an empty plate gets a plate of its own, marked oversize.
 
 Placement tries a few hundred bottom-left candidate positions per object and angle, then slides the best one left and
-down until it touches, so concave objects can tuck into each other's gaps.
+down until it touches. The best spot keeps the pile's longest side shortest (then its area), so parts gather in a squarish
+cluster rather than a row across the bed, so concave objects can tuck into each other's gaps.
 """
 
 import math
@@ -110,13 +111,37 @@ class _Plate:
             free = grid[~shapely.intersects(union, shapely.polygons(coords[None] + grid[:, None, :]))]
             if not len(free):
                 continue
-            cost = (np.maximum(px, free[:, 0] + w) - bx0) * (np.maximum(py, free[:, 1] + d) - by0)
-            x, y = free[np.lexsort((free[:, 0] + free[:, 1], cost))[0]]
+            pw, pd = np.maximum(px, free[:, 0] + w) - bx0, np.maximum(py, free[:, 1] + d) - by0
+            x, y = free[np.lexsort((free[:, 0] + free[:, 1], pw * pd, np.maximum(pw, pd)))[0]]   # longest side of the pile first: a squarer pile, not a row
             x, y = self._slide(union, coords, x, y, lo_x, lo_y)
-            score = ((max(px, x + w) - bx0) * (max(py, y + d) - by0), x + y)
+            pw, pd = max(px, x + w) - bx0, max(py, y + d) - by0
+            score = (max(pw, pd), pw * pd, x + y)
             if best is None or score < best[0]:
                 best = score, (float(x), float(y), angle)
         return None if best is None else best[1]
+
+    def centre(self) -> None:
+        """Move the finished pile, as one piece, to the middle of the bed. The packer works from the corner, so without this
+        every plate hugs the front left. Plates with pinned objects stay as they are, and the pile stops short of the purge
+        area (it moves back toward the corner by halves until it is clear)."""
+        if self.fixed or not self.items:
+            return
+        x0, y0, x1, y1 = shapely.union_all([poly for poly, _ in self.shapes]).bounds
+        bx0, by0, bx1, by1 = self.bed
+        dx, dy = (bx0 + bx1 - x0 - x1) / 2, (by0 + by1 - y0 - y1) / 2
+        for fraction in (1.0, 0.5, 0.25, 0.0):
+            move = (dx * fraction, dy * fraction)
+            if all(self.purge is None or not shapely.intersects(_grow(self.purge, c), shapely.transform(poly, lambda c_, m=move: c_ + m))
+                   for poly, c in self.shapes):
+                break
+        else:
+            return
+        if not any(move):
+            return
+        self.shapes = [(shapely.transform(poly, lambda c_, m=move: c_ + m), c) for poly, c in self.shapes]
+        for item in self.items:
+            item["center"] = (item["center"][0] + move[0], item["center"][1] + move[1])
+        self.reach = {}
 
     @staticmethod
     def _slide(union, coords, x, y, lo_x, lo_y):
@@ -278,6 +303,9 @@ def _nest_once(items: list, bed, exclude, fixed, angles, order) -> list:
         plate.add(shapely.polygons(coords + (x, y)), b)
         plate.items.append({"key": item["key"], "center": (x + w / 2, y + d / 2), "turned": False, "angle": float(angle),
                             "oversize": False})
+    for entry in plates:
+        if entry["plate"] is not None:
+            entry["plate"].centre()
     plates.sort(key=lambda p: groups.index(p["group"]))
     return [{"group": p["group"], "fixed": p["plate"].fixed if p["plate"] else [],
              "items": [p["oversize"]] if p["plate"] is None else p["plate"].items} for p in plates]

@@ -120,6 +120,7 @@ function dashOpenUnconfirmed() {
 function syncShellView() {
   const hash = location.hash;
   const projects = hash === "#projects" || hash.startsWith("#projects=");
+  const wasShown = document.body.classList.contains("view-projects");
   document.body.classList.toggle("view-projects", projects);
   document.body.classList.toggle("view-printer", hash.startsWith("#printer="));
   document.getElementById("projects-view").hidden = !projects;
@@ -135,6 +136,9 @@ function syncShellView() {
     if (!frame.getAttribute("src") || (id && frame.dataset.route !== route)) {
       frame.dataset.route = route;
       frame.src = target;
+    } else if (!wasShown) {
+      // The same project kept in the frame since Projects was last shown: bring it up to date (a Quick print, another tab, a slice finishing).
+      try { frame.contentWindow?.spoolerRefresh?.(); } catch (_) { /* still loading */ }
     }
   } else {
     loadDashboard();

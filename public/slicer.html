@@ -6,7 +6,8 @@
   <title>Projects – Spooler</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <meta name="theme-color" content="#0d0e12" />
-  <link rel="stylesheet" href="style.css?v=59" />
+  <link rel="stylesheet" href="style.css?v=60" />
+  <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
   <link rel="stylesheet" href="slicer.css?v=25" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
@@ -86,10 +87,12 @@
           <h4>Objects on this plate</h4>
           <div class="slicer-actions-row">
             <button id="btn-add-model" class="btn btn-primary btn-sm" type="button">Add model</button>
+            <button id="btn-add-folder" class="btn btn-secondary btn-sm" type="button" title="Add every STL file in a folder, including subfolders">Add folder</button>
             <button id="btn-add-split" class="btn btn-secondary btn-sm" type="button">Split parts</button>
           </div>
         </div>
         <input id="model-input" type="file" accept=".stl,.obj,.3mf" multiple hidden />
+        <input id="folder-input" type="file" webkitdirectory hidden />
         <div id="upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
         <div id="object-list" class="slicer-object-list"></div>
       </section>
@@ -225,7 +228,9 @@
           <select id="new-up"><option value="z">Z (most slicers and CAD)</option><option value="y">Y (many sculpting and game tools)</option></select>
         </label>
         <button id="btn-new-upload" class="btn btn-primary" type="button" title="STL, OBJ, 3MF or G-code. You can also drop a file here.">Import</button>
-        <input id="new-model-input" type="file" accept=".stl,.obj,.3mf,.gcode" hidden />
+        <button id="btn-new-folder" class="btn btn-secondary" type="button" title="Make one project from every STL, OBJ or 3MF in a folder. You can also drop a folder here.">Import folder</button>
+        <input id="new-model-input" type="file" accept=".stl,.obj,.3mf,.gcode" multiple hidden />
+        <input id="new-folder-input" type="file" webkitdirectory hidden />
       </div>
       <div id="new-upload-progress" class="job-upload-progress" hidden><div class="job-upload-bar"></div></div>
     </section>
@@ -281,6 +286,7 @@
 
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
-  <script type="module" src="slicer/main.js?v=23"></script>
+  <script src="folder-import.js?v=2"></script>
+  <script type="module" src="slicer/main.js?v=29"></script>
 </body>
 </html>

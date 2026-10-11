@@ -144,6 +144,7 @@ async function loadFilamentMeta({ preserve = true } = {}) {
 
 // ─── WebSocket connection ──────────────────────────────────────────────────────
 let _wsConnected = false;
+let _wsEverConnected = false;
 let _wsAttempts  = 0;  // consecutive closed/failed connections since the last success
 let _wsRetryAt   = 0;
 
@@ -152,8 +153,17 @@ function connect() {
 
   ws.onopen = () => {
     console.log("[WS] Connected");
+    const reconnected = _wsEverConnected;
+    _wsEverConnected = true;
     _wsConnected = true;
     _wsAttempts = 0;
+    if (reconnected) {
+      // Spooler restarted or the link dropped: it may now run newer UI files (net.js reloads for those), and the open project may have moved on.
+      window.spoolerCheckBuild?.();
+      if (document.body.classList.contains("view-projects")) {
+        try { document.getElementById("projects-frame").contentWindow?.spoolerRefresh?.(); } catch (_) { /* still loading */ }
+      }
+    }
     renderSystemHealth();
     send({ action: "list_printers" });
     loadHistory();

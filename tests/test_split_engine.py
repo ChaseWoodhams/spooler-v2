@@ -77,6 +77,58 @@ class EngineTests(unittest.TestCase):
             self.assertLessEqual(mesh.extents[2], 250.01)
             self.assertLessEqual(max(part["print_size"][:2]), 240.01)
 
+    def test_a_hole_that_is_not_shared_by_two_parts_is_removed(self):
+        self.job(channel(), planner={"mode": "smart"}, connectors={"kind": "rod", "diameter": 2.0, "fallback_diameter": 1.0})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        real = engine.place_pins
+
+        def with_stray_hole(*args):
+            pins, islands = real(*args)
+            if pins:
+                stray = dict(pins[0], uv=[pins[0]["uv"][0] + 5000.0, pins[0]["uv"][1]], p=[pins[0]["p"][0] + 5000.0, *pins[0]["p"][1:]])
+                pins.append(stray)
+                islands[stray["island"]]["pins"] += 1
+            return pins, islands
+
+        engine.place_pins = with_stray_hole
+        try:
+            engine.split(self.work)
+        finally:
+            engine.place_pins = real
+        summary = self.read("result.json")["summary"]
+        self.assertEqual(summary["holes_not_shared_by_two"], 0)
+        self.assertGreater(summary["holes_removed"], 0)
+        rods = sum(summary["rods"].values())
+        self.assertEqual(rods, sum(j["rods"] for j in self.read("result.json")["joints"]))
+
+    def test_every_joint_gets_two_keyed_holes_away_from_the_edge(self):
+        self.job(channel(), planner={"mode": "smart"}, connectors={"kind": "rod", "diameter": 2.0, "fallback_diameter": 1.0})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        engine.split(self.work)
+        result = self.read("result.json")
+        self.assertEqual((result["summary"]["joints_single_rod"], result["summary"]["joints_unkeyed"]), (0, 0))
+        for joint in result["joints"]:
+            self.assertGreaterEqual(joint["rods"], 2)
+            self.assertTrue(joint["keyed"])
+
+    def test_a_pattern_that_fits_itself_after_a_turn_is_moved(self):
+        cand = np.array([[x, y] for x in range(0, 101, 2) for y in range(0, 41, 2)], float)
+        centre = cand.mean(axis=0)
+        symmetric = [int(np.argmin(np.linalg.norm(cand - [10, 20], axis=1))), int(np.argmin(np.linalg.norm(cand - [90, 20], axis=1)))]
+        self.assertFalse(engine.is_keyed(cand, symmetric, centre))
+        fixed = engine.key_pattern(cand, symmetric, centre, gap=6.0)
+        self.assertTrue(engine.is_keyed(cand, fixed, centre))
+        self.assertEqual(len(fixed), 2)
+
+    def test_holes_stay_off_thin_edges_when_there_is_room(self):
+        cand = np.array([[x, y] for x in range(0, 61) for y in range(0, 61)], float)
+        edge = np.minimum.reduce([cand[:, 0], cand[:, 1], 60 - cand[:, 0], 60 - cand[:, 1]])
+        picked, _ = engine.pick_connectors(cand, edge, want=2, gap=10.0)
+        self.assertEqual(len(picked), 2)
+        self.assertTrue(all(edge[k] >= engine.EDGE_MARGIN for k in picked))
+
     def test_smart_cuts_prefer_even_slabs(self):
         self.job(channel(), planner={"mode": "smart"})
         engine.analyze(self.work)

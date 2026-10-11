@@ -271,7 +271,11 @@ async function boot() {
     try {
       await openProject(id, { toPrinter: !!params.get("printer"), restoring: !asked });
       return;
-    } catch (_) { /* fall through to the project list */ }
+    } catch (err) {
+      // A deleted or hidden project falls through to the list. Anything else (Spooler busy or restarting) says so,
+      // rather than silently showing the list as if the project were gone.
+      if (err.status !== 404 && !err.quick) toast(`Couldn't reopen project #${id}: ${err.message}. Choose it below, or reload to try again`, true);
+    }
   }
   openProjectsDialog();
 }
@@ -426,7 +430,7 @@ async function bundleSettings(bundleId) {
 
 async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   const project = await api("GET", `/api/projects/${id}`);
-  if (restoring && project.quick) throw new Error("A hidden quick project is never reopened on its own");   // the caller falls back to the list
+  if (restoring && project.quick) throw Object.assign(new Error("A hidden quick project is never reopened on its own"), { quick: true });   // the caller falls back to the list
   clearTimeout(state.jobsTimer);
   state.clockSkew = project.server_time - Date.now() / 1000;
   state.project = project;
@@ -440,6 +444,7 @@ async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   state.assigning = null;
   if (!project.quick) remember("slicer.project", String(id));   // a hidden quick project is never restored as the last-open project
   history.replaceState(null, "", `?project=${id}`);
+  syncShellRoute(id);
   await bundleSettings(project.data.profile.bundle_id).catch(err => toast(err.message, true));
   if (project.split_id) await splitStep.open(project.split_id).catch(err => toast(err.message, true));
   else splitStep.close();
@@ -453,6 +458,50 @@ async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   await setStep(landing, { force: true });
   loadProblems();
   schedulePoll();
+  maybeAutoPlan();
+}
+
+// Inside the app shell, record the project now open in the shell's address and frame route. Otherwise the shell still
+// names the project this page first opened, and returning to Projects (or reloading) reopens that one instead.
+function syncShellRoute(id) {
+  if (window.self === window.top) return;
+  try {
+    const frame = window.frameElement;
+    const shown = Number(new URLSearchParams(parent.location.hash.slice(1)).get("projects")) || 0;
+    if (!frame || shown === id) return;   // already right; keep a push link's &printer= as it is
+    frame.dataset.route = `${id}|`;
+    parent.history.replaceState(null, "", `#projects=${id}`);
+  } catch (_) { /* not the Spooler shell */ }
+}
+
+// After a multi-file import the objects all sit on plate 1 at the same spot: once every model has finished importing (so the
+// planner has real sizes), land on Plates and apply the plan (orient, space, split across plates) as one undo step. Only a plan with
+// a problem (an object too big for any plate, no valid layout) opens the review sheet instead.
+async function maybeAutoPlan() {
+  const id = state.project?.id;
+  let wanted = null;
+  try { wanted = sessionStorage.getItem("slicer.autoplan"); } catch (_) { /* storage blocked */ }
+  if (!id || wanted !== String(id)) return;
+  if (state.project.models.some(m => m.state === "importing")) return;   // the poller calls this again as imports finish
+  try { sessionStorage.removeItem("slicer.autoplan"); } catch (_) { /* storage blocked */ }
+  if (!data().objects.length || $("dlg-plan").open) return;
+  if (state.step !== "plates") await setStep("plates", { force: true });
+  try {
+    await flushSave();
+    state.planTilt = false;
+    const plan = await api("POST", `/api/projects/${id}/plan`, { allow_tilt: false });
+    const clean = plan.plates.length && !plan.refused && !plan.problems.length;
+    if (!clean) { await planPlates(); return; }   // no valid layout: show the review sheet
+    // A part too big for any plate does not hold the rest back: it sits on a plate of its own and the toast says so.
+    const result = await api("POST", `/api/projects/${id}/plan/accept`, { revision: plan.revision, fingerprint: plan.fingerprint, allow_tilt: false });
+    applyProject(result);
+    recordEdit();
+    renderAll();
+    state.viewport?.fit(state.viewport.objectsBox());
+    toast(`Arranged automatically: ${result.plan.summary}. Undo puts it back`, !!(plan.too_big.length || plan.tippy?.length));
+  } catch (err) {
+    toast(`Couldn't arrange the models automatically: ${err.message}`, true);
+  }
 }
 
 function applyProject(project, { keepLocalData = false } = {}) {
@@ -695,37 +744,62 @@ function schedulePoll() {
   if (!busy) return;
   state.poller = setTimeout(async () => {
     try {
-      const fresh = await api("GET", `/api/projects/${state.project.id}`);
-      state.clockSkew = fresh.server_time - Date.now() / 1000;
-      const before = state.project;
-      const newModels = fresh.models.filter(m => m.state === "ready" && before.models.find(b => b.id === m.id)?.state !== "ready");
-      const sliceChanged = JSON.stringify(fresh.slices) !== JSON.stringify(before.slices);
-      state.project = { ...before, models: fresh.models, slices: fresh.slices };
-      if (!state.saving && !state.saveTimer && fresh.revision !== before.revision) applyProject(fresh);
-      if (newModels.length || fresh.models.some((m, i) => m.state !== before.models[i]?.state)) loadProblems();   // a model failed or finished
-      if (newModels.length) {
-        await loadGeometry();
-        // placeholders were fitted while importing; the real parts are usually far bigger
-        const onThisPlate = newModels.some(m => plateObjects().some(o => o.model === m.id));
-        if (onThisPlate && state.mode === "prepare" && (state.step === "plates" || state.step === "slice")) state.viewport?.fit(state.viewport.objectsBox());
-      }
-      if (sliceChanged) {
-        const entry = sliceEntry(), was = before.slices[String(state.plate)];
-        if (state.step === "slice" && entry?.state === "sliced" && !entry.outdated && was?.state !== "sliced") setMode("preview");
-        for (const [plateId, now] of Object.entries(fresh.slices)) {
-          const then = before.slices[plateId];
-          if (now.state === "failed" && then?.state !== "failed") toast(`${plateById(Number(plateId))?.name || "A plate"}: slicing failed — ${now.error}`, true);
-        }
-        const plates = platesWithObjects();
-        if (plates.length > 1 && plates.every(p => isUpToDate(p.id)) && Object.values(before.slices).some(s => s.state === "queued" || s.state === "slicing")) {
-          toast(`All ${plates.length} plates are sliced`);
-        }
-      }
-      renderAll({ geometry: false });
+      await refreshProject();
     } catch (_) { /* Spooler may be restarting */ }
     schedulePoll();
   }, 1500);
 }
+
+// Pull the project's latest state from Spooler: models, slices, and (when nothing local is unsaved) the whole layout.
+// Runs on the poll while something is in progress, and whenever the page is shown again.
+async function refreshProject() {
+  if (!state.project) return;
+  const id = state.project.id;
+  const fresh = await api("GET", `/api/projects/${id}`);
+  if (state.project?.id !== id) return;   // another project was opened meanwhile
+  state.clockSkew = fresh.server_time - Date.now() / 1000;
+  const before = state.project;
+  const newModels = fresh.models.filter(m => m.state === "ready" && before.models.find(b => b.id === m.id)?.state !== "ready");
+  const sliceChanged = JSON.stringify(fresh.slices) !== JSON.stringify(before.slices);
+  const layoutChanged = !state.saving && !state.saveTimer && fresh.revision !== before.revision;
+  state.project = { ...before, models: fresh.models, slices: fresh.slices };
+  if (layoutChanged) applyProject(fresh);
+  if (newModels.length || fresh.models.some((m, i) => m.state !== before.models[i]?.state)) loadProblems();   // a model failed or finished
+  if (newModels.length) {
+    await loadGeometry();
+    // placeholders were fitted while importing; the real parts are usually far bigger
+    const onThisPlate = newModels.some(m => plateObjects().some(o => o.model === m.id));
+    if (onThisPlate && state.mode === "prepare" && (state.step === "plates" || state.step === "slice")) state.viewport?.fit(state.viewport.objectsBox());
+  }
+  if (sliceChanged) {
+    const entry = sliceEntry(), was = before.slices[String(state.plate)];
+    if (state.step === "slice" && entry?.state === "sliced" && !entry.outdated && was?.state !== "sliced") setMode("preview");
+    for (const [plateId, now] of Object.entries(fresh.slices)) {
+      const then = before.slices[plateId];
+      if (now.state === "failed" && then?.state !== "failed") toast(`${plateById(Number(plateId))?.name || "A plate"}: slicing failed — ${now.error}`, true);
+    }
+    const plates = platesWithObjects();
+    if (plates.length > 1 && plates.every(p => isUpToDate(p.id)) && Object.values(before.slices).some(s => s.state === "queued" || s.state === "slicing")) {
+      toast(`All ${plates.length} plates are sliced`);
+    }
+  }
+  renderAll({ geometry: layoutChanged });   // a layout changed elsewhere (another tab, Quick print) moves the objects too
+  maybeAutoPlan();
+  schedulePoll();   // something may have started elsewhere: follow it
+}
+
+// Bring the page up to date when it is shown again: switching back to this tab, or to Projects in the app shell.
+// Skipped while an edit is unsaved or a step is mid-request, so it never overwrites what is being changed here.
+function refreshWhenShown() {
+  if (!state.project || state.saving || state.saveTimer || state.pendingSave) return;
+  refreshProject().catch(() => { /* Spooler may be restarting; the poll or the next show tries again */ });
+  loadJobs();
+  loadPrinters();
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshWhenShown(); });
+// The app shell asks before reloading for an update (net.js), and refreshes this page when Projects is shown again.
+window.spoolerBusy = () => !!(state.saving || state.saveTimer || state.pendingSave || document.querySelector("dialog[open]"));
+window.spoolerRefresh = refreshWhenShown;
 
 // ── Rendering ───────────────────────────────────────────────────────────────────
 function renderAll({ geometry = true } = {}) {
@@ -1619,6 +1693,10 @@ function planFootprint(object) {
 function planMap(plate) {
   const [x0, y0, x1, y1] = bedLimits(state.bundleSettings.get(data().profile.bundle_id)?.machine).bed;
   const objects = plate.objects.map(object => {
+    if (object.outline?.length > 2) {   // the real outline from above, as the server checks it for overlaps
+      const points = object.outline.map(([px, py]) => `${px.toFixed(1)},${(y1 - py + y0).toFixed(1)}`).join(" ");
+      return `<polygon class="plan-object${object.pinned ? " pinned" : ""}" points="${points}"><title>${esc(object.name)}</title></polygon>`;
+    }
     const { half, turn } = planFootprint(object) || { half: [8, 8], turn: 0 };
     const [x, y] = object.position, cy = y1 - y + y0;
     return `<rect class="plan-object${object.pinned ? " pinned" : ""}" x="${(x - half[0]).toFixed(1)}" y="${(cy - half[1]).toFixed(1)}" width="${(half[0] * 2).toFixed(1)}" height="${(half[1] * 2).toFixed(1)}" transform="rotate(${(-turn).toFixed(1)} ${x.toFixed(1)} ${cy.toFixed(1)})"><title>${esc(object.name)}</title></rect>`;
@@ -1978,6 +2056,10 @@ async function uploadNewModel(file) {
   try {
     const params = new URLSearchParams({ filename: file.name, scale: $("new-scale").value, up: $("new-up").value });
     const project = await upload(`/api/projects/upload?${params}`, file, pct => { bar.style.width = `${pct}%`; });
+    // A 3MF holding several objects on one plate opens crammed together: plan it like a batch import does
+    if (project.data?.objects?.length > 1 && new Set(project.data.objects.map(o => o.plate)).size === 1) {
+      try { sessionStorage.setItem("slicer.autoplan", String(project.id)); } catch (_) { /* storage blocked */ }
+    }
     $("dlg-projects").close();
     await openProject(project.id);
     toast(`Imported ${file.name}`);
@@ -1988,6 +2070,35 @@ async function uploadNewModel(file) {
     progress.hidden = true;
     $("btn-new-upload").disabled = false;
   }
+}
+
+// Several files, or a folder: one new project holding them all
+async function uploadNewBatch(files, folder) {
+  const models = files.filter(f => FolderImport.MODEL.test(f.name));
+  if (!models.length) { toast("Choose STL, OBJ or 3MF files", true); return; }
+  const progress = $("new-upload-progress"), bar = progress.querySelector(".job-upload-bar");
+  progress.hidden = false;
+  bar.style.width = "0%";
+  $("btn-new-upload").disabled = $("btn-new-folder").disabled = true;
+  try {
+    const result = await FolderImport.toNewProject(models, {
+      name: folder, scale: $("new-scale").value, up: $("new-up").value,
+      onProgress: (done, total, part) => { bar.style.width = `${(done + part) / total * 100}%`; },
+    });
+    $("dlg-projects").close();
+    await openProject(result.id);
+    toast(FolderImport.summary(result, models.length), !!result.failed.length);
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    progress.hidden = true;
+    $("btn-new-upload").disabled = $("btn-new-folder").disabled = false;
+  }
+}
+
+function uploadNew(files, folder = "") {
+  if (files.length === 1 && !folder) uploadNewModel(files[0]);
+  else if (files.length) uploadNewBatch(files, folder);
 }
 
 async function openSplitDialog() {
@@ -2073,9 +2184,15 @@ function bindUi() {
   projectsDialog.addEventListener("drop", e => {
     e.preventDefault();
     projectsDialog.classList.remove("dropping");
-    if (e.dataTransfer.files[0]) uploadNewModel(e.dataTransfer.files[0]);
+    FolderImport.dropped(e.dataTransfer).then(({ files, folder }) => uploadNew(files, folder));
   });
-  $("new-model-input").addEventListener("change", e => { if (e.target.files[0]) uploadNewModel(e.target.files[0]); e.target.value = ""; });
+  $("new-model-input").addEventListener("change", e => { uploadNew([...e.target.files]); e.target.value = ""; });
+  $("btn-new-folder").addEventListener("click", () => $("new-folder-input").click());
+  $("new-folder-input").addEventListener("change", e => {
+    const { files, folder } = FolderImport.picked(e.target.files);
+    e.target.value = "";
+    if (files.length) uploadNewBatch(files, folder); else toast("That folder has no STL, OBJ or 3MF files", true);
+  });
   $("btn-new-project").addEventListener("click", async () => {
     try {
       const project = await api("POST", "/api/projects", { name: $("new-project-name").value });
@@ -2135,6 +2252,8 @@ function bindUi() {
 
   $("btn-add-model").addEventListener("click", () => $("model-input").click());
   $("model-input").addEventListener("change", e => { chooseImport([...e.target.files]); e.target.value = ""; });
+  $("btn-add-folder").addEventListener("click", () => $("folder-input").click());
+  $("folder-input").addEventListener("change", e => { chooseFolder([...e.target.files]); e.target.value = ""; });
   $("btn-import").addEventListener("click", importFiles);
   $("btn-add-split").addEventListener("click", openSplitDialog);
   $("split-choices").addEventListener("click", async e => {
@@ -2394,7 +2513,10 @@ function bindUi() {
   viewport.addEventListener("drop", e => {
     e.preventDefault();
     viewport.classList.remove("dropping");
-    chooseImport([...e.dataTransfer.files]);
+    FolderImport.dropped(e.dataTransfer).then(({ files, folder }) => {
+      chooseImport(files);
+      if (folder && $("dlg-import").open) $("import-files").textContent = `${state.importFiles.length} files from ${folder}`;
+    });
   });
 
   document.addEventListener("keydown", e => {
@@ -2450,6 +2572,17 @@ function chooseImport(files) {
   $("dlg-import").showModal();
 }
 
+// A folder pick: every STL inside it (subfolders included), in path order
+function chooseFolder(files) {
+  const stls = FolderImport.picked(files).files.filter(f => /\.stl$/i.test(f.name));
+  if (!stls.length) { toast("That folder has no STL files", true); return; }
+  chooseImport(stls);
+  if ($("dlg-import").open) {
+    const folder = (stls[0].webkitRelativePath || "").split("/")[0];
+    $("import-files").textContent = `${stls.length} STL file${stls.length === 1 ? "" : "s"}${folder ? ` from ${folder}` : ""}`;
+  }
+}
+
 // What an OrcaSlicer project import had to leave out or change
 function showImportNotes(project) {
   const notes = project?.import_notes || [];
@@ -2479,8 +2612,10 @@ async function exportProject() {
 async function importFiles() {
   $("dlg-import").close();
   const progress = $("upload-progress"), bar = progress.querySelector(".job-upload-bar");
+  const files = state.importFiles, failed = [];
+  const wasEmpty = !data().objects.length;   // adding to a project that already has a layout leaves that layout alone
   progress.hidden = false;
-  for (const file of state.importFiles) {
+  for (const [i, file] of files.entries()) {
     bar.style.width = "0%";
     try {
       const params = new URLSearchParams({ filename: file.name, scale: $("import-scale").value, up: $("import-up").value, plate: state.plate });
@@ -2489,11 +2624,21 @@ async function importFiles() {
       renderAll();
       showImportNotes(project);
     } catch (err) {
-      toast(`${file.name}: ${err.message}`, true);
+      failed.push(`${file.name}: ${err.message}`);
+      if (files.length === 1) toast(failed[0], true);
+      else if (/at most \d+ objects/.test(err.message)) { failed.push(`${files.length - i - 1} more skipped`); break; }
     }
   }
   progress.hidden = true;
+  if (files.length > 1) {
+    const added = files.length - failed.length;
+    toast(failed.length ? `Added ${added} of ${files.length} files. ${failed.slice(0, 3).join(" · ")}${failed.length > 3 ? " …" : ""}` : `Added ${files.length} files`, !!failed.length);
+  }
   schedulePoll();
+  if (wasEmpty && files.length - failed.length > 1) {   // they all landed on one plate at the same spot: plan once they've imported
+    try { sessionStorage.setItem("slicer.autoplan", String(state.project.id)); } catch (_) { /* storage blocked */ }
+    maybeAutoPlan();
+  }
 }
 
 boot();

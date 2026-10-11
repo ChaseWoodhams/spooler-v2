@@ -47,6 +47,7 @@ from pathlib import Path
 import manifold3d as m3d
 import numpy as np
 import trimesh
+from scipy.ndimage import distance_transform_edt
 
 M = m3d.Manifold
 OK = m3d.Error.NoError
@@ -574,21 +575,91 @@ def clear_of_other_cuts(world: np.ndarray, n, depth: float, room: float, others:
     return ok
 
 
+MIN_RADIUS_GAP = 3.0   # a pattern with one hole this much nearer or farther from the centre than the rest fits only one way round
+EDGE_MARGIN    = 3.0   # holes keep this much extra wall beyond the minimum when the island has room
+
+
+def pick_spread(cand: np.ndarray, want: int, gap: float) -> list:
+    """Indices into `cand`: the point farthest from the middle, then repeatedly the point farthest from those chosen."""
+    picked = [int(np.argmax(np.linalg.norm(cand - cand.mean(axis=0), axis=1)))]
+    nearest = np.linalg.norm(cand - cand[picked[0]], axis=1)
+    while len(picked) < want:
+        k = int(np.argmax(nearest))
+        if nearest[k] < gap:
+            break
+        picked.append(k)
+        nearest = np.minimum(nearest, np.linalg.norm(cand - cand[k], axis=1))
+    return picked
+
+
+def is_keyed(cand: np.ndarray, picked: list, centre: np.ndarray) -> bool:
+    """True when the holes cannot match themselves after turning the part in the plane of the joint.
+
+    Only turns matter: a part cannot be flipped over its own joint face. If one hole's distance from the middle
+    differs from every other hole's, no turn maps the pattern onto itself."""
+    if len(picked) < 2:
+        return False
+    radii = np.linalg.norm(cand[picked] - centre, axis=1)
+    return any(all(abs(r - o) >= MIN_RADIUS_GAP for k, o in enumerate(radii) if k != i) for i, r in enumerate(radii))
+
+
+def key_pattern(cand: np.ndarray, picked: list, centre: np.ndarray, gap: float, allowed: np.ndarray | None = None) -> list:
+    """Move one hole so the pattern fits only one way round, if the island has a spot that allows it."""
+    if len(picked) < 2 or is_keyed(cand, picked, centre):
+        return picked
+    own = np.linalg.norm(cand - centre, axis=1)
+    for i in reversed(range(len(picked))):
+        rest = [p for k, p in enumerate(picked) if k != i]
+        clear = np.min(np.linalg.norm(cand[:, None, :] - cand[rest][None, :, :], axis=2), axis=1)
+        ok = (clear >= gap) & (np.ones(len(cand), bool) if allowed is None else allowed) & np.all(np.abs(own[:, None] - own[rest][None, :]) >= MIN_RADIUS_GAP, axis=1)
+        if ok.any():
+            best = int(np.flatnonzero(ok)[int(np.argmax(clear[ok]))])
+            return rest[:i] + [best] + rest[i:]
+    return picked
+
+
+def pick_connectors(cand: np.ndarray, clearance: np.ndarray, want: int, gap: float) -> tuple:
+    """Choose hole positions: off thin edges where the island allows it, spread out, and keyed."""
+    picked = pick_spread(cand, want, gap)
+    allowed = clearance >= min(EDGE_MARGIN, 0.5 * float(clearance.max()))
+    inner = np.flatnonzero(allowed)
+    if 0 < len(inner) < len(cand):
+        safer = [int(inner[k]) for k in pick_spread(cand[inner], want, gap)]
+        if len(safer) >= len(picked):
+            picked = safer
+        else:
+            allowed = None
+    else:
+        allowed = None
+    picked = key_pattern(cand, picked, cand.mean(axis=0), gap, allowed)
+    return picked, is_keyed(cand, picked, cand.mean(axis=0))
+
+
+def event_cutter(normal: np.ndarray, pins: list):
+    """The cylinders that cut one joint's holes into both faces, as one solid in model space."""
+    if not pins:
+        return None
+    d = float(np.asarray(pins[0]["p"]) @ normal)
+    cylinders = [M.cylinder(2 * pin["depth"], pin["hole_diameter"] / 2, pin["hole_diameter"] / 2, pin["segments"])
+                 .translate([pin["uv"][0], pin["uv"][1], d - pin["depth"]]) for pin in pins]
+    return rotate(M.batch_boolean(cylinders, m3d.OpType.Add), to_z(normal).T)
+
+
 def place_pins(event: dict, others: list, specs: list, spacing: float, per_joint: int) -> tuple:
     n, d = event["n"], event["d"]
     R = to_z(n)
     rotated = rotate(event["piece"], R)
-    pins, islands, cutters, guards = [], [], [], {}
+    pins, islands, guards = [], [], {}
     for island in rotated.slice(d).decompose():
         polys = [np.asarray(p) for p in island.to_polygons()]
         perimeter = sum(float(np.linalg.norm(np.diff(np.vstack([p, p[:1]]), axis=0), axis=1).sum()) for p in polys)
         edge = island.offset(-0.5, m3d.JoinType.Round)
         probe_uv = np.asarray(edge.to_polygons()[0])[0] if not edge.is_empty() else polys[0][0]
         entry = {"cut": event["cut"], "area_mm2": round(island.area()), "length_mm": round(perimeter / 2),
-                 "connector": None, "pins": 0, "probe": (np.array([probe_uv[0], probe_uv[1], d]) @ R).tolist()}
+                 "connector": None, "pins": 0, "keyed": False, "probe": (np.array([probe_uv[0], probe_uv[1], d]) @ R).tolist()}
         islands.append(entry)
         want = int(min(per_joint, max(2, round(perimeter / 2 / spacing))))
-        chosen, cand = None, None
+        best = None  # the first connector size that gives two holes, otherwise the one that gives most
         for index, spec in enumerate(specs):
             inset = island.offset(-keepout(spec), m3d.JoinType.Round)
             if inset.is_empty():
@@ -597,7 +668,10 @@ def place_pins(event: dict, others: list, specs: list, spacing: float, per_joint
             step = max(1.0, min(4.0, math.sqrt(max((x1 - x0) * (y1 - y0), 1.0) / 20000)))
             gx, gy = np.meshgrid(np.arange(x0, x1 + 1e-6, step), np.arange(y0, y1 + 1e-6, step))
             pts = np.column_stack([gx.ravel(), gy.ravel()])
-            pts = pts[inside_mask([np.asarray(p) for p in inset.to_polygons()], pts)]
+            inside = inside_mask([np.asarray(p) for p in inset.to_polygons()], pts)
+            # distance from each point to the edge of the usable area, so holes can stay off thin edges
+            clearance = (distance_transform_edt(np.pad(inside.reshape(gx.shape), 1)) * step)[1:-1, 1:-1].ravel()[inside]
+            pts = pts[inside]
             depth = spec["depth"]
             for dz in (-depth - 0.5, -depth / 2, depth / 2, depth + 0.5):  # the hole must stay inside the wall
                 if not len(pts):
@@ -606,33 +680,30 @@ def place_pins(event: dict, others: list, specs: list, spacing: float, per_joint
                 if key not in guards:
                     wall = spec["diameter"] / 2 + spec["clearance"] + spec["wall"] / 2
                     guards[key] = [np.asarray(p) for p in rotated.slice(d + dz).offset(-wall, m3d.JoinType.Round).to_polygons()]
-                pts = pts[inside_mask(guards[key], pts)] if guards[key] else pts[:0]
+                keep = inside_mask(guards[key], pts) if guards[key] else np.zeros(len(pts), bool)
+                pts, clearance = pts[keep], clearance[keep]
             if len(pts):
                 world = np.column_stack([pts, np.full(len(pts), d)]) @ R
-                pts = pts[clear_of_other_cuts(world, n, depth, keepout(spec), others)]
-            if len(pts):
-                chosen, cand = spec, pts
+                keep = clear_of_other_cuts(world, n, depth, keepout(spec), others)
+                pts, clearance = pts[keep], clearance[keep]
+            if not len(pts):
+                continue
+            picked, keyed = pick_connectors(pts, clearance, want, 2 * keepout(spec))
+            if best is None or len(picked) > len(best[2]):
+                best = (spec, pts, picked, keyed)
+            if len(picked) >= min(2, want):
                 break
-        if chosen is None:
+        if best is None:
             continue
-        picked = [int(np.argmax(np.linalg.norm(cand - cand.mean(axis=0), axis=1)))]
-        nearest = np.linalg.norm(cand - cand[picked[0]], axis=1)
-        while len(picked) < want:
-            k = int(np.argmax(nearest))
-            if nearest[k] < 2 * keepout(chosen):
-                break
-            picked.append(k)
-            nearest = np.minimum(nearest, np.linalg.norm(cand - cand[k], axis=1))
-        entry.update(connector=chosen["label"], pins=len(picked))
+        chosen, cand, picked, keyed = best
+        entry.update(connector=chosen["label"], pins=len(picked), keyed=keyed)
         radius = chosen["diameter"] / 2 + chosen["clearance"]
         for k in picked:
             u, v = (float(x) for x in cand[k])
             pins.append({"p": [round(float(x), 3) for x in np.array([u, v, d]) @ R], "axis": [round(float(x), 6) for x in n],
                          "connector": chosen["label"], "diameter": chosen["diameter"], "hole_diameter": round(2 * radius, 3),
                          "depth": chosen["depth"], "island": len(islands) - 1, "uv": [u, v], "segments": chosen["segments"]})
-            cutters.append(M.cylinder(2 * chosen["depth"], radius, radius, chosen["segments"]).translate([u, v, d - chosen["depth"]]))
-    cutter = rotate(M.batch_boolean(cutters, m3d.OpType.Add), R.T) if cutters else None
-    return pins, islands, cutter
+    return pins, islands
 
 
 def containing_part(parts: list, point, exclude: set = frozenset()):
@@ -810,49 +881,81 @@ def split(work: Path) -> None:
         raise EngineError(f"{oversize} part{'s are' if oversize != 1 else ' is'} still too big for the printer — use Auto-fix or move the cuts")
 
     # holes, placed once every cut is known so no cut can go through a hole
-    pins, islands, cutters = [], [], []
+    pins, islands = [], []
     for j, event in enumerate(events):
         stage.progress(25 + 25 * j / max(len(events), 1), f"Placing alignment holes ({j + 1} of {len(events)} joints)")
         others = [(o["n"], o["d"], o["bb"]) for k, o in enumerate(events)
                   if k != j and not (abs(o["n"] @ event["n"]) > 0.999 and abs(o["d"] * np.sign(o["n"] @ event["n"]) - event["d"]) < 0.5)]
-        new_pins, new_islands, cutter = place_pins(event, others, specs, spacing, per_joint)
+        new_pins, new_islands = place_pins(event, others, specs, spacing, per_joint)
         for pin in new_pins:
             pin["island"] += len(islands)
+            pin["event"] = j
         pins += new_pins
         islands += new_islands
-        if cutter is not None:
-            cutters.append((np.asarray(cutter.bounding_box(), float), cutter))
         event["piece"] = None
 
-    parts = []
-    for piece in pieces:
-        man = piece["man"]
-        bb = np.asarray(man.bounding_box(), float)
-        near = [c for cbb, c in cutters if boxes_overlap(bb, cbb)]
-        cutter = (near[0] if len(near) == 1 else M.batch_boolean(near, m3d.OpType.Add)) if near else None
-        if cutter is not None:
-            man = man - cutter
-        # body and cutter are kept so the preview can be simplified before the holes go in (see parts_preview.bin)
-        parts.append({"man": man, "body": piece["man"], "cutter": cutter,
-                      "bb": np.asarray(man.bounding_box(), float), "normals": piece["normals"]})
-    parts.sort(key=lambda p: (round((p["bb"][2] + p["bb"][5]) / 100), round((p["bb"][1] + p["bb"][4]) / 100), (p["bb"][0] + p["bb"][3]) / 2))
+    def cut_holes() -> list:
+        """The parts with every current hole cut in."""
+        cutters = []
+        for j, event in enumerate(events):
+            cutter = event_cutter(event["n"], [pin for pin in pins if pin["event"] == j])
+            if cutter is not None:
+                cutters.append((np.asarray(cutter.bounding_box(), float), cutter))
+        built = []
+        for piece in pieces:
+            man = piece["man"]
+            bb = np.asarray(man.bounding_box(), float)
+            near = [c for cbb, c in cutters if boxes_overlap(bb, cbb)]
+            cutter = (near[0] if len(near) == 1 else M.batch_boolean(near, m3d.OpType.Add)) if near else None
+            if cutter is not None:
+                man = man - cutter
+            # body and cutter are kept so the preview can be simplified before the holes go in (see parts_preview.bin)
+            built.append({"man": man, "body": piece["man"], "cutter": cutter,
+                          "bb": np.asarray(man.bounding_box(), float), "normals": piece["normals"]})
+        built.sort(key=lambda p: (round((p["bb"][2] + p["bb"][5]) / 100), round((p["bb"][1] + p["bb"][4]) / 100), (p["bb"][0] + p["bb"][3]) / 2))
+        return built
 
+    def unshared_holes(built: list) -> list:
+        """Indexes of holes that are not cut into exactly two parts, recording which parts each one touches."""
+        bad = []
+        for index, pin in enumerate(pins):
+            n = np.asarray(pin["axis"])
+            u, v = pin["uv"]
+            d = float(np.asarray(pin["p"]) @ n)
+            radius = pin["hole_diameter"] / 2
+            sleeve = (M.cylinder(2 * pin["depth"], radius + 0.4, radius + 0.4, pin["segments"])
+                      - M.cylinder(2 * pin["depth"] + 2, radius, radius, pin["segments"]).translate([0, 0, -1]))
+            sleeve = rotate(sleeve.translate([u, v, d - pin["depth"]]), to_z(n).T)
+            sbb = np.asarray(sleeve.bounding_box(), float)
+            touching = [k for k, part in enumerate(built) if boxes_overlap(part["bb"], sbb) and (part["man"] ^ sleeve).volume() > 0.05]
+            pin["parts"] = [k + 1 for k in touching]
+            if len(touching) != 2:
+                bad.append(index)
+        return bad
+
+    stage.progress(52, "Cutting the holes")
+    parts = cut_holes()
     stage.progress(55, "Checking every hole is shared by two parts")
-    bad_holes = []
-    for index, pin in enumerate(pins):
-        n = np.asarray(pin["axis"])
-        R = to_z(n)
-        u, v = pin["uv"]
-        d = float(np.asarray(pin["p"]) @ n)
-        radius = pin["hole_diameter"] / 2
-        sleeve = (M.cylinder(2 * pin["depth"], radius + 0.4, radius + 0.4, pin["segments"])
-                  - M.cylinder(2 * pin["depth"] + 2, radius, radius, pin["segments"]).translate([0, 0, -1]))
-        sleeve = rotate(sleeve.translate([u, v, d - pin["depth"]]), R.T)
-        sbb = np.asarray(sleeve.bounding_box(), float)
-        touching = [k for k, part in enumerate(parts) if boxes_overlap(part["bb"], sbb) and (part["man"] ^ sleeve).volume() > 0.05]
-        pin["parts"] = [k + 1 for k in touching]
-        if len(touching) != 2:
-            bad_holes.append(index)
+    bad_holes = unshared_holes(parts)
+    holes_removed = 0
+    for _ in range(3):  # a hole that is not shared by two parts is dropped, then the check runs again on what is left
+        if not bad_holes:
+            break
+        drop = set(bad_holes)
+        holes_removed += len(drop)
+        for index in drop:
+            island = islands[pins[index]["island"]]
+            island["pins"] -= 1
+            if not island["pins"]:
+                island["connector"] = None
+        pins = [pin for index, pin in enumerate(pins) if index not in drop]
+        stage.progress(58, f"Removing {len(drop)} hole{'s' if len(drop) != 1 else ''} that don't line up")
+        parts = cut_holes()
+        bad_holes = unshared_holes(parts)
+    # a removal can leave a joint with a single hole, which is no longer keyed
+    for island in islands:
+        if island["pins"] < 2:
+            island["keyed"] = False
 
     stage.progress(62, "Working out which parts join")
     joints = {}
@@ -865,9 +968,10 @@ def split(work: Path) -> None:
         if a is None or b is None:
             continue
         key = tuple(sorted((a + 1, b + 1)))
-        joint = joints.setdefault(key, {"parts": list(key), "area_mm2": 0, "rods": 0, "connectors": defaultdict(int), "cuts": set()})
+        joint = joints.setdefault(key, {"parts": list(key), "area_mm2": 0, "rods": 0, "connectors": defaultdict(int), "cuts": set(), "keyed": True})
         joint["area_mm2"] += island["area_mm2"]
         joint["rods"] += island["pins"]
+        joint["keyed"] = joint["keyed"] and (island["keyed"] or not island["pins"])
         joint["cuts"].add(island["cut"])
         if island["connector"]:
             joint["connectors"][island["connector"]] += island["pins"]
@@ -949,6 +1053,9 @@ def split(work: Path) -> None:
             "joints":                 len(joint_list),
             "joints_without_rods":    sum(1 for j in joint_list if not j["rods"]),
             "holes_not_shared_by_two": len(bad_holes),
+            "holes_removed":          holes_removed,
+            "joints_single_rod":      sum(1 for j in joint_list if j["rods"] == 1),
+            "joints_unkeyed":         sum(1 for j in joint_list if j["rods"] and not j["keyed"]),
             "parts_needing_supports": sum(p["needs_supports"] for p in result_parts),
             "volume_cm3":             round(sum(p["volume_cm3"] for p in result_parts), 1),
             "seconds":                round(time.monotonic() - started, 1),

@@ -825,7 +825,7 @@
 
   function loadSettingsKit() {
     if (!settingsKit) {
-      settingsKit = Promise.all([import("/slicer/settings.js?v=4"), fetch("/orca/settings.json").then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })])
+      settingsKit = Promise.all([import("/slicer/settings.js?v=5"), fetch("/orca/settings.json").then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })])
         .then(([mod, schema]) => ({ SettingsPanel: mod.SettingsPanel, schema }))
         .catch(err => { settingsKit = null; throw new Error(`Couldn't load the settings panel (${err.message})`); });
     }

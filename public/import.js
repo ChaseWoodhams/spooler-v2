@@ -45,9 +45,45 @@
     }
   }
 
+  // Several files or a folder: one project holding every model
+  const folderButton = document.getElementById("btn-import-folder");
+  const folderInput = document.getElementById("import-folder");
+  async function importBatch(files, folder) {
+    const models = files.filter(f => FolderImport.MODEL.test(f.name));
+    if (!models.length) { say("There are no STL, OBJ or 3MF files to import", true); return; }
+    button.disabled = true;
+    if (folderButton) folderButton.disabled = true;
+    const label = button.querySelector("span");
+    try {
+      const result = await FolderImport.toNewProject(models, {
+        name: folder,
+        onProgress: (done, total) => { if (label && done < total) label.textContent = `${done + 1}/${total}`; },
+      });
+      if (result.failed.length) say(FolderImport.summary(result, models.length), true);
+      if (typeof closeQueue === "function") closeQueue();
+      location.hash = `#projects=${result.id}`;
+    } catch (err) {
+      say(err.message, true);
+    } finally {
+      button.disabled = false;
+      if (folderButton) folderButton.disabled = false;
+      if (label) label.textContent = "Import";
+    }
+  }
+
   button.addEventListener("click", () => input.click());
+  folderButton?.addEventListener("click", () => folderInput.click());
+  folderInput?.addEventListener("change", () => {
+    const { files, folder } = FolderImport.picked(folderInput.files);
+    folderInput.value = "";
+    importBatch(files, folder);
+  });
   document.getElementById("btn-queue-import")?.addEventListener("click", () => input.click()); // the Queue panel's Import button
-  input.addEventListener("change", () => { importFile(input.files[0]); input.value = ""; });
+  input.addEventListener("change", () => {
+    const files = [...input.files];
+    input.value = "";
+    if (files.length > 1) importBatch(files, ""); else importFile(files[0]);
+  });
 
   // Drop a file anywhere on the dashboard (not onto a form field or a dialog that handles its own drops)
   let depth = 0;
@@ -60,8 +96,10 @@
     e.preventDefault();
     depth = 0;
     document.body.classList.remove("import-dropping");
-    const file = e.dataTransfer.files[0];
-    if (window.QuickPrint) window.QuickPrint.open({ file }); // a dropped file is a Quick print; the Import button still makes a Project
-    else importFile(file);
+    FolderImport.dropped(e.dataTransfer).then(({ files, folder }) => {
+      if (files.length > 1 || folder) { importBatch(files, folder); return; } // a folder or several files make one Project
+      if (window.QuickPrint) window.QuickPrint.open({ file: files[0] }); // a dropped file is a Quick print; the Import button still makes a Project
+      else importFile(files[0]);
+    });
   });
 })();

@@ -58,6 +58,17 @@ KEY_FILE  = DATA_DIR / "key.pem"
 
 MAX_BODY = 100 * 1024 * 1024  # 100 MB
 
+PUBLIC_DIR = Path(__file__).parent / "public"
+
+
+def ui_build() -> str:
+    """Fingerprint of the browser UI's own files (not vendored ones): open pages reload when it changes."""
+    newest = 0
+    for path in PUBLIC_DIR.rglob("*"):
+        if path.suffix in (".html", ".js", ".css") and "vendor" not in path.parts:
+            newest = max(newest, path.stat().st_mtime_ns)
+    return f"{newest:x}"
+
 # When true, Spoolman's web UI is proxied through /spoolman/ on this server.
 # When false (default), /spoolman redirects the browser directly to SPOOLMAN_URL.
 PROXY_SPOOLMAN = os.getenv("PROXY_SPOOLMAN", "true").lower() in ("1", "true", "yes")
@@ -542,6 +553,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             body = (
                 f"window.SPOOLER_WS_PORT  = {ws_port};\n"
                 f"window.SPOOLER_WSS_PORT = {wss_port};\n"
+                f"window.SPOOLER_BUILD    = {json.dumps(ui_build())};\n"
             ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/javascript")
@@ -577,6 +589,10 @@ class SPHandler(SimpleHTTPRequestHandler):
             ok = health.event_loop_responsive()
             self._json({"status": "ok" if ok else "unresponsive", "uptime_s": health.uptime_s()},
                        200 if ok else 503)
+            return
+
+        if self.path == "/api/build":
+            self._json({"build": ui_build()})
             return
 
         if self.path == "/api/auth-status":
@@ -1474,8 +1490,15 @@ class SPHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _Server(ThreadingHTTPServer):
+    # The default listen backlog is 5. Every request is its own connection (HTTP/1.0), so a page load opens dozens at once,
+    # and while slicing or splitting keeps Python busy the accept loop falls behind: Windows refuses the overflow and the
+    # browser reports "Failed to fetch".
+    request_queue_size = 256
+
+
 def run_http(port: int) -> None:
-    server = ThreadingHTTPServer(("0.0.0.0", port), SPHandler)
+    server = _Server(("0.0.0.0", port), SPHandler)
     print(f"[HTTP] Serving on http://0.0.0.0:{port}")
     server.serve_forever()
 
@@ -1485,7 +1508,7 @@ def run_https(port: int) -> None:
         return
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(str(CERT_FILE), str(KEY_FILE))
-    server = ThreadingHTTPServer(("0.0.0.0", port), SPHandler)
+    server = _Server(("0.0.0.0", port), SPHandler)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
     server._is_https = True
     print(f"[HTTPS] Serving on https://0.0.0.0:{port}")
