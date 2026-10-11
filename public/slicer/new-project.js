@@ -45,6 +45,7 @@ function view() {
   return { rows, summary };
 }
 
+let importNotes = []; // what an OrcaSlicer 3MF added to an open project had to leave out or change (from the upload responses)
 let unitsOpen = null; // the model whose "units and up axis" choice is open
 
 function fileNames() {
@@ -137,6 +138,8 @@ function render() {
   }
   box.querySelector(".intake-list").innerHTML = rows.map(rowHtml).join("") + queue.map(queuedHtml).join("");
   box.querySelector(".intake-summary").textContent = summaryText();
+  const notes = box.querySelector(".intake-notes");
+  if (notes) { notes.hidden = !importNotes.length; notes.textContent = importNotes.length ? `Opened with ${importNotes.length === 1 ? "a note" : `${importNotes.length} notes`}: ${importNotes.join(" · ")}` : ""; }
   if (!existing) action.hidden = box.hidden;
   action.disabled = existing ? busy() : !canCreate();
   syncName();
@@ -185,8 +188,9 @@ async function drain() {
         if (!id) return;
         const params = new URLSearchParams({ filename: item.name, scale: "1", up: "z" });   // millimetres, Z up; a wrong guess is fixed per file
         if (existing) params.set("plate", existing.plate);
-        await host.upload(`/api/projects/${id}/models/upload?${params}`, item.file, pct => { item.pct = pct; render(); });
+        const result = await host.upload(`/api/projects/${id}/models/upload?${params}`, item.file, pct => { item.pct = pct; render(); });
         if (mine !== generation) return;
+        if (existing) importNotes = [...new Set([...importNotes, ...(result?.import_notes || [])])];
         queue = queue.filter(q => q !== item);
         await refresh();
       } catch (err) {
@@ -214,6 +218,7 @@ function dropDraft() {
   generation++;
   clearTimeout(timer);
   draft = drafting = intake = unitsOpen = null;
+  importNotes = [];
   queue = [];
   uploading = false;
   creating = false;
@@ -238,7 +243,10 @@ function addTo(project, files) {
 /** Done: forget the table and say how many files it holds (the project keeps them) */
 function finishAdding() {
   const added = view()?.rows.length || 0;
-  if (existing) dropDraft();
+  if (existing) {
+    if (importNotes.length) host.importNotes({ import_notes: importNotes });   // the dialog hides toasts, so say it once it has closed
+    dropDraft();
+  }
   return added;
 }
 
