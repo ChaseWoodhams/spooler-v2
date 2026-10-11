@@ -1161,6 +1161,33 @@ def _scale_suggestion(longest: float, scale: float):
     return None
 
 
+def _loose_limits(record: dict) -> dict:
+    """The project's machine limits, or the defaults while it has no profile yet."""
+    bundle_id = record["data"]["profile"].get("bundle_id")
+    return machine_limits(slicer.bundle_settings(bundle_id)["machine"] if bundle_id else {})
+
+
+def _verdict(analysis: dict, scale: float, limits: dict, rotation, turned=None) -> dict:
+    """What one analysed model needs: its size at `scale` (the unscaled size when that scale looks wrong), whether the size is
+    plausible, the scale fix if not, whether it fits the bed whole, and the reason it can't print yet. `turned(rotation)`
+    gives the size after the model is rotated, for a model whose mesh is at hand."""
+    size = [float(x) for x in analysis["size"]]
+    longest = max(analysis.get("raw_size") or size) * scale    # the rounded size reads 0.0 for a speck
+    doubtful = not PLAUSIBLE_MM[0] <= longest <= PLAUSIBLE_MM[1]
+    fix = _scale_suggestion(longest, scale) if doubtful else None
+    if doubtful:   # the analysis rounds to 0.1 mm, which reads 0 for a speck
+        size = [round(x * scale, 4) for x in analysis.get("raw_size") or size]
+    if any(rotation) and not doubtful and turned:
+        size = turned(rotation)
+    fits = _whole_position(size, limits) is not None
+    reason = None
+    if doubtful:
+        reason = f"The model is {' x '.join(f'{x:g}' for x in size)} mm (longest side {longest:.3g} mm), which looks like the wrong scale"
+    elif not fits:
+        reason = "The model doesn't fit the bed whole, so it needs the Model and Split steps"
+    return {"size": size, "scale": scale, "fix": fix, "fits": fits, "doubtful": doubtful, "reason": reason}
+
+
 def intake(project_id: int) -> dict:
     """What an imported model needs before it can print: analysed yet, repaired, whether it fits the bed whole (so Split
     can be skipped), whether its size is plausible for its scale, and a rough estimate."""
@@ -1182,24 +1209,9 @@ def intake(project_id: int) -> dict:
         return {**out, "state": "failed", "reason": split.get("error") or "The model couldn't be read"}
     if not analysis:
         return {**out, "reason": "The model is still being checked"}
-    bundle_id = record["data"]["profile"].get("bundle_id")
-    limits = machine_limits(slicer.bundle_settings(bundle_id)["machine"] if bundle_id else {})
-    size = [float(x) for x in analysis["size"]]
-    scale = float(split["settings"]["scale"])
-    longest = max(analysis.get("raw_size") or size) * scale    # the rounded size reads 0.0 for a speck
-    doubtful = not PLAUSIBLE_MM[0] <= longest <= PLAUSIBLE_MM[1]
-    fix = _scale_suggestion(longest, scale) if doubtful else None
-    if doubtful:   # the analysis rounds to 0.1 mm, which reads 0 for a speck
-        size = [round(x * scale, 4) for x in analysis.get("raw_size") or size]
     rotation = _orientation(record)
-    if any(rotation) and not doubtful:
-        size = _oriented_size(split, rotation)
-    fits = _whole_position(size, limits) is not None
-    reason = None
-    if doubtful:
-        reason = f"The model is {' x '.join(f'{x:g}' for x in size)} mm (longest side {longest:.3g} mm), which looks like the wrong scale"
-    elif not fits:
-        reason = "The model doesn't fit the bed whole, so it needs the Model and Split steps"
+    verdict = _verdict(analysis, float(split["settings"]["scale"]), _loose_limits(record), rotation, lambda turned: _oriented_size(split, turned))
+    size, scale, fix, fits, doubtful, reason = (verdict[k] for k in ("size", "scale", "fix", "fits", "doubtful", "reason"))
     grams = analysis["volume_cm3"] * ROUGH_G_PER_CM3
     return {**out, "state": "ready", "size": size, "volume_cm3": analysis["volume_cm3"],
             "repaired": bool(analysis.get("repairs")), "repairs": analysis.get("repairs") or [],
@@ -1331,6 +1343,37 @@ def fix_scale(project_id: int) -> dict:
         raise jobs.JobError("The model is already on a plate; change its scale there", 409)
     splits.update_settings(get_project(project_id)["split_id"], {"scale": info["scale_fix"]["scale"]})
     return intake(project_id)
+
+
+def intake_files(project_id: int) -> dict:
+    """The intake table: one row per imported model with what it needs before the project is created (the per-model slice of
+    intake), and a summary. `status` is the row's chip: fits, split (too big for the bed), check_units, or None while it has
+    no verdict. Fit is worked out here against the project's own machine, never the engine's default printer."""
+    record = get_project(project_id)
+    limits = _loose_limits(record)
+    rows = []
+    for model in record["models"]:
+        objects = [o for o in record["data"]["objects"] if o["model"] == model["id"]]
+        row = {"model": model["id"], "object": objects[0]["id"] if objects else None, "file": model["file"], "kind": "model",
+               "state": model["state"], "error": model.get("error"), "size_bytes": model.get("size_bytes"),
+               "size": None, "scale": model["import"][0], "up": model["import"][1], "status": None, "fits": None,
+               "scale_ok": None, "scale_fix": None, "reason": None, "repairs": model.get("repairs") or [],
+               "triangles": model.get("triangles"), "volume_cm3": model.get("volume_cm3"), "copies": len(objects), "estimate": None}
+        if model["state"] == READY and model.get("size"):
+            verdict = _verdict(model, float(row["scale"]), limits, (0.0, 0.0, 0.0))
+            grams = (model.get("volume_cm3") or 0) * ROUGH_G_PER_CM3
+            row.update(size=verdict["size"], fits=verdict["fits"], scale_ok=not verdict["doubtful"], scale_fix=verdict["fix"],
+                       reason=verdict["reason"], status="check_units" if verdict["doubtful"] else "fits" if verdict["fits"] else "split",
+                       estimate={"grams": round(grams), "seconds": round(grams / ROUGH_G_PER_HOUR * 3600), "rough": True})
+        rows.append(row)
+    count = lambda status: sum(1 for r in rows if r["status"] == status)
+    analysing = sum(1 for r in rows if r["state"] not in (READY, FAILED))
+    failed = sum(1 for r in rows if r["state"] == FAILED)
+    summary = {"files": len(rows), "items": sum(r["copies"] for r in rows), "split": count("split"), "fits": count("fits"),
+               "check_units": count("check_units"), "analysing": analysing, "failed": failed}
+    summary["can_create"] = bool(rows) and not (summary["check_units"] or analysing or failed)
+    summary["steps"] = (["split"] if summary["split"] else []) + ["plates", "slice", "queue"]
+    return {"rows": rows, "summary": summary}
 
 
 QUICK_LAYER_HEIGHTS = (0.08, 0.12, 0.16, 0.2, 0.24, 0.28, 0.32)   # the fixed list the Quick print dialog offers (0.4 mm nozzle)
@@ -2481,6 +2524,36 @@ def retry_model(project_id: int, model_id: int) -> dict:
     return get_project(project_id)
 
 
+def rescale_model(project_id: int, model_id: int, scale=None, up=None) -> dict:
+    """Change an imported model's scale and/or up axis (the unit fix) and analyse it again. A model that is already
+    parts laid out from a split can't be changed this way."""
+    record = get_project(project_id)
+    model = next((m for m in record["models"] if m["id"] == model_id), None)
+    if model is None:
+        raise jobs.JobError("Model not found", 404)
+    if model.get("split"):
+        raise jobs.JobError("This model is already laid out as parts; change its scale on the plate", 409)
+    if model["state"] == IMPORTING and model.get("claimed_at"):
+        raise jobs.JobError("The model is being analysed; try again in a moment", 409)
+    settings = splits.normalize_settings({k: v for k, v in (("scale", scale), ("up", up)) if v is not None},
+                                         {"scale": model["import"][0], "up": model["import"][1]})
+    folder = model_dir(project_id, model_id)
+    job = json.loads((folder / "job.json").read_text(encoding="utf-8"))
+    (folder / "job.json").write_text(json.dumps({**job, "scale": settings["scale"], "up": settings["up"]}), encoding="utf-8")
+    for name in ("analysis.json", "model.npz", "work.npz", "preview.bin", "error.json"):
+        (folder / name).unlink(missing_ok=True)
+
+    def requeue(models):
+        for m in models:
+            if m["id"] == model_id:
+                for key in ("claimed_at", "size", "raw_size", "triangles", "volume_cm3", "repairs"):
+                    m.pop(key, None)
+                m.update(state=IMPORTING, error=None, **{"import": [settings["scale"], settings["up"]]})
+    _mutate(project_id, "models", requeue, record["created_at"])
+    notify_worker()
+    return get_project(project_id)
+
+
 def model_preview(project_id: int, model_id: int) -> Path:
     record = get_project(project_id)
     model = next((m for m in record["models"] if m["id"] == model_id), None)
@@ -2500,8 +2573,8 @@ def _run_import(project_id: int, model_id: int) -> dict:
         error = splits._read(folder, "error.json") or {}
         raise jobs.JobError(error.get("error") or f"The model couldn't be imported (exit code {proc.returncode})")
     analysis = splits._read(folder, "analysis.json") or {}
-    return {"state": READY, "error": None, "size": analysis.get("size"), "triangles": analysis.get("triangles"),
-            "volume_cm3": analysis.get("volume_cm3"), "repairs": analysis.get("repairs", [])}
+    return {"state": READY, "error": None, "size": analysis.get("size"), "raw_size": analysis.get("raw_size"),
+            "triangles": analysis.get("triangles"), "volume_cm3": analysis.get("volume_cm3"), "repairs": analysis.get("repairs", [])}
 
 
 # ── Geometry ───────────────────────────────────────────────────────────────────

@@ -1145,6 +1145,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json(projects.plate_status(project_id))
             elif len(parts) == 5 and parts[4] == "intake":
                 self._json(projects.intake(project_id))
+            elif len(parts) == 5 and parts[4] == "intake-files":
+                self._json(projects.intake_files(project_id))
             elif len(parts) == 5 and parts[4] == "quick-options":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 self._json(projects.quick_options(project_id, (query.get("preset") or [None])[0]))
@@ -1252,6 +1254,12 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if len(parts) == 7 and parts[4] == "models" and parts[5].isdigit() and parts[6] == "retry":
             self._jobs_call(lambda: projects.retry_model(self._job_id(), int(parts[5])), broadcast=False)
+            return
+        if len(parts) == 7 and parts[4] == "models" and parts[5].isdigit() and parts[6] == "settings":
+            def rescale():
+                body = self._json_body()
+                return projects.rescale_model(self._job_id(), int(parts[5]), body.get("scale"), body.get("up"))
+            self._jobs_call(rescale, broadcast=False)
             return
         if len(parts) == 6 and parts[4] == "models" and parts[5] == "upload":
             self._handle_project_upload()
