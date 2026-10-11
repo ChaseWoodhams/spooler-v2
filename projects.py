@@ -388,11 +388,21 @@ def _create_project_from_single_object_3mf(path: Path, stem: str, scale, up, qui
     return {**get_project(project["id"]), "import_notes": list(dict.fromkeys(notes))}
 
 
-def delete_project(project_id: int) -> None:
-    """Delete the project and its files, and each of its split models unless another project uses that split too."""
+def delete_project(project_id: int, only_draft_idle_before: float | None = None, only_draft: bool = False) -> None:
+    """Delete the project and its files, and each of its split models unless another project uses that split too.
+    With `only_draft` the row goes only if it is still a draft (and, with `only_draft_idle_before`, still idle since then),
+    decided in the same transaction as the delete so a Create that lands meanwhile keeps its project."""
     record = get_project(project_id)
+    only_draft = only_draft or only_draft_idle_before is not None
     with database.transaction() as conn:
-        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        sql, args = "DELETE FROM projects WHERE id = ?", [project_id]
+        if only_draft:
+            sql += " AND draft = 1"
+        if only_draft_idle_before is not None:
+            sql += " AND updated_at < ?"
+            args.append(only_draft_idle_before)
+        if conn.execute(sql, args).rowcount == 0 and only_draft:
+            raise jobs.JobError(DRAFT_GONE, 409)
         doomed = [i for i in record["split_ids"]
                   if not conn.execute("SELECT 1 FROM projects WHERE split_id = ? UNION SELECT 1 FROM project_splits WHERE split_id = ?",
                                       (i, i)).fetchone()]
@@ -414,20 +424,55 @@ def draft_idle_hours() -> float:
         return 24.0
 
 
+DRAFT_GONE = "This new project was already created or cleared away. Start again."
+
+
+def require_draft(project_id: int, token) -> dict:
+    """The new-project table's guard: the project must still be the very draft the page made. SQLite reuses ids, so a tab
+    holding a swept draft's id is told so (409) rather than editing whatever project took the id; `token` is the draft's
+    created_at as the page received it."""
+    record = get_project(project_id)
+    try:
+        same = float(token) == record["created_at"]
+    except (TypeError, ValueError):
+        same = False
+    if not record["draft"] or not same:
+        raise jobs.JobError(DRAFT_GONE, 409)
+    return record
+
+
+def _create_blocker(rows: list, summary: dict) -> str:
+    """Why a draft can't be created yet, in plain words ("" when it can)."""
+    if summary["analysing"]:
+        return "Wait for the models to be checked."
+    if summary["failed"]:
+        return "Retry or remove the model that couldn't be read."
+    if summary["check_units"]:
+        return f"Check the size of {summary['check_units']} model{'s' if summary['check_units'] != 1 else ''} marked Check units."
+    return "" if rows else "Add a model first."
+
+
 def create_draft(project_id: int, name: str) -> dict:
     """Create: give the draft its final name and make it a normal, visible project. Returns the project and the first
     step to open: `model` while any of its split models is not yet placed, else `plates`. Every row too big for the bed
-    becomes a split of its own first (make_split); the fits-whole models stay where they are."""
+    becomes a split of its own first (make_split); the fits-whole models stay where they are. The conversion comes first
+    and the promotion last, so a failure leaves a draft that can Create again."""
     record = get_project(project_id)
     if not record["draft"]:
-        raise jobs.JobError("This project is not a draft", 409)
+        raise jobs.JobError(DRAFT_GONE, 409)
+    table = intake_files(project_id)
+    blocker = _create_blocker(table["rows"], table["summary"])
+    if blocker and not (blocker == "Add a model first." and record["split_ids"]):
+        raise jobs.JobError(blocker, 409)
     final = _clean_name(name) or record["name"]
-    with database.transaction() as conn:
-        conn.execute("UPDATE projects SET name = ?, draft = 0, updated_at = ? WHERE id = ? AND draft = 1",
-                     (final, time.time(), project_id))
-    for row in intake_files(project_id)["rows"]:
+    for row in table["rows"]:
         if row["status"] == "split":
             make_split(project_id, row["model"])
+    with database.transaction() as conn:
+        promoted = conn.execute("UPDATE projects SET name = ?, draft = 0, updated_at = ? WHERE id = ? AND draft = 1",
+                                (final, time.time(), project_id)).rowcount
+    if not promoted:
+        raise jobs.JobError(DRAFT_GONE, 409)
     project = get_project(project_id)
     return {"project": project, "step": "model" if unplaced_splits(project) else "plates"}
 
@@ -450,6 +495,9 @@ def make_split(project_id: int, model_id: int) -> dict:
     source = model_dir(project_id, model_id) / "source" / model["file"]
     with source.open("rb") as fh:
         split = splits.create_split(fh, source.stat().st_size, model["file"], {"scale": model["import"][0], "up": model["import"][1]})
+    copies = sum(1 for o in record["data"]["objects"] if o["model"] == model_id)
+    if copies > 1:   # the Copies the row asked for go onto whatever the split becomes (see _split_copies)
+        _mutate(project_id, "data", lambda d: d.setdefault("split_copies", {}).__setitem__(str(split["id"]), copies))
     with database.transaction() as conn:
         if record.get("split_id") is None:
             conn.execute("UPDATE projects SET split_id = ? WHERE id = ?", (split["id"], project_id))
@@ -458,11 +506,12 @@ def make_split(project_id: int, model_id: int) -> dict:
     return delete_model(project_id, model_id)
 
 
-def discard_draft(project_id: int) -> None:
-    """Delete a draft and its files (the page was closed or cancelled). Anything that is not a draft is refused."""
+def discard_draft(project_id: int, idle_before: float | None = None) -> None:
+    """Delete a draft and its files (the page was closed or cancelled). Anything that is not a draft is refused, and the
+    row is deleted only while it is still a draft, so a Create that lands meanwhile keeps its project."""
     if not get_project(project_id)["draft"]:
-        raise jobs.JobError("This project is not a draft", 409)
-    delete_project(project_id)
+        raise jobs.JobError(DRAFT_GONE, 409)
+    delete_project(project_id, only_draft=True, only_draft_idle_before=idle_before)
 
 
 def sweep_drafts(idle_hours: float | None = None) -> list:
@@ -475,7 +524,7 @@ def sweep_drafts(idle_hours: float | None = None) -> list:
     swept = []
     for project_id in ids:
         try:
-            discard_draft(project_id)
+            discard_draft(project_id, idle_before=cutoff)
             swept.append(project_id)
         except jobs.JobError:
             pass   # promoted or deleted since the list was read
@@ -635,7 +684,7 @@ def validate_data(raw, record: dict) -> dict:
         out["arrange_engine"] = ORCA
     # A quick print's chosen orientation is the server's alone: whatever a save sends, the stored value is kept (the
     # other writers, _mutate on "data", change a copy of the stored data and so keep it too).
-    for key in ("orientation", "orientations"):    # "orientations" holds one per split once a project has turned several
+    for key in ("orientation", "orientations", "split_copies"):    # one orientation per split once a project has turned several; Copies a split was made with
         if (record.get("data") or {}).get(key):
             out[key] = record["data"][key]
     return out
@@ -1005,10 +1054,15 @@ def _orca_project_config(project_id: int, settings: dict) -> dict:
 
 def add_split_parts(project_id: int, split_id: int, numbers=None) -> dict:
     """Bring the parts of any split model into the project, packed onto plates (see lay_out_split)."""
-    return lay_out_split(project_id, numbers, split_id=split_id)
+    return lay_out_split(project_id, numbers, split_id=split_id, adopt=True)
 
 
 # ── Laying out plates ──────────────────────────────────────────────────────────
+
+def _split_or_first(record: dict, split_id: int | None) -> int | None:
+    """The split a call is about: the one asked for, else the project's first (a Quick print has just one)."""
+    return split_id if split_id is not None else record.get("split_id")
+
 
 def _machine_limits_for(record: dict) -> dict:
     bundle_id = record["data"]["profile"]["bundle_id"]
@@ -1060,7 +1114,7 @@ def _replace_split_models(project_id: int, split_id: int, new_models: list, layo
                     target = _new_plate(_next_id(data["plates"]), overrides)
                     data["plates"].append(target)
                 for item in plate["items"]:
-                    model = by_part[item["key"]]
+                    model = by_part[item["key"][0]]
                     data["objects"].append({"id": next_object, "model": model["id"], "name": model["name"], "plate": target["id"],
                                             "position": [round(item["center"][0], 3), round(item["center"][1], 3)],
                                             "rotation": [0.0, 0.0, 90.0 if item["turned"] else 0.0], "scale": [1.0, 1.0, 1.0],
@@ -1100,22 +1154,31 @@ def _file_footprint(path: Path) -> tuple:
     return float(size[0]), float(size[1])
 
 
-def lay_out_split(project_id: int, numbers=None, split_id: int | None = None) -> dict:
+def _split_copies(record: dict, split_id: int) -> int:
+    """How many of the split (every part of it, or the whole model) the project asked for."""
+    return int((record["data"].get("split_copies") or {}).get(str(split_id), 1))
+
+
+def lay_out_split(project_id: int, numbers=None, split_id: int | None = None, adopt: bool = False) -> dict:
     """Put a split model's parts on plates, packed onto as few as fit the printer profile's bed. Parts that need
-    supports get plates of their own with tree supports on. Laying out again replaces the parts placed before."""
+    supports get plates of their own with tree supports on. Laying out again replaces the parts placed before. The split
+    must belong to the project unless `adopt` (bringing in the parts of another split model)."""
     _require_geometry()
     record = get_project(project_id)
-    split_id = split_id if split_id is not None else record.get("split_id")
+    split_id = _split_or_first(record, split_id)
     if split_id is None:
         raise jobs.JobError("This project has no split model", 409)
+    if not adopt and split_id not in record["split_ids"]:
+        raise jobs.JobError("That split model doesn't belong to this project", 409)
     split = splits.get_split(split_id, detail=True)
     wanted = {int(n) for n in numbers} if numbers else None
     parts = [p for p in (split.get("result") or {}).get("parts", []) if wanted is None or p["number"] in wanted]
     if not parts:
         raise jobs.JobError("Split the model before laying out its parts", 409)
     limits = _machine_limits_for(record)
-    items = [{"key": p["number"], "size": _file_footprint(splits.work_dir(split_id) / "parts" / p["file"]),
-              "group": bool(p["needs_supports"])} for p in parts]
+    copies = _split_copies(record, split_id)
+    items = [{"key": (p["number"], copy), "size": _file_footprint(splits.work_dir(split_id) / "parts" / p["file"]),
+              "group": bool(p["needs_supports"])} for p in parts for copy in range(copies)]
     profile = record["data"]["profile"]["process"]
     layout = [plate for supported in (False, True)   # plain plates first, then the ones with supports
               for plate in packing.pack([i for i in items if i["group"] == supported], limits["bed"], limits["exclude"],
@@ -1157,7 +1220,7 @@ def place_whole_model(project_id: int, split_id: int | None = None) -> dict:
     that fits the printer without splitting."""
     _require_geometry()
     record = get_project(project_id)
-    split_id = split_id if split_id is not None else record.get("split_id")
+    split_id = _split_or_first(record, split_id)
     if split_id is None or split_id not in record["split_ids"]:
         raise jobs.JobError("This project has no uploaded model", 409)
     split = splits.get_split(split_id, detail=True)
@@ -1171,10 +1234,18 @@ def place_whole_model(project_id: int, split_id: int | None = None) -> dict:
     model = _store_source(project_id, _next_id(record["models"]), split["source_name"],
                           _copy_from(splits.work_dir(split_id) / split["source_file"]), split["settings"]["scale"], split["settings"]["up"])
     model["split"] = {"id": split_id, "part": 0, "supports": False}
-    layout = [{"group": False, "items": [{"key": 0, "center": center, "turned": False, "oversize": False}]}]
+    copies = _split_copies(record, split_id)
+    if copies > 1:
+        layout = packing.pack([{"key": (0, i), "size": tuple(size[:2]), "group": False} for i in range(copies)], limits["bed"], limits["exclude"])
+    else:
+        layout = [{"group": False, "items": [{"key": (0, 0), "center": center, "turned": False, "oversize": False}]}]
     placed = _replace_split_models(project_id, split_id, [model], layout)
-    if any(rotation):
-        _mutate(project_id, "data", lambda d: [o.__setitem__("rotation", list(rotation)) for o in d["objects"] if o["model"] == model["id"]])
+    if any(rotation):   # a copy the packer turned a quarter keeps that turn on top of the model's own orientation
+        def orient(d):
+            for o in d["objects"]:
+                if o["model"] == model["id"]:
+                    o["rotation"] = [rotation[0], rotation[1], (rotation[2] + o["rotation"][2]) % 360]
+        _mutate(project_id, "data", orient)
         placed = get_project(project_id)
     return placed
 
@@ -1236,7 +1307,7 @@ def intake(project_id: int, split_id: int | None = None) -> dict:
     """What an imported model needs before it can print: analysed yet, repaired, whether it fits the bed whole (so Split
     can be skipped), whether its size is plausible for its scale, and a rough estimate."""
     record = get_project(project_id)
-    split_id = split_id if split_id is not None else record.get("split_id")
+    split_id = _split_or_first(record, split_id)
     entry = (record["slices"] or {}).get("1") or {}
     if split_id is None and entry.get("imported") and not record["data"]["objects"]:   # uploaded G-code: already sliced
         grams = entry.get("estimate_g")
@@ -1268,7 +1339,7 @@ def _orientation(record: dict, split_id: int | None = None) -> list:
     """The rotation (degrees about X, Y, Z) a split's model will be placed with, before it is on a plate. A split without
     one of its own takes the project's single orientation when it is the project's first split (how projects saved before
     this were stored), else none."""
-    split_id = split_id if split_id is not None else record.get("split_id")
+    split_id = _split_or_first(record, split_id)
     own = (record["data"].get("orientations") or {}).get(str(split_id))
     if own is None and split_id == record.get("split_id"):
         own = record["data"].get("orientation")
@@ -1322,7 +1393,7 @@ def _largest_face_normal(verts, tris):
 def _quick_orientation(project_id: int, change, split_id: int | None = None) -> dict:
     """Change a quick model's orientation before it is placed: `change(split, current rotation)` gives the new one."""
     record = get_project(project_id)
-    split_id = split_id if split_id is not None else record.get("split_id")
+    split_id = _split_or_first(record, split_id)
     if split_id is None:
         raise jobs.JobError("This project has no uploaded model", 409)
     if any((m.get("split") or {}).get("id") == split_id for m in record["models"]):

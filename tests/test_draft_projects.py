@@ -85,6 +85,9 @@ class DraftProjectTests(unittest.TestCase):
         path.write_bytes(b"solid")
         return path
 
+    def ready_model(self, project_id):
+        projects._mutate(project_id, "models", lambda m: m.append({"id": 1, "name": "a", "file": "a.stl", "state": "ready", "import": [1.0, "z"]}))
+
     def attach_split(self, project_id):
         with database.transaction() as conn:
             conn.execute("INSERT INTO splits (id, source_name, source_file, state, settings, created_at, updated_at) "
@@ -156,6 +159,7 @@ class DraftProjectTests(unittest.TestCase):
         real_empty = projects.create_project("Empty but visible")
         quick = projects.create_project("Quick", quick=True)
         promoted = self.draft()
+        self.ready_model(promoted["id"])
         self.call("POST", f"/api/projects/{promoted['id']}/create", {"name": "Promoted"})
         stale = self.draft()
         self.clock = T0 + 1000 * HOUR
@@ -187,6 +191,46 @@ class DraftProjectTests(unittest.TestCase):
         for pid in (real["id"], quick["id"]):
             self.assertEqual(self.call("POST", f"/api/projects/{pid}/discard-draft")[0], 409)
             self.assertEqual(self.call("GET", f"/api/projects/{pid}")[0], 200)
+
+    # ── stale draft ids ───────────────────────────────────────────────────────
+
+    def test_a_tab_holding_a_swept_drafts_id_is_refused_once_the_id_is_reused(self):
+        old = self.draft()
+        projects.delete_project(old["id"])
+        self.clock += 10
+        real = self.call("POST", "/api/projects", {"name": "Real"})[1]
+        self.assertEqual(real["id"], old["id"])   # SQLite hands the freed id to the next project
+        token = old["created_at"]
+        base = f"/api/projects/{old['id']}"
+        self.assertEqual(self.call("GET", f"{base}/intake-files?draft_token={token}")[0], 409)
+        self.assertEqual(self.call("DELETE", f"{base}/models/1?draft_token={token}")[0], 409)
+        for tail in ("copies", "models/1/retry", "models/1/settings", "create"):
+            self.assertEqual(self.call("POST", f"{base}/{tail}", {"draft_token": token, "name": "X", "object": 1, "copies": 2})[0], 409, tail)
+        self.assertEqual(self.call("POST", f"{base}/discard-draft?draft_token={token}")[0], 409)
+        self.assertEqual(self.call("GET", base)[1]["name"], "Real")
+
+    def test_a_reused_id_that_is_a_newer_draft_is_refused_too_and_the_right_token_is_accepted(self):
+        old = self.draft()
+        projects.delete_project(old["id"])
+        self.clock += 10
+        newer = self.draft()
+        base = f"/api/projects/{newer['id']}/intake-files"
+        self.assertEqual(self.call("GET", f"{base}?draft_token={old['created_at']}")[0], 409)
+        self.assertEqual(self.call("GET", f"{base}?draft_token={newer['created_at']}")[0], 200)
+
+    # ── a concurrent Create cannot lose its project ───────────────────────────
+
+    def test_discarding_a_draft_that_was_promoted_meanwhile_keeps_the_project(self):
+        draft = self.draft()
+        self.ready_model(draft["id"])
+        stale = projects.get_project(draft["id"])   # what a slow discard read before Create landed
+        self.call("POST", f"/api/projects/{draft['id']}/create", {"name": "Kept"})
+        with mock.patch.object(projects, "get_project", return_value=stale):
+            with self.assertRaises(jobs.JobError):
+                projects.discard_draft(draft["id"])
+            self.assertEqual(projects.sweep_drafts(idle_hours=0), [])
+        self.assertEqual(projects.get_project(draft["id"])["name"], "Kept")
+        self.assertTrue(projects.project_dir(draft["id"]).exists())
 
     # ── migration ─────────────────────────────────────────────────────────────
 

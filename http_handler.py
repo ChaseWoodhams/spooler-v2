@@ -779,7 +779,10 @@ class SPHandler(SimpleHTTPRequestHandler):
         if self.path.startswith("/api/projects/"):
             parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'projects', <id>, 'models', <model id>]
             if len(parts) == 6 and parts[4] == "models" and parts[5].isdigit():
-                self._jobs_call(lambda: projects.delete_model(self._job_id(), int(parts[5])), broadcast=False)
+                def remove():
+                    self._guard_draft(self._job_id())
+                    return projects.delete_model(self._job_id(), int(parts[5]))
+                self._jobs_call(remove, broadcast=False)
             elif len(parts) == 4:
                 self._jobs_call(lambda: projects.delete_project(self._job_id()), broadcast=False)
             else:
@@ -1146,6 +1149,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             elif len(parts) == 5 and parts[4] == "intake":
                 self._json(projects.intake(project_id))
             elif len(parts) == 5 and parts[4] == "intake-files":
+                self._guard_draft(project_id)
                 self._json(projects.intake_files(project_id))
             elif len(parts) == 5 and parts[4] == "quick-options":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -1202,10 +1206,15 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._handle_project_upload(new_project=True)
             return
         if len(parts) == 5 and parts[3].isdigit() and parts[4] == "create":   # promote a draft
-            self._jobs_call(lambda: projects.create_draft(self._job_id(), self._json_body().get("name", "")), broadcast=False)
+            def create_it():
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                return projects.create_draft(self._job_id(), body.get("name", ""))
+            self._jobs_call(create_it, broadcast=False)
             return
         if len(parts) == 5 and parts[3].isdigit() and parts[4] == "discard-draft":   # navigator.sendBeacon on page close
             def discard():
+                self._guard_draft(self._job_id())
                 projects.discard_draft(self._job_id())
                 return {"ok": True}
             self._jobs_call(discard, broadcast=False)
@@ -1254,15 +1263,23 @@ class SPHandler(SimpleHTTPRequestHandler):
         if len(parts) == 5 and parts[4] == "copies":
             def copies():
                 body = self._json_body()
+                self._guard_draft(self._job_id(), body)
                 return projects.set_copies(self._job_id(), body.get("object"), body.get("copies"), body.get("revision"))
             self._jobs_call(copies, broadcast=False)
             return
         if len(parts) == 7 and parts[4] == "models" and parts[5].isdigit() and parts[6] == "retry":
-            self._jobs_call(lambda: projects.retry_model(self._job_id(), int(parts[5])), broadcast=False)
+            def retry():
+                self._guard_draft(self._job_id(), self._json_body())
+                return projects.retry_model(self._job_id(), int(parts[5]))
+            self._jobs_call(retry, broadcast=False)
+            return
+        if len(parts) == 7 and parts[4] == "models" and parts[5].isdigit() and parts[6] == "make-split":   # Done in the add-files dialog
+            self._jobs_call(lambda: projects.make_split(self._job_id(), int(parts[5])), broadcast=False)
             return
         if len(parts) == 7 and parts[4] == "models" and parts[5].isdigit() and parts[6] == "settings":
             def rescale():
                 body = self._json_body()
+                self._guard_draft(self._job_id(), body)
                 return projects.rescale_model(self._job_id(), int(parts[5]), body.get("scale"), body.get("up"))
             self._jobs_call(rescale, broadcast=False)
             return
@@ -1299,6 +1316,15 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         self._json({"error": "Not found"}, 404)
 
+    def _guard_draft(self, project_id: int, body: dict | None = None) -> None:
+        """A page working on a new project's draft names it by its created_at (`draft_token`, in the query or the body):
+        if the project is no longer that draft, say so (409) instead of touching whatever took its id."""
+        token = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("draft_token") or [None])[0]
+        if token is None and body:
+            token = body.get("draft_token")
+        if token is not None:
+            projects.require_draft(project_id, token)
+
     def _handle_project_upload(self, new_project: bool = False):
         # The body is the raw model file, streamed to disk; scale, up axis and plate travel in the query string.
         # new_project: the file starts a new project (stored as a split model, analysed before anything else).
@@ -1318,9 +1344,12 @@ class SPHandler(SimpleHTTPRequestHandler):
                                                                           bed=value("bed") or "textured",
                                                                           quick=value("quick") in ("1", "true")))
             return
-        self._jobs_call(lambda: projects.import_model(self._job_id(), self.rfile, length, value("filename"),
+        def add():
+            self._guard_draft(self._job_id())
+            return projects.import_model(self._job_id(), self.rfile, length, value("filename"),
                                                      scale=value("scale") or 1.0, up=value("up") or "z",
-                                                     plate_id=value("plate") or None), broadcast=False)
+                                                     plate_id=value("plate") or None)
+        self._jobs_call(add, broadcast=False)
 
     def _handle_split_upload(self):
         # The body is the raw model file, streamed to disk; scale and up axis travel in the query string.

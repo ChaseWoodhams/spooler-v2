@@ -147,6 +147,86 @@ class SeveralSplitsTests(unittest.IsolatedAsyncioTestCase):
         result = projects.create_draft(draft["id"], "Small")
         self.assertEqual((result["step"], result["project"]["split_ids"]), ("plates", []))
 
+    async def test_create_refuses_a_draft_that_is_not_ready_and_stays_a_draft(self):
+        draft = projects.create_project("D", draft=True)
+        self.add(draft["id"], "big.stl", (400, 40, 20))   # not analysed yet
+        with self.assertRaises(jobs.JobError) as ctx:
+            projects.create_draft(draft["id"], "D")
+        self.assertEqual(ctx.exception.status, 409)
+        await self.settle()
+        tiny = cube_stl(1)
+        projects.import_model(draft["id"], io.BytesIO(tiny), len(tiny), "tiny.stl")
+        await self.settle()
+        with self.assertRaises(jobs.JobError) as ctx:
+            projects.create_draft(draft["id"], "D")
+        self.assertIn("Check units", str(ctx.exception))
+        self.assertTrue(projects.get_project(draft["id"])["draft"])
+        self.assertEqual(projects.list_projects(), [])
+
+    async def test_a_failed_conversion_leaves_a_draft_that_can_create_again(self):
+        draft = await self.mixed_draft(small=1, big=2)
+        real = projects.make_split
+        calls = []
+
+        def flaky(project_id, model_id):
+            calls.append(model_id)
+            if len(calls) == 2:
+                raise jobs.JobError("disk full")
+            return real(project_id, model_id)
+        with mock.patch.object(projects, "make_split", flaky):
+            with self.assertRaises(jobs.JobError):
+                projects.create_draft(draft["id"], "Retry")
+        self.assertTrue(projects.get_project(draft["id"])["draft"])
+        result = projects.create_draft(draft["id"], "Retry")
+        self.assertEqual((result["project"]["draft"], len(result["project"]["split_ids"])), (False, 2))
+
+    def add_copies(self, project_id, model_id, extra):
+        def clone(data):
+            source = next(o for o in data["objects"] if o["model"] == model_id)
+            for _ in range(extra):
+                data["objects"].append({**source, "id": max(o["id"] for o in data["objects"]) + 1})
+        projects._mutate(project_id, "data", clone)
+
+    async def test_a_models_copies_survive_becoming_a_split_whole(self):
+        draft = projects.create_project("D", draft=True)
+        data = cube_stl(30)
+        projects.import_model(draft["id"], io.BytesIO(data), len(data), "a.stl")
+        await self.settle()
+        model = projects.get_project(draft["id"])["models"][0]
+        self.add_copies(draft["id"], model["id"], 2)
+        project = projects.make_split(draft["id"], model["id"])
+        self.assertEqual(project["data"]["objects"], [])
+        await self.settle()
+        placed =projects.place_whole_model(project["id"], project["split_id"])
+        self.assertEqual(len(placed["data"]["objects"]), 3)
+        self.assertEqual(len({o["model"] for o in placed["data"]["objects"]}), 1)
+
+    async def test_a_models_copies_survive_becoming_a_split_cut_into_parts(self):
+        draft = projects.create_project("D", draft=True)
+        data = box_stl(self.dir / "big.stl", (400, 40, 20))
+        projects.import_model(draft["id"], io.BytesIO(data), len(data), "big.stl")
+        await self.settle()
+        model = projects.get_project(draft["id"])["models"][0]
+        self.add_copies(draft["id"], model["id"], 1)
+        project = projects.create_draft(draft["id"], "Big")["project"]
+        await self.settle()
+        splits.request_split(project["split_id"])
+        await self.settle()
+        laid = projects.lay_out_split(project["id"], split_id=project["split_id"])
+        parts = len(splits.get_split(project["split_id"], detail=True)["result"]["parts"])
+        self.assertEqual(len(laid["data"]["objects"]), 2 * parts)
+
+    async def test_laying_out_a_split_the_project_does_not_own_is_refused(self):
+        a = projects.create_draft((await self.mixed_draft(small=0, big=1))["id"], "A")["project"]
+        b = projects.create_draft((await self.mixed_draft(small=0, big=1))["id"], "B")["project"]
+        await self.settle()
+        splits.request_split(b["split_id"])
+        await self.settle()
+        with self.assertRaises(jobs.JobError) as ctx:
+            projects.lay_out_split(a["id"], split_id=b["split_id"])
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(projects.get_project(a["id"])["models"], [])
+
     def test_the_migration_is_additive(self):
         path = self.dir / "old.db"
         conn = sqlite3.connect(path)
