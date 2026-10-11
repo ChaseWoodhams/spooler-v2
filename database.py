@@ -244,6 +244,10 @@ MIGRATIONS = [
     );
     CREATE INDEX slice_log_by_project ON slice_log (project_id, plate_id);
     """,
+    # 11 — Draft projects (additive): the hidden home of files uploaded before Create; swept when abandoned
+    """
+    ALTER TABLE projects ADD COLUMN draft INTEGER NOT NULL DEFAULT 0 CHECK (draft IN (0, 1));
+    """,
 ]
 
 _lock = threading.RLock()

@@ -1193,11 +1193,20 @@ class SPHandler(SimpleHTTPRequestHandler):
                     split_id = int(body["split_id"]) if body.get("split_id") not in (None, "") else None
                 except (TypeError, ValueError):
                     raise jobs.JobError("split_id must be a split number")
-                return projects.create_project(body.get("name", ""), split_id=split_id)
+                return projects.create_project(body.get("name", ""), split_id=split_id, draft=bool(body.get("draft")))
             self._jobs_call(create, broadcast=False)
             return
         if path == "/api/projects/upload":
             self._handle_project_upload(new_project=True)
+            return
+        if len(parts) == 5 and parts[3].isdigit() and parts[4] == "create":   # promote a draft
+            self._jobs_call(lambda: projects.create_draft(self._job_id(), self._json_body().get("name", "")), broadcast=False)
+            return
+        if len(parts) == 5 and parts[3].isdigit() and parts[4] == "discard-draft":   # navigator.sendBeacon on page close
+            def discard():
+                projects.discard_draft(self._job_id())
+                return {"ok": True}
+            self._jobs_call(discard, broadcast=False)
             return
         if len(parts) == 5 and parts[4] in ("auto-place", "fix-scale", "print", "open-as-project", "lay-flat", "rotate"):
             actions = {

@@ -203,6 +203,7 @@ def _to_project(row) -> dict:
     record["models"] = json.loads(record["models"] or "[]")
     record["slices"] = json.loads(record["slices"] or "{}")
     record["quick"] = bool(record.get("quick"))
+    record["draft"] = bool(record.get("draft"))
     record["server_time"] = time.time()  # lets a browser with a different clock show how long a slice has been running
     for plate in record["data"].get("plates", []):
         entry = record["slices"].get(str(plate["id"]))
@@ -220,9 +221,10 @@ def get_project(project_id: int) -> dict:
 
 
 def list_projects(include_quick: bool = False) -> list:
-    """Projects, newest first. Quick projects (hidden behind Quick print) are left out unless `include_quick`."""
+    """Projects, newest first. Quick projects (hidden behind Quick print) are left out unless `include_quick`;
+    drafts (files uploaded before Create) are always left out."""
     with database.transaction() as conn:
-        rows = conn.execute("SELECT * FROM projects" + ("" if include_quick else " WHERE quick = 0")
+        rows = conn.execute("SELECT * FROM projects WHERE draft = 0" + ("" if include_quick else " AND quick = 0")
                             + " ORDER BY updated_at DESC, id DESC").fetchall()
     out = []
     for record in map(_to_project, rows):
@@ -249,9 +251,10 @@ def _new_plate(plate_id: int, overrides: dict | None = None) -> dict:
     return {"id": plate_id, "name": f"Plate {plate_id}", "overrides": dict(overrides or {})}
 
 
-def create_project(name: str = "", split_id: int | None = None, quick: bool = False) -> dict:
+def create_project(name: str = "", split_id: int | None = None, quick: bool = False, draft: bool = False) -> dict:
     """A project with one empty plate. With `split_id` it belongs to that split model and lays out its parts.
-    A `quick` project is hidden from project listings; it is reached by id."""
+    A `quick` project is hidden from project listings; it is reached by id. A `draft` is hidden too, until
+    create_draft promotes it, and is swept when abandoned."""
     if split_id is not None:
         splits.get_split(split_id)
     remembered = remembered_defaults.usable()
@@ -264,8 +267,10 @@ def create_project(name: str = "", split_id: int | None = None, quick: bool = Fa
             "plates": [plate], "objects": []}
     now = time.time()
     with database.transaction() as conn:
-        project_id = conn.execute("INSERT INTO projects (name, data, split_id, quick, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                                  (_clean_name(name) or "Untitled project", json.dumps(data), split_id, int(bool(quick)), now, now)).lastrowid
+        project_id = conn.execute("INSERT INTO projects (name, data, split_id, quick, draft, created_at, updated_at) "
+                                  "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                  (_clean_name(name) or "Untitled project", json.dumps(data), split_id, int(bool(quick)), int(bool(draft)),
+                                   now, now)).lastrowid
     project_dir(project_id).mkdir(parents=True, exist_ok=True)
     return get_project(project_id)
 
@@ -391,6 +396,68 @@ def delete_project(project_id: int) -> None:
             splits.delete_split(split_id)
         except jobs.JobError:
             pass  # already deleted
+
+
+# ── Drafts ─────────────────────────────────────────────────────────────────────
+
+def draft_idle_hours() -> float:
+    """How long a draft may sit untouched before the sweep deletes it (DRAFT_IDLE_HOURS, default 24)."""
+    try:
+        return max(0.0, float(os.getenv("DRAFT_IDLE_HOURS", "24")))
+    except ValueError:
+        return 24.0
+
+
+def create_draft(project_id: int, name: str) -> dict:
+    """Create: give the draft its final name and make it a normal, visible project. Returns the project and the first
+    step to open: `model` while its split model is not yet placed, else `plates`."""
+    record = get_project(project_id)
+    if not record["draft"]:
+        raise jobs.JobError("This project is not a draft", 409)
+    final = _clean_name(name) or record["name"]
+    with database.transaction() as conn:
+        conn.execute("UPDATE projects SET name = ?, draft = 0, updated_at = ? WHERE id = ? AND draft = 1",
+                     (final, time.time(), project_id))
+    project = get_project(project_id)
+    split_id = project.get("split_id")
+    unplaced = split_id is not None and not any((m.get("split") or {}).get("id") == split_id for m in project["models"])
+    return {"project": project, "step": "model" if unplaced else "plates"}
+
+
+def discard_draft(project_id: int) -> None:
+    """Delete a draft and its files (the page was closed or cancelled). Anything that is not a draft is refused."""
+    if not get_project(project_id)["draft"]:
+        raise jobs.JobError("This project is not a draft", 409)
+    delete_project(project_id)
+
+
+def sweep_drafts(idle_hours: float | None = None) -> list:
+    """Delete drafts untouched for `idle_hours` (default draft_idle_hours()) and return their ids. Only rows flagged
+    draft are ever considered, so real, quick and promoted projects are safe."""
+    limit = draft_idle_hours() if idle_hours is None else idle_hours
+    cutoff = time.time() - limit * 3600
+    with database.transaction() as conn:
+        ids = [r["id"] for r in conn.execute("SELECT id FROM projects WHERE draft = 1 AND updated_at < ?", (cutoff,))]
+    swept = []
+    for project_id in ids:
+        try:
+            discard_draft(project_id)
+            swept.append(project_id)
+        except jobs.JobError:
+            pass   # promoted or deleted since the list was read
+    return swept
+
+
+async def draft_sweep_loop(interval_s: float = 3600) -> None:
+    """Sweep abandoned drafts at startup and then every `interval_s`."""
+    while True:
+        try:
+            swept = await asyncio.to_thread(sweep_drafts)
+            if swept:
+                print(f"[Projects] Removed {len(swept)} abandoned draft project(s)")
+        except Exception as e:
+            print(f"[Projects] Draft sweep failed: {e}")
+        await asyncio.sleep(interval_s)
 
 
 def _numbers(value, count: int, name: str, low: float, high: float) -> list:

@@ -144,6 +144,7 @@ async def main() -> None:
         asyncio.create_task(slicer.worker_loop()),
         asyncio.create_task(splits.worker_loop()),
         asyncio.create_task(projects.worker_loop()),
+        asyncio.create_task(projects.draft_sweep_loop()),
         asyncio.create_task(session_cleanup_loop()),
         asyncio.create_task(health.loop_lag_monitor()),
         asyncio.create_task(health.spoolman_monitor_loop()),
