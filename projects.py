@@ -635,8 +635,9 @@ def validate_data(raw, record: dict) -> dict:
         out["arrange_engine"] = ORCA
     # A quick print's chosen orientation is the server's alone: whatever a save sends, the stored value is kept (the
     # other writers, _mutate on "data", change a copy of the stored data and so keep it too).
-    if (record.get("data") or {}).get("orientation"):
-        out["orientation"] = record["data"]["orientation"]
+    for key in ("orientation", "orientations"):    # "orientations" holds one per split once a project has turned several
+        if (record.get("data") or {}).get(key):
+            out[key] = record["data"][key]
     return out
 
 
@@ -1164,7 +1165,7 @@ def place_whole_model(project_id: int, split_id: int | None = None) -> dict:
         raise jobs.JobError("Wait for the model to be analysed", 409)
     limits = _machine_limits_for(record)
     x0, y0, x1, y1 = limits["bed"]
-    rotation = _orientation(record)
+    rotation = _orientation(record, split_id)
     size = _oriented_size(split, rotation) if any(rotation) else split["analysis"]["size"]
     center = _whole_position(size, limits) or ((x0 + x1) / 2, (y0 + y1) / 2)
     model = _store_source(project_id, _next_id(record["models"]), split["source_name"],
@@ -1252,7 +1253,7 @@ def intake(project_id: int, split_id: int | None = None) -> dict:
         return {**out, "state": "failed", "reason": split.get("error") or "The model couldn't be read"}
     if not analysis:
         return {**out, "reason": "The model is still being checked"}
-    rotation = _orientation(record)
+    rotation = _orientation(record, split_id)
     verdict = _verdict(analysis, float(split["settings"]["scale"]), _loose_limits(record), rotation, lambda turned: _oriented_size(split, turned))
     size, scale, fix, fits, doubtful, reason = (verdict[k] for k in ("size", "scale", "fix", "fits", "doubtful", "reason"))
     grams = analysis["volume_cm3"] * ROUGH_G_PER_CM3
@@ -1263,9 +1264,15 @@ def intake(project_id: int, split_id: int | None = None) -> dict:
             "estimate": {"grams": round(grams), "seconds": round(grams / ROUGH_G_PER_HOUR * 3600), "rough": True}}
 
 
-def _orientation(record: dict) -> list:
-    """The rotation (degrees about X, Y, Z) a quick model will be placed with, before it is on a plate."""
-    return [float(r) for r in record["data"].get("orientation") or (0.0, 0.0, 0.0)]
+def _orientation(record: dict, split_id: int | None = None) -> list:
+    """The rotation (degrees about X, Y, Z) a split's model will be placed with, before it is on a plate. A split without
+    one of its own takes the project's single orientation when it is the project's first split (how projects saved before
+    this were stored), else none."""
+    split_id = split_id if split_id is not None else record.get("split_id")
+    own = (record["data"].get("orientations") or {}).get(str(split_id))
+    if own is None and split_id == record.get("split_id"):
+        own = record["data"].get("orientation")
+    return [float(r) for r in own or (0.0, 0.0, 0.0)]
 
 
 def _split_mesh(split: dict):
@@ -1323,8 +1330,13 @@ def _quick_orientation(project_id: int, change, split_id: int | None = None) -> 
     split = splits.get_split(split_id, detail=True)
     if not split.get("analysis"):
         raise jobs.JobError("Wait for the model to be analysed", 409)
-    rotation = [r % 360 for r in change(split, _orientation(record))]
-    _mutate(project_id, "data", lambda d: d.__setitem__("orientation", rotation))
+    rotation = [r % 360 for r in change(split, _orientation(record, split_id))]
+
+    def store(data):
+        data.setdefault("orientations", {})[str(split_id)] = rotation
+        if split_id == record.get("split_id"):   # the first split's stays where older projects (and readers) keep it
+            data["orientation"] = rotation
+    _mutate(project_id, "data", store)
     return intake(project_id, split_id)
 
 

@@ -160,6 +160,44 @@ class SeveralSplitsTests(unittest.IsolatedAsyncioTestCase):
             projects.init()
         self.assertEqual(projects.get_project(1)["split_ids"], [])
 
+    async def two_oversized_splits(self):
+        draft = projects.create_project("D", draft=True)
+        for name in ("a.stl", "b.stl"):
+            data = box_stl(self.dir / name, (30, 50, 10))
+            projects.import_model(draft["id"], io.BytesIO(data), len(data), name)
+        await self.settle()
+        for model in projects.get_project(draft["id"])["models"]:
+            projects.make_split(draft["id"], model["id"])
+        await self.settle()
+        return projects.get_project(draft["id"])
+
+    async def test_two_splits_rotate_independently(self):
+        project = await self.two_oversized_splits()
+        first, second = project["split_ids"]
+        projects.rotate_quarter(project["id"], first)
+        projects.rotate_quarter(project["id"], first)
+        projects.rotate_quarter(project["id"], second)
+        self.assertEqual(projects.intake(project["id"], first)["rotation"], [0.0, 0.0, 180.0])
+        self.assertEqual(projects.intake(project["id"], second)["rotation"], [0.0, 0.0, 90.0])
+
+    async def test_each_split_is_placed_with_its_own_orientation(self):
+        project = await self.two_oversized_splits()
+        first, second = project["split_ids"]
+        projects.rotate_quarter(project["id"], second)
+        projects.place_whole_model(project["id"], first)
+        placed = projects.place_whole_model(project["id"], second)
+        turned = {m["split"]["id"]: next(o["rotation"] for o in placed["data"]["objects"] if o["model"] == m["id"]) for m in placed["models"]}
+        self.assertEqual(turned, {first: [0.0, 0.0, 0.0], second: [0.0, 0.0, 90.0]})
+
+    async def test_a_project_saved_with_one_orientation_keeps_it_for_its_first_split(self):
+        project = await self.two_oversized_splits()
+        first, second = project["split_ids"]
+        projects._mutate(project["id"], "data", lambda d: d.__setitem__("orientation", [0.0, 0.0, 90.0]))
+        self.assertEqual(projects.intake(project["id"], first)["rotation"], [0.0, 0.0, 90.0])
+        self.assertEqual(projects.intake(project["id"], second)["rotation"], [0.0, 0.0, 0.0])
+        projects.rotate_quarter(project["id"], first)
+        self.assertEqual(projects.get_project(project["id"])["data"]["orientation"], [0.0, 0.0, 180.0])
+
 
 if __name__ == "__main__":
     unittest.main()
