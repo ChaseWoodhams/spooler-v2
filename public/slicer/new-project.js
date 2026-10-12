@@ -151,14 +151,14 @@ const STEP_TEXT = {
   split: s => `${plural(s.split, "model")} bigger than the bed will be cut into parts that fit.`,
   plates: s => `${plural(s.objects, "object")} (copies included) arranged onto plates automatically.`,
   slice: () => "Default settings; change anything in All settings later.",
-  queue: () => "Send the plates to a printer.",
+  print: () => "Send the plates to a printer and start them.",
 };
-const STEP_NAME = { split: "Split", plates: "Plates", slice: "Slice", queue: "Queue" };
+const STEP_NAME = { split: "Split", plates: "Plates", slice: "Slice", print: "Print" };
 
 /** The "What happens next" panel: the steps this project will take, the mixed-upload sentence and why Create is blocked */
 function renderPlan() {
   const s = intake?.summary, box = $("new-intake");
-  const steps = s?.steps || ["plates", "slice", "queue"];
+  const steps = s?.steps || ["plates", "slice", "print"];
   box.querySelector(".plan-steps").innerHTML = s ? steps.map((step, i) => `<li><span class="n">${i + 1}</span><div><b>${STEP_NAME[step]}</b><small>${STEP_TEXT[step](s)}</small></div></li>`).join("") : "";
   maybePreview();
   renderPack();

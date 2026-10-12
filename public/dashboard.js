@@ -128,12 +128,13 @@ function syncShellView() {
   document.getElementById("btn-printers-nav").classList.toggle("active", !projects);
   if (projects) {
     const frame = document.getElementById("projects-frame");
-    const params = new URLSearchParams(hash.slice(1)); // #projects=<id>[&printer=<id>]
+    const params = new URLSearchParams(hash.slice(1)); // #projects=<id>[&printer=<id>][&step=print]
     const id = Number(params.get("projects")) || 0;
     const fresh = params.get("projects") === "new"; // header and Queue "New project": the Projects page opens on its New project form
     const printer = id ? params.get("printer") || "" : ""; // from a push: focus that printer's card on the project page
-    const target = id ? `/slicer.html?project=${id}${printer ? `&printer=${encodeURIComponent(printer)}` : ""}` : fresh ? "/slicer.html?new=1" : "/slicer.html";
-    const route = fresh ? "new" : `${id}|${printer}`;
+    const toPrint = id && ["print", "queue"].includes(params.get("step")); // a link to the Project's printing stage (the old Queue step is Print now)
+    const target = id ? `/slicer.html?project=${id}${printer ? `&printer=${encodeURIComponent(printer)}` : ""}${toPrint ? "&step=print" : ""}` : fresh ? "/slicer.html?new=1" : "/slicer.html";
+    const route = fresh ? "new" : `${id}|${printer}${toPrint ? "|print" : ""}`;
     if (!frame.getAttribute("src") || ((id || fresh) && frame.dataset.route !== route)) {
       frame.dataset.route = route;
       frame.src = target;
@@ -150,9 +151,10 @@ function syncShellView() {
 document.addEventListener("click", event => {
   const link = event.target.closest('a[href^="/slicer.html"]');
   if (!link || link.closest("#projects-view") || event.ctrlKey || event.metaKey || event.shiftKey) return;
-  const id = new URL(link.href).searchParams.get("project");
+  const query = new URL(link.href).searchParams;
+  const id = query.get("project");
   event.preventDefault();
-  location.hash = id ? `#projects=${id}` : "#projects";
+  location.hash = id ? `#projects=${id}${["print", "queue"].includes(query.get("step")) ? "&step=print" : ""}` : "#projects";
 });
 
 window.addEventListener("hashchange", syncShellView);

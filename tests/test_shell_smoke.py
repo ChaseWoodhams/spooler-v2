@@ -618,5 +618,82 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         await self.page.until("document.querySelector('#step-bar .slicer-step.active')?.dataset.step === 'slice'", what="the Slice step")
 
 
+    # ── The Queue step is gone: every way into it lands on Print ────────────────────────────────────────────────
+
+    async def step_bar(self):
+        return await self.page.js("JSON.stringify([...document.querySelectorAll('#step-bar [data-step]')].map(b => b.dataset.step))")
+
+    async def active_step(self):
+        return await self.page.js("document.querySelector('#step-bar .slicer-step.active')?.dataset.step")
+
+    async def test_the_step_bar_has_no_queue_step_and_the_sidebar_has_no_queue_cards(self):
+        await self.open_print_step(self.make_board_project(offline_printing=False))
+        self.assertEqual(json.loads(await self.step_bar()), ["plates", "slice", "print"])
+        self.assertEqual(await self.page.js("['jobs-card', 'send-plates', 'btn-send-batch', 'job-batches'].filter(id => document.getElementById(id)).length"), 0)
+
+    async def test_a_remembered_queue_step_opens_print(self):
+        project_id = self.make_board_project(offline_printing=False)
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html")
+        await self.page.js(f"localStorage.setItem('slicer.step.{project_id}', 'queue')")
+        await self.goto(f"{self.base}/slicer.html?project={project_id}")
+        await self.page.until("!!document.querySelector('#project-page [data-group]')", what="the Plate board")
+        self.assertEqual(await self.active_step(), "print")
+
+    async def test_a_queue_deep_link_opens_print_on_that_project(self):
+        project_id = self.make_small_project(sliced=True)
+        await self.hold_qr_script()
+        for step in ("queue", "print"):
+            await self.goto(f"{self.base}/slicer.html?project={project_id}&step={step}")
+            await self.page.until("!!document.querySelector('#project-page [data-group]')", what="the Plate board")
+            self.assertEqual(await self.active_step(), "print")
+
+    async def test_an_old_push_link_lands_on_print_with_that_printer_focused(self):
+        project_id = self.make_board_project(offline_printing=False)
+        frame = "document.getElementById('projects-frame').contentDocument"
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={project_id}&printer=p1")   # the old link, outside the app shell
+        await self.page.until("location.pathname === '/' && location.hash.startsWith('#projects=')", what="the shell")
+        self.assertEqual(await self.page.js("new URLSearchParams(location.hash.slice(1)).get('printer')"), "p1")
+        await self.page.until(f"!!{frame}.querySelector('#project-page [data-group]')", what="Print in the frame")
+        self.assertEqual(await self.page.js(f"{frame}.querySelector('#step-bar .slicer-step.active').dataset.step"), "print")
+
+    async def test_the_shell_opens_a_project_on_print_when_the_link_asks_for_it(self):
+        project_id = self.make_board_project(offline_printing=False)
+        frame = "document.getElementById('projects-frame').contentDocument"
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/#projects={project_id}&step=queue")
+        await self.page.until(f"!!{frame}.querySelector('#project-page [data-group]')", what="Print in the frame")
+        self.assertEqual(await self.page.js(f"{frame}.querySelector('#step-bar .slicer-step.active').dataset.step"), "print")
+
+    async def test_the_queue_page_links_a_batch_back_to_print_on_its_project(self):
+        project_id = self.make_board_project(offline_printing=False)
+        with database.transaction() as conn:
+            for plate in (5, 8):
+                conn.execute("INSERT INTO jobs (name, state, source, file_name, created_at, updated_at, project_id, plate_id, batch_id) "
+                             "VALUES (?, 'queued', 'upload', ?, 1, 1, ?, ?, 'b1')", (f"Plate {plate} - Board", f"plate{plate}.gcode", project_id, plate))
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/?queue=1")
+        await self.page.js("loadJobs()")   # the page loads the Jobs when its websocket opens, which the test server does not offer
+        await self.page.until("document.getElementById('panel-queue').classList.contains('open')", what="the global Queue to open")
+        link = await self.page.until("document.querySelector('.queue-batch-head a[href*=\"/slicer.html\"]')?.getAttribute('href')", what="the batch's Project link")
+        self.assertEqual(link, f"/slicer.html?project={project_id}&step=print")
+
+    async def test_a_gcode_project_has_print_as_its_only_step(self):
+        data = {"bed": "textured", "profile": {"bundle_id": "x"}, "plates": [{"id": 1, "name": "Plate 1"}], "objects": []}
+        slices = {"1": {"state": "sliced", "imported": True, "estimate_s": 600, "estimate_g": 10}}
+        with database.transaction() as conn:
+            project_id = conn.execute("INSERT INTO projects (name, data, models, slices, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
+                                      ("Gcode", json.dumps(data), json.dumps([]), json.dumps(slices))).lastrowid
+        folder = projects.plate_dir(project_id, 1)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "plate.gcode").write_bytes(b"; test\nG28\n")
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={project_id}")
+        await self.page.until("!!document.querySelector('#project-page [data-group]')", what="Print")
+        self.assertEqual(json.loads(await self.step_bar()), ["print"])
+        self.assertEqual(await self.active_step(), "print")
+
+
 if __name__ == "__main__":
     unittest.main()

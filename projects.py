@@ -1581,7 +1581,7 @@ def intake_files(project_id: int) -> dict:
     summary = {"models": len(rows), "objects": sum(r["copies"] for r in rows), "split": count("split"), "fits": count("fits"),
                "check_units": count("check_units"), "analysing": analysing, "failed": failed}
     summary["can_create"] = bool(rows) and not (summary["check_units"] or analysing or failed)
-    summary["steps"] = (["split"] if summary["split"] else []) + ["plates", "slice", "queue"]
+    summary["steps"] = (["split"] if summary["split"] else []) + ["plates", "slice", "print"]
     return {"rows": rows, "summary": summary}
 
 

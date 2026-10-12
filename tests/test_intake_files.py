@@ -88,13 +88,13 @@ class IntakeFilesTests(unittest.TestCase):
         self.assertEqual((huge["file"], huge["status"], huge["fits"], huge["scale_ok"]), ("huge.stl", "split", False, True))
         self.assertEqual((small["model"], small["object"], small["copies"], small["scale"], small["up"]), (1, 1, 1, 1.0, "z"))
         self.assertEqual(body["summary"], {"models": 2, "objects": 2, "split": 1, "fits": 1, "check_units": 0, "analysing": 0, "failed": 0,
-                                           "can_create": True, "steps": ["split", "plates", "slice", "queue"]})
+                                           "can_create": True, "steps": ["split", "plates", "slice", "print"]})
 
     def test_a_model_that_fits_everywhere_skips_the_split_step(self):
         project = projects.create_project("Small")
         self.add(project, "small.stl", 20)
         self.settle()
-        self.assertEqual(self.files(project)["summary"]["steps"], ["plates", "slice", "queue"])
+        self.assertEqual(self.files(project)["summary"]["steps"], ["plates", "slice", "print"])
 
     def test_a_doubtful_size_offers_its_scale_fix_and_blocks_create(self):
         project = projects.create_project("Units")
