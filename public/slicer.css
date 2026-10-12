@@ -615,3 +615,8 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .pp-plate-btn { flex: 1 1 140px; min-height: 36px; text-align: left; background: transparent; color: var(--text); border: 0; font-size: 13px; cursor: pointer; }
 .pp-state { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--c); font-weight: 600; white-space: nowrap; }
 .pp-reason { flex-basis: 100%; font-size: 12px; color: var(--red); padding-bottom: 4px; }
+.pp-fold { background: transparent; border: 0; color: inherit; font: inherit; font-weight: 700; cursor: pointer; padding: 0; min-height: 44px; }
+.pp-card-acts { display: flex; gap: 6px; flex-basis: 100%; padding: 2px 0 6px; }
+.pp-card-act, .pp-printer [data-outcome], .pp-actions .btn { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
+.pp-autostart { min-height: 44px; }
+.pp-queue-link { font-size: 13px; justify-self: end; }

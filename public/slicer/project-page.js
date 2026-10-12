@@ -20,6 +20,7 @@ let status = null; // GET /api/projects/<id>/status
 let jobs = [];
 let printers = [];
 let allPrinters = []; // every printer the page was told about, whatever its type (printers keeps the ones the queue can use)
+let awaitingPlates = new Set(); // Plate ids whose last print is waiting for an answer, so the card can offer the Outcome
 let awaiting = new Set();   // printer ids whose last print is waiting for an answer (OutcomePrompt)
 let focusedPrinter = false; // a push deep link (?printer=) is scrolled to once
 const focusPrinterId = new URLSearchParams(location.search).get("printer"); // read at load: opening a project rewrites the URL
@@ -29,6 +30,19 @@ let holdPicker = null;      // plate id whose "Hold after..." chooser is open
 let holdChoice = "";        // the chooser's current value: "plate:<id>" or "job:<id>"
 let warnPanel = null;       // { jobId, titles }: warnings found when queueing that wait for an accept
 let selected = null;
+let folds = new Set();   // board groups the user closed; remembered per Project
+
+const memoryKey = () => `spooler.print.${host.projectId()}`;
+function remember() {
+  try { localStorage.setItem(memoryKey(), JSON.stringify({ selected, folds: [...folds] })); } catch (err) { /* private window: the page still works */ }
+}
+function recall() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(memoryKey()) || "{}");
+    selected = Number.isInteger(saved.selected) ? saved.selected : null;
+    folds = new Set(Array.isArray(saved.folds) ? saved.folds : []);
+  } catch (err) { selected = null; folds = new Set(); }
+}
 let timer = null;
 
 function duration(seconds) {
@@ -122,17 +136,26 @@ function boardGroups() {
   return GROUPS.filter(([id]) => groups[id].length).map(([id, title]) => ({ id, title, cards: groups[id] }));
 }
 
+/** The actions a Plate's own card offers: Start (through Review) for a queued one, the Outcome for one whose print ended, Reprint for a failed one. */
+function cardActions(plate) {
+  const acts = [];
+  if (plate.status === "queued" && plate.job_id) acts.push(`<a class="btn btn-primary btn-sm pp-card-act" href="/?review=${plate.job_id}" title="Preview the toolpath, run the preflight checks and start">Start</a>`);
+  if (awaitingPlates.has(plate.id)) acts.push(`<button type="button" class="btn btn-primary btn-sm pp-card-act" data-outcome-plate="${plate.id}">Printed OK / Failed…</button>`);
+  if (plate.status === "failed") acts.push(`<button type="button" class="btn btn-primary btn-sm pp-card-act" data-act="reprint" data-card-plate="${plate.id}" title="Queue this plate again from its stored G-code">Reprint</button>`);
+  return acts.length ? `<span class="pp-card-acts">${acts.join("")}</span>` : "";
+}
+
 function plateBoard() {
   const queued = jobs.filter(j => j.state === "queued");
   const canAssign = queued.length > 1 && printers.some(p => p.connected);
-  return `<div class="pp-board">${boardGroups().map(({ id, title, cards }) => `<section class="pp-card pp-group pp-group-${id}" data-group="${id}" aria-labelledby="pp-group-${id}">
-    <div class="pp-group-head"><h3 id="pp-group-${id}">${title} <span class="slicer-muted">${cards.length}</span></h3>
+  return `<div class="pp-board"><a class="pp-queue-link" href="/?queue=1">Open the Queue page</a>${boardGroups().map(({ id, title, cards }) => `<section class="pp-card pp-group pp-group-${id}" data-group="${id}" aria-labelledby="pp-group-${id}">
+    <div class="pp-group-head"><h3 id="pp-group-${id}"><button type="button" class="pp-fold" data-fold="${id}" aria-expanded="${!folds.has(id)}">${folds.has(id) ? "▸" : "▾"} ${title} <span class="slicer-muted">${cards.length}</span></button></h3>
       ${id === "queued" ? `<button type="button" class="btn btn-secondary btn-sm" data-act="assign"${canAssign ? "" : " disabled"}
         title="Spread the queued plates over the connected printers so they finish about together, by estimated print time">Assign printers · balance by time</button>` : ""}</div>
-    <ul class="pp-plates">${cards.map(({ plate, word, reason }) => `<li class="pp-plate st-${plate.status}${plate.id === selected ? " sel" : ""}" data-plate-card>
+    <ul class="pp-plates"${folds.has(id) ? " hidden" : ""}>${cards.map(({ plate, word, reason }) => `<li class="pp-plate st-${plate.status}${plate.id === selected ? " sel" : ""}" data-plate-card>
       <button type="button" class="pp-plate-btn" data-plate="${plate.id}" aria-pressed="${plate.id === selected}">${esc(plate.name)}</button>
       <span class="pp-state"><i class="pp-dot st-${plate.status}"></i>${word}</span>
-      ${reason ? `<span class="pp-reason">${esc(reason)}</span>` : ""}</li>`).join("")}</ul></section>`).join("")}</div>`;
+      ${reason ? `<span class="pp-reason">${esc(reason)}</span>` : ""}${cardActions(plate)}</li>`).join("")}</ul></section>`).join("")}</div>`;
 }
 
 function detail() {
@@ -214,7 +237,9 @@ async function refresh() {
     if (!shown || host.projectId() !== id) return;
     status = s; jobs = j.jobs; printers = cc1; allPrinters = p; allJobs = all.jobs;
     autoStart = Object.fromEntries(cc1.map((x, i) => [x.id, beds[i]?.auto_start !== false]));
-    awaiting = new Set((await OutcomePrompt.awaiting()).map(a => a.printer_id));
+    const waitingOn = await OutcomePrompt.awaiting();
+    awaiting = new Set(waitingOn.map(a => a.printer_id));
+    awaitingPlates = new Set(waitingOn.filter(a => a.project_id === id && a.plate_id != null).map(a => a.plate_id));
     render();
     const focus = focusPrinterId;
     if (focus && !focusedPrinter) {   // opened from a push: bring that printer's card into view
@@ -278,12 +303,22 @@ function bind() {
   root.addEventListener("click", async e => {
     const ask = e.target.closest("[data-outcome]");
     if (ask) { OutcomePrompt.open(ask.dataset.outcome); return; }
+    const fold = e.target.closest("[data-fold]");
+    if (fold) { const g = fold.dataset.fold; folds.has(g) ? folds.delete(g) : folds.add(g); remember(); render(); return; }
+    const outcomeCard = e.target.closest("[data-outcome-plate]");
+    if (outcomeCard) {
+      const item = (await OutcomePrompt.awaiting()).find(a => a.project_id === host.projectId() && a.plate_id === Number(outcomeCard.dataset.outcomePlate));
+      if (item) OutcomePrompt.open(item.printer_id);
+      return;
+    }
+    const own = e.target.closest("[data-card-plate]");
+    if (own) selected = Number(own.dataset.cardPlate);   // a card's action acts on that card's Plate
     const cell = e.target.closest("[data-plate]");
     const button = e.target.closest("[data-act]");
     if (button && !button.disabled) {
       button.disabled = true;
       try { await act(button.dataset.act, button); } catch (err) { host.toast(err.message, true); } finally { button.disabled = false; }
-    } else if (cell) { selected = Number(cell.dataset.plate); render(); }
+    } else if (cell) { selected = Number(cell.dataset.plate); remember(); render(); }
   });
   root.addEventListener("change", async e => {
     const choice = e.target.closest("[data-holdchoice]");
@@ -312,7 +347,7 @@ function bind() {
 
 export const projectPage = {
   attach(hooks) { host = hooks; bind(); },
-  show() { shown = true; focusedPrinter = false; status = null; selected = null; $("project-page").innerHTML = '<p class="slicer-muted">Loading…</p>'; refresh(); },
+  show() { shown = true; focusedPrinter = false; status = null; recall(); $("project-page").innerHTML = '<p class="slicer-muted">Loading…</p>'; refresh(); },
   hide() { shown = false; clearTimeout(timer); },
   /** Redraw from what is already loaded (a slice finished, the selection moved). */
   redraw() { render(); },

@@ -372,6 +372,35 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(board["printing"], ["Plate 2: printing now", "Plate 4: starting to print"])
         self.assertIn("Plate 7: needs slicing", board["ready"])
 
+    async def test_plate_cards_carry_the_print_actions_and_print_remembers_its_place(self):
+        project_id = self.make_board_project(offline_printing=False)
+        with database.transaction() as conn:
+            queued_job = conn.execute("SELECT id FROM jobs WHERE plate_id = 3 AND project_id = ?", (project_id,)).fetchone()[0]
+        await self.open_print_step(project_id)
+        page = self.page
+        card = lambda n: f"[...document.querySelectorAll('#project-page [data-plate-card]')].find(c => c.querySelector('[data-plate]').textContent.trim() === 'Plate {n}')"
+        # Start on a Queued card goes to Review and start (the preflight), as a 44 px target
+        self.assertEqual(await page.js(f"{card(3)}.querySelector('a.pp-card-act').getAttribute('href')"), f"/?review={queued_job}")
+        self.assertIn("Start", await page.js(f"{card(3)}.querySelector('a.pp-card-act').textContent"))
+        self.assertGreaterEqual(await page.js(f"{card(3)}.querySelector('a.pp-card-act').getBoundingClientRect().height"), 44)
+        # a failed Plate offers Reprint next, on its own card, and acting on it does not need it selected first
+        self.assertGreaterEqual(await page.js(f"{card(7)}.querySelector('[data-act=reprint]').getBoundingClientRect().height"), 44)
+        await page.js("window.__posts = []; const f = window.fetch; window.fetch = (u, o) => { if (o && o.method === 'POST') window.__posts.push(String(u)); return f(u, o); }")
+        await page.js(f"{card(7)}.querySelector('[data-act=reprint]').click()")
+        await page.until(f"window.__posts.includes('/api/projects/{project_id}/plates/7/reprint')", what="the reprint request for Plate 7")
+        # selecting a card shows its preview and facts
+        await page.js(f"{card(5)}.querySelector('[data-plate]').click()")
+        await page.until("!!document.querySelector('#project-page .pp-side .pp-preview')", what="the selected Plate's preview")
+        self.assertIn("Plate 5", await page.js("document.querySelector('#project-page .pp-side').textContent"))
+        # the global Queue page is one link away
+        self.assertEqual(await page.js("document.querySelector('#project-page a[href=\"/?queue=1\"]')?.getAttribute('href')"), "/?queue=1")
+        # a fold stays shut, and the selected Plate stays selected, across a reload
+        await page.js("document.querySelector('#project-page [data-fold=done]').click()")
+        self.assertTrue(await page.js("document.querySelector('#project-page [data-group=done] .pp-plates').hidden"))
+        await self.open_print_step(project_id)
+        self.assertEqual(await page.js("document.querySelector('#project-page .pp-plate.sel [data-plate]').textContent.trim()"), "Plate 5")
+        self.assertTrue(await page.js("document.querySelector('#project-page [data-group=done] .pp-plates').hidden"))
+
 
 if __name__ == "__main__":
     unittest.main()
