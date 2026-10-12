@@ -1,4 +1,4 @@
-/* Spooler – project workspace (slicer.html): Model → Split → Plates → Slice → Queue */
+/* Spooler – project workspace (slicer.html): Model → Split → Plates → Slice → Print */
 body.slicer-page { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 body.slicer-page [hidden] { display: none !important; }
 body.slicer-page a.btn { text-decoration: none; }
@@ -34,15 +34,6 @@ body.slicer-page a.btn { text-decoration: none; }
 .slicer-plate-row .dot.failed { background: var(--red); }
 .slicer-plate-row .dot.busy { background: var(--accent); animation: slicer-pulse 1s infinite alternate; }
 
-.slicer-batches { display: flex; flex-direction: column; gap: 10px; }
-.slicer-batch { display: flex; flex-direction: column; gap: 4px; }
-.slicer-batch-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--text-muted); }
-.slicer-job { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; padding: 6px 8px; border: 1px solid var(--border);
-  border-radius: 6px; font-size: 13px; }
-.slicer-job-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.slicer-job-controls { grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.slicer-job-controls select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font-size: 12px; }
-.slicer-assign { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px dashed var(--border); border-radius: 6px; }
 
 .slicer-new-model { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); margin: 6px 0 10px; }
 .slicer-new-model h4 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
@@ -411,14 +402,8 @@ body.print-step .slicer-sidebar { display: none; }
 .pp-printer { border-left: 4px solid var(--c); gap: 4px; }
 .pp-layout { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr); gap: 12px; align-items: start; }
 .pp-side { display: grid; gap: 12px; }
-.pp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); gap: 6px; }
-.pp-cell { aspect-ratio: 1; border-radius: 8px; border: 2px solid var(--c); display: grid; place-items: center; font-size: 12px; cursor: pointer;
-  background: rgba(255, 255, 255, .02); color: var(--text); }
-.pp-cell.sel { background: var(--c); color: #000; font-weight: 700; }
-.pp-legend { display: flex; gap: 6px; flex-wrap: wrap; }
 .pp-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--c); color: var(--c); white-space: nowrap; }
 .pp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); display: inline-block; }
-.pp-next { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 13px; }
 .pp-printon { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .pp-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .project-page .st-unsliced { --c: #6b6f7b; } .project-page .st-sliced { --c: #5aa9ff; } .project-page .st-queued { --c: #facc15; }
@@ -442,8 +427,6 @@ body.embedded .slicer-home { display: none; }
 
 .slicer-object-select { border: 0; background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; padding: 4px 0; }
 .slicer-sidebar-toggle { align-self: flex-start; margin: 4px 10px; }
-.slicer-batch-summary { padding: 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
-.slicer-batch-summary ul { padding-left: 20px; }
 .slicer-slice-state { white-space: normal; overflow: visible; }
 .slicer-float { background: var(--surface); }
 .slicer-error { color: var(--red); }
@@ -457,14 +440,10 @@ body.embedded .slicer-home { display: none; }
 .project-page .st-printed_ok { --c: var(--green); }
 .project-page .st-failed { --c: var(--red); }
 .light-mode .project-page .st-waiting { --c: #6b21a8; }
-.light-mode .pp-cell.sel { color: #fff; }
 .pp-warn, .slicer-warn { color: var(--red); }
 .slicer-tool-group { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 4px; background: var(--surface); }
 .slicer-tool-group > span { color: var(--text-muted); font-size: 12px; }
 .slicer-toolbar { flex-wrap: wrap; right: 10px; }
-.pp-readable-plates { list-style: none; padding: 0; display: grid; gap: 6px; margin: 10px 0; }
-.pp-readable-plates .btn { width: 100%; text-align: left; white-space: normal; }
-.pp-next { width: 100%; background: transparent; color: var(--text); border: 0; text-align: left; }
 .slicer-page :focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
 @media (min-width: 901px) {
   .sidebar-collapsed .slicer-body { grid-template-columns: minmax(0, 1fr); }
@@ -546,3 +525,83 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .pd-chip.go { color: var(--green); border-color: var(--green); }
 .pd-chip.busy { color: var(--yellow); border-color: var(--yellow); }
 .pd-empty { text-align: center; padding: 40px 10px; color: var(--text-muted); display: flex; flex-direction: column; gap: 12px; align-items: center; }
+
+/* Minimal by default: second-level controls sit behind a quiet disclosure and open on demand */
+.slicer-subfold { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+.slicer-subfold > summary { cursor: pointer; list-style: none; font-size: 12px; color: var(--text-muted); }
+.slicer-subfold > summary::-webkit-details-marker { display: none; }
+.slicer-subfold > summary::before { content: "\25B8"; display: inline-block; margin-right: 6px; transition: transform .12s; }
+.slicer-subfold[open] > summary::before { transform: rotate(90deg); }
+.slicer-subfold > summary:hover { color: var(--text); }
+.slicer-subfold[open] > :not(summary) { margin-top: 8px; }
+.slicer-subfold[open] > summary + * { margin-top: 6px; }
+.tool-more-head { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+.tool-more-head:not(:first-child) { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+.slicer-project .tool-more { margin-left: 0; }
+.slicer-project .tool-more-panel { left: 0; right: auto; min-width: 180px; }
+.slicer-card-head .tool-more { margin-left: 0; }
+.slicer-card-head .tool-more-panel { min-width: 170px; }
+.split-section.slicer-fold { padding: 8px 12px; }
+.split-section.slicer-fold > summary { margin-bottom: 0; }
+.split-section.slicer-fold[open] > summary { margin-bottom: 8px; }
+.split-section.slicer-fold[open] > :not(summary) { margin-top: 8px; }
+.split-section.slicer-fold[open] > summary + * { margin-top: 0; }
+.slicer-preview-panel .slicer-subfold { margin-top: 0; }
+.slicer-preview-panel .slicer-stats { margin: 0; }
+.slicer-subfold .preset-row { margin-top: 6px; }
+@media (prefers-reduced-motion: reduce) { .slicer-subfold > summary::before { transition: none; } }
+
+/* Print settings: nothing in the sidebar may push past its width. Rows with several values stack the label above them. */
+.slicer-settings, .slicer-settings-body, .set-group, .set-row, .set-fields { min-width: 0; max-width: 100%; }
+.slicer-settings-tools { flex-wrap: wrap; }
+.slicer-settings-tools input[type=search] { min-width: 0; flex: 1 1 120px; }
+.slicer-settings-tools select { min-width: 0; max-width: 100%; }
+.set-label { overflow-wrap: anywhere; }
+.set-fields .set-field { flex: 1 1 auto; min-width: 0; }
+.set-fields .set-field input[type=text] { width: auto; flex: 1 1 44px; min-width: 40px; max-width: 90px; }
+.set-row:has(.set-field + .set-field) { grid-template-columns: minmax(0, 1fr) 18px; }
+.set-row:has(.set-field + .set-field) .set-label { grid-column: 1 / -1; }
+.set-row:has(.set-field + .set-field) .set-fields { grid-column: 1; }
+
+/* A closed Print settings fold takes only its summary line; the Send button stays in reach below a long plate list */
+.slicer-settings:not([open]) { flex: none; min-height: 0; }
+
+/* Single-value settings keep their unit beside the input */
+.set-fields > input[type=text], .set-fields > select { width: auto; flex: 1 1 60px; min-width: 0; }
+.set-fields > .set-unit { flex: none; }
+.set-row:not(:has(.set-field + .set-field)) .set-fields { flex-wrap: nowrap; }
+
+/* Print step: the state-grouped Plate board */
+.pp-board { display: grid; gap: 12px; min-width: 0; }
+.pp-group-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pp-group h3 { margin: 0; font-size: 14px; }
+.pp-group-attention { border-color: var(--red); }
+.pp-plates { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.pp-plate { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; border-left: 4px solid var(--c); border-radius: 6px; padding: 2px 8px; background: var(--surface2); }
+.pp-plate.sel { outline: 2px solid var(--c); }
+.pp-plate-btn { flex: 1 1 140px; min-height: 36px; text-align: left; background: transparent; color: var(--text); border: 0; font-size: 13px; cursor: pointer; }
+.pp-state { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--c); font-weight: 600; white-space: nowrap; }
+.pp-reason { flex-basis: 100%; font-size: 12px; color: var(--red); padding-bottom: 4px; }
+.pp-fold { background: transparent; border: 0; color: inherit; font: inherit; font-weight: 700; cursor: pointer; padding: 0; min-height: 44px; }
+.pp-card-acts { display: flex; gap: 6px; flex-basis: 100%; padding: 2px 0 6px; }
+.pp-card-act, .pp-printer [data-outcome], .pp-actions .btn { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
+.pp-autostart { min-height: 44px; }
+.pp-queue-link { font-size: 13px; justify-self: end; }
+.pp-slice-first { margin: 8px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+/* Print step: tick Ready Plates and send them from a pinned bar */
+.pp-ticks { display: inline-flex; gap: 6px; }
+.pp-ticks .btn, .pp-group-head > .btn { min-height: 44px; min-width: 44px; }   /* All, None and Assign printers are 44 px at every width */
+.pp-assign { display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
+.pp-assign .slicer-check { min-height: 44px; }
+.pp-tick { width: 20px; height: 20px; margin: 0; cursor: pointer; flex: none; }
+.pp-plate:has(.pp-tick) { cursor: pointer; }
+.pp-plate.ticked { background: var(--surface); outline: 1px solid var(--accent); }
+.pp-sendbar { position: sticky; bottom: -14px; z-index: 3; margin: 0 -16px -14px; padding: 10px 16px; display: flex; flex-direction: column; gap: 8px;
+  background: var(--surface); border-top: 1px solid var(--border); box-shadow: 0 -10px 12px -10px rgba(0, 0, 0, .6); }
+.pp-send-summary { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 1.4; }
+.pp-sendbar .slicer-muted { margin: 0; }
+.pp-barfold { font-size: 13px; }
+.pp-barfold summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
+.pp-where { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 12px; max-height: 160px; overflow-y: auto; }
+.pp-sendbar .btn-primary { width: 100%; min-height: 44px; }
+@media (max-width: 900px) { .pp-sendbar { bottom: -10px; margin: 0 -10px -10px; padding: 10px; } }

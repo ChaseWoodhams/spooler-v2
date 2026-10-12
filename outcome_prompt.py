@@ -87,10 +87,11 @@ def _is_quick(record: dict) -> bool:
 
 
 def deep_link(record: dict) -> str:
-    """The project with the printer's card focused, or the printer's own page when the Print has no project or its
-    project is a hidden Quick print one (that page is never linked to)."""
+    """The project with the printer's card focused and the Plate selected, or the printer's own page when the Print has
+    no project or its project is a hidden Quick print one (that page is never linked to)."""
     if record.get("project_id") and not _is_quick(record):
-        return f"/#projects={record['project_id']}&printer={urllib.parse.quote(record['printer_id'], safe='')}"
+        plate = f"&plate={record['plate_id']}" if record.get("plate_id") is not None else ""
+        return f"/#projects={record['project_id']}&printer={urllib.parse.quote(record['printer_id'], safe='')}{plate}"
     return f"/#printer={urllib.parse.quote(record['printer_id'], safe='')}"
 
 

@@ -1,12 +1,12 @@
-/* Spooler project workspace (slicer.html): one page from a model upload to the print queue.
+/* Spooler project workspace (slicer.html): one page from a model upload to a finished print.
    Model (analysis, units) → Split (cuts, parts) → Plates (parts packed onto plates; move, merge, settings for the
-   project, a plate or an object) → Slice (every plate, layer preview) → Queue (send the plates as one batch, assign
-   printers). Projects without an uploaded model start at Plates. Talks to /api/projects, /api/splits and /api/jobs. */
+   project, a plate or an object) → Slice (every plate, layer preview) → Print (send the plates, watch the Jobs, start
+   them). Projects without an uploaded model start at Plates. Talks to /api/projects, /api/splits and /api/jobs. */
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
-import { splitStep } from "./split-step.js?v=2";
-import { projectPage } from "./project-page.js?v=2";
-import { newProject } from "./new-project.js?v=8";
+import { splitStep } from "./split-step.js?v=3";
+import { projectPage } from "./project-page.js?v=7";
+import { newProject } from "./new-project.js?v=9";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 
 const $ = id => document.getElementById(id);
@@ -15,11 +15,7 @@ const clone = v => JSON.parse(JSON.stringify(v));
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const listNames = names => names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0] || "";
 
-const STEPS = [["model", "Model"], ["split", "Split"], ["plates", "Plates"], ["slice", "Slice"], ["queue", "Queue"], ["print", "Print"]];
-const JOB_STATES = {
-  queued: ["Queued", "idle"], starting: ["Starting", "warmingup"], printing: ["Printing", "printing"], completed: ["Printed", "complete"],
-  cancelled: ["Cancelled", "cancelled"], failed: ["Failed", "offline"], unknown: ["Outcome unknown", "paused"],
-};
+const STEPS = [["model", "Model"], ["split", "Split"], ["plates", "Plates"], ["slice", "Slice"], ["print", "Print"]];
 const OPEN_JOB_STATES = new Set(["queued", "starting", "printing"]);
 
 const state = {
@@ -43,10 +39,8 @@ const state = {
   group: [],            // the other selected objects (Shift-click, Ctrl+A) besides state.selected
   serverProblems: [],   // the server's list of problem objects (GET /status): off the bed, over the purge area, overlaps, failed model
   problemReasons: {},   // plate id → why the server says that plate has a problem
-  jobs: [],             // queue jobs sent from this project
+  jobs: [],             // the Jobs sent from this project
   printers: [],
-  jobsTimer: null,
-  assigning: null,      // batch id whose printer chooser is open
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -120,14 +114,6 @@ function remember(key, value) {
 // browser starts a new project from it. Saving is best effort: a failure never interrupts the work.
 function rememberDefaults(change) {
   api("PATCH", "/api/defaults", change).catch(() => {});
-}
-
-async function applySendDefaults() {
-  try {
-    const { options } = (await api("GET", "/api/defaults")).defaults;
-    $("send-leveling").checked = Boolean(options.leveling);
-    $("send-timelapse").checked = Boolean(options.timelapse);
-  } catch (_) { /* the checkboxes stay as they are */ }
 }
 
 const data = () => state.project.data;
@@ -213,7 +199,6 @@ function setFilamentChoice(modelId, choice) {
 const isUpToDate = plateId =>sliceEntry(plateId)?.state === "sliced" && !sliceEntry(plateId).outdated;
 const isBusy = plateId => ["queued", "slicing"].includes(sliceEntry(plateId)?.state);
 const plateImporting = plateId => plateObjects(plateId).some(o => state.project.models.find(m => m.id === o.model)?.state === "importing");
-const openJobPlates = () => new Set(state.jobs.filter(j => OPEN_JOB_STATES.has(j.state)).map(j => j.plate_id));
 
 // ── Loading ─────────────────────────────────────────────────────────────────────
 async function boot() {
@@ -249,8 +234,14 @@ async function boot() {
     sliceState: plateId => sliceEntry(plateId)?.state,
     onSlice: plateId => requestPlateSlice(plateId),
     onOpenPlate: plateId => { selectPlate(plateId); setStep("plates"); },
+    onOpenSlice: () => setStep("slice"),
     hasAssembly: () => !!(splitIdsOf(state.project).length && splitStep.split?.result?.assembly),
     onOpenAssembly: async () => { await setStep("split"); document.querySelector(".split-assembly")?.scrollIntoView({ block: "center" }); },
+    sendPlates: (ids, options) => queuePlates(ids, options),
+    balance: ids => balancePlates(ids.map(plateById)) ? Object.fromEntries(ids.map(id => [id, plateById(id).printer_id])) : null,
+    plateFilament: plateId => plateFilamentLabel(plateId),
+    bedName: () => data().bed === 'smooth' ? 'Smooth PEI' : 'Textured PEI',
+    spoolNote: () => { const spool = state.spools?.find(s => s.id === data().profile.spool_id); return spool ? `Spool: ${spoolLabel(spool)}` : "No spool assigned; using preset values"; },
     onSetPrinter: (plateId, printerId) => {
       const plate = data().plates.find(p => p.id === plateId);
       if (!plate) return;
@@ -266,7 +257,7 @@ async function boot() {
     onChanged: split => { renderSteps(); renderStepActions(); landOnSplit(split); },
   });
   $("settings-mode").value = remember("slicer.mode") || (remember("slicer.advanced") === "1" ? "advanced" : "simple");
-  $("settings-mode").addEventListener("change", e => remember("slicer.mode", e.target.value));
+  $("settings-mode").addEventListener("change", e => { remember("slicer.mode", e.target.value); renderFoldSummaries(); });
   try {
     state.schema = await (await fetch("/orca/settings.json")).json();
     state.settings.setSchema(state.schema);
@@ -277,12 +268,11 @@ async function boot() {
   await loadPresets();
   loadSpools();
   loadPrinters();
-  applySendDefaults();
   const params = new URLSearchParams(location.search);
   const asked = Number(params.get("project")) || 0;
   if (asked) {
     try {
-      await openProject(asked, { toPrinter: !!params.get("printer") });
+      await openProject(asked, { toPrinter: !!params.get("printer"), toPrint: stepAliases(params.get("step")) === "print" || !!params.get("plate") });
       return;
     } catch (err) {
       // A deleted or hidden project falls through to the Projects page. Anything else (Spooler busy or restarting) says so,
@@ -367,7 +357,8 @@ function renderFarm() {
   const name = state.printers.find(p => p.id === printer)?.name;
   const button = $("btn-slice-send");
   button.textContent = name ? `Slice & send to ${name}` : "Slice & send";
-  button.disabled = !printer || !plateObjects().length || !data().profile.bundle_id || isBusy(state.plate) || plateImporting(state.plate);
+  button.disabled = !plateObjects().length || !data().profile.bundle_id || isBusy(state.plate) || plateImporting(state.plate);
+  if (state.step === "slice") renderStepActions();
   refreshFit();
 }
 
@@ -433,7 +424,17 @@ async function sliceAndSend(plateIds) {
   applyProject(project);
   renderAll({ geometry: false });
   schedulePoll();
-  toast("Slicing — it will go to the queue when it's done");
+  toast("Slicing — it will be sent to the printer when it's done");
+}
+
+// The Slice step's send: a current Slice goes to its printer as it is; an outdated or missing one is sliced first.
+async function sendThisPlate() {
+  const plate = state.plate;
+  if (!isUpToDate(plate)) return sliceAndSend([plate]);
+  if (!await queuePlates([plate], {})) return;   // the same send as Print: saves first and remembers the choices
+  rememberDefaults({ printer: currentPlate()?.printer_id || null });
+  await loadJobs();
+  toast("Sent to the printer");
 }
 
 async function bundleSettings(bundleId) {
@@ -442,10 +443,9 @@ async function bundleSettings(bundleId) {
   return state.bundleSettings.get(bundleId);
 }
 
-async function openProject(id, { toPrinter = false, restoring = false } = {}) {
+async function openProject(id, { toPrinter = false, toPrint = false, restoring = false } = {}) {
   const project = await api("GET", `/api/projects/${id}`);
   if (restoring && (project.quick || project.draft)) throw Object.assign(new Error("A hidden quick project is never reopened on its own"), { quick: true });   // the caller falls back to the list
-  clearTimeout(state.jobsTimer);
   document.body.classList.remove("view-dashboard");
   $("projects-dashboard").hidden = true;
   state.clockSkew = project.server_time - Date.now() / 1000;
@@ -457,7 +457,6 @@ async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   state.loadedModels = new Map();
   resetEdits();
   state.jobs = [];
-  state.assigning = null;
   if (!project.quick && !project.draft) remember("slicer.project", String(id));   // a hidden quick or draft project is never restored as the last-open project
   history.replaceState(null, "", `?project=${id}`);
   syncShellRoute(id);
@@ -468,9 +467,9 @@ async function openProject(id, { toPrinter = false, restoring = false } = {}) {
   renderAll();
   await loadGeometry();
   state.viewport?.fit(state.viewport.objectsBox());
-  const saved = remember(`slicer.step.${id}`);
-  // A push deep link (?printer=) lands on the Print step, where that printer's card is.
-  const landing = toPrinter && stepAvailable("print") ? "print" : saved && stepAvailable(saved) ? saved : defaultStep();
+  // Print absorbed the old Queue step: a remembered "queue", a ?step=queue link and a push link (?printer=) all land on Print.
+  const saved = stepAliases(remember(`slicer.step.${id}`));
+  const landing = (toPrinter || toPrint) && stepAvailable("print") ? "print" : saved && stepAvailable(saved) ? saved : defaultStep();
   await setStep(landing, { force: true });
   loadProblems();
   schedulePoll();
@@ -577,14 +576,13 @@ function stepAvailable(step) {
   const project = state.project;
   if (!project) return false;
   const split = splitIdsOf(project).length ? splitStep.split : null;
-  if (isGcodeProject() && step !== "queue") return false;
+  if (isGcodeProject() && step !== "print") return false;   // an imported G-code Plate goes straight to Print
   switch (step) {
     case "model":  return !!splitIdsOf(project).length;
     case "split":  return !!split?.analysis;
     case "plates": return !splitIdsOf(project).length || data().objects.length > 0;
     case "slice":  return data().objects.length > 0;
-    case "queue":  return platesWithObjects().some(p => isUpToDate(p.id)) || state.jobs.length > 0;
-    case "print":  return Object.values(project.slices).some(s => s.state === "sliced") || state.jobs.length > 0;
+    case "print":  return data().objects.length > 0 || state.jobs.length > 0 || isGcodeProject();   // with nothing sliced, Print says to slice first
   }
   return false;
 }
@@ -596,22 +594,24 @@ function stepDone(step) {
     case "split":  return !!split?.result || data().objects.some(o => state.project.models.find(m => m.id === o.model)?.split?.part === 0);
     case "plates": return data().objects.length > 0 && !anyProblem();   // no check mark while a problem object remains
     case "slice":  return platesWithObjects().length > 0 && platesWithObjects().every(p => isUpToDate(p.id));
-    case "queue":  return state.jobs.length > 0;
   }
   return false;   // Print is never "done": the project page shows how far along it is
 }
 
+// The Queue step was folded into Print; its old names still arrive from remembered steps and links.
+const stepAliases = step => step === "queue" ? "print" : step;
+
 function defaultStep() {
-  if (isGcodeProject()) return "queue";
+  if (isGcodeProject()) return "print";
   if (unplacedSplitIds(state.project).length || splitIdsOf(state.project).length && !data().objects.length) return splitStep.split?.result ? "split" : "model";
   if (!data().objects.length) return "plates";
-  if (state.jobs.some(j => OPEN_JOB_STATES.has(j.state))) return "queue";
+  if (state.jobs.some(j => OPEN_JOB_STATES.has(j.state))) return "print";
   return platesWithObjects().every(p => isUpToDate(p.id)) ? "slice" : "plates";
 }
 
 async function setStep(step, { force = false } = {}) {
   if (!state.project || (!force && !stepAvailable(step))) return;
-  if (!stepAvailable(step)) step = isGcodeProject() ? "queue" : stepAvailable("plates") ? "plates" : "model";
+  if (!stepAvailable(step)) step = isGcodeProject() ? "print" : stepAvailable("plates") ? "plates" : "model";
   await flushSave();
   if (state.step !== step) document.querySelector(".slicer-sidebar").scrollTop = 0;
   state.step = step;
@@ -630,11 +630,7 @@ async function setStep(step, { force = false } = {}) {
   if (splitView) splitStep.show(step);
   else splitStep.hide();
   if (step !== "plates") selectObject(null);
-  clearTimeout(state.jobsTimer);
-  if (step === "queue") {
-    loadPrinters();
-    loadJobs();
-  }
+  if (pageView) loadPrinters();   // the send bar's destinations and balancing read the current printers
   if (!splitView && !pageView) {
     state.viewport?.resize();
     await setMode(step === "slice" && sliceEntry()?.state === "sliced" ? "preview" : "prepare");
@@ -644,7 +640,7 @@ async function setStep(step, { force = false } = {}) {
 
 function renderSteps() {
   if (!state.project) { $("step-bar").innerHTML = ""; return; }
-  const steps = STEPS.filter(([id]) => isGcodeProject() ? id === "queue" : splitIdsOf(state.project).length || (id !== "model" && id !== "split"));
+  const steps = STEPS.filter(([id]) => isGcodeProject() ? id === "print" : splitIdsOf(state.project).length || (id !== "model" && id !== "split"));
   $("step-bar").innerHTML = steps.map(([id, label], index) => {
     const skipped = id === "split" && splitSkipped();   // a model that fits the bed skips Split, but the step stays openable
     return `${index ? '<span class="slicer-step-sep"></span>' : ""}
@@ -657,7 +653,26 @@ function renderStepActions() {
   const el = $("step-actions");
   if (!state.project) { el.innerHTML = ""; return; }
   const next = (step, label) => `<button class="btn btn-primary" type="button" data-go="${step}"${stepAvailable(step) ? "" : " disabled"}>${label}</button>`;
-  el.innerHTML = state.step === "plates" ? next("slice", "Slice →") : state.step === "slice" ? next("queue", "Send to the queue →") : "";
+  const send = sendThisPlateState();
+  el.innerHTML = state.step === "plates" ? next("slice", "Slice →")
+    : state.step === "slice" ? `<button class="btn btn-primary" type="button" data-send-this-plate${send.why ? " disabled" : ""}${send.why ? ` title="${esc(send.why)}"` : ""}>${esc(send.label)}</button>`
+      + (send.why ? `<small class="slicer-muted">${esc(send.why)}</small>` : "") : "";
+  $("btn-slice-send").hidden = state.step === "slice";   // the Slice step has its own send in the header
+}
+
+// The Slice step's one action: send the selected Plate to its printer, or to the next free one when none is chosen.
+// `why` is set only for a real blocker.
+function sendThisPlateState() {
+  const plate = currentPlate();
+  const printer = state.printers.find(p => p.id === plate?.printer_id);
+  const label = printer ? `Send to ${printer.name}` : "Send to next free printer";
+  if (!plate) return { label, why: "" };
+  const why = !plateObjects().length ? "This plate is empty"
+    : plateImporting(plate.id) ? "The models on this plate are still importing"
+    : anyProblem() ? (state.problemReasons[plate.id] || "Fix the objects marked in red first")
+    : !data().profile.bundle_id ? "Choose a slicing profile first"
+    : isBusy(plate.id) ? "This plate is being sliced" : "";
+  return { label, why };
 }
 
 // ── Saving ──────────────────────────────────────────────────────────────────────
@@ -858,8 +873,6 @@ function renderAll({ geometry = true } = {}) {
   renderSliceState();
   renderSlicing();
   renderBricklayers();
-  renderSend();
-  renderJobs();
   if (geometry) renderViewport();
   renderTools();
   renderObjectPanel();
@@ -1026,11 +1039,11 @@ function plateStatus(plateId) {
   if (entry.state === "queued") return { text: "Slice in progress — waiting for the slicer", cls: "" };
   if (entry.state === "slicing") return { text: `Slice in progress — ${slicingText(entry)}`, cls: "" };
   if (entry.state === "failed") return { text: `Failed Slice: ${entry.error || 'The slicer could not finish'}. Retry slicing this Plate.`, cls: "bad" };
-  if (entry.outdated) return { text: "Outdated Slice — objects, placement or relevant settings changed. Slice this Plate again before Queueing.", cls: "warn" };
+  if (entry.outdated) return { text: "Outdated Slice — objects, placement or relevant settings changed. Slice this Plate again before sending it.", cls: "warn" };
   const text = ['Current Slice', duration(entry.estimate_s), entry.estimate_g != null ? `${Math.round(entry.estimate_g)} g` : "Filament estimate unavailable", plural(entry.layers, "layer")].filter(Boolean).join(" · ");
   const printer = state.printers.find(p => p.id === entry.sent_to)?.name;
   if (entry.send_error) return { text: `${text} · not sent: ${entry.send_error}`, cls: "warn" };
-  if (entry.sent_job) return { text: `${text} · in the queue${printer ? ` for ${printer}` : ""}`, cls: "good" };
+  if (entry.sent_job) return { text: `${text} · sent${printer ? ` to ${printer}` : ""}`, cls: "good" };
   return { text: entry.auto_send ? `${text} · sending…` : text, cls: "good" };
 }
 
@@ -1060,6 +1073,7 @@ function renderBricklayers() {
   const project = projectBricks();
   const plate = currentPlate();
   const mode = !plate || plate.bricklayers == null ? "project" : plate.bricklayers.enabled ? "on" : "off";
+  $("brick-summary").textContent = project.enabled ? "On" : mode === "on" ? "On for this plate" : "Off";
   $("bricklayers").innerHTML = `
     <p class="slicer-muted">Raises every other inner wall loop by half a layer so walls interlock like bricks — stronger across layers.
       While it's on, arc fitting is turned off and walls are classic, printed inner then outer.</p>
@@ -1210,8 +1224,7 @@ function renderSlicing() {
   if (!state.project || state.step !== "slice") return;
   const plates = platesWithObjects();
   const todo = plates.filter(p => !isUpToDate(p.id) && !isBusy(p.id) && !plateImporting(p.id));
-  const everyPlateHasPrinter = todo.length > 0 && todo.every(p => p.printer_id);
-  $("slicing-actions").innerHTML = (everyPlateHasPrinter ? `<button class="btn btn-secondary btn-sm" type="button" data-slice-all-send title="Slice ${plural(todo.length, "plate")} and queue each for its own printer">Slice &amp; send</button>` : "") + `<button class="btn btn-primary btn-sm" type="button" data-slice-all${todo.length && data().profile.bundle_id ? "" : " disabled"}>
+  $("slicing-actions").innerHTML = `<button class="btn btn-primary btn-sm" type="button" data-slice-all${todo.length && data().profile.bundle_id ? "" : " disabled"}>
     ${todo.length === plates.length ? `Slice all ${plural(plates.length, "plate")}` : todo.length ? `Slice ${plural(todo.length, "plate")}` : "All sliced"}</button>`;
   $("slicing-list").innerHTML = plates.map(plate => {
     const status = plateStatus(plate.id);
@@ -1231,27 +1244,6 @@ function renderSlicing() {
     : "Click a sliced plate to see its layers.";
 }
 
-function renderSend() {
-  if (!state.project || state.step !== "queue") return;
-  if ($('send-plates').contains(document.activeElement) && document.activeElement.matches('select')) return;
-  const inQueue = openJobPlates();
-  const previous = new Set([...document.querySelectorAll("[data-send-plate]")].filter(x => x.checked).map(x => Number(x.dataset.sendPlate)));
-  const firstRender = !document.querySelector("[data-send-plate]");
-  $("send-plates").innerHTML = platesWithObjects().map(plate => {
-    const ready = isUpToDate(plate.id);
-    const queued = inQueue.has(plate.id);
-    const checked = firstRender ? ready && !queued : previous.has(plate.id) && ready;
-    const status = queued ? "in the queue" : ready ? plateStatus(plate.id).text : "slice it first";
-    const missingPrinter = plate.printer_id && !state.printers.some(p => p.id === plate.printer_id);
-    return `<div class="slicer-plate-row">
-      <input aria-label="Queue ${esc(plate.name)}" type="checkbox" data-send-plate="${plate.id}"${checked ? " checked" : ""}${ready ? "" : " disabled"}>
-      <div><strong>${esc(plate.name)}</strong> ${plateBadge(plate)}<small class="${queued ? "warn" : ready ? "" : "bad"}">${esc(status)}</small>
-      <label class="slicer-field">Destination printer<select data-send-printer="${plate.id}" aria-label="Destination printer for ${esc(plate.name)}"><option value="">Next free printer</option>${missingPrinter ? `<option value="${esc(plate.printer_id)}" selected>Unavailable printer (${esc(plate.printer_id)})</option>` : ''}${state.printers.map(p => `<option value="${esc(p.id)}"${p.id === plate.printer_id ? ' selected' : ''}>${esc(p.name)}${p.connected ? '' : ' (offline)'}</option>`).join('')}</select></label></div><span></span>
-    </div>`;
-  }).join("") || '<p class="slicer-muted">No plates with objects.</p>';
-  updateSendButton();
-}
-
 function plateFilamentLabel(id) {
   if (isImportedPlate(id)) return 'Imported G-code — verify material in Job review';
   const labels = new Set(plateObjects(id).map(o => {
@@ -1261,70 +1253,20 @@ function plateFilamentLabel(id) {
   return [...labels].join(', ') || currentPresets()?.filament || 'Imported G-code material';
 }
 
-function destinationLabel(id) {
-  if (!id) return 'Next free printer';
-  const printer = state.printers.find(p => p.id === id);
-  return printer ? `${printer.name}${printer.connected ? '' : ' (offline)'}` : `Unavailable printer (${id})`;
-}
-
-function updateSendButton() {
-  const chosen = [...document.querySelectorAll("[data-send-plate]")].filter(x => x.checked);
-  $("btn-send-batch").disabled = !chosen.length;
-  $('btn-balance-selected').disabled = !chosen.length;
-  $("btn-send-batch").textContent = chosen.length ? `Send ${plural(chosen.length, "plate")} to the queue` : "Send to the queue";
-  const plates = chosen.map(box => plateById(Number(box.dataset.sendPlate)));
-  const entries = plates.map(p => sliceEntry(p.id));
-  const timeKnown = entries.every(e => e?.estimate_s != null), gramsKnown = entries.every(e => e?.estimate_g != null);
-  const seconds = entries.reduce((sum,e) => sum + (e?.estimate_s || 0),0), grams = entries.reduce((sum,e) => sum + (e?.estimate_g || 0),0);
-  const spool = state.spools?.find(s => s.id === data().profile.spool_id);
-  $('batch-summary').innerHTML = `<b>${plates.length} Plate${plates.length === 1 ? '' : 's'} selected</b><ul>${plates.map(p => `<li>${esc(p.name)} → ${esc(destinationLabel(p.printer_id))} · ${esc(plateFilamentLabel(p.id))} · ${data().bed === 'smooth' ? 'Smooth PEI' : 'Textured PEI'}</li>`).join('')}</ul><p>Estimated total: ${timeKnown ? duration(seconds) || '0 min' : 'Time unavailable for one or more Plates'} · ${gramsKnown ? `${Number(grams.toFixed(1))} g` : 'Filament unavailable for one or more Plates'}${spool ? ` · Spool: ${esc(spoolLabel(spool))}` : ' · No Spool assigned; using preset values'}</p><p>Each selected Plate becomes a Job in the Queue. Review &amp; start runs preflight before a physical Print. Bed cleared can release the next Job when auto-start is on.</p>`;
-}
-
-function renderJobs() {
-  if (!state.project || state.step !== "queue") return;
-  const focused = document.activeElement;
-  if (focused?.tagName === "SELECT" && $("job-batches").contains(focused)) return;
-  const batches = new Map();
-  for (const job of [...state.jobs].reverse()) {
-    const key = job.batch_id || `job-${job.id}`;
-    if (!batches.has(key)) batches.set(key, []);
-    batches.get(key).push(job);
+/** Give the longest Plates first to the connected printer with the least estimated work in this Project; false (with a toast) when it cannot. Sets each Plate's printer; the `plates` list itself is left as it was. */
+function balancePlates(plates) {
+  const ready = state.printers.filter(p => p.connected);
+  if (!ready.length) { toast('No connected printers. Choose assignments manually or reconnect a printer.', true); return false; }
+  if (plates.some(p => sliceEntry(p.id)?.estimate_s == null)) { toast('Time estimates are missing. Assign destination printers manually or slice these Plates again.', true); return false; }
+  const loads = new Map(ready.map(p => [p.id, state.jobs.filter(j => j.printer_id === p.id && OPEN_JOB_STATES.has(j.state)).reduce((sum,j) => sum + (j.estimate_s || 0),0)]));
+  const longestFirst = [...plates].sort((a,b) => (sliceEntry(b.id)?.estimate_s || 0) - (sliceEntry(a.id)?.estimate_s || 0));
+  for (const plate of longestFirst) {
+    const printer = [...ready].sort((a,b) => loads.get(a.id) - loads.get(b.id))[0];
+    plate.printer_id = printer.id;
+    loads.set(printer.id, loads.get(printer.id) + (sliceEntry(plate.id)?.estimate_s || 0));
   }
-  const printerName = id => state.printers.find(p => p.id === id)?.name || (id ? "Unknown printer" : "No printer");
-  const printerOptions = selected => '<option value="">No printer</option>' + state.printers.map(p =>
-    `<option value="${esc(p.id)}"${p.id === selected ? " selected" : ""}>${esc(p.name)}${p.connected ? "" : " (offline)"}</option>`).join("");
-  $("job-batches").innerHTML = [...batches.entries()].map(([key, jobs]) => {
-    jobs.sort((a, b) => (a.plate_id || 0) - (b.plate_id || 0));
-    const queued = jobs.filter(j => j.state === "queued");
-    const sent = new Date(jobs[0].created_at * 1000).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
-    const chooser = state.assigning === key ? `<div class="slicer-assign">
-        ${state.printers.map(p => `<label class="slicer-check"><input type="checkbox" data-assign-printer="${esc(p.id)}"${p.connected ? " checked" : ""}> ${esc(p.name)}${p.connected ? "" : " (offline)"}</label>`).join("")
-          || '<p class="slicer-muted">No printers that the queue can use yet.</p>'}
-        <div class="slicer-actions-row">
-          <button class="btn btn-primary btn-sm" type="button" data-assign-apply="${esc(key)}"${state.printers.length ? "" : " disabled"}>Spread ${plural(queued.length, "plate")} over these printers</button>
-          <button class="btn btn-secondary btn-sm" type="button" data-assign-cancel>Cancel</button>
-        </div>
-      </div>` : "";
-    return `<div class="slicer-batch">
-      <div class="slicer-batch-head"><span>Sent ${esc(sent)} · ${plural(jobs.length, "plate")}</span>
-        ${queued.length > 1 ? `<button class="btn btn-secondary btn-sm" type="button" data-assign="${esc(key)}">Assign printers</button>` : ""}</div>
-      ${chooser}
-      ${jobs.map(job => {
-        const [label, cls] = JOB_STATES[job.state] || [job.state, "idle"];
-        const plate = plateById(job.plate_id);
-        return `<div class="slicer-job">
-          <span class="slicer-job-name" title="${esc(job.notes || job.name)}">${esc(plate?.name || job.name)}</span>
-          <span class="status-badge ${cls}">${label}</span>
-          <div class="slicer-job-controls">
-            ${job.state === "queued"
-              ? `<select data-job-printer="${job.id}" aria-label="Printer for ${esc(plate?.name || job.name)}">${printerOptions(job.printer_id)}</select>
-                 <a class="btn btn-primary btn-sm" href="/?review=${job.id}" title="Preview the toolpath, run the preflight checks and start">Review &amp; start</a>`
-              : `<span class="slicer-muted">${esc(printerName(job.printer_id))}${job.error ? ` · ${esc(job.error)}` : ""}</span>`}
-          </div>
-        </div>`;
-      }).join("")}
-    </div>`;
-  }).join("") || '<p class="slicer-muted">Nothing sent yet.</p>';
+  changed();
+  return true;
 }
 
 function renderViewport() {
@@ -1340,7 +1282,7 @@ function renderTools() {
   if (!state.project) return;
   const preview = state.mode === "preview";
   $("prepare-tools").hidden = state.step !== "plates";
-  $("view-tools").hidden = state.step !== "slice" && state.step !== "queue";
+  $("view-tools").hidden = state.step !== "slice";
   $("mode-prepare").classList.toggle("active", !preview);
   $("mode-preview").classList.toggle("active", preview);
   $('mode-prepare').setAttribute('aria-pressed',String(!preview));
@@ -1516,10 +1458,10 @@ const projectPack = () => {
 const withSupports = (pack, tight) => (tight ? { ...pack, tight_supports: true } : pack);
 
 function bindPack() {
-  const more = document.querySelector(".tool-more");   // the More menu closes after a button in it is used, or on a click anywhere else
-  more.addEventListener("click", e => { if (e.target.closest("button")) more.open = false; });
-  document.addEventListener("click", e => { if (more.open && !more.contains(e.target)) more.open = false; });
-  document.addEventListener("keydown", e => { if (e.key === "Escape" && more.open) more.open = false; });
+  const menus = [...document.querySelectorAll(".tool-more")];   // a More menu closes after a button in it is used, or on a click anywhere else
+  for (const more of menus) more.addEventListener("click", e => { if (e.target.closest("button")) more.open = false; });
+  document.addEventListener("click", e => { for (const more of menus) if (more.open && !more.contains(e.target)) more.open = false; });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") for (const more of menus) more.open = false; });
   $("pack-select").addEventListener("change", e => {
     const [scope, preset] = e.target.value.split(":");
     if (scope === "plate") setPack({ plate_id: state.plate, plate_pack: preset === "inherit" ? null : { preset } });
@@ -2273,82 +2215,53 @@ function renderPreviewPanel(info) {
   const temps = analysis.temperatures || {};
   $("preview-panel").innerHTML = `
     <dl class="slicer-stats">
-      <dt>Plate</dt><dd>${esc(currentPlate()?.name)}</dd>
       <dt>Print time</dt><dd>${duration(entry?.estimate_s) || "—"}</dd>
       <dt>Filament</dt><dd>${entry?.estimate_g ? `${entry.estimate_g.toFixed(1)} g` : "—"}</dd>
       <dt>Layers</dt><dd>${analysis.layers.length}</dd>
-      <dt>Nozzle / bed</dt><dd>${temps.nozzle?.max ?? "—"} °C / ${temps.bed?.max ?? "—"} °C</dd>
-      <dt>Slicer</dt><dd>${esc(analysis.slicer || "OrcaSlicer")}</dd>
     </dl>
     ${entry?.outdated ? '<p class="slicer-slice-state warn">This plate changed after it was sliced.</p>' : ""}
     ${info?.stride > 1 ? `<p class="slicer-muted">Large toolpath: showing every ${info.stride}th move.</p>` : ""}
-    <div class="slicer-legend">${legend || '<p class="slicer-muted">No extrusion features found.</p>'}</div>
+    <details class="slicer-subfold" data-preview-more${state.previewMore ? " open" : ""}>
+      <summary>Features and details</summary>
+      <div class="slicer-legend">${legend || '<p class="slicer-muted">No extrusion features found.</p>'}</div>
+      <dl class="slicer-stats">
+        <dt>Plate</dt><dd>${esc(currentPlate()?.name)}</dd>
+        <dt>Nozzle / bed</dt><dd>${temps.nozzle?.max ?? "—"} °C / ${temps.bed?.max ?? "—"} °C</dd>
+        <dt>Slicer</dt><dd>${esc(analysis.slicer || "OrcaSlicer")}</dd>
+      </dl>
+    </details>
     <a class="btn btn-secondary btn-sm" href="/api/projects/${state.project.id}/plates/${state.plate}/gcode" download>Download G-code</a>`;
 }
 
-// ── Queue ───────────────────────────────────────────────────────────────────────
+// ── Jobs and printers (the Print step reads and sends through these) ────────────────
 async function loadJobs({ quiet = false } = {}) {
-  clearTimeout(state.jobsTimer);
   if (!state.project) return;
   const id = state.project.id;
   try {
     const { jobs } = await api("GET", `/api/projects/${id}/jobs`);
     if (state.project?.id !== id) return;
     state.jobs = jobs;
-    if (!quiet) {
-      renderSteps();
-      renderSend();
-      renderJobs();
-    }
+    if (!quiet) renderSteps();
   } catch (err) {
     if (!quiet) toast(err.message, true);
   }
-  if (state.step === "queue") state.jobsTimer = setTimeout(loadJobs, 4000);
 }
 
 async function loadPrinters() {
   try {
     const printers = await api("GET", "/api/printers");
     state.printers = printers.filter(p => p.printer_type === "cc1");
-    renderSend();
-    renderJobs();
   } catch (_) { /* the list stays as it was */ }
 }
 
-async function sendBatch() {
-  const chosen = [...document.querySelectorAll("[data-send-plate]")].filter(x => x.checked).map(x => Number(x.dataset.sendPlate));
-  if (!chosen.length) return;
-  const repeats = chosen.filter(id => openJobPlates().has(id)).map(id => plateById(id).name);
-  if (repeats.length && !confirm(`${listNames(repeats)} ${repeats.length === 1 ? "is" : "are"} already in the queue. Send another copy?`)) return;
+/** Save the project, then turn the given Plates into Jobs (the Print step and the Slice step both send through here). */
+async function queuePlates(plates, { leveling, timelapse, again = false }) {
   await flushSave();
   if ($('save-state').textContent === 'Not saved') {
-    toast('Project changes could not be saved. Retry saving before adding these Plates to the Queue.', true); return;
+    toast('Project changes could not be saved. Retry saving before sending these Plates.', true); return null;
   }
-  rememberDefaults({ options: { leveling: $("send-leveling").checked, timelapse: $("send-timelapse").checked } });
-  await withButton($("btn-send-batch"), async () => {
-    const result = await api("POST", `/api/projects/${state.project.id}/queue`, {
-      plates: chosen, leveling: $("send-leveling").checked, timelapse: $("send-timelapse").checked, again: repeats.length > 0 });
-    toast(`Sent ${plural(result.jobs.length, "plate")} to the queue`);
-    document.querySelectorAll("[data-send-plate]").forEach(box => { box.checked = false; });  // sent: don't offer them again
-    const queuedCount = result.jobs.length;
-    await loadJobs();
-    if (queuedCount > 1 && state.printers.length > 1) state.assigning = result.batch_id;
-    renderJobs();
-    $("job-batches").closest(".slicer-card").scrollIntoView({ behavior: "smooth", block: "start" });
-  });
-}
-
-async function assignPrinters(batchKey, button) {
-  const printers = [...document.querySelectorAll("[data-assign-printer]")].filter(x => x.checked).map(x => x.dataset.assignPrinter);
-  if (!printers.length) { toast("Choose at least one printer", true); return; }
-  const jobIds = state.jobs.filter(j => (j.batch_id || `job-${j.id}`) === batchKey && j.state === "queued")
-    .sort((a, b) => (a.plate_id || 0) - (b.plate_id || 0)).map(j => j.id);
-  await withButton(button, async () => {
-    await api("POST", "/api/jobs/assign", { job_ids: jobIds, printer_ids: printers });
-    state.assigning = null;
-    await loadJobs();
-    toast(`Spread ${plural(jobIds.length, "plate")} over ${plural(printers.length, "printer")}`);
-  });
+  if (leveling !== undefined || timelapse !== undefined) rememberDefaults({ options: { leveling, timelapse } });
+  return api("POST", `/api/projects/${state.project.id}/queue`, { plates, leveling, timelapse, again });
 }
 
 // ── Dialogs ─────────────────────────────────────────────────────────────────────
@@ -2412,7 +2325,6 @@ async function showProjectsPage() {
     try { await flushSave(); } catch (err) { toast(err.message, true); return; }
   }
   clearTimeout(state.poller);
-  clearTimeout(state.jobsTimer);
   state.project = null;
   state.selected = null;
   state.group = [];
@@ -2540,6 +2452,8 @@ function bindUi() {
   $("step-actions").addEventListener("click", e => {
     const btn = e.target.closest("[data-go]");
     if (btn && !btn.disabled) setStep(btn.dataset.go);
+    const send = e.target.closest("[data-send-this-plate]");
+    if (send && !send.disabled) withButton(send, sendThisPlate);
   });
 
   $("project-name").addEventListener("keydown", e => {   // Enter saves (through change), Escape puts the saved name back
@@ -2748,8 +2662,6 @@ function bindUi() {
   $("slicing-actions").addEventListener("click", e => {
     const btn = e.target.closest("[data-slice-all]");
     if (btn && !btn.disabled) withButton(btn, () => sliceplates(null));
-    const send = e.target.closest("[data-slice-all-send]");
-    if (send && !send.disabled) withButton(send, () => sliceAndSend(null)).catch(err => toast(err.message, true));
   });
   $("bricklayers").addEventListener("change", e => {
     if (e.target.closest("[data-brick], [data-brick-plate]")) changeBricklayers(e.target);
@@ -2764,48 +2676,6 @@ function bindUi() {
     if (row) selectPlate(Number(row.dataset.selectPlate));
   });
 
-  $("send-plates").addEventListener("change", e => {
-    if (e.target.matches('[data-send-printer]')) {
-      const plate = plateById(Number(e.target.dataset.sendPrinter));
-      plate.printer_id = e.target.value || null;
-      changed();
-    }
-    updateSendButton();
-  });
-  $('btn-balance-selected').addEventListener('click', () => {
-    const ready = state.printers.filter(p => p.connected);
-    if (!ready.length) { toast('No connected printers. Choose assignments manually or reconnect a printer.', true); return; }
-    const plates = [...document.querySelectorAll('[data-send-plate]:checked')].map(box => plateById(Number(box.dataset.sendPlate)));
-    if (plates.some(p => sliceEntry(p.id)?.estimate_s == null)) { toast('Time estimates are missing. Assign destination printers manually or slice these Plates again.', true); return; }
-    const loads = new Map(ready.map(p => [p.id, state.jobs.filter(j => j.printer_id === p.id && OPEN_JOB_STATES.has(j.state)).reduce((sum,j) => sum + (j.estimate_s || 0),0)]));
-    plates.sort((a,b) => (sliceEntry(b.id)?.estimate_s || 0) - (sliceEntry(a.id)?.estimate_s || 0));
-    for (const plate of plates) {
-      const printer = [...ready].sort((a,b) => loads.get(a.id) - loads.get(b.id))[0];
-      plate.printer_id = printer.id;
-      loads.set(printer.id, loads.get(printer.id) + (sliceEntry(plate.id)?.estimate_s || 0));
-    }
-    changed(); renderSend();
-    toast('Assignments suggested by estimated time. Review each destination before adding Jobs to the Queue.');
-  });
-  $("btn-send-batch").addEventListener("click", sendBatch);
-  $("job-batches").addEventListener("click", e => {
-    const open = e.target.closest("[data-assign]");
-    const apply = e.target.closest("[data-assign-apply]");
-    if (open) { state.assigning = open.dataset.assign; renderJobs(); }
-    else if (apply) assignPrinters(apply.dataset.assignApply, apply);
-    else if (e.target.closest("[data-assign-cancel]")) { state.assigning = null; renderJobs(); }
-  });
-  $("job-batches").addEventListener("change", async e => {
-    const select = e.target.closest("[data-job-printer]");
-    if (!select) return;
-    select.blur();
-    try {
-      await api("PATCH", `/api/jobs/${select.dataset.jobPrinter}`, { printer_id: select.value || null });
-      await loadJobs();
-    } catch (err) {
-      toast(err.message, true);
-    }
-  });
 
   $("object-panel").addEventListener("change", e => {
     if (e.target.id === "group-plate") {
@@ -2937,6 +2807,7 @@ function bindUi() {
     state.viewport?.setShell(e.target.value);
     savePrinterPrefs({ shell: e.target.value });
   });
+  $("preview-panel").addEventListener("toggle", e => { if (e.target.matches("[data-preview-more]")) state.previewMore = e.target.open; }, true);
   $("preview-panel").addEventListener("change", e => {
     const name = e.target.dataset.feature;
     if (!name) return;
@@ -3023,7 +2894,7 @@ const ADD_NOTES = {
   model: `The models join the project as whole models on the Plates step. The split you are working on is not changed.${TOO_BIG}`,
   split: `The models join the project as whole models on the Plates step. The split you are working on is not changed.${TOO_BIG}`,
   plates: `The models are added to the current plate. Plates with a finished Slice become outdated and need slicing again.${TOO_BIG}`,
-  slice: `The models are added to the current plate, which marks its Slice outdated: slice it again before queueing.${TOO_BIG}`,
+  slice: `The models are added to the current plate, which marks its Slice outdated: slice it again before sending it.${TOO_BIG}`,
 };
 
 // Done: the project now holds the added models (a too-big one as a split), so bring the workspace up to date

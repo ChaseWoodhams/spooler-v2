@@ -267,11 +267,18 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed["project"]["wall_loops"], "5")
         self.assertEqual(parsed["project"]["print_settings_id"], "0.20mm Standard @Elegoo CC 0.4 nozzle")
 
+    async def test_slice_and_send_without_a_printer_makes_a_job_for_the_next_free_printer(self):
+        project = await self.project_with_cube()
+        self.assertEqual(projects.request_slice(project["id"], 1, send=True)["slices"]["1"]["auto_send"], True)
+        with mock.patch.object(slicer, "runner", fake_runner()):
+            await self.run_worker()
+        entry = projects.get_project(project["id"])["slices"]["1"]
+        self.assertEqual((entry["state"], entry["sent_to"]), ("sliced", None))
+        job = jobs.get_job(entry["sent_job"])
+        self.assertEqual((job["state"], job["printer_id"], job["plate_id"]), ("queued", None, 1))
+
     async def test_slice_and_send_queues_the_plate_for_its_own_printer(self):
         project = await self.project_with_cube()
-        with self.assertRaisesRegex(jobs.JobError, "Choose a printer for Plate 1"):
-            projects.request_slice(project["id"], 1, send=True)
-
         plates = [{**project["data"]["plates"][0], "printer_id": "p1"}]
         project = self.edit(project, plates=plates)
         self.assertEqual(project["data"]["plates"][0]["printer_id"], "p1")

@@ -310,6 +310,527 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
                               what="the object to be marked off the bed")
         self.assertFalse(await self.page.js(plates_done), "the Plates step must not show done with an object off the bed")
 
+    async def slice_project(self, printer=True, sliced=False):
+        """A project with one 20 mm cube on its plate (and, if asked, a printer chosen for it and a current Slice), open on the Slice step."""
+        from tests.test_jobs import FakePrinter
+        import state
+        from tests.test_slicer import cube_stl
+        saved = state.printers
+        fake = FakePrinter("p1", "Printer 1")
+        fake.to_dict = lambda: {"id": fake.id, "name": fake.name, "printer_type": "cc1", "connected": True}   # what /api/printers lists
+        state.printers = {"p1": fake}
+        self.addCleanup(lambda: setattr(state, "printers", saved))
+        project = projects.create_project("One plate")
+        stl = cube_stl(20)
+        projects.import_model(project["id"], io.BytesIO(stl), len(stl), "cube.stl")
+        await asyncio.to_thread(lambda: asyncio.run(self.drain_projects()))   # the import blocks; the browser connection needs this loop free
+        record = projects.get_project(project["id"])
+        change = json.loads(json.dumps(record["data"]))
+        change["objects"][0]["position"] = [100, 100]
+        change["plates"][0]["printer_id"] = "p1" if printer else None   # a new project picks up the last printer used
+        projects.update_project(project["id"], {"data": change, "revision": record["revision"]})
+        if sliced:
+            projects.request_slice(project["id"], 1)
+            await asyncio.to_thread(lambda: asyncio.run(self.drain_projects()))
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={project['id']}")
+        await self.page.until("document.querySelector('#step-bar [data-step=slice]') && !document.querySelector('#step-bar [data-step=slice]').disabled", what="the Slice step")
+        await self.page.js("document.querySelector('#step-bar [data-step=slice]').click()")
+        await self.page.until("document.querySelector('#step-bar [data-step=slice]').classList.contains('active')", what="the Slice step to open")
+        return project["id"]
+
+    async def drain_projects(self):
+        from tests.test_slicer import fake_runner
+        with mock.patch.object(slicer, "runner", fake_runner()):
+            while await projects.process_next():
+                pass
+
+    def run_slicer(self):
+        """Run the project worker (slices, and the send that follows) in a thread while the browser works."""
+        from tests.test_slicer import fake_runner
+        stop = threading.Event()
+        runner = fake_runner()
+
+        def work():
+            async def process():
+                with mock.patch.object(slicer, "runner", runner):
+                    while not stop.is_set():
+                        if not await projects.process_next():
+                            await asyncio.sleep(0.2)
+            asyncio.run(process())
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        self.stop_worker = lambda: (stop.set(), worker.join(30))   # before the database is pointed back at the real file
+        return runner
+
+    @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+    async def test_slice_step_sends_one_plate_in_one_click(self):
+        page = self.page
+        project_id = await self.slice_project()
+        runner = self.run_slicer()
+
+        # The Slice step is about one plate: no tick boxes, and no talk of a queue in its sidebar or actions
+        self.assertEqual(await page.js("document.querySelectorAll('[data-send-plate]:not([hidden])').length"), 0)
+        shown = await page.js("""[...document.querySelectorAll('.slicer-sidebar [data-steps]:not([hidden]), #step-actions')]
+            .filter(el => !el.hidden && el.offsetParent !== null).map(el => el.innerText).join(' ')""")
+        self.assertNotRegex(shown, r"(?i)queue")
+        # Its one primary action sends this plate to its printer
+        label = await page.js("document.querySelector('#step-actions .btn-primary').textContent.trim()")
+        self.assertEqual(label, "Send to Printer 1")
+        self.assertEqual(await page.js("document.querySelectorAll('#btn-slice-send:not([hidden])').length"), 0)
+
+        # The plate has never been sliced, so one click slices it first and then creates exactly one Job
+        await page.js("document.querySelector('#step-actions .btn-primary').click()")
+        for _ in range(100):
+            if projects.project_jobs(project_id):
+                break
+            await asyncio.sleep(0.3)
+        sent = projects.project_jobs(project_id)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual((sent[0]["plate_id"], sent[0]["printer_id"]), (1, "p1"))
+        self.assertEqual(len(runner.calls), 1, "an out-of-date plate is sliced before its Job is created")
+        self.assertEqual(projects.get_project(project_id)["slices"]["1"]["state"], "sliced")
+
+    @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+    async def test_slice_step_sends_an_up_to_date_plate_without_slicing_again(self):
+        page = self.page
+        project_id = await self.slice_project(sliced=True)
+        runner = self.run_slicer()
+        self.assertEqual(projects.get_project(project_id)["slices"]["1"]["state"], "sliced")
+        await page.until("document.getElementById('slice-state').textContent.includes('Current Slice')", what="the sliced plate")
+
+        await page.js("document.querySelector('#step-actions .btn-primary').click()")
+        for _ in range(100):
+            if projects.project_jobs(project_id):
+                break
+            await asyncio.sleep(0.3)
+        self.assertEqual(len(projects.project_jobs(project_id)), 1)
+        self.assertEqual(runner.calls, [], "a current Slice is sent as it is")
+
+    @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+    async def test_slice_step_with_no_printer_chosen_sends_to_the_next_free_printer(self):
+        page = self.page
+        project_id = await self.slice_project(printer=False)
+        self.run_slicer()
+        button = await page.js("(b => ({ disabled: b.disabled, text: b.textContent.trim() }))(document.querySelector('#step-actions .btn-primary'))")
+        self.assertFalse(button["disabled"], "no printer is not a blocker: the Job takes the next free one")
+        self.assertEqual(button["text"], "Send to next free printer")
+        await page.js("document.querySelector('#step-actions .btn-primary').click()")
+        for _ in range(100):
+            if projects.project_jobs(project_id):
+                break
+            await asyncio.sleep(0.3)
+        sent = projects.project_jobs(project_id)
+        self.assertEqual(len(sent), 1)
+        self.assertIsNone(sent[0]["printer_id"])
+
+    def make_board_project(self, offline_printing):
+        """A Project with a Plate in every state: 1 printed OK, 2 printing, 3 in the queue, 4 starting, 5 and 8 sliced, 6 and 7 unsliced (7 failed before)."""
+        data = {"bed": "textured", "profile": {"bundle_id": "x"},
+                "plates": [{"id": n, "name": f"Plate {n}"} for n in range(1, 9)],
+                "objects": [{"id": n, "model": 1, "name": f"part {n}", "plate": n, "position": [0, 0], "rotation": [0, 0, 0],
+                             "scale": [1, 1, 1], "overrides": {}} for n in range(1, 9)]}
+        models = [{"id": 1, "name": "part", "file": "part.stl", "state": "ready", "sha256": "abc"}]
+        with database.transaction() as conn:
+            project_id = conn.execute("INSERT INTO projects (name, data, models, slices, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
+                                      ("Board", json.dumps(data), json.dumps(models), json.dumps({}))).lastrowid
+        record = projects.get_project(project_id)
+        slices = {str(n): {"state": "sliced", "fingerprint": projects.fingerprint(record, n)} for n in (5, 8)}
+        with database.transaction() as conn:
+            conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(slices), project_id))
+            for plate, state_, printer in ((2, "printing", "ghost" if offline_printing else None), (3, "queued", None), (4, "starting", None)):
+                conn.execute("INSERT INTO jobs (name, state, printer_id, source, file_name, created_at, updated_at, project_id, plate_id) "
+                             "VALUES (?, ?, ?, 'upload', ?, 1, 1, ?, ?)", (f"Plate {plate}", state_, printer, f"plate{plate}.gcode", project_id, plate))
+            for plate, outcome in ((1, "completed"), (7, "failed")):
+                conn.execute("INSERT INTO prints (printer_id, printer_name, file_name, started_at, ended_at, outcome, project_id, plate_id) "
+                             "VALUES ('p9', 'P9', ?, 1, 2, ?, ?, ?)", (f"plate{plate}.gcode", outcome, project_id, plate))
+        return project_id
+
+    BOARD = """JSON.stringify([...document.querySelectorAll('#project-page [data-group]')].map(g => [g.dataset.group,
+        [...g.querySelectorAll('[data-plate-card]')].map(c => c.querySelector('[data-plate]').textContent.trim() + ': ' + c.querySelector('.pp-state').textContent.trim())]))"""
+
+    async def open_print_step(self, project_id):
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={project_id}")
+        await self.page.until("!!document.querySelector('#step-bar [data-step=print]')", what="the step bar")
+        await self.page.js("document.querySelector('#step-bar [data-step=print]').click()")
+        await self.page.until("!!document.querySelector('#project-page [data-group]')", what="the Plate board")
+
+    async def test_print_step_groups_plates_by_state_with_needs_attention_first(self):
+        await self.open_print_step(self.make_board_project(offline_printing=True))
+        board = json.loads(await self.page.js(self.BOARD))
+        self.assertEqual(board, [
+            ["attention", ["Plate 2: printing now", "Plate 7: failed"]],
+            ["printing", ["Plate 4: starting to print"]],
+            ["queued", ["Plate 3: in the queue"]],
+            ["ready", ["Plate 5: sliced", "Plate 8: sliced", "Plate 6: needs slicing"]],
+            ["done", ["Plate 1: printed OK"]],
+        ])
+        self.assertEqual(await self.page.js("document.querySelectorAll('#project-page .pp-cell, #project-page .pp-next').length"), 0)
+        self.assertNotIn("Next up", await self.page.js("document.getElementById('project-page').textContent"))
+        small = await self.page.js("[...document.querySelectorAll('#project-page [data-group] *')].filter(e => e.childElementCount === 0 && "
+                                   "e.textContent.trim() && parseFloat(getComputedStyle(e).fontSize) < 12).map(e => e.textContent)")
+        self.assertEqual(small, [])
+        for kind in ("keyDown", "keyUp"):   # a key press puts the page in keyboard mode, so focus shows its ring
+            await self.page.send("Input.dispatchKeyEvent", type=kind, key="Tab", code="Tab", windowsVirtualKeyCode=9)
+        await self.page.js("document.querySelector('#project-page [data-plate-card] [data-plate]').focus()")
+        self.assertTrue(await self.page.js("document.activeElement.matches('[data-plate]') && document.activeElement.matches(':focus-visible') && getComputedStyle(document.activeElement).outlineStyle !== 'none'"))
+
+    async def test_needs_attention_appears_only_when_a_plate_needs_it(self):
+        project_id = self.make_board_project(offline_printing=False)
+        with database.transaction() as conn:
+            conn.execute("DELETE FROM prints WHERE plate_id = 7")   # nothing failed, and the printing Plate has no offline printer
+        await self.open_print_step(project_id)
+        board = dict(json.loads(await self.page.js(self.BOARD)))
+        self.assertEqual(list(board), ["printing", "queued", "ready", "done"])
+        self.assertEqual(board["printing"], ["Plate 2: printing now", "Plate 4: starting to print"])
+        self.assertIn("Plate 7: needs slicing", board["ready"])
+
+    async def test_plate_cards_carry_the_print_actions_and_print_remembers_its_place(self):
+        project_id = self.make_board_project(offline_printing=False)
+        with database.transaction() as conn:
+            queued_job = conn.execute("SELECT id FROM jobs WHERE plate_id = 3 AND project_id = ?", (project_id,)).fetchone()[0]
+        await self.open_print_step(project_id)
+        page = self.page
+        card = lambda n: f"[...document.querySelectorAll('#project-page [data-plate-card]')].find(c => c.querySelector('[data-plate]').textContent.trim() === 'Plate {n}')"
+        # Start on a Queued card goes to Review and start (the preflight), as a 44 px target
+        self.assertEqual(await page.js(f"{card(3)}.querySelector('a.pp-card-act').getAttribute('href')"), f"/?review={queued_job}")
+        self.assertIn("Start", await page.js(f"{card(3)}.querySelector('a.pp-card-act').textContent"))
+        self.assertGreaterEqual(await page.js(f"{card(3)}.querySelector('a.pp-card-act').getBoundingClientRect().height"), 44)
+        # a failed Plate offers Reprint next, on its own card, and acting on it does not need it selected first
+        self.assertGreaterEqual(await page.js(f"{card(7)}.querySelector('[data-act=reprint]').getBoundingClientRect().height"), 44)
+        await page.js("window.__posts = []; const f = window.fetch; window.fetch = (u, o) => { if (o && o.method === 'POST') window.__posts.push(String(u)); return f(u, o); }")
+        await page.js(f"{card(7)}.querySelector('[data-act=reprint]').click()")
+        await page.until(f"window.__posts.includes('/api/projects/{project_id}/plates/7/reprint')", what="the reprint request for Plate 7")
+        # selecting a card shows its preview and facts
+        await page.js(f"{card(5)}.querySelector('[data-plate]').click()")
+        await page.until("!!document.querySelector('#project-page .pp-side .pp-preview')", what="the selected Plate's preview")
+        self.assertIn("Plate 5", await page.js("document.querySelector('#project-page .pp-side').textContent"))
+        # the global Queue page is one link away
+        self.assertEqual(await page.js("document.querySelector('#project-page a[href=\"/?queue=1\"]')?.getAttribute('href')"), "/?queue=1")
+        # a fold stays shut, and the selected Plate stays selected, across a reload
+        await page.js("document.querySelector('#project-page [data-fold=done]').click()")
+        self.assertTrue(await page.js("document.querySelector('#project-page [data-group=done] .pp-plates').hidden"))
+        await self.open_print_step(project_id)
+        self.assertEqual(await page.js("document.querySelector('#project-page .pp-plate.sel [data-plate]').textContent.trim()"), "Plate 5")
+        self.assertTrue(await page.js("document.querySelector('#project-page [data-group=done] .pp-plates').hidden"))
+
+    async def make_sendable_board(self):
+        """The board project with Plates 5 and 8 really sliced (10 min / 10 g and 20 min / 20 g), so they can be sent."""
+        project_id = self.make_board_project(offline_printing=False)
+        record = projects.get_project(project_id)
+        slices = {str(n): {"state": "sliced", "fingerprint": projects.fingerprint(record, n), "estimate_s": s, "estimate_g": g}
+                  for n, s, g in ((5, 600, 10), (8, 1200, 20))}
+        with database.transaction() as conn:
+            conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(slices), project_id))
+        for n in (5, 8):
+            folder = projects.plate_dir(project_id, n)
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "plate.gcode").write_bytes(b"; test\nG28\n")
+        return project_id
+
+    SEND = "JSON.stringify({ticked: [...document.querySelectorAll('#project-page [data-tick]:checked')].map(b => b.dataset.tick).sort(), bar: document.getElementById('pp-sendbar').innerText.replace(/\s+/g, ' ').trim(), disabled: document.getElementById('pp-send').disabled})"
+
+    async def send_state(self):
+        return json.loads(await self.page.js(self.SEND))
+
+    async def test_ready_plates_are_ticked_and_sent_to_the_queue_from_print(self):
+        project_id = await self.make_sendable_board()
+        await self.open_print_step(project_id)
+        page = self.page
+        # only sliced Ready Plates can be ticked, the boxes are big, and nothing starts ticked
+        self.assertEqual(await page.js("[...document.querySelectorAll('#project-page [data-tick]')].map(b => b.dataset.tick).sort().join()"), "5,8")
+        self.assertGreaterEqual(await page.js("document.querySelector('#project-page [data-tick]').getBoundingClientRect().width"), 20)
+        first = await self.send_state()
+        self.assertEqual(first["ticked"], [])
+        self.assertIn("Tick the Plates to send", first["bar"])
+        self.assertTrue(first["disabled"])
+        self.assertEqual(await page.js("document.getElementById('pp-send-summary').getAttribute('role')"), "status")
+        # All skips unsliced and queued Plates
+        await page.js("document.getElementById('pp-send-all').click()")
+        both = await self.send_state()
+        self.assertEqual(both["ticked"], ["5", "8"])
+        self.assertIn("2 Plates · 30 min · 30 g", both["bar"])
+        self.assertFalse(both["disabled"])
+        await page.js("document.getElementById('pp-send-none').click()")
+        self.assertEqual((await self.send_state())["ticked"], [])
+        # by box, and by clicking the card outside its controls
+        await page.js("document.querySelector('#project-page [data-tick=\"5\"]').click()")
+        one = await self.send_state()
+        self.assertEqual(one["ticked"], ["5"])
+        self.assertIn("1 Plate · 10 min · 10 g", one["bar"])
+        await page.js("document.querySelector('#project-page [data-tick=\"8\"]').closest('[data-plate-card]').querySelector('.pp-state').click()")
+        self.assertEqual((await self.send_state())["ticked"], ["5", "8"])
+        await page.js("document.querySelector('#project-page [data-tick=\"8\"]').closest('[data-plate-card]').querySelector('.pp-state').click()")
+        self.assertEqual((await self.send_state())["ticked"], ["5"])
+        # the send bar is pinned in view while the board scrolls
+        await page.js("(() => { const p = document.getElementById('project-page'); const pad = document.createElement('div'); pad.id = 'test-pad'; pad.style.minHeight = '3000px'; p.insertBefore(pad, document.getElementById('pp-sendbar')); p.scrollTop = 0; })()")
+        self.assertEqual(await page.js("getComputedStyle(document.getElementById('pp-sendbar')).position"), "sticky")
+        self.assertTrue(await page.js("(() => { const r = document.getElementById('pp-sendbar').getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; })()"))
+        await page.js("document.getElementById('test-pad').remove()")
+        # options and destinations are folded away; the per-Plate printer defaults to Next free printer
+        self.assertEqual(await page.js("document.querySelector('#pp-sendbar select[data-send-printer=\"5\"]').selectedOptions[0].textContent"), "Next free printer")
+        self.assertTrue(await page.js("!!document.getElementById('pp-send-leveling') && !!document.getElementById('pp-send-timelapse') && !!document.getElementById('pp-send-balance')"))
+        # Send makes a Job for the ticked Plate, which moves to Queued
+        await page.js("document.getElementById('pp-send').click()")
+        await page.until("[...document.querySelectorAll('#project-page [data-group=queued] [data-plate]')].some(b => b.textContent.trim() === 'Plate 5')", what="Plate 5 under Queued")
+        board = dict(json.loads(await page.js(self.BOARD)))
+        self.assertIn("Plate 5: in the queue", board["queued"])
+        self.assertIn("Plate 8: sliced", board["ready"])
+        with database.transaction() as conn:
+            sent = conn.execute("SELECT COUNT(*) FROM jobs WHERE project_id = ? AND plate_id = 5", (project_id,)).fetchone()[0]
+        self.assertEqual(sent, 1)
+    def make_small_project(self, sliced, open_job=False):
+        """A one-Plate Project; `sliced` makes its Plate really sliced, `open_job` puts it in the queue."""
+        data = {"bed": "textured", "profile": {"bundle_id": "x"}, "plates": [{"id": 1, "name": "Plate 1"}],
+                "objects": [{"id": 1, "model": 1, "name": "part", "plate": 1, "position": [0, 0], "rotation": [0, 0, 0],
+                             "scale": [1, 1, 1], "overrides": {}}]}
+        models = [{"id": 1, "name": "part", "file": "part.stl", "state": "ready", "sha256": "abc"}]
+        with database.transaction() as conn:
+            project_id = conn.execute("INSERT INTO projects (name, data, models, slices, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
+                                      ("Small", json.dumps(data), json.dumps(models), json.dumps({}))).lastrowid
+        if sliced:
+            record = projects.get_project(project_id)
+            slices = {"1": {"state": "sliced", "fingerprint": projects.fingerprint(record, 1), "estimate_s": 600, "estimate_g": 10}}
+            with database.transaction() as conn:
+                conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(slices), project_id))
+            folder = projects.plate_dir(project_id, 1)
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "plate.gcode").write_bytes(b"; test\nG28\n")
+        if open_job:
+            with database.transaction() as conn:
+                conn.execute("INSERT INTO jobs (name, state, source, file_name, created_at, updated_at, project_id, plate_id) "
+                             "VALUES ('Plate 1', 'queued', 'upload', 'plate1.gcode', 1, 1, ?, 1)", (project_id,))
+        return project_id
+
+    async def test_one_plate_project_opens_print_with_the_plate_ticked_and_the_send_bar_showing(self):
+        await self.open_print_step(self.make_small_project(sliced=True))
+        state = await self.send_state()
+        self.assertEqual(state["ticked"], ["1"])
+        self.assertIn("1 Plate · 10 min · 10 g", state["bar"])
+        self.assertFalse(state["disabled"])
+        self.assertTrue(await self.page.js("(() => { const r = document.getElementById('pp-sendbar').getBoundingClientRect(); return r.height > 0 && r.top < innerHeight; })()"))
+
+    async def test_a_project_with_open_jobs_opens_on_print(self):
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={self.make_small_project(sliced=True, open_job=True)}")
+        await self.page.until("!!document.querySelector('#project-page [data-group]')", what="the Print step opened by itself")
+        self.assertEqual(await self.page.js("document.querySelector('#step-bar .slicer-step.active').dataset.step"), "print")
+
+    async def test_print_with_no_sliced_plates_says_to_slice_first_and_links_to_slice(self):
+        await self.open_print_step(self.make_small_project(sliced=False))
+        text = await self.page.js("document.getElementById('project-page').innerText")
+        self.assertIn("Slice first", text)
+        self.assertEqual(await self.page.js("!!document.getElementById('pp-sendbar')"), False)
+        await self.page.js("document.querySelector('#project-page [data-go-slice]').click()")
+        await self.page.until("document.querySelector('#step-bar .slicer-step.active')?.dataset.step === 'slice'", what="the Slice step")
+
+    # ── Review fixes: deep links, wording, controls, attention reasons, assign and copies ─────────────────────
+
+    def fake_printers(self, *ids):
+        from tests.test_jobs import FakePrinter
+        import state
+        saved = state.printers
+        state.printers = {}
+        for n, pid in enumerate(ids, 1):
+            fake = FakePrinter(pid, f"Printer {n}")
+            fake.to_dict = lambda fake=fake: {"id": fake.id, "name": fake.name, "printer_type": "cc1", "connected": True}
+            state.printers[pid] = fake
+        self.addCleanup(lambda: setattr(state, "printers", saved))
+
+    def job_id(self, project_id, plate):
+        with database.transaction() as conn:
+            return conn.execute("SELECT id FROM jobs WHERE project_id = ? AND plate_id = ? ORDER BY id DESC", (project_id, plate)).fetchone()[0]
+
+    def job_count(self, project_id, plate):
+        with database.transaction() as conn:
+            return conn.execute("SELECT COUNT(*) FROM jobs WHERE project_id = ? AND plate_id = ?", (project_id, plate)).fetchone()[0]
+
+    async def test_a_plate_deep_link_opens_print_with_that_plate_selected(self):
+        project_id = self.make_board_project(offline_printing=False)
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={project_id}&step=print&plate=8")
+        await self.page.until("!!document.querySelector('#project-page .pp-plate.sel')", what="a selected Plate")
+        self.assertEqual(await self.page.js("document.querySelector('#project-page .pp-plate.sel [data-plate]').textContent.trim()"), "Plate 8")
+        # through the app shell, the link keeps its Plate
+        frame = "document.getElementById('projects-frame').contentDocument"
+        await self.goto(f"{self.base}/#projects={project_id}&step=print&plate=5")
+        await self.page.until(f"!!{frame}.querySelector('#project-page .pp-plate.sel')", what="Print in the frame")
+        self.assertEqual(await self.page.js(f"{frame}.querySelector('#project-page .pp-plate.sel [data-plate]').textContent.trim()"), "Plate 5")
+
+    async def test_a_held_plate_has_no_start_link(self):
+        import holds
+        project_id = self.make_board_project(offline_printing=False)
+        holds.add(self.job_id(project_id, 3), {"after_job_id": self.job_id(project_id, 2)})
+        await self.open_print_step(project_id)
+        page = self.page
+        board = dict(json.loads(await page.js(self.BOARD)))
+        self.assertIn("Plate 3: in the queue", board["queued"])
+        card = "[...document.querySelectorAll('#project-page [data-plate-card]')].find(c => c.querySelector('[data-plate]').textContent.trim() === 'Plate 3')"
+        self.assertEqual(await page.js(f"{card}.querySelectorAll('a.pp-card-act').length"), 0, "a held Plate cannot start, so its card has no Start")
+        await page.js(f"{card}.querySelector('[data-plate]').click()")
+        label = await page.until("[...document.querySelectorAll('#project-page .pp-side a[href^=\"/?review=\"]')].map(a => a.textContent.trim())[0]", what="the detail link")
+        self.assertNotRegex(label, r"(?i)start")
+
+    async def test_the_send_bar_uses_send_wording_and_touch_sized_controls(self):
+        project_id = await self.make_sendable_board()
+        await self.open_print_step(project_id)
+        page = self.page
+        self.assertEqual(await page.js("document.getElementById('pp-send').textContent.trim()"), "Send Plates")
+        self.assertNotRegex(await page.js("document.getElementById('pp-send').title"), r"(?i)queue")
+        self.assertEqual(await page.js("document.querySelector('#project-page [data-tick=\"5\"]').getAttribute('aria-label')"), "Send Plate 5, sliced")
+        await page.js("document.getElementById('pp-send-all').click()")
+        self.assertEqual(await page.js("document.getElementById('pp-send').textContent.trim()"), "Send 2 Plates")
+        bar = await page.js("document.getElementById('pp-sendbar').innerText")
+        self.assertNotRegex(bar, r"(?i)queue")
+        self.assertIn("Where each Plate goes", bar)
+        for selector in ("#pp-send-all", "#pp-send-none", "#pp-send", "#pp-sendbar summary"):
+            self.assertGreaterEqual(await page.js(f"document.querySelector('{selector}').getBoundingClientRect().height"), 44, selector)
+
+    async def test_a_printer_card_names_the_next_plate_and_failed_cards_say_why(self):
+        project_id = self.make_board_project(offline_printing=False)
+        self.fake_printers("p1")
+        with database.transaction() as conn:
+            conn.execute("UPDATE jobs SET printer_id = 'p1' WHERE project_id = ? AND plate_id = 3", (project_id,))
+        await self.open_print_step(project_id)
+        page = self.page
+        card = await page.until("document.getElementById('pp-printer-p1')?.innerText", what="the printer card")
+        self.assertIn("Plate 3", card)
+        reason = await page.js("""[...document.querySelectorAll('#project-page [data-plate-card]')].find(c => c.querySelector('[data-plate]').textContent.trim() === 'Plate 7')
+            .querySelector('.pp-reason')?.textContent.trim()""")
+        self.assertTrue(reason, "a failed Plate says why it needs attention")
+
+    async def test_an_unknown_outcome_needs_attention_with_its_reason(self):
+        project_id = self.make_board_project(offline_printing=False)
+        with database.transaction() as conn:
+            conn.execute("INSERT INTO prints (printer_id, printer_name, file_name, started_at, ended_at, outcome, project_id, plate_id) "
+                         "VALUES ('p9', 'P9', 'plate5.gcode', 1, 2, 'unknown', ?, 5)", (project_id,))
+        await self.open_print_step(project_id)
+        board = dict(json.loads(await self.page.js(self.BOARD)))
+        self.assertTrue(any(card.startswith("Plate 5") for card in board["attention"]), board)
+        reason = await self.page.js("""[...document.querySelectorAll('#project-page [data-group=attention] [data-plate-card]')].find(c => c.querySelector('[data-plate]').textContent.trim() === 'Plate 5')
+            .querySelector('.pp-reason')?.textContent.trim()""")
+        self.assertRegex(reason or "", r"(?i)outcome unknown")
+
+    async def test_assign_printers_lets_you_pick_which_printers_to_spread_over(self):
+        project_id = await self.make_sendable_board()
+        self.fake_printers("p1", "p2")
+        with database.transaction() as conn:
+            conn.execute("INSERT INTO jobs (name, state, source, file_name, created_at, updated_at, project_id, plate_id) "
+                         "VALUES ('Plate 5', 'queued', 'upload', 'plate5.gcode', 1, 1, ?, 5)", (project_id,))
+        await self.open_print_step(project_id)
+        page = self.page
+        await page.until("document.querySelector('#project-page [data-act=assign]') && !document.querySelector('#project-page [data-act=assign]').disabled", what="Assign printers")
+        self.assertGreaterEqual(await page.js("document.querySelector('#project-page [data-act=assign]').getBoundingClientRect().height"), 44)
+        await page.js("document.querySelector('#project-page [data-act=assign]').click()")
+        await page.until("document.querySelectorAll('#project-page [data-assign-printer]').length === 2", what="the printer tick list")
+        await page.js("window.__bodies = []; const f = window.fetch; window.fetch = (u, o) => { if (String(u) === '/api/jobs/assign') window.__bodies.push(o.body); return f(u, o); }")
+        await page.js("document.querySelector('#project-page [data-assign-printer=p2]').click()")
+        await page.js("document.querySelector('#project-page [data-act=assign-apply]').click()")
+        await page.until("window.__bodies.length === 1", what="the assign request")
+        body = json.loads(await page.js("window.__bodies[0]"))
+        self.assertEqual(body["printer_ids"], ["p1"])
+
+    async def test_a_queued_plate_can_be_sent_again_as_another_copy_after_a_confirm(self):
+        project_id = await self.make_sendable_board()
+        with database.transaction() as conn:
+            conn.execute("INSERT INTO jobs (name, state, source, file_name, created_at, updated_at, project_id, plate_id) "
+                         "VALUES ('Plate 5', 'queued', 'upload', 'plate5.gcode', 1, 1, ?, 5)", (project_id,))
+        await self.open_print_step(project_id)
+        page = self.page
+        copy = "[...document.querySelectorAll('#project-page [data-group=queued] [data-plate-card]')].find(c => c.querySelector('[data-plate]').textContent.trim() === 'Plate 5').querySelector('[data-act=copy]')"
+        self.assertGreaterEqual(await page.js(f"{copy}.getBoundingClientRect().height"), 44)
+        await page.js("window.confirm = () => false")
+        await page.js(f"{copy}.click()")
+        await asyncio.sleep(1)
+        self.assertEqual(self.job_count(project_id, 5), 1)
+        await page.js("window.confirm = () => true")
+        await page.js(f"{copy}.click()")
+        for _ in range(50):
+            if self.job_count(project_id, 5) == 2:
+                break
+            await asyncio.sleep(0.3)
+        self.assertEqual(self.job_count(project_id, 5), 2)
+        # All never ticks a Plate that is already in the queue
+        self.assertEqual(await page.js("[...document.querySelectorAll('#project-page [data-tick]')].map(b => b.dataset.tick).join()"), "8")
+
+
+    # ── The Queue step is gone: every way into it lands on Print ────────────────────────────────────────────────
+
+    async def step_bar(self):
+        return await self.page.js("JSON.stringify([...document.querySelectorAll('#step-bar [data-step]')].map(b => b.dataset.step))")
+
+    async def active_step(self):
+        return await self.page.js("document.querySelector('#step-bar .slicer-step.active')?.dataset.step")
+
+    async def test_the_step_bar_has_no_queue_step_and_the_sidebar_has_no_queue_cards(self):
+        await self.open_print_step(self.make_board_project(offline_printing=False))
+        self.assertEqual(json.loads(await self.step_bar()), ["plates", "slice", "print"])
+        self.assertEqual(await self.page.js("['jobs-card', 'send-plates', 'btn-send-batch', 'job-batches'].filter(id => document.getElementById(id)).length"), 0)
+
+    async def test_a_remembered_queue_step_opens_print(self):
+        project_id = self.make_board_project(offline_printing=False)
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html")
+        await self.page.js(f"localStorage.setItem('slicer.step.{project_id}', 'queue')")
+        await self.goto(f"{self.base}/slicer.html?project={project_id}")
+        await self.page.until("!!document.querySelector('#project-page [data-group]')", what="the Plate board")
+        self.assertEqual(await self.active_step(), "print")
+
+    async def test_a_queue_deep_link_opens_print_on_that_project(self):
+        project_id = self.make_small_project(sliced=True)
+        await self.hold_qr_script()
+        for step in ("queue", "print"):
+            await self.goto(f"{self.base}/slicer.html?project={project_id}&step={step}")
+            await self.page.until("!!document.querySelector('#project-page [data-group]')", what="the Plate board")
+            self.assertEqual(await self.active_step(), "print")
+
+    async def test_an_old_push_link_lands_on_print_with_that_printer_focused(self):
+        project_id = self.make_board_project(offline_printing=False)
+        frame = "document.getElementById('projects-frame').contentDocument"
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={project_id}&printer=p1")   # the old link, outside the app shell
+        await self.page.until("location.pathname === '/' && location.hash.startsWith('#projects=')", what="the shell")
+        self.assertEqual(await self.page.js("new URLSearchParams(location.hash.slice(1)).get('printer')"), "p1")
+        await self.page.until(f"!!{frame}.querySelector('#project-page [data-group]')", what="Print in the frame")
+        self.assertEqual(await self.page.js(f"{frame}.querySelector('#step-bar .slicer-step.active').dataset.step"), "print")
+
+    async def test_the_shell_opens_a_project_on_print_when_the_link_asks_for_it(self):
+        project_id = self.make_board_project(offline_printing=False)
+        frame = "document.getElementById('projects-frame').contentDocument"
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/#projects={project_id}&step=queue")
+        await self.page.until(f"!!{frame}.querySelector('#project-page [data-group]')", what="Print in the frame")
+        self.assertEqual(await self.page.js(f"{frame}.querySelector('#step-bar .slicer-step.active').dataset.step"), "print")
+
+    async def test_the_queue_page_links_a_batch_back_to_print_on_its_project(self):
+        project_id = self.make_board_project(offline_printing=False)
+        with database.transaction() as conn:
+            for plate in (5, 8):
+                conn.execute("INSERT INTO jobs (name, state, source, file_name, created_at, updated_at, project_id, plate_id, batch_id) "
+                             "VALUES (?, 'queued', 'upload', ?, 1, 1, ?, ?, 'b1')", (f"Plate {plate} - Board", f"plate{plate}.gcode", project_id, plate))
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/?queue=1")
+        await self.page.js("loadJobs()")   # the page loads the Jobs when its websocket opens, which the test server does not offer
+        await self.page.until("document.getElementById('panel-queue').classList.contains('open')", what="the global Queue to open")
+        link = await self.page.until("document.querySelector('.queue-batch-head a[href*=\"/slicer.html\"]')?.getAttribute('href')", what="the batch's Project link")
+        self.assertEqual(link, f"/slicer.html?project={project_id}&step=print")
+
+    async def test_a_gcode_project_has_print_as_its_only_step(self):
+        data = {"bed": "textured", "profile": {"bundle_id": "x"}, "plates": [{"id": 1, "name": "Plate 1"}], "objects": []}
+        slices = {"1": {"state": "sliced", "imported": True, "estimate_s": 600, "estimate_g": 10}}
+        with database.transaction() as conn:
+            project_id = conn.execute("INSERT INTO projects (name, data, models, slices, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
+                                      ("Gcode", json.dumps(data), json.dumps([]), json.dumps(slices))).lastrowid
+        folder = projects.plate_dir(project_id, 1)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "plate.gcode").write_bytes(b"; test\nG28\n")
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={project_id}")
+        await self.page.until("!!document.querySelector('#project-page [data-group]')", what="Print")
+        self.assertEqual(json.loads(await self.step_bar()), ["print"])
+        self.assertEqual(await self.active_step(), "print")
+
 
 if __name__ == "__main__":
     unittest.main()
