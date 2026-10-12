@@ -310,6 +310,112 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
                               what="the object to be marked off the bed")
         self.assertFalse(await self.page.js(plates_done), "the Plates step must not show done with an object off the bed")
 
+    async def slice_project(self, printer=True, sliced=False):
+        """A project with one 20 mm cube on its plate (and, if asked, a printer chosen for it and a current Slice), open on the Slice step."""
+        from tests.test_jobs import FakePrinter
+        import state
+        from tests.test_slicer import cube_stl
+        saved = state.printers
+        fake = FakePrinter("p1", "Printer 1")
+        fake.to_dict = lambda: {"id": fake.id, "name": fake.name, "printer_type": "cc1", "connected": True}   # what /api/printers lists
+        state.printers = {"p1": fake}
+        self.addCleanup(lambda: setattr(state, "printers", saved))
+        project = projects.create_project("One plate")
+        stl = cube_stl(20)
+        projects.import_model(project["id"], io.BytesIO(stl), len(stl), "cube.stl")
+        await asyncio.to_thread(lambda: asyncio.run(self.drain_projects()))   # the import blocks; the browser connection needs this loop free
+        record = projects.get_project(project["id"])
+        change = json.loads(json.dumps(record["data"]))
+        change["objects"][0]["position"] = [100, 100]
+        change["plates"][0]["printer_id"] = "p1" if printer else None   # a new project picks up the last printer used
+        projects.update_project(project["id"], {"data": change, "revision": record["revision"]})
+        if sliced:
+            projects.request_slice(project["id"], 1)
+            await asyncio.to_thread(lambda: asyncio.run(self.drain_projects()))
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={project['id']}")
+        await self.page.until("document.querySelector('#step-bar [data-step=slice]') && !document.querySelector('#step-bar [data-step=slice]').disabled", what="the Slice step")
+        await self.page.js("document.querySelector('#step-bar [data-step=slice]').click()")
+        await self.page.until("document.querySelector('#step-bar [data-step=slice]').classList.contains('active')", what="the Slice step to open")
+        return project["id"]
+
+    async def drain_projects(self):
+        from tests.test_slicer import fake_runner
+        with mock.patch.object(slicer, "runner", fake_runner()):
+            while await projects.process_next():
+                pass
+
+    def run_slicer(self):
+        """Run the project worker (slices, and the send that follows) in a thread while the browser works."""
+        from tests.test_slicer import fake_runner
+        stop = threading.Event()
+        runner = fake_runner()
+
+        def work():
+            async def process():
+                with mock.patch.object(slicer, "runner", runner):
+                    while not stop.is_set():
+                        if not await projects.process_next():
+                            await asyncio.sleep(0.2)
+            asyncio.run(process())
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        self.stop_worker = lambda: (stop.set(), worker.join(30))   # before the database is pointed back at the real file
+        return runner
+
+    @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+    async def test_slice_step_sends_one_plate_in_one_click(self):
+        page = self.page
+        project_id = await self.slice_project()
+        runner = self.run_slicer()
+
+        # The Slice step is about one plate: no tick boxes, and no talk of a queue in its sidebar or actions
+        self.assertEqual(await page.js("document.querySelectorAll('[data-send-plate]:not([hidden])').length"), 0)
+        shown = await page.js("""[...document.querySelectorAll('.slicer-sidebar [data-steps]:not([hidden]), #step-actions')]
+            .filter(el => !el.hidden && el.offsetParent !== null).map(el => el.innerText).join(' ')""")
+        self.assertNotRegex(shown, r"(?i)queue")
+        # Its one primary action sends this plate to its printer
+        label = await page.js("document.querySelector('#step-actions .btn-primary').textContent.trim()")
+        self.assertEqual(label, "Send to Printer 1")
+        self.assertEqual(await page.js("document.querySelectorAll('#btn-slice-send:not([hidden])').length"), 0)
+
+        # The plate has never been sliced, so one click slices it first and then creates exactly one Job
+        await page.js("document.querySelector('#step-actions .btn-primary').click()")
+        for _ in range(100):
+            if projects.project_jobs(project_id):
+                break
+            await asyncio.sleep(0.3)
+        sent = projects.project_jobs(project_id)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual((sent[0]["plate_id"], sent[0]["printer_id"]), (1, "p1"))
+        self.assertEqual(len(runner.calls), 1, "an out-of-date plate is sliced before its Job is created")
+        self.assertEqual(projects.get_project(project_id)["slices"]["1"]["state"], "sliced")
+
+    @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+    async def test_slice_step_sends_an_up_to_date_plate_without_slicing_again(self):
+        page = self.page
+        project_id = await self.slice_project(sliced=True)
+        runner = self.run_slicer()
+        self.assertEqual(projects.get_project(project_id)["slices"]["1"]["state"], "sliced")
+        await page.until("document.getElementById('slice-state').textContent.includes('Current Slice')", what="the sliced plate")
+
+        await page.js("document.querySelector('#step-actions .btn-primary').click()")
+        for _ in range(100):
+            if projects.project_jobs(project_id):
+                break
+            await asyncio.sleep(0.3)
+        self.assertEqual(len(projects.project_jobs(project_id)), 1)
+        self.assertEqual(runner.calls, [], "a current Slice is sent as it is")
+
+    @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+    async def test_slice_step_send_is_disabled_with_a_reason_when_no_printer_is_chosen(self):
+        page = self.page
+        await self.slice_project(printer=False)
+        button = await page.js("(b => ({ disabled: b.disabled, text: b.textContent.trim() }))(document.querySelector('#step-actions .btn-primary'))")
+        self.assertTrue(button["disabled"])
+        reason = await page.js("document.querySelector('#step-actions .slicer-why')?.textContent.trim()")
+        self.assertRegex(reason or "", r"(?i)choose a printer")
+
 
 if __name__ == "__main__":
     unittest.main()
