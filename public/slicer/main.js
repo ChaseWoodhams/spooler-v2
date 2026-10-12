@@ -1,11 +1,11 @@
-/* Spooler project workspace (slicer.html): one page from a model upload to the print queue.
+/* Spooler project workspace (slicer.html): one page from a model upload to a finished print.
    Model (analysis, units) → Split (cuts, parts) → Plates (parts packed onto plates; move, merge, settings for the
    project, a plate or an object) → Slice (every plate, layer preview) → Print (send the plates, watch the Jobs, start
    them). Projects without an uploaded model start at Plates. Talks to /api/projects, /api/splits and /api/jobs. */
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=3";
-import { projectPage } from "./project-page.js?v=6";
+import { projectPage } from "./project-page.js?v=7";
 import { newProject } from "./new-project.js?v=9";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 
@@ -39,7 +39,7 @@ const state = {
   group: [],            // the other selected objects (Shift-click, Ctrl+A) besides state.selected
   serverProblems: [],   // the server's list of problem objects (GET /status): off the bed, over the purge area, overlaps, failed model
   problemReasons: {},   // plate id → why the server says that plate has a problem
-  jobs: [],             // queue jobs sent from this project
+  jobs: [],             // the Jobs sent from this project
   printers: [],
 };
 
@@ -272,7 +272,7 @@ async function boot() {
   const asked = Number(params.get("project")) || 0;
   if (asked) {
     try {
-      await openProject(asked, { toPrinter: !!params.get("printer"), toPrint: stepAliases(params.get("step")) === "print" });
+      await openProject(asked, { toPrinter: !!params.get("printer"), toPrint: stepAliases(params.get("step")) === "print" || !!params.get("plate") });
       return;
     } catch (err) {
       // A deleted or hidden project falls through to the Projects page. Anything else (Spooler busy or restarting) says so,
@@ -357,7 +357,7 @@ function renderFarm() {
   const name = state.printers.find(p => p.id === printer)?.name;
   const button = $("btn-slice-send");
   button.textContent = name ? `Slice & send to ${name}` : "Slice & send";
-  button.disabled = !printer || !plateObjects().length || !data().profile.bundle_id || isBusy(state.plate) || plateImporting(state.plate);
+  button.disabled = !plateObjects().length || !data().profile.bundle_id || isBusy(state.plate) || plateImporting(state.plate);
   if (state.step === "slice") renderStepActions();
   refreshFit();
 }
@@ -431,8 +431,8 @@ async function sliceAndSend(plateIds) {
 async function sendThisPlate() {
   const plate = state.plate;
   if (!isUpToDate(plate)) return sliceAndSend([plate]);
-  await flushSave();
-  await api("POST", `/api/projects/${state.project.id}/queue`, { plates: [plate] });
+  if (!await queuePlates([plate], {})) return;   // the same send as Print: saves first and remembers the choices
+  rememberDefaults({ printer: currentPlate()?.printer_id || null });
   await loadJobs();
   toast("Sent to the printer");
 }
@@ -656,20 +656,20 @@ function renderStepActions() {
   const send = sendThisPlateState();
   el.innerHTML = state.step === "plates" ? next("slice", "Slice →")
     : state.step === "slice" ? `<button class="btn btn-primary" type="button" data-send-this-plate${send.why ? " disabled" : ""}${send.why ? ` title="${esc(send.why)}"` : ""}>${esc(send.label)}</button>`
-      + (send.why ? `<small class="slicer-why slicer-muted">${esc(send.why)}</small>` : "") : "";
+      + (send.why ? `<small class="slicer-muted">${esc(send.why)}</small>` : "") : "";
   $("btn-slice-send").hidden = state.step === "slice";   // the Slice step has its own send in the header
 }
 
-// The Slice step's one action: send the selected plate to its printer. `why` is set when it can't be used right now.
+// The Slice step's one action: send the selected Plate to its printer, or to the next free one when none is chosen.
+// `why` is set only for a real blocker.
 function sendThisPlateState() {
   const plate = currentPlate();
   const printer = state.printers.find(p => p.id === plate?.printer_id);
-  const label = printer ? `Send to ${printer.name}` : "Send to printer";
+  const label = printer ? `Send to ${printer.name}` : "Send to next free printer";
   if (!plate) return { label, why: "" };
   const why = !plateObjects().length ? "This plate is empty"
     : plateImporting(plate.id) ? "The models on this plate are still importing"
     : anyProblem() ? (state.problemReasons[plate.id] || "Fix the objects marked in red first")
-    : !plate.printer_id ? "Choose a printer under Print on first"
     : !data().profile.bundle_id ? "Choose a slicing profile first"
     : isBusy(plate.id) ? "This plate is being sliced" : "";
   return { label, why };
@@ -1253,14 +1253,14 @@ function plateFilamentLabel(id) {
   return [...labels].join(', ') || currentPresets()?.filament || 'Imported G-code material';
 }
 
-/** Give the longest Plates first to the connected printer with the least estimated work in this Project; false (with a toast) when it cannot. */
+/** Give the longest Plates first to the connected printer with the least estimated work in this Project; false (with a toast) when it cannot. Sets each Plate's printer; the `plates` list itself is left as it was. */
 function balancePlates(plates) {
   const ready = state.printers.filter(p => p.connected);
   if (!ready.length) { toast('No connected printers. Choose assignments manually or reconnect a printer.', true); return false; }
   if (plates.some(p => sliceEntry(p.id)?.estimate_s == null)) { toast('Time estimates are missing. Assign destination printers manually or slice these Plates again.', true); return false; }
   const loads = new Map(ready.map(p => [p.id, state.jobs.filter(j => j.printer_id === p.id && OPEN_JOB_STATES.has(j.state)).reduce((sum,j) => sum + (j.estimate_s || 0),0)]));
-  plates.sort((a,b) => (sliceEntry(b.id)?.estimate_s || 0) - (sliceEntry(a.id)?.estimate_s || 0));
-  for (const plate of plates) {
+  const longestFirst = [...plates].sort((a,b) => (sliceEntry(b.id)?.estimate_s || 0) - (sliceEntry(a.id)?.estimate_s || 0));
+  for (const plate of longestFirst) {
     const printer = [...ready].sort((a,b) => loads.get(a.id) - loads.get(b.id))[0];
     plate.printer_id = printer.id;
     loads.set(printer.id, loads.get(printer.id) + (sliceEntry(plate.id)?.estimate_s || 0));
@@ -2235,7 +2235,6 @@ function renderPreviewPanel(info) {
 
 // ── Jobs and printers (the Print step reads and sends through these) ────────────────
 async function loadJobs({ quiet = false } = {}) {
-  clearTimeout(state.jobsTimer);
   if (!state.project) return;
   const id = state.project.id;
   try {
@@ -2255,13 +2254,13 @@ async function loadPrinters() {
   } catch (_) { /* the list stays as it was */ }
 }
 
-/** Save the project, then turn the given Plates into queued Jobs (the Print step and the Slice step both send through here). */
+/** Save the project, then turn the given Plates into Jobs (the Print step and the Slice step both send through here). */
 async function queuePlates(plates, { leveling, timelapse, again = false }) {
   await flushSave();
   if ($('save-state').textContent === 'Not saved') {
-    toast('Project changes could not be saved. Retry saving before adding these Plates to the Queue.', true); return null;
+    toast('Project changes could not be saved. Retry saving before sending these Plates.', true); return null;
   }
-  rememberDefaults({ options: { leveling, timelapse } });
+  if (leveling !== undefined || timelapse !== undefined) rememberDefaults({ options: { leveling, timelapse } });
   return api("POST", `/api/projects/${state.project.id}/queue`, { plates, leveling, timelapse, again });
 }
 
@@ -2895,7 +2894,7 @@ const ADD_NOTES = {
   model: `The models join the project as whole models on the Plates step. The split you are working on is not changed.${TOO_BIG}`,
   split: `The models join the project as whole models on the Plates step. The split you are working on is not changed.${TOO_BIG}`,
   plates: `The models are added to the current plate. Plates with a finished Slice become outdated and need slicing again.${TOO_BIG}`,
-  slice: `The models are added to the current plate, which marks its Slice outdated: slice it again before queueing.${TOO_BIG}`,
+  slice: `The models are added to the current plate, which marks its Slice outdated: slice it again before sending it.${TOO_BIG}`,
 };
 
 // Done: the project now holds the added models (a too-big one as a split), so bring the workspace up to date

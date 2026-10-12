@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="style.css?v=60" />
   <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=49" />
+  <link rel="stylesheet" href="slicer.css?v=50" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -21,7 +21,7 @@
   </script>
   <script>
   // Old push links (/slicer.html?project=&printer=) land in the app shell on the same project and printer card.
-  (function () { const q = new URLSearchParams(location.search); if (window.self === window.top && q.get("project") && q.get("printer")) location.replace("/#projects=" + encodeURIComponent(q.get("project")) + "&printer=" + encodeURIComponent(q.get("printer"))); })();
+  (function () { const q = new URLSearchParams(location.search); if (window.self === window.top && q.get("project") && q.get("printer")) location.replace("/#projects=" + encodeURIComponent(q.get("project")) + "&printer=" + encodeURIComponent(q.get("printer")) + (q.get("plate") ? "&plate=" + encodeURIComponent(q.get("plate")) : "")); })();
   </script>
   <script>if (window.self !== window.top) { document.body.classList.add("embedded"); const b = document.createElement("base"); b.target = "_top"; document.head.appendChild(b); }</script>
   <header class="slicer-top">
@@ -96,7 +96,7 @@
           <select id="plate-printer-select" title="The printer this plate is meant for"></select></div>
         <div id="plate-fit" class="plate-fit"></div>
         <div class="slicer-actions-row"><button id="btn-slice-send" class="btn btn-secondary btn-sm" type="button" disabled
-          title="Slice this plate and put it in the queue for its printer">Slice &amp; send</button></div>
+          title="Slice this Plate and send it to its printer">Slice &amp; send</button></div>
       </section>
 
       <details class="slicer-card slicer-fold" id="fold-material" data-steps="plates slice">
@@ -356,6 +356,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=52"></script>
+  <script type="module" src="slicer/main.js?v=53"></script>
 </body>
 </html>
