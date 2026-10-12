@@ -5,7 +5,7 @@
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=3";
-import { projectPage } from "./project-page.js?v=5";
+import { projectPage } from "./project-page.js?v=6";
 import { newProject } from "./new-project.js?v=8";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 
@@ -249,6 +249,7 @@ async function boot() {
     sliceState: plateId => sliceEntry(plateId)?.state,
     onSlice: plateId => requestPlateSlice(plateId),
     onOpenPlate: plateId => { selectPlate(plateId); setStep("plates"); },
+    onOpenSlice: () => setStep("slice"),
     hasAssembly: () => !!(splitIdsOf(state.project).length && splitStep.split?.result?.assembly),
     onOpenAssembly: async () => { await setStep("split"); document.querySelector(".split-assembly")?.scrollIntoView({ block: "center" }); },
     sendPlates: (ids, options) => queuePlates(ids, options),
@@ -600,7 +601,7 @@ function stepAvailable(step) {
     case "plates": return !splitIdsOf(project).length || data().objects.length > 0;
     case "slice":  return data().objects.length > 0;
     case "queue":  return platesWithObjects().some(p => isUpToDate(p.id)) || state.jobs.length > 0;
-    case "print":  return Object.values(project.slices).some(s => s.state === "sliced") || state.jobs.length > 0;
+    case "print":  return data().objects.length > 0 || state.jobs.length > 0;   // with nothing sliced, Print says to slice first
   }
   return false;
 }
@@ -621,7 +622,7 @@ function defaultStep() {
   if (isGcodeProject()) return "queue";
   if (unplacedSplitIds(state.project).length || splitIdsOf(state.project).length && !data().objects.length) return splitStep.split?.result ? "split" : "model";
   if (!data().objects.length) return "plates";
-  if (state.jobs.some(j => OPEN_JOB_STATES.has(j.state))) return "queue";
+  if (state.jobs.some(j => OPEN_JOB_STATES.has(j.state))) return "print";
   return platesWithObjects().every(p => isUpToDate(p.id)) ? "slice" : "plates";
 }
 

@@ -572,6 +572,50 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         with database.transaction() as conn:
             sent = conn.execute("SELECT COUNT(*) FROM jobs WHERE project_id = ? AND plate_id = 5", (project_id,)).fetchone()[0]
         self.assertEqual(sent, 1)
+    def make_small_project(self, sliced, open_job=False):
+        """A one-Plate Project; `sliced` makes its Plate really sliced, `open_job` puts it in the queue."""
+        data = {"bed": "textured", "profile": {"bundle_id": "x"}, "plates": [{"id": 1, "name": "Plate 1"}],
+                "objects": [{"id": 1, "model": 1, "name": "part", "plate": 1, "position": [0, 0], "rotation": [0, 0, 0],
+                             "scale": [1, 1, 1], "overrides": {}}]}
+        models = [{"id": 1, "name": "part", "file": "part.stl", "state": "ready", "sha256": "abc"}]
+        with database.transaction() as conn:
+            project_id = conn.execute("INSERT INTO projects (name, data, models, slices, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
+                                      ("Small", json.dumps(data), json.dumps(models), json.dumps({}))).lastrowid
+        if sliced:
+            record = projects.get_project(project_id)
+            slices = {"1": {"state": "sliced", "fingerprint": projects.fingerprint(record, 1), "estimate_s": 600, "estimate_g": 10}}
+            with database.transaction() as conn:
+                conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(slices), project_id))
+            folder = projects.plate_dir(project_id, 1)
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "plate.gcode").write_bytes(b"; test\nG28\n")
+        if open_job:
+            with database.transaction() as conn:
+                conn.execute("INSERT INTO jobs (name, state, source, file_name, created_at, updated_at, project_id, plate_id) "
+                             "VALUES ('Plate 1', 'queued', 'upload', 'plate1.gcode', 1, 1, ?, 1)", (project_id,))
+        return project_id
+
+    async def test_one_plate_project_opens_print_with_the_plate_ticked_and_the_send_bar_showing(self):
+        await self.open_print_step(self.make_small_project(sliced=True))
+        state = await self.send_state()
+        self.assertEqual(state["ticked"], ["1"])
+        self.assertIn("1 plate · 10 min · 10 g", state["bar"])
+        self.assertFalse(state["disabled"])
+        self.assertTrue(await self.page.js("(() => { const r = document.getElementById('pp-sendbar').getBoundingClientRect(); return r.height > 0 && r.top < innerHeight; })()"))
+
+    async def test_a_project_with_open_jobs_opens_on_print(self):
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={self.make_small_project(sliced=True, open_job=True)}")
+        await self.page.until("!!document.querySelector('#project-page [data-group]')", what="the Print step opened by itself")
+        self.assertEqual(await self.page.js("document.querySelector('#step-bar .slicer-step.active').dataset.step"), "print")
+
+    async def test_print_with_no_sliced_plates_says_to_slice_first_and_links_to_slice(self):
+        await self.open_print_step(self.make_small_project(sliced=False))
+        text = await self.page.js("document.getElementById('project-page').innerText")
+        self.assertIn("Slice first", text)
+        self.assertEqual(await self.page.js("!!document.getElementById('pp-sendbar')"), False)
+        await self.page.js("document.querySelector('#project-page [data-go-slice]').click()")
+        await self.page.until("document.querySelector('#step-bar .slicer-step.active')?.dataset.step === 'slice'", what="the Slice step")
 
 
 if __name__ == "__main__":

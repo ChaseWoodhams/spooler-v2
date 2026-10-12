@@ -50,6 +50,7 @@ let sendOpts = { leveling: false, timelapse: false };   // remembered from the l
 let dest = {};              // plate id -> printer id picked on the send bar (the project save may not have landed yet)
 let barFolds = {};          // which send bar folds are open; remembered per Project with the board folds
 let sending = false;
+let autoTicked = false;     // a one-Plate Project ticks its Plate once, when Print first loads
 
 function duration(seconds) {
   if (!seconds) return "";
@@ -232,6 +233,8 @@ function plateBoard() {
     <div class="pp-group-head"><h3 id="pp-group-${id}"><button type="button" class="pp-fold" data-fold="${id}" aria-expanded="${!folds.has(id)}">${folds.has(id) ? "▸" : "▾"} ${title} <span class="slicer-muted">${cards.length}</span></button></h3>
       ${id === "ready" && cards.some(c => sendable(c.plate)) ? `<span class="pp-ticks"><button type="button" class="btn btn-secondary btn-sm" id="pp-send-all" title="Tick every plate that is sliced and not already in the queue">All</button>
         <button type="button" class="btn btn-secondary btn-sm" id="pp-send-none">None</button></span>` : ""}
+      ${id === "ready" && !cards.some(c => sendable(c.plate)) && cards.some(c => c.plate.status === "unsliced") ? `<p class="pp-slice-first" role="note"><strong>Slice first.</strong> No plate here is sliced yet, so there is nothing to send.
+        <button type="button" class="btn btn-primary btn-sm" data-go-slice>Go to Slice</button></p>` : ""}
       ${id === "queued" ? `<button type="button" class="btn btn-secondary btn-sm" data-act="assign"${canAssign ? "" : " disabled"}
         title="Spread the queued plates over the connected printers so they finish about together, by estimated print time">Assign printers · balance by time</button>` : ""}</div>
     <ul class="pp-plates"${folds.has(id) ? " hidden" : ""}>${cards.map(({ plate, word, reason }) => `<li class="pp-plate st-${plate.status}${plate.id === selected ? " sel" : ""}${ticked.has(plate.id) ? " ticked" : ""}" data-plate-card>
@@ -301,6 +304,10 @@ function render() {
   if (!shown || !status) return;
   if (document.activeElement?.matches?.("select") && root.contains(document.activeElement)) return;  // never rebuild a menu being used
   ticked = new Set(readySendable().filter(p => ticked.has(p.id)).map(p => p.id));   // a Plate that left Ready is no longer ticked
+  if (!autoTicked) {   // sending the only Plate of a one-Plate Project takes one click
+    autoTicked = true;
+    if (status.plates.length === 1 && readySendable().length === 1) ticked.add(status.plates[0].id);
+  }
   if (selected == null || !plateOf(selected)) selected = status.plates.find(p => p.status === "printing")?.id ?? status.plates[0]?.id ?? null;
   const active = root.contains(document.activeElement) ? document.activeElement : null;
   const activePlate = active?.getAttribute('data-plate'), activeName = active?.getAttribute('aria-label');
@@ -425,6 +432,7 @@ function bind() {
     }
     const own = e.target.closest("[data-card-plate]");
     if (own) selected = Number(own.dataset.cardPlate);   // a card's action acts on that card's Plate
+    if (e.target.closest("[data-go-slice]")) { host.onOpenSlice(); return; }
     const cell = e.target.closest("[data-plate]");
     const button = e.target.closest("[data-act]");
     if (button && !button.disabled) {
@@ -467,7 +475,7 @@ async function loadSendOptions() {
 
 export const projectPage = {
   attach(hooks) { host = hooks; bind(); },
-  show() { shown = true; focusedPrinter = false; status = null; recall(); ticked = new Set(); dest = {}; loadSendOptions(); $("project-page").innerHTML = '<p class="slicer-muted">Loading…</p>'; refresh(); },
+  show() { shown = true; focusedPrinter = false; status = null; recall(); ticked = new Set(); autoTicked = false; dest = {}; loadSendOptions(); $("project-page").innerHTML = '<p class="slicer-muted">Loading…</p>'; refresh(); },
   hide() { shown = false; clearTimeout(timer); },
   /** Redraw from what is already loaded (a slice finished, the selection moved). */
   redraw() { render(); },
