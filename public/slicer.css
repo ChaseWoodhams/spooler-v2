@@ -615,3 +615,17 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .pp-plate-btn { flex: 1 1 140px; min-height: 36px; text-align: left; background: transparent; color: var(--text); border: 0; font-size: 13px; cursor: pointer; }
 .pp-state { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--c); font-weight: 600; white-space: nowrap; }
 .pp-reason { flex-basis: 100%; font-size: 12px; color: var(--red); padding-bottom: 4px; }
+/* Print step: tick Ready Plates and send them from a pinned bar */
+.pp-ticks { display: inline-flex; gap: 6px; }
+.pp-tick { width: 20px; height: 20px; margin: 0; cursor: pointer; flex: none; }
+.pp-plate:has(.pp-tick) { cursor: pointer; }
+.pp-plate.ticked { background: var(--surface); outline: 1px solid var(--accent); }
+.pp-sendbar { position: sticky; bottom: -14px; z-index: 3; margin: 0 -16px -14px; padding: 10px 16px; display: flex; flex-direction: column; gap: 8px;
+  background: var(--surface); border-top: 1px solid var(--border); box-shadow: 0 -10px 12px -10px rgba(0, 0, 0, .6); }
+.pp-send-summary { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 1.4; }
+.pp-sendbar .slicer-muted { margin: 0; }
+.pp-fold { font-size: 13px; }
+.pp-fold summary { cursor: pointer; min-height: 28px; }
+.pp-where { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 12px; max-height: 160px; overflow-y: auto; }
+.pp-sendbar .btn-primary { width: 100%; min-height: 36px; }
+@media (max-width: 900px) { .pp-sendbar { bottom: -10px; margin: 0 -10px -10px; padding: 10px; } }

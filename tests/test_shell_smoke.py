@@ -372,6 +372,72 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(board["printing"], ["Plate 2: printing now", "Plate 4: starting to print"])
         self.assertIn("Plate 7: needs slicing", board["ready"])
 
+    async def make_sendable_board(self):
+        """The board project with Plates 5 and 8 really sliced (10 min / 10 g and 20 min / 20 g), so they can be sent."""
+        project_id = self.make_board_project(offline_printing=False)
+        record = projects.get_project(project_id)
+        slices = {str(n): {"state": "sliced", "fingerprint": projects.fingerprint(record, n), "estimate_s": s, "estimate_g": g}
+                  for n, s, g in ((5, 600, 10), (8, 1200, 20))}
+        with database.transaction() as conn:
+            conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(slices), project_id))
+        for n in (5, 8):
+            folder = projects.plate_dir(project_id, n)
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "plate.gcode").write_bytes(b"; test\nG28\n")
+        return project_id
+
+    SEND = "JSON.stringify({ticked: [...document.querySelectorAll('#project-page [data-tick]:checked')].map(b => b.dataset.tick).sort(), bar: document.getElementById('pp-sendbar').innerText.replace(/\s+/g, ' ').trim(), disabled: document.getElementById('pp-send').disabled})"
+
+    async def send_state(self):
+        return json.loads(await self.page.js(self.SEND))
+
+    async def test_ready_plates_are_ticked_and_sent_to_the_queue_from_print(self):
+        project_id = await self.make_sendable_board()
+        await self.open_print_step(project_id)
+        page = self.page
+        # only sliced Ready Plates can be ticked, the boxes are big, and nothing starts ticked
+        self.assertEqual(await page.js("[...document.querySelectorAll('#project-page [data-tick]')].map(b => b.dataset.tick).sort().join()"), "5,8")
+        self.assertGreaterEqual(await page.js("document.querySelector('#project-page [data-tick]').getBoundingClientRect().width"), 20)
+        first = await self.send_state()
+        self.assertEqual(first["ticked"], [])
+        self.assertIn("Tick the plates to send", first["bar"])
+        self.assertTrue(first["disabled"])
+        self.assertEqual(await page.js("document.getElementById('pp-send-summary').getAttribute('role')"), "status")
+        # All skips unsliced and queued Plates
+        await page.js("document.getElementById('pp-send-all').click()")
+        both = await self.send_state()
+        self.assertEqual(both["ticked"], ["5", "8"])
+        self.assertIn("2 plates · 30 min · 30 g", both["bar"])
+        self.assertFalse(both["disabled"])
+        await page.js("document.getElementById('pp-send-none').click()")
+        self.assertEqual((await self.send_state())["ticked"], [])
+        # by box, and by clicking the card outside its controls
+        await page.js("document.querySelector('#project-page [data-tick=\"5\"]').click()")
+        one = await self.send_state()
+        self.assertEqual(one["ticked"], ["5"])
+        self.assertIn("1 plate · 10 min · 10 g", one["bar"])
+        await page.js("document.querySelector('#project-page [data-tick=\"8\"]').closest('[data-plate-card]').querySelector('.pp-state').click()")
+        self.assertEqual((await self.send_state())["ticked"], ["5", "8"])
+        await page.js("document.querySelector('#project-page [data-tick=\"8\"]').closest('[data-plate-card]').querySelector('.pp-state').click()")
+        self.assertEqual((await self.send_state())["ticked"], ["5"])
+        # the send bar is pinned in view while the board scrolls
+        await page.js("(() => { const p = document.getElementById('project-page'); const pad = document.createElement('div'); pad.id = 'test-pad'; pad.style.minHeight = '3000px'; p.insertBefore(pad, document.getElementById('pp-sendbar')); p.scrollTop = 0; })()")
+        self.assertEqual(await page.js("getComputedStyle(document.getElementById('pp-sendbar')).position"), "sticky")
+        self.assertTrue(await page.js("(() => { const r = document.getElementById('pp-sendbar').getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; })()"))
+        await page.js("document.getElementById('test-pad').remove()")
+        # options and destinations are folded away; the per-Plate printer defaults to Next free printer
+        self.assertEqual(await page.js("document.querySelector('#pp-sendbar select[data-send-printer=\"5\"]').selectedOptions[0].textContent"), "Next free printer")
+        self.assertTrue(await page.js("!!document.getElementById('pp-send-leveling') && !!document.getElementById('pp-send-timelapse') && !!document.getElementById('pp-send-balance')"))
+        # Send makes a Job for the ticked Plate, which moves to Queued
+        await page.js("document.getElementById('pp-send').click()")
+        await page.until("[...document.querySelectorAll('#project-page [data-group=queued] [data-plate]')].some(b => b.textContent.trim() === 'Plate 5')", what="Plate 5 under Queued")
+        board = dict(json.loads(await page.js(self.BOARD)))
+        self.assertIn("Plate 5: in the queue", board["queued"])
+        self.assertIn("Plate 8: sliced", board["ready"])
+        with database.transaction() as conn:
+            sent = conn.execute("SELECT COUNT(*) FROM jobs WHERE project_id = ? AND plate_id = 5", (project_id,)).fetchone()[0]
+        self.assertEqual(sent, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
