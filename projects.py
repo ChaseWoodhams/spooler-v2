@@ -3095,7 +3095,7 @@ def _require_one_filament(record: dict, plate_ids) -> None:
 
 
 def request_slice(project_id: int, plate_id: int, send: bool = False, send_opts: dict | None = None) -> dict:
-    """Slice one plate. With `send`, the finished plate goes to the queue for its own printer."""
+    """Slice one plate. With `send`, the finished plate goes to the queue for its own printer (or the next free one when it has none)."""
     record = get_project(project_id)
     if plate_id not in {p["id"] for p in record["data"]["plates"]}:
         raise jobs.JobError("Plate not found", 404)
@@ -3104,8 +3104,6 @@ def request_slice(project_id: int, plate_id: int, send: bool = False, send_opts:
     if record["slices"].get(str(plate_id), {}).get("state") in (QUEUED, SLICING):
         raise jobs.JobError("The plate is already being sliced", 409)
     _require_one_filament(record, {plate_id})
-    if send:
-        _require_printers(record, {plate_id})
     _mutate(project_id, "slices", lambda s: s.__setitem__(str(plate_id), _queued_entry(s.get(str(plate_id)), time.time(), send, send_opts)))
     notify_worker()
     return get_project(project_id)
@@ -3133,8 +3131,6 @@ def request_slices(project_id: int, plate_ids=None, send: bool = False) -> dict:
     if not todo:
         raise jobs.JobError("Nothing to slice — every plate is empty, already sliced or slicing", 409)
     _require_one_filament(record, set(todo))
-    if send:
-        _require_printers(record, set(todo))
     now = time.time()
 
     def mark(slices):
