@@ -5,7 +5,7 @@
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=3";
-import { projectPage } from "./project-page.js?v=4";
+import { projectPage } from "./project-page.js?v=5";
 import { newProject } from "./new-project.js?v=8";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 
@@ -251,6 +251,11 @@ async function boot() {
     onOpenPlate: plateId => { selectPlate(plateId); setStep("plates"); },
     hasAssembly: () => !!(splitIdsOf(state.project).length && splitStep.split?.result?.assembly),
     onOpenAssembly: async () => { await setStep("split"); document.querySelector(".split-assembly")?.scrollIntoView({ block: "center" }); },
+    sendPlates: (ids, options) => queuePlates(ids, options),
+    balance: ids => balancePlates(ids.map(plateById)) ? Object.fromEntries(ids.map(id => [id, plateById(id).printer_id])) : null,
+    plateFilament: plateId => plateFilamentLabel(plateId),
+    bedName: () => data().bed === 'smooth' ? 'Smooth PEI' : 'Textured PEI',
+    spoolNote: () => { const spool = state.spools?.find(s => s.id === data().profile.spool_id); return spool ? `Spool: ${spoolLabel(spool)}` : "No spool assigned; using preset values"; },
     onSetPrinter: (plateId, printerId) => {
       const plate = data().plates.find(p => p.id === plateId);
       if (!plate) return;
@@ -1296,6 +1301,22 @@ function destinationLabel(id) {
   if (!id) return 'Next free printer';
   const printer = state.printers.find(p => p.id === id);
   return printer ? `${printer.name}${printer.connected ? '' : ' (offline)'}` : `Unavailable printer (${id})`;
+}
+
+/** Give the longest Plates first to the connected printer with the least estimated work in this Project; false (with a toast) when it cannot. */
+function balancePlates(plates) {
+  const ready = state.printers.filter(p => p.connected);
+  if (!ready.length) { toast('No connected printers. Choose assignments manually or reconnect a printer.', true); return false; }
+  if (plates.some(p => sliceEntry(p.id)?.estimate_s == null)) { toast('Time estimates are missing. Assign destination printers manually or slice these Plates again.', true); return false; }
+  const loads = new Map(ready.map(p => [p.id, state.jobs.filter(j => j.printer_id === p.id && OPEN_JOB_STATES.has(j.state)).reduce((sum,j) => sum + (j.estimate_s || 0),0)]));
+  plates.sort((a,b) => (sliceEntry(b.id)?.estimate_s || 0) - (sliceEntry(a.id)?.estimate_s || 0));
+  for (const plate of plates) {
+    const printer = [...ready].sort((a,b) => loads.get(a.id) - loads.get(b.id))[0];
+    plate.printer_id = printer.id;
+    loads.set(printer.id, loads.get(printer.id) + (sliceEntry(plate.id)?.estimate_s || 0));
+  }
+  changed();
+  return true;
 }
 
 function updateSendButton() {
@@ -2355,19 +2376,24 @@ async function loadPrinters() {
   } catch (_) { /* the list stays as it was */ }
 }
 
+/** Save the project, then turn the given Plates into queued Jobs (the Queue step and the Print step both send through here). */
+async function queuePlates(plates, { leveling, timelapse, again = false }) {
+  await flushSave();
+  if ($('save-state').textContent === 'Not saved') {
+    toast('Project changes could not be saved. Retry saving before adding these Plates to the Queue.', true); return null;
+  }
+  rememberDefaults({ options: { leveling, timelapse } });
+  return api("POST", `/api/projects/${state.project.id}/queue`, { plates, leveling, timelapse, again });
+}
+
 async function sendBatch() {
   const chosen = [...document.querySelectorAll("[data-send-plate]")].filter(x => x.checked).map(x => Number(x.dataset.sendPlate));
   if (!chosen.length) return;
   const repeats = chosen.filter(id => openJobPlates().has(id)).map(id => plateById(id).name);
   if (repeats.length && !confirm(`${listNames(repeats)} ${repeats.length === 1 ? "is" : "are"} already in the queue. Send another copy?`)) return;
-  await flushSave();
-  if ($('save-state').textContent === 'Not saved') {
-    toast('Project changes could not be saved. Retry saving before adding these Plates to the Queue.', true); return;
-  }
-  rememberDefaults({ options: { leveling: $("send-leveling").checked, timelapse: $("send-timelapse").checked } });
   await withButton($("btn-send-batch"), async () => {
-    const result = await api("POST", `/api/projects/${state.project.id}/queue`, {
-      plates: chosen, leveling: $("send-leveling").checked, timelapse: $("send-timelapse").checked, again: repeats.length > 0 });
+    const result = await queuePlates(chosen, { leveling: $("send-leveling").checked, timelapse: $("send-timelapse").checked, again: repeats.length > 0 });
+    if (!result) return;
     toast(`Sent ${plural(result.jobs.length, "plate")} to the queue`);
     document.querySelectorAll("[data-send-plate]").forEach(box => { box.checked = false; });  // sent: don't offer them again
     const queuedCount = result.jobs.length;
@@ -2826,18 +2852,9 @@ function bindUi() {
     updateSendButton();
   });
   $('btn-balance-selected').addEventListener('click', () => {
-    const ready = state.printers.filter(p => p.connected);
-    if (!ready.length) { toast('No connected printers. Choose assignments manually or reconnect a printer.', true); return; }
     const plates = [...document.querySelectorAll('[data-send-plate]:checked')].map(box => plateById(Number(box.dataset.sendPlate)));
-    if (plates.some(p => sliceEntry(p.id)?.estimate_s == null)) { toast('Time estimates are missing. Assign destination printers manually or slice these Plates again.', true); return; }
-    const loads = new Map(ready.map(p => [p.id, state.jobs.filter(j => j.printer_id === p.id && OPEN_JOB_STATES.has(j.state)).reduce((sum,j) => sum + (j.estimate_s || 0),0)]));
-    plates.sort((a,b) => (sliceEntry(b.id)?.estimate_s || 0) - (sliceEntry(a.id)?.estimate_s || 0));
-    for (const plate of plates) {
-      const printer = [...ready].sort((a,b) => loads.get(a.id) - loads.get(b.id))[0];
-      plate.printer_id = printer.id;
-      loads.set(printer.id, loads.get(printer.id) + (sliceEntry(plate.id)?.estimate_s || 0));
-    }
-    changed(); renderSend();
+    if (!balancePlates(plates)) return;
+    renderSend();
     toast('Assignments suggested by estimated time. Review each destination before adding Jobs to the Queue.');
   });
   $("btn-send-batch").addEventListener("click", sendBatch);

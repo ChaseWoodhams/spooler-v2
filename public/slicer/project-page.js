@@ -34,16 +34,22 @@ let folds = new Set();   // board groups the user closed; remembered per Project
 
 const memoryKey = () => `spooler.print.${host.projectId()}`;
 function remember() {
-  try { localStorage.setItem(memoryKey(), JSON.stringify({ selected, folds: [...folds] })); } catch (err) { /* private window: the page still works */ }
+  try { localStorage.setItem(memoryKey(), JSON.stringify({ selected, folds: [...folds], barFolds })); } catch (err) { /* private window: the page still works */ }
 }
 function recall() {
   try {
     const saved = JSON.parse(localStorage.getItem(memoryKey()) || "{}");
     selected = Number.isInteger(saved.selected) ? saved.selected : null;
     folds = new Set(Array.isArray(saved.folds) ? saved.folds : []);
-  } catch (err) { selected = null; folds = new Set(); }
+    barFolds = saved.barFolds && typeof saved.barFolds === "object" ? { where: Boolean(saved.barFolds.where), options: Boolean(saved.barFolds.options) } : {};
+  } catch (err) { selected = null; folds = new Set(); barFolds = {}; }
 }
 let timer = null;
+let ticked = new Set();     // plate ids ticked for sending
+let sendOpts = { leveling: false, timelapse: false };   // remembered from the last send
+let dest = {};              // plate id -> printer id picked on the send bar (the project save may not have landed yet)
+let barFolds = {};          // which send bar folds are open; remembered per Project with the board folds
+let sending = false;
 
 function duration(seconds) {
   if (!seconds) return "";
@@ -145,14 +151,91 @@ function cardActions(plate) {
   return acts.length ? `<span class="pp-card-acts">${acts.join("")}</span>` : "";
 }
 
+/** The Plates in the Ready group that can be sent: sliced, up to date, and not already in the queue. */
+const sendable = plate => plate.status === "sliced" && !plate.outdated;
+const readySendable = () => (boardGroups().find(g => g.id === "ready")?.cards || []).map(c => c.plate).filter(sendable);
+const tickedPlates = () => readySendable().filter(p => ticked.has(p.id));
+const destOf = plate => (plate.id in dest ? dest[plate.id] : plate.printer_id) || "";
+
+function summaryHtml(plates) {
+  if (!plates.length) return '<span class="slicer-muted">Tick the plates to send.</span>';
+  const timeKnown = plates.every(p => p.estimate_s != null), gramsKnown = plates.every(p => p.estimate_g != null);
+  const seconds = plates.reduce((sum, p) => sum + (p.estimate_s || 0), 0), grams = plates.reduce((sum, p) => sum + (p.estimate_g || 0), 0);
+  return `<b>${plural(plates.length, "plate")} · ${timeKnown ? duration(seconds) || "0 min" : "time unknown"} · ${gramsKnown ? `${Number(grams.toFixed(1))} g` : "filament unknown"}</b>
+    <small class="slicer-muted">${esc(host.spoolNote())}</small>`;
+}
+
+function whereHtml(plates) {
+  if (!plates.length) return '<li class="slicer-muted">Tick the plates to see where they go.</li>';
+  return plates.map(plate => {
+    const chosen = destOf(plate), missing = chosen && !printers.some(p => p.id === chosen);
+    return `<li><b>${esc(plate.name)}</b> → <select data-send-printer="${plate.id}" aria-label="Destination printer for ${esc(plate.name)}"><option value="">Next free printer</option>${
+      missing ? `<option value="${esc(chosen)}" selected>Unavailable printer (${esc(chosen)})</option>` : ""}${printers.map(p =>
+      `<option value="${esc(p.id)}"${p.id === chosen ? " selected" : ""}>${esc(p.name)}${p.connected ? "" : " (offline)"}</option>`).join("")}</select>
+      · ${esc(host.plateFilament(plate.id))} · ${esc(host.bedName())}</li>`;
+  }).join("");
+}
+
+function sendBar() {
+  const fold = (id, title, body) => `<details class="pp-barfold" data-barfold="${id}"${barFolds[id] ? " open" : ""}><summary>${title}</summary>${body}</details>`;
+  return `<div class="pp-sendbar" id="pp-sendbar">
+    <div id="pp-send-summary" class="pp-send-summary" role="status" aria-live="polite">${summaryHtml(tickedPlates())}</div>
+    ${fold("where", "Where each plate goes", `<ul class="pp-where" id="pp-send-where">${whereHtml(tickedPlates())}</ul>`)}
+    ${fold("options", "Options and balancing", `<label class="slicer-check"><input type="checkbox" id="pp-send-leveling"${sendOpts.leveling ? " checked" : ""}> Level the bed before each plate</label>
+      <label class="slicer-check"><input type="checkbox" id="pp-send-timelapse"${sendOpts.timelapse ? " checked" : ""}> Time-lapse</label>
+      <button type="button" id="pp-send-balance" class="btn btn-secondary btn-sm"${ticked.size ? "" : " disabled"}>Balance by estimated time</button>
+      <p class="slicer-muted">Balancing gives the longest ticked plates first to the connected printer with the least estimated work in this project. Other projects are not counted. Check each destination before sending.</p>`)}
+    <button type="button" id="pp-send" class="btn btn-primary" title="Each plate becomes a Job. Start each from the queue when its printer's bed is clear; every start runs the preflight checks."${ticked.size && !sending ? "" : " disabled"}>${
+      ticked.size ? `Send ${plural(ticked.size, "plate")} to the queue` : "Send to the queue"}</button></div>`;
+}
+
+/** Bring the send bar and the ticks on the cards up to date without redrawing the page (so screen readers hear the summary change). */
+function updateBar() {
+  const bar = $("pp-sendbar");
+  if (!bar) return;
+  const plates = tickedPlates();
+  ticked = new Set(plates.map(p => p.id));
+  $("pp-send-summary").innerHTML = summaryHtml(plates);
+  if (!$("pp-send-where").contains(document.activeElement)) $("pp-send-where").innerHTML = whereHtml(plates);
+  $("pp-send-balance").disabled = !plates.length;
+  const send = $("pp-send");
+  send.disabled = !plates.length || sending;
+  send.textContent = plates.length ? `Send ${plural(plates.length, "plate")} to the queue` : "Send to the queue";
+  for (const box of $("project-page").querySelectorAll("[data-tick]")) {
+    box.checked = ticked.has(Number(box.dataset.tick));
+    box.closest("[data-plate-card]").classList.toggle("ticked", box.checked);
+  }
+}
+
+function tick(plateId, on) {
+  if (on) ticked.add(plateId); else ticked.delete(plateId);
+  updateBar();
+}
+
+async function sendTicked() {
+  const plates = tickedPlates();
+  if (!plates.length || sending) return;
+  sending = true; updateBar();
+  try {
+    const result = await host.sendPlates(plates.map(p => p.id), sendOpts);
+    if (result) { host.toast(`Sent ${plural(result.jobs.length, "plate")} to the queue`); ticked.clear(); }
+  } catch (err) { host.toast(err.message, true); }
+  sending = false;
+  await refresh();
+  updateBar();
+}
+
 function plateBoard() {
   const queued = jobs.filter(j => j.state === "queued");
   const canAssign = queued.length > 1 && printers.some(p => p.connected);
   return `<div class="pp-board"><a class="pp-queue-link" href="/?queue=1">Open the Queue page</a>${boardGroups().map(({ id, title, cards }) => `<section class="pp-card pp-group pp-group-${id}" data-group="${id}" aria-labelledby="pp-group-${id}">
     <div class="pp-group-head"><h3 id="pp-group-${id}"><button type="button" class="pp-fold" data-fold="${id}" aria-expanded="${!folds.has(id)}">${folds.has(id) ? "▸" : "▾"} ${title} <span class="slicer-muted">${cards.length}</span></button></h3>
+      ${id === "ready" && cards.some(c => sendable(c.plate)) ? `<span class="pp-ticks"><button type="button" class="btn btn-secondary btn-sm" id="pp-send-all" title="Tick every plate that is sliced and not already in the queue">All</button>
+        <button type="button" class="btn btn-secondary btn-sm" id="pp-send-none">None</button></span>` : ""}
       ${id === "queued" ? `<button type="button" class="btn btn-secondary btn-sm" data-act="assign"${canAssign ? "" : " disabled"}
         title="Spread the queued plates over the connected printers so they finish about together, by estimated print time">Assign printers · balance by time</button>` : ""}</div>
-    <ul class="pp-plates"${folds.has(id) ? " hidden" : ""}>${cards.map(({ plate, word, reason }) => `<li class="pp-plate st-${plate.status}${plate.id === selected ? " sel" : ""}" data-plate-card>
+    <ul class="pp-plates"${folds.has(id) ? " hidden" : ""}>${cards.map(({ plate, word, reason }) => `<li class="pp-plate st-${plate.status}${plate.id === selected ? " sel" : ""}${ticked.has(plate.id) ? " ticked" : ""}" data-plate-card>
+      ${id === "ready" && sendable(plate) ? `<input type="checkbox" class="pp-tick" data-tick="${plate.id}" aria-label="Send ${esc(plate.name)}"${ticked.has(plate.id) ? " checked" : ""}>` : ""}
       <button type="button" class="pp-plate-btn" data-plate="${plate.id}" aria-pressed="${plate.id === selected}">${esc(plate.name)}</button>
       <span class="pp-state"><i class="pp-dot st-${plate.status}"></i>${word}</span>
       ${reason ? `<span class="pp-reason">${esc(reason)}</span>` : ""}${cardActions(plate)}</li>`).join("")}</ul></section>`).join("")}</div>`;
@@ -217,11 +300,12 @@ function render() {
   const root = $("project-page");
   if (!shown || !status) return;
   if (document.activeElement?.matches?.("select") && root.contains(document.activeElement)) return;  // never rebuild a menu being used
+  ticked = new Set(readySendable().filter(p => ticked.has(p.id)).map(p => p.id));   // a Plate that left Ready is no longer ticked
   if (selected == null || !plateOf(selected)) selected = status.plates.find(p => p.status === "printing")?.id ?? status.plates[0]?.id ?? null;
   const active = root.contains(document.activeElement) ? document.activeElement : null;
   const activePlate = active?.getAttribute('data-plate'), activeName = active?.getAttribute('aria-label');
   root.innerHTML = `${header()}${printerCards()}
-    <div class="pp-layout">${plateBoard()}<div class="pp-side">${detail()}</div></div>`;
+    <div class="pp-layout">${plateBoard()}<div class="pp-side">${detail()}</div></div>${readySendable().length ? sendBar() : ""}`;
   if (activePlate) [...root.querySelectorAll('[data-plate]')].find(button => button.getAttribute('data-plate') === activePlate && button.getAttribute('aria-label') === activeName)?.focus();
 }
 
@@ -298,8 +382,36 @@ async function act(name, button) {
   await refresh();
 }
 
+function bindSend(root) {
+  root.addEventListener("toggle", e => { const id = e.target.dataset?.barfold; if (id && barFolds[id] !== e.target.open) { barFolds[id] = e.target.open; remember(); } }, true);
+  root.addEventListener("click", e => {
+    if (e.target.closest("#pp-send-all")) { ticked = new Set(readySendable().map(p => p.id)); return updateBar(); }
+    if (e.target.closest("#pp-send-none")) { ticked.clear(); return updateBar(); }
+    if (e.target.closest("#pp-send")) return sendTicked();
+    if (e.target.closest("#pp-send-balance")) {
+      const map = host.balance([...ticked]);
+      if (map) { Object.assign(dest, map); host.toast("Assignments suggested by estimated time. Review each destination before sending."); updateBar(); }
+      return;
+    }
+    const card = e.target.closest("[data-plate-card]");
+    const box = card?.querySelector("[data-tick]");
+    if (box && e.target !== box && !e.target.closest("a, button, input, select, label")) tick(Number(box.dataset.tick), !box.checked);
+  });
+  root.addEventListener("change", e => {
+    if (e.target.matches("[data-tick]")) return tick(Number(e.target.dataset.tick), e.target.checked);
+    if (e.target.id === "pp-send-leveling") sendOpts.leveling = e.target.checked;
+    else if (e.target.id === "pp-send-timelapse") sendOpts.timelapse = e.target.checked;
+    else if (e.target.matches("[data-send-printer]")) {
+      const id = Number(e.target.dataset.sendPrinter), printerId = e.target.value || null;
+      dest[id] = printerId;
+      host.onSetPrinter(id, printerId);
+    }
+  });
+}
+
 function bind() {
   const root = $("project-page");
+  bindSend(root);
   root.addEventListener("click", async e => {
     const ask = e.target.closest("[data-outcome]");
     if (ask) { OutcomePrompt.open(ask.dataset.outcome); return; }
@@ -345,9 +457,17 @@ function bind() {
   });
 }
 
+async function loadSendOptions() {
+  try {
+    const { options } = (await host.api("GET", "/api/defaults")).defaults;
+    sendOpts = { leveling: Boolean(options.leveling), timelapse: Boolean(options.timelapse) };
+    for (const [id, on] of [["pp-send-leveling", sendOpts.leveling], ["pp-send-timelapse", sendOpts.timelapse]]) if ($(id)) $(id).checked = on;
+  } catch (err) { /* the boxes stay as they are */ }
+}
+
 export const projectPage = {
   attach(hooks) { host = hooks; bind(); },
-  show() { shown = true; focusedPrinter = false; status = null; recall(); $("project-page").innerHTML = '<p class="slicer-muted">Loading…</p>'; refresh(); },
+  show() { shown = true; focusedPrinter = false; status = null; recall(); ticked = new Set(); dest = {}; loadSendOptions(); $("project-page").innerHTML = '<p class="slicer-muted">Loading…</p>'; refresh(); },
   hide() { shown = false; clearTimeout(timer); },
   /** Redraw from what is already loaded (a slice finished, the selection moved). */
   redraw() { render(); },
