@@ -411,14 +411,8 @@ body.print-step .slicer-sidebar { display: none; }
 .pp-printer { border-left: 4px solid var(--c); gap: 4px; }
 .pp-layout { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr); gap: 12px; align-items: start; }
 .pp-side { display: grid; gap: 12px; }
-.pp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); gap: 6px; }
-.pp-cell { aspect-ratio: 1; border-radius: 8px; border: 2px solid var(--c); display: grid; place-items: center; font-size: 12px; cursor: pointer;
-  background: rgba(255, 255, 255, .02); color: var(--text); }
-.pp-cell.sel { background: var(--c); color: #000; font-weight: 700; }
-.pp-legend { display: flex; gap: 6px; flex-wrap: wrap; }
 .pp-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--c); color: var(--c); white-space: nowrap; }
 .pp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); display: inline-block; }
-.pp-next { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 13px; }
 .pp-printon { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .pp-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .project-page .st-unsliced { --c: #6b6f7b; } .project-page .st-sliced { --c: #5aa9ff; } .project-page .st-queued { --c: #facc15; }
@@ -457,14 +451,10 @@ body.embedded .slicer-home { display: none; }
 .project-page .st-printed_ok { --c: var(--green); }
 .project-page .st-failed { --c: var(--red); }
 .light-mode .project-page .st-waiting { --c: #6b21a8; }
-.light-mode .pp-cell.sel { color: #fff; }
 .pp-warn, .slicer-warn { color: var(--red); }
 .slicer-tool-group { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 4px; background: var(--surface); }
 .slicer-tool-group > span { color: var(--text-muted); font-size: 12px; }
 .slicer-toolbar { flex-wrap: wrap; right: 10px; }
-.pp-readable-plates { list-style: none; padding: 0; display: grid; gap: 6px; margin: 10px 0; }
-.pp-readable-plates .btn { width: 100%; text-align: left; white-space: normal; }
-.pp-next { width: 100%; background: transparent; color: var(--text); border: 0; text-align: left; }
 .slicer-page :focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
 @media (min-width: 901px) {
   .sidebar-collapsed .slicer-body { grid-template-columns: minmax(0, 1fr); }
@@ -614,3 +604,14 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 #send-plates .slicer-plate-row:hover { border-color: var(--text-muted); }
 #send-plates .slicer-plate-row:has(input:checked) { border-color: var(--accent); }
 #send-plates .slicer-plate-row input[type=checkbox] { width: 20px; height: 20px; margin: 0; cursor: pointer; }
+/* Print step: the state-grouped Plate board */
+.pp-board { display: grid; gap: 12px; min-width: 0; }
+.pp-group-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pp-group h3 { margin: 0; font-size: 14px; }
+.pp-group-attention { border-color: var(--red); }
+.pp-plates { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.pp-plate { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; border-left: 4px solid var(--c); border-radius: 6px; padding: 2px 8px; background: var(--surface2); }
+.pp-plate.sel { outline: 2px solid var(--c); }
+.pp-plate-btn { flex: 1 1 140px; min-height: 36px; text-align: left; background: transparent; color: var(--text); border: 0; font-size: 13px; cursor: pointer; }
+.pp-state { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--c); font-weight: 600; white-space: nowrap; }
+.pp-reason { flex-basis: 100%; font-size: 12px; color: var(--red); padding-bottom: 4px; }

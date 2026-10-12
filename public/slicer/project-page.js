@@ -1,5 +1,5 @@
 /* Spooler project workspace – the Print step: the project page. A progress header, a printer card for each printer, a
-   colour-coded map of every plate beside a Next up list, and a detail card for the selected plate. Mounted by main.js
+   board of every plate grouped by what is happening to it (Needs attention, Printing, Queued, Ready, Done), and a detail card for the selected plate. Mounted by main.js
    (which owns the step bar); reads /api/projects/<id>/status, /api/projects/<id>/jobs and /api/printers, and polls them
    while the step is on screen. Holds, Reprint, the queue-time warning check and each printer's auto-start toggle use the jobs and printer endpoints. */
 
@@ -9,7 +9,6 @@ const STATUS = {
 };
 const BAR_ORDER = ["printed_ok", "unsliced", "sliced", "waiting", "queued", "printing", "failed"];  // plate order is never status order
 const POLL_MS = 4000;
-const NEXT_UP = 6;
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -20,6 +19,7 @@ let shown = false;
 let status = null; // GET /api/projects/<id>/status
 let jobs = [];
 let printers = [];
+let allPrinters = []; // every printer the page was told about, whatever its type (printers keeps the ones the queue can use)
 let awaiting = new Set();   // printer ids whose last print is waiting for an answer (OutcomePrompt)
 let focusedPrinter = false; // a push deep link (?printer=) is scrolled to once
 const focusPrinterId = new URLSearchParams(location.search).get("printer"); // read at load: opening a project rewrites the URL
@@ -98,24 +98,41 @@ function printerCards() {
   }).join("")}</div>`;
 }
 
-function plateMap() {
-  return `<div class="pp-card"><div class="slicer-muted">Every Plate at a glance. Select a numbered Plate or use the readable list below.</div>
-    <div class="pp-grid">${status.plates.map(p =>
-      `<button type="button" class="pp-cell st-${p.status}${p.id === selected ? " sel" : ""}" data-plate="${p.id}" aria-pressed="${p.id === selected}" aria-label="Plate map ${esc(p.name)}: ${STATUS[p.status]}${p.outcome_unknown ? ', latest Outcome unknown' : ''}">${p.id}</button>`).join("")}</div>
-    <ul class="pp-readable-plates">${status.plates.map(p => `<li><button type="button" class="btn btn-secondary btn-sm" data-plate="${p.id}" aria-pressed="${p.id === selected}">${esc(p.name)}: ${STATUS[p.status]}${p.outcome_unknown ? ', latest Outcome unknown' : ''}</button></li>`).join('')}</ul>
-    <div class="pp-legend">${Object.keys(STATUS).map(chip).join("")}</div></div>`;
+// What a Plate is doing, in words, from its open Job (a Print with no Job reads "printing now")
+const JOB_WORD = { printing: "printing now", queued: "in the queue", starting: "starting to print" };
+const PLATE_WORD = { unsliced: "needs slicing", sliced: "sliced", printed_ok: "printed OK", failed: "failed", waiting: "in the queue", queued: "in the queue", printing: "printing now" };
+const GROUPS = [["attention", "Needs attention"], ["printing", "Printing"], ["queued", "Queued"], ["ready", "Ready"], ["done", "Done"]];
+
+/** Sort every Plate into one board group, with the words that describe it and (for Needs attention) why. */
+function boardGroups() {
+  const rank = id => { const at = (status.print_order || []).indexOf(id); return at < 0 ? Infinity : at; };   // longest by the best available time; names stay as planned
+  const groups = Object.fromEntries(GROUPS.map(([id]) => [id, []]));
+  for (const plate of status.plates) {
+    const job = plate.job_id ? jobs.find(j => j.id === plate.job_id) : null;
+    const word = (job && JOB_WORD[job.state]) || PLATE_WORD[plate.status];
+    const running = plate.status === "printing";
+    const offline = running && job?.printer_id && !allPrinters.find(p => p.id === job.printer_id)?.connected;
+    const reason = offline ? `${printerName(job.printer_id) || "Its printer"} is offline` : plate.outcome_unknown ? "Outcome unknown: check History" : "";
+    const group = offline || plate.outcome_unknown || plate.status === "failed" ? "attention"
+      : running ? "printing" : plate.status === "queued" || plate.status === "waiting" ? "queued"
+      : plate.status === "printed_ok" ? "done" : "ready";
+    groups[group].push({ plate, word, reason });
+  }
+  groups.ready.sort((a, b) => (a.plate.status === "unsliced") - (b.plate.status === "unsliced") || rank(a.plate.id) - rank(b.plate.id));   // sliced Plates first, in print order
+  return GROUPS.filter(([id]) => groups[id].length).map(([id, title]) => ({ id, title, cards: groups[id] }));
 }
 
-function nextUp() {
-  const rank = id => { const at = (status.print_order || []).indexOf(id); return at < 0 ? Infinity : at; };   // longest by the best available time; names stay as planned
-  const next = status.plates.filter(p => ["queued", "waiting", "sliced"].includes(p.status)).sort((a, b) => rank(a.id) - rank(b.id)).slice(0, NEXT_UP);
+function plateBoard() {
   const queued = jobs.filter(j => j.state === "queued");
   const canAssign = queued.length > 1 && printers.some(p => p.connected);
-  return `<div class="pp-card"><b>Next up</b>
-    ${next.map(p => `<button type="button" class="pp-next" data-plate="${p.id}" aria-pressed="${p.id === selected}"><span>${esc(p.name)}${p.printer_id ? ` → ${esc(printerName(p.printer_id) || "printer")}` : ""}</span>${chip(p.status)}</button>`).join("")
-      || '<p class="slicer-muted">Nothing waiting. Slice a plate and add it to the queue.</p>'}
-    <button type="button" class="btn btn-primary btn-sm" data-act="assign"${canAssign ? "" : " disabled"}
-      title="Spread the queued plates over the connected printers so they finish about together, by estimated print time">Assign printers · balance by time</button></div>`;
+  return `<div class="pp-board">${boardGroups().map(({ id, title, cards }) => `<section class="pp-card pp-group pp-group-${id}" data-group="${id}" aria-labelledby="pp-group-${id}">
+    <div class="pp-group-head"><h3 id="pp-group-${id}">${title} <span class="slicer-muted">${cards.length}</span></h3>
+      ${id === "queued" ? `<button type="button" class="btn btn-secondary btn-sm" data-act="assign"${canAssign ? "" : " disabled"}
+        title="Spread the queued plates over the connected printers so they finish about together, by estimated print time">Assign printers · balance by time</button>` : ""}</div>
+    <ul class="pp-plates">${cards.map(({ plate, word, reason }) => `<li class="pp-plate st-${plate.status}${plate.id === selected ? " sel" : ""}" data-plate-card>
+      <button type="button" class="pp-plate-btn" data-plate="${plate.id}" aria-pressed="${plate.id === selected}">${esc(plate.name)}</button>
+      <span class="pp-state"><i class="pp-dot st-${plate.status}"></i>${word}</span>
+      ${reason ? `<span class="pp-reason">${esc(reason)}</span>` : ""}</li>`).join("")}</ul></section>`).join("")}</div>`;
 }
 
 function detail() {
@@ -181,7 +198,7 @@ function render() {
   const active = root.contains(document.activeElement) ? document.activeElement : null;
   const activePlate = active?.getAttribute('data-plate'), activeName = active?.getAttribute('aria-label');
   root.innerHTML = `${header()}${printerCards()}
-    <div class="pp-layout">${plateMap()}<div class="pp-side">${nextUp()}${detail()}</div></div>`;
+    <div class="pp-layout">${plateBoard()}<div class="pp-side">${detail()}</div></div>`;
   if (activePlate) [...root.querySelectorAll('[data-plate]')].find(button => button.getAttribute('data-plate') === activePlate && button.getAttribute('aria-label') === activeName)?.focus();
 }
 
@@ -195,7 +212,7 @@ async function refresh() {
     const cc1 = p.filter(x => x.printer_type === "cc1");
     const beds = await Promise.all(cc1.map(x => host.api("GET", `/api/printers/${encodeURIComponent(x.id)}/bed-cleared`).catch(() => null)));
     if (!shown || host.projectId() !== id) return;
-    status = s; jobs = j.jobs; printers = cc1; allJobs = all.jobs;
+    status = s; jobs = j.jobs; printers = cc1; allPrinters = p; allJobs = all.jobs;
     autoStart = Object.fromEntries(cc1.map((x, i) => [x.id, beds[i]?.auto_start !== false]));
     awaiting = new Set((await OutcomePrompt.awaiting()).map(a => a.printer_id));
     render();
