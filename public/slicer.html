@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="style.css?v=60" />
   <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=37" />
+  <link rel="stylesheet" href="slicer.css?v=44" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -30,7 +30,12 @@
       <input id="project-name" class="slicer-project-name" aria-label="Project name" maxlength="120" />
       <button id="btn-projects" class="btn btn-secondary btn-sm" type="button">Projects</button>
       <button id="btn-add-files" class="btn btn-secondary btn-sm" type="button" title="Add STL, OBJ or 3MF models to this project, on any step">Add models</button>
-      <button id="btn-export-3mf" class="btn btn-secondary btn-sm" type="button" title="Download the project as an OrcaSlicer project (3MF) with its plates, placements and settings">Export 3MF</button>
+      <details class="tool-more">
+        <summary class="btn btn-secondary btn-sm" aria-label="More project actions" title="Export and other project actions">More</summary>
+        <div class="tool-more-panel">
+          <div class="tool-more-row"><button id="btn-export-3mf" class="btn btn-secondary btn-sm" type="button" title="Download the project as an OrcaSlicer project (3MF) with its plates, placements and settings">Export 3MF</button></div>
+        </div>
+      </details>
       <span id="save-state" class="slicer-muted"></span>
     </div>
     <nav id="step-bar" class="slicer-steps" aria-label="Workflow steps"></nav>
@@ -69,8 +74,13 @@
           <h4>Objects on this plate</h4>
           <div class="slicer-actions-row">
             <button id="btn-add-model" class="btn btn-primary btn-sm" type="button">Add model</button>
-            <button id="btn-add-folder" class="btn btn-secondary btn-sm" type="button" title="Add every STL file in a folder, including subfolders">Add folder</button>
-            <button id="btn-add-split" class="btn btn-secondary btn-sm" type="button">Split parts</button>
+            <details class="tool-more">
+              <summary class="btn btn-secondary btn-sm" aria-label="More ways to add objects">More</summary>
+              <div class="tool-more-panel">
+                <div class="tool-more-row"><button id="btn-add-folder" class="btn btn-secondary btn-sm" type="button" title="Add every STL file in a folder, including subfolders">Add folder</button></div>
+                <div class="tool-more-row"><button id="btn-add-split" class="btn btn-secondary btn-sm" type="button" title="Add the parts of a split model, packed onto new plates">Split parts</button></div>
+              </div>
+            </details>
           </div>
         </div>
         <input id="model-input" type="file" accept=".stl,.obj,.3mf" multiple hidden />
@@ -101,15 +111,18 @@
           <select id="preset-process-select"></select>
           <button id="btn-save-process" class="preset-btn" type="button" title="Save the process changes as a preset" hidden>Save</button>
           <button id="btn-delete-process" class="preset-btn" type="button" title="Delete this saved preset" hidden>Delete</button></div>
-        <div class="preset-row"><label for="btn-import-preset">Import</label>
-          <button id="btn-import-preset" class="btn btn-secondary btn-sm" type="button" title="Import an OrcaSlicer process or filament preset (.json)">Orca preset…</button>
-          <input id="preset-file" type="file" accept=".json" hidden /></div>
         <label class="slicer-field">Build plate
           <select id="bed-select"><option value="textured">Textured PEI (Side A)</option><option value="smooth">Smooth PEI (Side B)</option></select>
         </label>
-        <div class="preset-row"><label for="spool-select">Spool</label>
-          <select id="spool-select" title="Use a Spoolman spool: its density, temperatures and cost are applied as filament settings"></select></div>
-        <p id="spool-note" class="slicer-muted" hidden></p>
+        <details class="slicer-subfold" id="fold-material-more">
+          <summary>Spool and preset import</summary>
+          <div class="preset-row"><label for="spool-select">Spool</label>
+            <select id="spool-select" title="Use a Spoolman spool: its density, temperatures and cost are applied as filament settings"></select></div>
+          <p id="spool-note" class="slicer-muted" hidden></p>
+          <div class="preset-row"><label for="btn-import-preset">Import</label>
+            <button id="btn-import-preset" class="btn btn-secondary btn-sm" type="button" title="Import an OrcaSlicer process or filament preset (.json)">Orca preset…</button>
+            <input id="preset-file" type="file" accept=".json" hidden /></div>
+        </details>
       </details>
 
       <section class="slicer-card" data-steps="slice">
@@ -121,29 +134,37 @@
         <div id="slicing-totals" class="slicer-muted"></div>
       </section>
 
-      <section class="slicer-card" data-steps="slice">
-        <div class="slicer-card-head"><h4>BrickLayers interlocking walls</h4></div>
+      <details class="slicer-card slicer-fold" id="fold-bricklayers" data-steps="slice">
+        <summary><span>BrickLayers walls</span><small id="brick-summary">Off</small></summary>
         <div id="bricklayers" class="slicer-bricklayers"></div>
-      </section>
+      </details>
 
-      <section class="slicer-card" data-steps="queue">
-        <div class="slicer-card-head"><h4>Send to the queue</h4></div>
-        <div id="send-plates" class="slicer-plate-rows"></div>
-        <button id="btn-balance-selected" type="button" class="btn btn-secondary btn-sm">Balance selected Plates by estimated time</button>
-        <p class="slicer-muted">Balancing assigns the longest selected Plates first to connected printers with the smallest estimated workload in this Project. Other Projects are not counted. Review printer compatibility and edit each assignment below before submission; preflight still runs at Print start.</p>
-        <div id="batch-summary" class="slicer-batch-summary" role="status"></div>
-        <label class="slicer-check"><input type="checkbox" id="send-leveling" /> Level the bed before each plate</label>
-        <label class="slicer-check"><input type="checkbox" id="send-timelapse" /> Time-lapse</label>
-        <div class="slicer-actions-row"><button id="btn-send-batch" class="btn btn-primary" type="button" disabled>Send to the queue</button></div>
-        <p class="slicer-muted">Each plate becomes a job. Assign printers below, then start each one from the queue when that printer's bed is clear — every start runs the preflight checks.</p>
-      </section>
-
-      <section class="slicer-card" data-steps="queue">
+      <section class="slicer-card" id="jobs-card" data-steps="queue">
         <div class="slicer-card-head">
           <h4>Jobs from this project</h4>
           <a class="btn btn-secondary btn-sm" href="/?queue=1">Open the queue</a>
         </div>
         <div id="job-batches" class="slicer-batches"></div>
+      </section>
+
+      <section class="slicer-card" data-steps="queue">
+        <div class="slicer-card-head"><h4>Send to the queue</h4>
+          <div class="slicer-actions-row">
+            <button id="btn-send-all" type="button" class="btn btn-secondary btn-sm" title="Tick every plate that is sliced and not already in the queue">All</button>
+            <button id="btn-send-none" type="button" class="btn btn-secondary btn-sm">None</button>
+          </div></div>
+        <div id="send-plates" class="slicer-plate-rows"></div>
+        <div id="send-footer" class="slicer-send-footer">
+        <div id="batch-summary" class="slicer-batch-summary" role="status"></div>
+        <details class="slicer-subfold" id="fold-send-options">
+          <summary>Options and balancing</summary>
+          <label class="slicer-check"><input type="checkbox" id="send-leveling" /> Level the bed before each plate</label>
+          <label class="slicer-check"><input type="checkbox" id="send-timelapse" /> Time-lapse</label>
+          <button id="btn-balance-selected" type="button" class="btn btn-secondary btn-sm">Balance selected Plates by estimated time</button>
+          <p class="slicer-muted">Balancing gives the longest selected Plates first to the connected printer with the least estimated work in this Project. Other Projects are not counted. Check compatibility and edit each assignment before sending.</p>
+        </details>
+        <div class="slicer-actions-row"><button id="btn-send-batch" class="btn btn-primary" type="button" disabled title="Each plate becomes a job. Start each from the queue when its printer's bed is clear; every start runs the preflight checks.">Send to the queue</button></div>
+        </div>
       </section>
 
       <details class="slicer-card slicer-settings slicer-fold" id="fold-settings" data-steps="plates slice">
@@ -176,39 +197,6 @@
         </div>
         <div class="tool-seg" role="group" aria-label="Arrange">
           <button class="btn btn-secondary btn-sm" type="button" id="btn-arrange" title="Arrange this plate (A); Shift+A arranges every plate onto as few as fit. Pinned objects stay put and plates never mix filaments.">Arrange</button>
-          <button class="btn btn-secondary btn-sm" type="button" id="btn-plan-plates" title="Plan plates: turn objects, pack them across plates by filament and order the plates. You review it first; Undo reverses it.">Plan plates</button>
-          <select id="pack-select" class="slicer-toolbar-select" aria-label="How close objects are packed" title="How far apart Arrange and Plan plates keep objects, and what counts as too close. Choose for this plate or for the whole project.">
-            <optgroup label="This plate">
-              <option value="plate:tight">Tight (3 mm)</option><option value="plate:normal">Normal (6 mm)</option><option value="plate:roomy">Roomy (12 mm)</option>
-            </optgroup>
-            <optgroup label="Whole project">
-              <option value="project:tight">Tight (3 mm)</option><option value="project:normal">Normal (6 mm)</option><option value="project:roomy">Roomy (12 mm)</option>
-              <option value="project:custom">Custom…</option>
-            </optgroup>
-            <option value="plate:inherit">This plate follows the project</option>
-          </select>
-        </div>
-        <div class="tool-seg" role="group" aria-label="Position">
-          <select id="align-menu" class="slicer-toolbar-select" aria-label="Align, centre or spread the selected objects" title="Line up, spread or place the selected objects. Arrow keys nudge them; Shift moves 10 mm, Alt 0.1 mm." disabled>
-            <option value="">Align…</option>
-            <optgroup label="Line up (2 or more)">
-              <option value="left">Left edges</option><option value="right">Right edges</option>
-              <option value="front">Front edges</option><option value="back">Back edges</option>
-              <option value="centre-x">Centres left to right</option><option value="centre-y">Centres front to back</option>
-            </optgroup>
-            <optgroup label="Spread evenly (3 or more)">
-              <option value="spread-x">Across the bed, left to right</option><option value="spread-y">Across the bed, front to back</option>
-            </optgroup>
-            <optgroup label="On the bed">
-              <option value="bed-centre">Centre on the bed</option>
-              <option value="bed-left">To the left edge</option><option value="bed-right">To the right edge</option>
-              <option value="bed-front">To the front edge</option><option value="bed-back">To the back edge</option>
-            </optgroup>
-          </select>
-          <label class="slicer-check" title="Snap dragging to a grid, and turning to 15°"><input type="checkbox" id="snap-on"> Snap</label>
-          <select id="snap-step" class="slicer-toolbar-select" aria-label="Snap grid" disabled>
-            <option value="1">1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option>
-          </select>
         </div>
         <div class="tool-seg" role="group" aria-label="View and history">
           <button class="btn btn-secondary btn-sm" type="button" id="btn-undo" title="Undo (Ctrl+Z)">Undo</button>
@@ -216,17 +204,50 @@
           <button class="btn btn-secondary btn-sm" type="button" id="btn-fit" title="Fit the view (Z zooms to the selection; 0-6 pick a side)">Fit view</button>
         </div>
         <details class="tool-more">
-          <summary class="btn btn-secondary btn-sm" title="Select all, the arranger, orienting, merging plates and the spacing details">More</summary>
+          <summary class="btn btn-secondary btn-sm" title="Plan plates, spacing, align, snapping, orienting, merging plates and the arranger">More</summary>
           <div class="tool-more-panel">
-            <div class="tool-more-row"><button class="btn btn-secondary btn-sm" type="button" id="btn-select-all" title="Select every object on this plate (Ctrl+A). Shift-click adds or removes one.">Select all</button></div>
-            <div class="tool-more-row"><button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button></div>
+            <p class="tool-more-head">Layout</p>
+            <div class="tool-more-row"><button class="btn btn-secondary btn-sm" type="button" id="btn-plan-plates" title="Plan plates: turn objects, pack them across plates by filament and order the plates. You review it first; Undo reverses it.">Plan plates</button></div>
+            <label class="tool-more-row">Spacing <select id="pack-select" class="slicer-toolbar-select" aria-label="How close objects are packed" title="How far apart Arrange and Plan plates keep objects, and what counts as too close. Choose for this plate or for the whole project.">
+              <optgroup label="This plate">
+                <option value="plate:tight">Tight (3 mm)</option><option value="plate:normal">Normal (6 mm)</option><option value="plate:roomy">Roomy (12 mm)</option>
+              </optgroup>
+              <optgroup label="Whole project">
+                <option value="project:tight">Tight (3 mm)</option><option value="project:normal">Normal (6 mm)</option><option value="project:roomy">Roomy (12 mm)</option>
+                <option value="project:custom">Custom…</option>
+              </optgroup>
+              <option value="plate:inherit">This plate follows the project</option>
+            </select></label>
+            <div class="tool-more-row"><label class="pack-gap-field" id="pack-gap-field" hidden>Gap <input type="number" id="pack-gap" min="2" max="40" step="0.5" aria-label="Gap between objects in millimetres"> mm</label></div>
+            <div class="tool-more-row"><label class="slicer-check" title="Objects that need supports are kept 22 mm apart so the supports don't collide. Tick this to pack them as close as the gap says."><input type="checkbox" id="pack-supports"> Close supports</label></div>
             <label class="tool-more-row">Arranged by <select id="arrange-engine" class="slicer-toolbar-select" aria-label="What arranges the plates" title="The nester keeps room for each object's supports and brim. OrcaSlicer's own arranger is a fallback: it can't work around pinned objects (a plate holding one is refused) and ignores filaments and supports.">
             <option value="nester">Nester</option>
             <option value="orca">OrcaSlicer</option>
           </select></label>
             <label class="tool-more-row">Merge this plate into <select id="merge-plate" class="slicer-toolbar-select" aria-label="Merge this plate into another"></select></label>
-            <div class="tool-more-row"><label class="pack-gap-field" id="pack-gap-field" hidden>Gap <input type="number" id="pack-gap" min="2" max="40" step="0.5" aria-label="Gap between objects in millimetres"> mm</label></div>
-            <div class="tool-more-row"><label class="slicer-check" title="Objects that need supports are kept 22 mm apart so the supports don't collide. Tick this to pack them as close as the gap says."><input type="checkbox" id="pack-supports"> Close supports</label></div>
+            <p class="tool-more-head">Selection</p>
+            <label class="tool-more-row">Align <select id="align-menu" class="slicer-toolbar-select" aria-label="Align, centre or spread the selected objects" title="Line up, spread or place the selected objects. Arrow keys nudge them; Shift moves 10 mm, Alt 0.1 mm." disabled>
+              <option value="">Choose…</option>
+              <optgroup label="Line up (2 or more)">
+                <option value="left">Left edges</option><option value="right">Right edges</option>
+                <option value="front">Front edges</option><option value="back">Back edges</option>
+                <option value="centre-x">Centres left to right</option><option value="centre-y">Centres front to back</option>
+              </optgroup>
+              <optgroup label="Spread evenly (3 or more)">
+                <option value="spread-x">Across the bed, left to right</option><option value="spread-y">Across the bed, front to back</option>
+              </optgroup>
+              <optgroup label="On the bed">
+                <option value="bed-centre">Centre on the bed</option>
+                <option value="bed-left">To the left edge</option><option value="bed-right">To the right edge</option>
+                <option value="bed-front">To the front edge</option><option value="bed-back">To the back edge</option>
+              </optgroup>
+            </select></label>
+            <div class="tool-more-row"><label class="slicer-check" title="Snap dragging to a grid, and turning to 15°"><input type="checkbox" id="snap-on"> Snap</label>
+              <select id="snap-step" class="slicer-toolbar-select" aria-label="Snap grid" disabled>
+                <option value="1">1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option>
+              </select></div>
+            <div class="tool-more-row"><button class="btn btn-secondary btn-sm" type="button" id="btn-select-all" title="Select every object on this plate (Ctrl+A). Shift-click adds or removes one.">Select all</button></div>
+            <div class="tool-more-row"><button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button></div>
           </div>
         </details>
       </div>
@@ -363,6 +384,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=44"></script>
+  <script type="module" src="slicer/main.js?v=47"></script>
 </body>
 </html>

@@ -253,10 +253,10 @@ class SplitViewer {
   showPieces(pieces) {
     this.clear(this.boxGroup);
     for (const piece of pieces || []) {
-      if (piece.fits) continue;
+      if (piece.fits && !piece.tiny) continue;
       const b = piece.bbox;
       const box = new THREE.Box3(new THREE.Vector3(b[0], b[1], b[2]), new THREE.Vector3(b[3], b[4], b[5]));
-      this.boxGroup.add(new THREE.Box3Helper(box, 0xef4444));
+      this.boxGroup.add(new THREE.Box3Helper(box, piece.fits ? 0xf59e0b : 0xef4444));
     }
   }
 
@@ -406,6 +406,11 @@ function renderSide() {
   side.innerHTML = view === "model" ? sideModel() : sub === "parts" && current.result ? sideParts() : sideCuts();
 }
 
+// Second-level controls sit in folds that stay closed until asked for; which ones are open survives a re-render.
+const openFolds = new Set();
+const fold = (id, title, summary, body, open = false) => `<details class="split-section slicer-fold" data-fold="${id}"${open || openFolds.has(id) ? " open" : ""}>
+  <summary><span>${title}</span>${summary ? `<small>${esc(summary)}</small>` : ""}</summary>${body}</details>`;
+
 function failedBlock() {
   if (current.state !== "failed") return "";
   return `<div class="split-section split-failed"><div class="job-error" role="alert">${esc(current.error || "Something went wrong")}</div>
@@ -441,18 +446,20 @@ function sideModel() {
     ${hint ? `<p class="split-hint split-bad">${esc(hint)}</p>` : ""}
     <dl class="split-facts">
       <dt>Size</dt><dd><strong>${sizeText(a.size)}</strong> · scale ×${s.scale}</dd>
-      <dt>Source units</dt><dd>${({1:'Millimetres',10:'Centimetres',25.4:'Inches',1000:'Metres'})[s.scale] || 'Custom scale'} · up axis ${esc(s.up.toUpperCase())}</dd>
+            <dt>One piece?</dt><dd>${a.fits_whole ? "Fits the printer without splitting" : `No — about ${plural(a.estimated_parts, "part")} for this printer`}</dd>
+    </dl>
+  </section>
+  ${fold("model-details", "Details", `${plural(a.source_triangles, "triangle")} · ${a.volume_cm3.toLocaleString()} cm³`, `<dl class="split-facts">
+<dt>Source units</dt><dd>${({1:'Millimetres',10:'Centimetres',25.4:'Inches',1000:'Metres'})[s.scale] || 'Custom scale'} · up axis ${esc(s.up.toUpperCase())}</dd>
       <dt>Target bed</dt><dd>${s.printer.bed_x} × ${s.printer.bed_y} mm · height ${s.printer.height} mm</dd>
       <dt>Volume</dt><dd>${a.volume_cm3.toLocaleString()} cm³</dd>
       <dt>Triangles</dt><dd>${a.source_triangles.toLocaleString()}${a.triangles !== a.source_triangles ? ` → ${a.triangles.toLocaleString()} (simplified 0.01 mm)` : ""}</dd>
       <dt>Mesh</dt><dd>${a.repairs.length ? esc(a.repairs.join("; ")) : "Closed solid, no repairs needed"}</dd>
       <dt>Repair state</dt><dd>${current.state === 'failed' ? 'Not ready — resolve the error and retry' : RUNNING.has(current.state) ? 'Processing — wait for analysis and planning to finish' : 'Ready to continue after analysis'}</dd>
       <dt>Average wall</dt><dd>${a.mean_wall_mm} mm</dd>
-      <dt>One piece?</dt><dd>${a.fits_whole ? "Fits the printer without splitting" : `No — about ${plural(a.estimated_parts, "part")} for this printer`}</dd>
     </dl>
-    <p class="split-hint">Original source is retained. Unit and orientation changes reanalyse that source; they do not overwrite it. Keep your source file to export or import it again.</p>
-  </section>
-  <section class="split-section"><h4>Units and orientation</h4>
+    <p class="split-hint">Original source is retained. Unit and orientation changes reanalyse that source; they do not overwrite it. Keep your source file to export or import it again.</p>`)}
+  ${fold("model-units", "Units and orientation", `${({1:"mm",10:"cm",25.4:"inch",1000:"m"})[s.scale] || "custom"} · ${s.up.toUpperCase()} up`, `
     <p id="split-input-error" class="slicer-error" role="alert"></p>
     <div class="split-row">
       ${numberField("split-scale", "Scale", s.scale, 0.0001, "any")}
@@ -461,21 +468,22 @@ function sideModel() {
     <div class="split-chips">${[[1, "mm"], [10, "cm"], [25.4, "inch"], [1000, "m"]]
       .map(([f, unit]) => `<button class="btn btn-secondary btn-sm" data-action="scale-preset" data-scale="${f}">${unit} ×${f}</button>`).join("")}</div>
     <div class="split-actions-row"><button class="btn btn-secondary btn-sm" data-action="apply-size">Apply and analyse again</button></div>
-  </section>
+  `, !!hint)}
   <div class="split-actions">${next}</div>`;
 }
 
 function canSplit() {
   const pieces = current?.check?.pieces || [];
-  return !!pieces.length && !pieces.some(p => !p.fits) && !checkDirty && !pendingSave && !RUNNING.has(current.state);
+  return !!pieces.length && !pieces.some(p => !p.fits || p.tiny) && !checkDirty && !pendingSave && !RUNNING.has(current.state);
 }
 
 function checkText() {
   if (current.state === "checking" || checkDirty) return '<span class="split-muted">Checking the cuts…</span>';
   const pieces = current.check?.pieces || [];
   if (!pieces.length) return '<span class="split-muted">Plan the cuts to see the parts.</span>';
-  const oversize = pieces.filter(p => !p.fits).length;
-  return `${plural(pieces.length, "part")} · ${oversize ? `<span class="split-bad">${oversize} too big for the printer</span>` : "all fit the printer"}`;
+  const oversize = pieces.filter(p => !p.fits).length, tiny = pieces.filter(p => p.tiny).length;
+  const problems = [oversize && `${oversize} too big for the printer`, tiny && `${tiny} too small to print`].filter(Boolean);
+  return `${plural(pieces.length, "part")} · ${problems.length ? `<span class="split-bad">${problems.join(" · ")}</span>` : "all fit the printer"}`;
 }
 
 function axisName(normal) {
@@ -506,10 +514,10 @@ function sideCuts() {
   const oversize = (current.check?.pieces || []).filter(x => !x.fits).length;
   const preset = CONNECTOR_PRESETS.find(x => x.kind === c.kind && (x.kind === "none" || (x.diameter === c.diameter && x.kind === c.kind)))?.id || "custom";
   return `${viewToggle()}${failedBlock()}
-  <section class="split-section"><h4>Printer</h4>
+  ${fold("split-printer", "Printer", `${p.bed_x} × ${p.bed_y} × ${p.height} mm`, `
     <div class="split-row">${numberField("split-bed-x", "Bed width", p.bed_x, 50)}${numberField("split-bed-y", "Bed depth", p.bed_y, 50)}${numberField("split-height", "Height", p.height, 50)}</div>
     <p class="split-hint">240 mm keeps Centauri Carbon parts clear of the purge corner.</p>
-  </section>
+  `)}
   <section class="split-section"><h4>Cuts</h4>
     <div class="split-seg">
       <label class="split-inline"><input type="radio" name="split-mode" value="smart"${s.planner.mode !== "grid" ? " checked" : ""}> Smart</label>
@@ -526,7 +534,7 @@ function sideCuts() {
     <div id="split-cut-list" class="split-cut-list">${cutListHtml()}</div>
     <p class="split-hint">Select a numbered cut and type its position in mm, or drag its plane in the preview. The Remove button deletes that cut and any cuts inside it.</p>
   </section>
-  <section class="split-section"><h4>Alignment holes</h4>
+  ${fold("split-holes", "Alignment holes", c.kind === "none" ? "None" : `${c.kind === "rod" ? "Rods" : "Pins"} ${c.diameter} mm`, `
     <label>Type<select id="split-conn-preset">${CONNECTOR_PRESETS.map(x => `<option value="${x.id}"${x.id === preset ? " selected" : ""}>${x.label}</option>`).join("")}
       <option value="custom"${preset === "custom" ? " selected" : ""}>Custom</option></select></label>
     <div id="split-conn-fields" class="split-row"${c.kind === "none" ? " hidden" : ""}>
@@ -536,7 +544,7 @@ function sideCuts() {
       ${numberField("split-conn-depth", "Depth", c.depth, 2, 0.5)}
     </div>
     <p class="split-hint" id="split-conn-hint">${esc(connectorHint(c))}</p>
-  </section>
+  `)}
   <div class="split-actions"><button class="btn btn-primary" data-action="split"${canSplit() ? "" : " disabled"}>${current.result ? "Split again" : "Split the model"}</button></div>`;
 }
 
@@ -572,11 +580,11 @@ function sideParts() {
       </tr>`).join("")}</tbody>
     </table></div>
   </section>
-  <section class="split-section"><h4>Assembly</h4>
+  ${fold("split-assembly", "Assembly", `${plural(r.assembly.length, "step")}`, `
     <ol class="split-assembly">${r.assembly.map((a, i) => i === 0 ? `<li>Start with part ${a.part}.</li>`
       : a.joins.length ? `<li>Add part ${a.part} to ${listText(a.joins)} — ${plural(a.rods, "rod")}.</li>`
       : `<li>Part ${a.part} doesn't meet the others at a cut.</li>`).join("")}</ol>
-  </section>
+  `)}
   <div class="split-actions"><button class="btn btn-primary" data-action="layout">Lay out on plates →</button></div>`;
 }
 
@@ -735,6 +743,10 @@ async function refresh() {
 // ─── Wiring ───────────────────────────────────────────────────────────────────
 function bindEvents() {
   const side = $("split-side");
+  side.addEventListener("toggle", e => {   // toggle does not bubble, so listen on the way down
+    const id = e.target.dataset?.fold;
+    if (id) e.target.open ? openFolds.add(id) : openFolds.delete(id);
+  }, true);
   side.addEventListener("click", async (e) => {
     const el = e.target.closest("[data-action]");
     if (!el || el.disabled || !current) return;

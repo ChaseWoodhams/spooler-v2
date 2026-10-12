@@ -4,7 +4,7 @@
    printers). Projects without an uploaded model start at Plates. Talks to /api/projects, /api/splits and /api/jobs. */
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
-import { splitStep } from "./split-step.js?v=2";
+import { splitStep } from "./split-step.js?v=3";
 import { projectPage } from "./project-page.js?v=2";
 import { newProject } from "./new-project.js?v=8";
 import { Viewport, featureColor } from "./viewport.js?v=5";
@@ -266,7 +266,7 @@ async function boot() {
     onChanged: split => { renderSteps(); renderStepActions(); landOnSplit(split); },
   });
   $("settings-mode").value = remember("slicer.mode") || (remember("slicer.advanced") === "1" ? "advanced" : "simple");
-  $("settings-mode").addEventListener("change", e => remember("slicer.mode", e.target.value));
+  $("settings-mode").addEventListener("change", e => { remember("slicer.mode", e.target.value); renderFoldSummaries(); });
   try {
     state.schema = await (await fetch("/orca/settings.json")).json();
     state.settings.setSchema(state.schema);
@@ -1060,6 +1060,7 @@ function renderBricklayers() {
   const project = projectBricks();
   const plate = currentPlate();
   const mode = !plate || plate.bricklayers == null ? "project" : plate.bricklayers.enabled ? "on" : "off";
+  $("brick-summary").textContent = project.enabled ? "On" : mode === "on" ? "On for this plate" : "Off";
   $("bricklayers").innerHTML = `
     <p class="slicer-muted">Raises every other inner wall loop by half a layer so walls interlock like bricks — stronger across layers.
       While it's on, arc fitting is turned off and walls are classic, printed inner then outer.</p>
@@ -1241,12 +1242,13 @@ function renderSend() {
     const ready = isUpToDate(plate.id);
     const queued = inQueue.has(plate.id);
     const checked = firstRender ? ready && !queued : previous.has(plate.id) && ready;
-    const status = queued ? "in the queue" : ready ? plateStatus(plate.id).text : "slice it first";
+    const open = state.jobs.find(j => j.plate_id === plate.id && OPEN_JOB_STATES.has(j.state));
+    const status = open ? (open.state === "queued" ? "in the queue" : open.state === "starting" ? "starting to print" : "printing now") : ready ? plateStatus(plate.id).text : "slice it first";
     const missingPrinter = plate.printer_id && !state.printers.some(p => p.id === plate.printer_id);
     return `<div class="slicer-plate-row">
       <input aria-label="Queue ${esc(plate.name)}" type="checkbox" data-send-plate="${plate.id}"${checked ? " checked" : ""}${ready ? "" : " disabled"}>
       <div><strong>${esc(plate.name)}</strong> ${plateBadge(plate)}<small class="${queued ? "warn" : ready ? "" : "bad"}">${esc(status)}</small>
-      <label class="slicer-field">Destination printer<select data-send-printer="${plate.id}" aria-label="Destination printer for ${esc(plate.name)}"><option value="">Next free printer</option>${missingPrinter ? `<option value="${esc(plate.printer_id)}" selected>Unavailable printer (${esc(plate.printer_id)})</option>` : ''}${state.printers.map(p => `<option value="${esc(p.id)}"${p.id === plate.printer_id ? ' selected' : ''}>${esc(p.name)}${p.connected ? '' : ' (offline)'}</option>`).join('')}</select></label></div><span></span>
+      <label class="slicer-field slicer-dest"><span class="slicer-dest-label">Destination printer</span><select data-send-printer="${plate.id}" aria-label="Destination printer for ${esc(plate.name)}"><option value="">Next free printer</option>${missingPrinter ? `<option value="${esc(plate.printer_id)}" selected>Unavailable printer (${esc(plate.printer_id)})</option>` : ''}${state.printers.map(p => `<option value="${esc(p.id)}"${p.id === plate.printer_id ? ' selected' : ''}>${esc(p.name)}${p.connected ? '' : ' (offline)'}</option>`).join('')}</select></label></div><span></span>
     </div>`;
   }).join("") || '<p class="slicer-muted">No plates with objects.</p>';
   updateSendButton();
@@ -1277,7 +1279,10 @@ function updateSendButton() {
   const timeKnown = entries.every(e => e?.estimate_s != null), gramsKnown = entries.every(e => e?.estimate_g != null);
   const seconds = entries.reduce((sum,e) => sum + (e?.estimate_s || 0),0), grams = entries.reduce((sum,e) => sum + (e?.estimate_g || 0),0);
   const spool = state.spools?.find(s => s.id === data().profile.spool_id);
-  $('batch-summary').innerHTML = `<b>${plates.length} Plate${plates.length === 1 ? '' : 's'} selected</b><ul>${plates.map(p => `<li>${esc(p.name)} → ${esc(destinationLabel(p.printer_id))} · ${esc(plateFilamentLabel(p.id))} · ${data().bed === 'smooth' ? 'Smooth PEI' : 'Textured PEI'}</li>`).join('')}</ul><p>Estimated total: ${timeKnown ? duration(seconds) || '0 min' : 'Time unavailable for one or more Plates'} · ${gramsKnown ? `${Number(grams.toFixed(1))} g` : 'Filament unavailable for one or more Plates'}${spool ? ` · Spool: ${esc(spoolLabel(spool))}` : ' · No Spool assigned; using preset values'}</p><p>Each selected Plate becomes a Job in the Queue. Review &amp; start runs preflight before a physical Print. Bed cleared can release the next Job when auto-start is on.</p>`;
+  const time = timeKnown ? duration(seconds) || "0 min" : "time unknown", weight = gramsKnown ? `${Number(grams.toFixed(1))} g` : "filament unknown";
+  $('batch-summary').innerHTML = plates.length ? `<b>${plural(plates.length, "plate")} · ${time} · ${weight}</b>
+    <small class="slicer-muted">${spool ? `Spool: ${esc(spoolLabel(spool))}` : "No spool assigned; using preset values"}</small>
+    <details class="slicer-subfold"><summary>Where each plate goes</summary><ul>${plates.map(p => `<li>${esc(p.name)} → ${esc(destinationLabel(p.printer_id))} · ${esc(plateFilamentLabel(p.id))} · ${data().bed === 'smooth' ? 'Smooth PEI' : 'Textured PEI'}</li>`).join('')}</ul></details>` : '<span class="slicer-muted">Tick the plates to send.</span>';
 }
 
 function renderJobs() {
@@ -1319,7 +1324,8 @@ function renderJobs() {
             ${job.state === "queued"
               ? `<select data-job-printer="${job.id}" aria-label="Printer for ${esc(plate?.name || job.name)}">${printerOptions(job.printer_id)}</select>
                  <a class="btn btn-primary btn-sm" href="/?review=${job.id}" title="Preview the toolpath, run the preflight checks and start">Review &amp; start</a>`
-              : `<span class="slicer-muted">${esc(printerName(job.printer_id))}${job.error ? ` · ${esc(job.error)}` : ""}</span>`}
+              : `<span class="slicer-muted">${esc(printerName(job.printer_id))}${job.error ? ` · ${esc(job.error)}` : ""}</span>
+                 ${["failed", "cancelled"].includes(job.state) ? `<button class="btn btn-secondary btn-sm" type="button" data-job-requeue="${job.id}" title="Put this plate back at the front of the queue from its stored G-code">Queue again</button>` : ""}`}
           </div>
         </div>`;
       }).join("")}
@@ -1516,10 +1522,10 @@ const projectPack = () => {
 const withSupports = (pack, tight) => (tight ? { ...pack, tight_supports: true } : pack);
 
 function bindPack() {
-  const more = document.querySelector(".tool-more");   // the More menu closes after a button in it is used, or on a click anywhere else
-  more.addEventListener("click", e => { if (e.target.closest("button")) more.open = false; });
-  document.addEventListener("click", e => { if (more.open && !more.contains(e.target)) more.open = false; });
-  document.addEventListener("keydown", e => { if (e.key === "Escape" && more.open) more.open = false; });
+  const menus = [...document.querySelectorAll(".tool-more")];   // a More menu closes after a button in it is used, or on a click anywhere else
+  for (const more of menus) more.addEventListener("click", e => { if (e.target.closest("button")) more.open = false; });
+  document.addEventListener("click", e => { for (const more of menus) if (more.open && !more.contains(e.target)) more.open = false; });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") for (const more of menus) more.open = false; });
   $("pack-select").addEventListener("change", e => {
     const [scope, preset] = e.target.value.split(":");
     if (scope === "plate") setPack({ plate_id: state.plate, plate_pack: preset === "inherit" ? null : { preset } });
@@ -2273,16 +2279,21 @@ function renderPreviewPanel(info) {
   const temps = analysis.temperatures || {};
   $("preview-panel").innerHTML = `
     <dl class="slicer-stats">
-      <dt>Plate</dt><dd>${esc(currentPlate()?.name)}</dd>
       <dt>Print time</dt><dd>${duration(entry?.estimate_s) || "—"}</dd>
       <dt>Filament</dt><dd>${entry?.estimate_g ? `${entry.estimate_g.toFixed(1)} g` : "—"}</dd>
       <dt>Layers</dt><dd>${analysis.layers.length}</dd>
-      <dt>Nozzle / bed</dt><dd>${temps.nozzle?.max ?? "—"} °C / ${temps.bed?.max ?? "—"} °C</dd>
-      <dt>Slicer</dt><dd>${esc(analysis.slicer || "OrcaSlicer")}</dd>
     </dl>
     ${entry?.outdated ? '<p class="slicer-slice-state warn">This plate changed after it was sliced.</p>' : ""}
     ${info?.stride > 1 ? `<p class="slicer-muted">Large toolpath: showing every ${info.stride}th move.</p>` : ""}
-    <div class="slicer-legend">${legend || '<p class="slicer-muted">No extrusion features found.</p>'}</div>
+    <details class="slicer-subfold" data-preview-more${state.previewMore ? " open" : ""}>
+      <summary>Features and details</summary>
+      <div class="slicer-legend">${legend || '<p class="slicer-muted">No extrusion features found.</p>'}</div>
+      <dl class="slicer-stats">
+        <dt>Plate</dt><dd>${esc(currentPlate()?.name)}</dd>
+        <dt>Nozzle / bed</dt><dd>${temps.nozzle?.max ?? "—"} °C / ${temps.bed?.max ?? "—"} °C</dd>
+        <dt>Slicer</dt><dd>${esc(analysis.slicer || "OrcaSlicer")}</dd>
+      </dl>
+    </details>
     <a class="btn btn-secondary btn-sm" href="/api/projects/${state.project.id}/plates/${state.plate}/gcode" download>Download G-code</a>`;
 }
 
@@ -2764,6 +2775,19 @@ function bindUi() {
     if (row) selectPlate(Number(row.dataset.selectPlate));
   });
 
+  $("send-plates").addEventListener("click", e => {
+    const row = e.target.closest(".slicer-plate-row");
+    if (!row || e.target.closest("select, input, a, button, label")) return;
+    const box = row.querySelector("[data-send-plate]");
+    if (box && !box.disabled) { box.checked = !box.checked; box.dispatchEvent(new Event("change", { bubbles: true })); }
+  });
+  const tickAll = on => {
+    const queued = openJobPlates();
+    document.querySelectorAll("[data-send-plate]").forEach(box => { box.checked = on && !box.disabled && !queued.has(Number(box.dataset.sendPlate)); });
+    updateSendButton();
+  };
+  $("btn-send-all").addEventListener("click", () => tickAll(true));
+  $("btn-send-none").addEventListener("click", () => tickAll(false));
   $("send-plates").addEventListener("change", e => {
     if (e.target.matches('[data-send-printer]')) {
       const plate = plateById(Number(e.target.dataset.sendPrinter));
@@ -2791,7 +2815,12 @@ function bindUi() {
   $("job-batches").addEventListener("click", e => {
     const open = e.target.closest("[data-assign]");
     const apply = e.target.closest("[data-assign-apply]");
-    if (open) { state.assigning = open.dataset.assign; renderJobs(); }
+    const again = e.target.closest("[data-job-requeue]");
+    if (again) withButton(again, async () => {
+      await api("POST", `/api/jobs/${again.dataset.jobRequeue}/requeue`);
+      await loadJobs();
+    });
+    else if (open) { state.assigning = open.dataset.assign; renderJobs(); }
     else if (apply) assignPrinters(apply.dataset.assignApply, apply);
     else if (e.target.closest("[data-assign-cancel]")) { state.assigning = null; renderJobs(); }
   });
@@ -2937,6 +2966,7 @@ function bindUi() {
     state.viewport?.setShell(e.target.value);
     savePrinterPrefs({ shell: e.target.value });
   });
+  $("preview-panel").addEventListener("toggle", e => { if (e.target.matches("[data-preview-more]")) state.previewMore = e.target.open; }, true);
   $("preview-panel").addEventListener("change", e => {
     const name = e.target.dataset.feature;
     if (!name) return;
