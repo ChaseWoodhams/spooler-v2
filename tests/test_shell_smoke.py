@@ -310,6 +310,68 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
                               what="the object to be marked off the bed")
         self.assertFalse(await self.page.js(plates_done), "the Plates step must not show done with an object off the bed")
 
+    def make_board_project(self, offline_printing):
+        """A Project with a Plate in every state: 1 printed OK, 2 printing, 3 in the queue, 4 starting, 5 and 8 sliced, 6 and 7 unsliced (7 failed before)."""
+        data = {"bed": "textured", "profile": {"bundle_id": "x"},
+                "plates": [{"id": n, "name": f"Plate {n}"} for n in range(1, 9)],
+                "objects": [{"id": n, "model": 1, "name": f"part {n}", "plate": n, "position": [0, 0], "rotation": [0, 0, 0],
+                             "scale": [1, 1, 1], "overrides": {}} for n in range(1, 9)]}
+        models = [{"id": 1, "name": "part", "file": "part.stl", "state": "ready", "sha256": "abc"}]
+        with database.transaction() as conn:
+            project_id = conn.execute("INSERT INTO projects (name, data, models, slices, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
+                                      ("Board", json.dumps(data), json.dumps(models), json.dumps({}))).lastrowid
+        record = projects.get_project(project_id)
+        slices = {str(n): {"state": "sliced", "fingerprint": projects.fingerprint(record, n)} for n in (5, 8)}
+        with database.transaction() as conn:
+            conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(slices), project_id))
+            for plate, state_, printer in ((2, "printing", "ghost" if offline_printing else None), (3, "queued", None), (4, "starting", None)):
+                conn.execute("INSERT INTO jobs (name, state, printer_id, source, file_name, created_at, updated_at, project_id, plate_id) "
+                             "VALUES (?, ?, ?, 'upload', ?, 1, 1, ?, ?)", (f"Plate {plate}", state_, printer, f"plate{plate}.gcode", project_id, plate))
+            for plate, outcome in ((1, "completed"), (7, "failed")):
+                conn.execute("INSERT INTO prints (printer_id, printer_name, file_name, started_at, ended_at, outcome, project_id, plate_id) "
+                             "VALUES ('p9', 'P9', ?, 1, 2, ?, ?, ?)", (f"plate{plate}.gcode", outcome, project_id, plate))
+        return project_id
+
+    BOARD = """JSON.stringify([...document.querySelectorAll('#project-page [data-group]')].map(g => [g.dataset.group,
+        [...g.querySelectorAll('[data-plate-card]')].map(c => c.querySelector('[data-plate]').textContent.trim() + ': ' + c.querySelector('.pp-state').textContent.trim())]))"""
+
+    async def open_print_step(self, project_id):
+        await self.hold_qr_script()
+        await self.goto(f"{self.base}/slicer.html?project={project_id}")
+        await self.page.until("!!document.querySelector('#step-bar [data-step=print]')", what="the step bar")
+        await self.page.js("document.querySelector('#step-bar [data-step=print]').click()")
+        await self.page.until("!!document.querySelector('#project-page [data-group]')", what="the Plate board")
+
+    async def test_print_step_groups_plates_by_state_with_needs_attention_first(self):
+        await self.open_print_step(self.make_board_project(offline_printing=True))
+        board = json.loads(await self.page.js(self.BOARD))
+        self.assertEqual(board, [
+            ["attention", ["Plate 2: printing now", "Plate 7: failed"]],
+            ["printing", ["Plate 4: starting to print"]],
+            ["queued", ["Plate 3: in the queue"]],
+            ["ready", ["Plate 5: sliced", "Plate 8: sliced", "Plate 6: needs slicing"]],
+            ["done", ["Plate 1: printed OK"]],
+        ])
+        self.assertEqual(await self.page.js("document.querySelectorAll('#project-page .pp-cell, #project-page .pp-next').length"), 0)
+        self.assertNotIn("Next up", await self.page.js("document.getElementById('project-page').textContent"))
+        small = await self.page.js("[...document.querySelectorAll('#project-page [data-group] *')].filter(e => e.childElementCount === 0 && "
+                                   "e.textContent.trim() && parseFloat(getComputedStyle(e).fontSize) < 12).map(e => e.textContent)")
+        self.assertEqual(small, [])
+        for kind in ("keyDown", "keyUp"):   # a key press puts the page in keyboard mode, so focus shows its ring
+            await self.page.send("Input.dispatchKeyEvent", type=kind, key="Tab", code="Tab", windowsVirtualKeyCode=9)
+        await self.page.js("document.querySelector('#project-page [data-plate-card] [data-plate]').focus()")
+        self.assertTrue(await self.page.js("document.activeElement.matches('[data-plate]') && document.activeElement.matches(':focus-visible') && getComputedStyle(document.activeElement).outlineStyle !== 'none'"))
+
+    async def test_needs_attention_appears_only_when_a_plate_needs_it(self):
+        project_id = self.make_board_project(offline_printing=False)
+        with database.transaction() as conn:
+            conn.execute("DELETE FROM prints WHERE plate_id = 7")   # nothing failed, and the printing Plate has no offline printer
+        await self.open_print_step(project_id)
+        board = dict(json.loads(await self.page.js(self.BOARD)))
+        self.assertEqual(list(board), ["printing", "queued", "ready", "done"])
+        self.assertEqual(board["printing"], ["Plate 2: printing now", "Plate 4: starting to print"])
+        self.assertIn("Plate 7: needs slicing", board["ready"])
+
 
 if __name__ == "__main__":
     unittest.main()
