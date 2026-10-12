@@ -368,6 +368,7 @@ function renderFarm() {
   const button = $("btn-slice-send");
   button.textContent = name ? `Slice & send to ${name}` : "Slice & send";
   button.disabled = !printer || !plateObjects().length || !data().profile.bundle_id || isBusy(state.plate) || plateImporting(state.plate);
+  if (state.step === "slice") renderStepActions();
   refreshFit();
 }
 
@@ -433,7 +434,17 @@ async function sliceAndSend(plateIds) {
   applyProject(project);
   renderAll({ geometry: false });
   schedulePoll();
-  toast("Slicing — it will go to the queue when it's done");
+  toast("Slicing — it will be sent to the printer when it's done");
+}
+
+// The Slice step's send: a current Slice goes to its printer as it is; an outdated or missing one is sliced first.
+async function sendThisPlate() {
+  const plate = state.plate;
+  if (!isUpToDate(plate)) return sliceAndSend([plate]);
+  await flushSave();
+  await api("POST", `/api/projects/${state.project.id}/queue`, { plates: [plate] });
+  await loadJobs();
+  toast("Sent to the printer");
 }
 
 async function bundleSettings(bundleId) {
@@ -657,7 +668,26 @@ function renderStepActions() {
   const el = $("step-actions");
   if (!state.project) { el.innerHTML = ""; return; }
   const next = (step, label) => `<button class="btn btn-primary" type="button" data-go="${step}"${stepAvailable(step) ? "" : " disabled"}>${label}</button>`;
-  el.innerHTML = state.step === "plates" ? next("slice", "Slice →") : state.step === "slice" ? next("queue", "Send to the queue →") : "";
+  const send = sendThisPlateState();
+  el.innerHTML = state.step === "plates" ? next("slice", "Slice →")
+    : state.step === "slice" ? `<button class="btn btn-primary" type="button" data-send-this-plate${send.why ? " disabled" : ""}${send.why ? ` title="${esc(send.why)}"` : ""}>${esc(send.label)}</button>`
+      + (send.why ? `<small class="slicer-why slicer-muted">${esc(send.why)}</small>` : "") : "";
+  $("btn-slice-send").hidden = state.step === "slice";   // the Slice step has its own send in the header
+}
+
+// The Slice step's one action: send the selected plate to its printer. `why` is set when it can't be used right now.
+function sendThisPlateState() {
+  const plate = currentPlate();
+  const printer = state.printers.find(p => p.id === plate?.printer_id);
+  const label = printer ? `Send to ${printer.name}` : "Send to printer";
+  if (!plate) return { label, why: "" };
+  const why = !plateObjects().length ? "This plate is empty"
+    : plateImporting(plate.id) ? "The models on this plate are still importing"
+    : anyProblem() ? (state.problemReasons[plate.id] || "Fix the objects marked in red first")
+    : !plate.printer_id ? "Choose a printer under Print on first"
+    : !data().profile.bundle_id ? "Choose a slicing profile first"
+    : isBusy(plate.id) ? "This plate is being sliced" : "";
+  return { label, why };
 }
 
 // ── Saving ──────────────────────────────────────────────────────────────────────
@@ -1026,11 +1056,11 @@ function plateStatus(plateId) {
   if (entry.state === "queued") return { text: "Slice in progress — waiting for the slicer", cls: "" };
   if (entry.state === "slicing") return { text: `Slice in progress — ${slicingText(entry)}`, cls: "" };
   if (entry.state === "failed") return { text: `Failed Slice: ${entry.error || 'The slicer could not finish'}. Retry slicing this Plate.`, cls: "bad" };
-  if (entry.outdated) return { text: "Outdated Slice — objects, placement or relevant settings changed. Slice this Plate again before Queueing.", cls: "warn" };
+  if (entry.outdated) return { text: "Outdated Slice — objects, placement or relevant settings changed. Slice this Plate again before sending it.", cls: "warn" };
   const text = ['Current Slice', duration(entry.estimate_s), entry.estimate_g != null ? `${Math.round(entry.estimate_g)} g` : "Filament estimate unavailable", plural(entry.layers, "layer")].filter(Boolean).join(" · ");
   const printer = state.printers.find(p => p.id === entry.sent_to)?.name;
   if (entry.send_error) return { text: `${text} · not sent: ${entry.send_error}`, cls: "warn" };
-  if (entry.sent_job) return { text: `${text} · in the queue${printer ? ` for ${printer}` : ""}`, cls: "good" };
+  if (entry.sent_job) return { text: `${text} · sent${printer ? ` to ${printer}` : ""}`, cls: "good" };
   return { text: entry.auto_send ? `${text} · sending…` : text, cls: "good" };
 }
 
@@ -1211,8 +1241,7 @@ function renderSlicing() {
   if (!state.project || state.step !== "slice") return;
   const plates = platesWithObjects();
   const todo = plates.filter(p => !isUpToDate(p.id) && !isBusy(p.id) && !plateImporting(p.id));
-  const everyPlateHasPrinter = todo.length > 0 && todo.every(p => p.printer_id);
-  $("slicing-actions").innerHTML = (everyPlateHasPrinter ? `<button class="btn btn-secondary btn-sm" type="button" data-slice-all-send title="Slice ${plural(todo.length, "plate")} and queue each for its own printer">Slice &amp; send</button>` : "") + `<button class="btn btn-primary btn-sm" type="button" data-slice-all${todo.length && data().profile.bundle_id ? "" : " disabled"}>
+  $("slicing-actions").innerHTML = `<button class="btn btn-primary btn-sm" type="button" data-slice-all${todo.length && data().profile.bundle_id ? "" : " disabled"}>
     ${todo.length === plates.length ? `Slice all ${plural(plates.length, "plate")}` : todo.length ? `Slice ${plural(todo.length, "plate")}` : "All sliced"}</button>`;
   $("slicing-list").innerHTML = plates.map(plate => {
     const status = plateStatus(plate.id);
@@ -2551,6 +2580,8 @@ function bindUi() {
   $("step-actions").addEventListener("click", e => {
     const btn = e.target.closest("[data-go]");
     if (btn && !btn.disabled) setStep(btn.dataset.go);
+    const send = e.target.closest("[data-send-this-plate]");
+    if (send && !send.disabled) withButton(send, sendThisPlate);
   });
 
   $("project-name").addEventListener("keydown", e => {   // Enter saves (through change), Escape puts the saved name back
@@ -2759,8 +2790,6 @@ function bindUi() {
   $("slicing-actions").addEventListener("click", e => {
     const btn = e.target.closest("[data-slice-all]");
     if (btn && !btn.disabled) withButton(btn, () => sliceplates(null));
-    const send = e.target.closest("[data-slice-all-send]");
-    if (send && !send.disabled) withButton(send, () => sliceAndSend(null)).catch(err => toast(err.message, true));
   });
   $("bricklayers").addEventListener("change", e => {
     if (e.target.closest("[data-brick], [data-brick-plate]")) changeBricklayers(e.target);
