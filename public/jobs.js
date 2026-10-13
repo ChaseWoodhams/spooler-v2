@@ -323,7 +323,12 @@ document.getElementById("queue-body").addEventListener("click", async (e) => {
         openJobEditor({ mode: "edit", job });
         return;
       case "delete":
-        if (!confirm(`Delete "${job.name}"${job.state === "queued" ? " from the queue" : ""}?`)) return;
+        if (!await confirmDialog({
+          title: `Delete ${job.name}?`,
+          body: job.state === "queued" ? "It leaves the queue and will not print. This cannot be undone." : "The Job is removed from the list. This cannot be undone.",
+          confirmLabel: "Delete Job",
+          danger: true,
+        })) return;
         await jobsApi("DELETE", `/api/jobs/${job.id}`);
         break;
       case "requeue":
@@ -331,7 +336,12 @@ document.getElementById("queue-body").addEventListener("click", async (e) => {
         toast(`${job.name} is back at the front of the queue`);
         break;
       case "finish":
-        if (!confirm(`Mark "${job.name}" as failed and release ${printer}?`)) return;
+        if (!await confirmDialog({
+          title: `Mark ${job.name} as failed?`,
+          body: `It is recorded as failed and ${printer} is released. Use this only when the printer is no longer printing it.`,
+          confirmLabel: "Mark failed",
+          danger: true,
+        })) return;
         await jobsApi("POST", `/api/jobs/${job.id}/finish`, { outcome: "failed" });
         break;
     }
