@@ -103,6 +103,9 @@ def ensure_ssl_cert() -> bool:
         return False
 
 
+_UTF8_TYPES = {"text/javascript", "application/javascript", "text/css", "application/json", "image/svg+xml", "text/html"}
+
+
 class SPHandler(SimpleHTTPRequestHandler):
     """Serve static files from ./public and handle /api/ calls."""
 
@@ -111,6 +114,13 @@ class SPHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass  # silence access log
+
+    def guess_type(self, path):
+        # Without a charset the browser guesses, and read scripts/styles as Windows-1252 turn "…" and "·" into mojibake.
+        ctype = super().guess_type(path)
+        if ctype.split(";")[0] in _UTF8_TYPES and "charset" not in ctype:
+            ctype += "; charset=utf-8"
+        return ctype
 
     def end_headers(self):
         # Static files (pages, scripts, styles) carry only Last-Modified, so browsers reused old copies for hours and could run
