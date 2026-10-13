@@ -656,10 +656,11 @@ function renderPrinter(printer) {
 
     <!-- Controls -->
     <div class="card-controls">
-      ${connected && !printing && !paused ? `
+      ${connected && !printing && !paused && bedClearedWaiting(printer.id) ? `
         <button class="btn btn-primary btn-sm" onclick="confirmBedCleared('${escAttr(printer.id)}')" title="Confirm the printed plate is off the bed; releases the next queued job when auto-start is on">
           Printed OK · Bed cleared
         </button>
+        ${bedClearedNext(printer)}
       ` : ""}
       ${printing ? `
         <button class="btn btn-secondary btn-sm" onclick="printerAction('${escAttr(printer.id)}','pause')">
@@ -2176,6 +2177,26 @@ document.getElementById("modal-files").addEventListener("click", (e) => {
   if (e.target === document.getElementById("modal-files")) closeFileBrowser();
 });
 
+// The card's Printed OK · Bed cleared button follows the Needs you rule: only for a Print that ended and still needs the
+// bed confirmed (dashboard.js keeps _dashboard fresh and re-renders the cards when this changes).
+// _dashboard is a let in dashboard.js (loaded after this file), so it is in its temporal dead zone until then.
+function bedClearedItem(printerId) {
+  try { return _dashboard.needs_you.printers.find(i => i.printer_id === printerId) || null; } catch (_) { return null; }
+}
+function bedClearedWaiting(printerId) { return bedClearedItem(printerId)?.kind === "bed_cleared"; }
+function bedClearedNext(printer) {
+  const item = bedClearedItem(printer.id);
+  if (!item || !item.next_job || item.auto_start === false) return "";
+  const name = item.next_job.file_name || "queued job";
+  return `<span class="card-next" title="Confirming releases this Job">Next up: <strong>${escHtml(name)}</strong> starts on ${escHtml(printer.name)}</span>`;
+}
+// "Fix outcome" toast action: History, filtered to this printer
+function fixOutcome(printerId) {
+  openHistory();
+  const select = document.getElementById("history-printer");
+  if (select) { select.value = printerId; select.dispatchEvent(new Event("change")); }
+}
+
 // Printed OK · Bed cleared: pre-fills the outcome from what the printer reported (only a completed print is
 // confirmed here; anything else is corrected in History), then releases the next job if auto-start is on.
 async function confirmBedCleared(printerId) {
@@ -2197,9 +2218,11 @@ async function confirmBedCleared(printerId) {
     });
     const result = await resp.json();
     if (!resp.ok) { toast(result.error || "Could not confirm", true); return; }
-    if (result.started) toast(`Bed cleared. Starting ${result.started.file_name}`);
-    else if (result.start_error) toast(`Bed cleared, but nothing started: ${result.start_error}`, true);
-    else toast("Bed cleared. Printer is ready");
+    const fix = { action: { label: "Fix outcome", onClick: () => fixOutcome(printerId) } };
+    if (result.started) toast(`Bed cleared. Starting ${result.started.file_name}`, false, fix);
+    else if (result.start_error) toast(`Bed cleared, but nothing started: ${result.start_error}`, true, fix);
+    else toast("Bed cleared. Printer is ready", false, fix);
+    if (typeof loadDashboard === "function") loadDashboard();
   } catch (e) {
     toast("Could not confirm Bed cleared", true);
   }

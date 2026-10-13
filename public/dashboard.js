@@ -16,13 +16,20 @@ function printerUpNext(printer) {
   return `<div class="card-upnext" title="${escAttr(queued[0].name)}">Up next: <strong>${escHtml(queued[0].name)}</strong>${more}</div>`;
 }
 
+const _bedClearedSignature = () => JSON.stringify(_dashboard.needs_you.printers.map(i => [i.printer_id, i.kind, i.next_job && i.next_job.id, i.auto_start]));
+
 // ─── Data ─────────────────────────────────────────────────────────────────────
 async function loadDashboard() {
   if (_dashboardBusy) return;
   _dashboardBusy = true;
   try {
     const resp = await fetch("/api/dashboard");
-    if (resp.ok) { _dashboard = await resp.json(); renderDashboard(); }
+    if (resp.ok) {
+      const before = _bedClearedSignature();
+      _dashboard = await resp.json();
+      renderDashboard();
+      if (_bedClearedSignature() !== before) Object.values(printers).forEach(p => renderPrinter(p)); // cards show Bed cleared only when it is waiting
+    }
   } catch (_) { /* server may be restarting */ }
   _dashboardBusy = false;
 }
