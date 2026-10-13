@@ -52,6 +52,7 @@ DEFAULT_SETTINGS = {
     "planner":    {"mode": "smart", "balanced": True},
     "connectors": {"kind": "rod", "diameter": 2.0, "fallback_diameter": 1.0, "clearance": 0.15, "depth": 6.5,
                    "spacing": 100.0, "max_per_joint": 8},
+    "labels":     {"enabled": True},      # Part numbers debossed into each part
 }
 
 _data_dir: Path = DATA_DIR
@@ -117,6 +118,7 @@ def normalize_settings(raw: dict | None, base: dict | None = None) -> dict:
     if not isinstance(raw, dict):
         raise jobs.JobError("Settings must be an object")
     out = base
+    out.setdefault("labels", dict(DEFAULT_SETTINGS["labels"]))   # splits saved before part numbers existed
     if "scale" in raw:
         out["scale"] = _number(raw["scale"], "Scale", 1e-4, 1e5)
     if "up" in raw:
@@ -152,6 +154,11 @@ def normalize_settings(raw: dict | None, base: dict | None = None) -> dict:
         out["connectors"]["spacing"] = _number(connectors["spacing"], "Spacing", 20, 1000)
     if "max_per_joint" in connectors:
         out["connectors"]["max_per_joint"] = int(_number(connectors["max_per_joint"], "Rods per joint", 1, 50))
+    labels = raw.get("labels") or {}
+    if "enabled" in labels:
+        if not isinstance(labels["enabled"], bool):
+            raise jobs.JobError("Part numbers must be on or off")
+        out["labels"]["enabled"] = labels["enabled"]
     return out
 
 

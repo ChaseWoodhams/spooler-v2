@@ -544,6 +544,8 @@ function sideCuts() {
       ${numberField("split-conn-depth", "Depth", c.depth, 2, 0.5)}
     </div>
     <p class="split-hint" id="split-conn-hint">${esc(connectorHint(c))}</p>
+    <label class="split-inline"><input type="checkbox" id="split-labels"${s.labels?.enabled === false ? "" : " checked"}> Number the parts</label>
+    <p class="split-hint">Cuts each part's number into a face that is hidden once glued, so you can tell the parts apart on the bench. Turn it off to keep every face clean.</p>
   `)}
   <div class="split-actions"><button class="btn btn-primary" data-action="split"${canSplit() ? "" : " disabled"}>${current.result ? "Split again" : "Split the model"}</button></div>`;
 }
@@ -604,6 +606,10 @@ function connectorForm() {
     clearance: Number($("split-conn-clearance").value),
     depth: Number($("split-conn-depth").value),
   };
+}
+
+function labelsForm() {
+  return { enabled: $("split-labels").checked };
 }
 
 function applyConnectorPreset(id) {
@@ -690,7 +696,7 @@ async function planCuts(keepCuts) {
 
 async function startSplit() {
   if (!canSplit()) return;
-  const detail = await host.api("POST", `/api/splits/${current.id}/settings`, { printer: printerForm(), connectors: connectorForm() });
+  const detail = await host.api("POST", `/api/splits/${current.id}/settings`, { printer: printerForm(), connectors: connectorForm(), labels: labelsForm() });
   current.settings = detail.settings;
   started(await host.api("POST", `/api/splits/${current.id}/split`, {}));
   render();

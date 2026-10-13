@@ -4,7 +4,7 @@
    them). Projects without an uploaded model start at Plates. Talks to /api/projects, /api/splits and /api/jobs. */
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
-import { splitStep } from "./split-step.js?v=3";
+import { splitStep } from "./split-step.js?v=4";
 import { projectPage } from "./project-page.js?v=10";
 import { newProject } from "./new-project.js?v=10";
 import { Viewport, featureColor } from "./viewport.js?v=5";
