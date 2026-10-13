@@ -28,6 +28,7 @@
   <script>if (window.self !== window.top) { document.body.classList.add("embedded"); const b = document.createElement("base"); b.target = "_top"; document.head.appendChild(b); }</script>
   <a class="skip-link" href="#slicer-main">Skip to main content</a>
   <header class="slicer-top">
+    <div class="slicer-id">
     <a href="/" class="slicer-home" title="Back to the dashboard"><img src="/icon.svg" alt="" /><span>Spooler</span></a>
     <div class="slicer-project">
       <input id="project-name" class="slicer-project-name" aria-label="Project name" maxlength="120" />
@@ -41,14 +42,17 @@
       </details>
       <span id="save-state" class="slicer-muted"></span>
     </div>
+    </div>
+    <div class="slicer-nav">
     <nav id="step-bar" class="slicer-steps" aria-label="Workflow steps"></nav>
     <div class="slicer-top-actions">
       <span id="slice-state" class="slicer-slice-state" role="status"></span>
       <span id="step-actions" class="slicer-step-actions"></span>
     </div>
+    </div>
   </header>
 
-  <div class="slicer-small-screen-note">Review your Project here and defer 3D editing to a larger screen. Numeric transforms are available when editing controls are shown.
+  <div class="slicer-small-screen-note">Phones review a Project; moving objects and plates waits for a larger screen. Fit view and Undo stay.
     <button id="btn-mobile-edit" type="button" class="btn btn-secondary btn-sm" aria-expanded="false">Show editing controls</button>
   </div>
   <button id="btn-sidebar" type="button" class="btn btn-secondary btn-sm slicer-sidebar-toggle" aria-expanded="true" aria-controls="project-sidebar">Hide sidebar</button>
@@ -175,6 +179,10 @@
         <div class="tool-seg" role="group" aria-label="Arrange">
           <button class="btn btn-secondary btn-sm" type="button" id="btn-arrange" title="Arrange this plate (A); Shift+A arranges every plate onto as few as fit. Pinned objects stay put and plates never mix filaments.">Arrange</button>
         </div>
+        <div class="tool-seg" role="group" aria-label="Selection">
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-select-all" title="Select every object on this plate (Ctrl+A). Shift-click adds or removes one.">Select all</button>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button>
+        </div>
         <div class="tool-seg" role="group" aria-label="View and history">
           <button class="btn btn-secondary btn-sm" type="button" id="btn-undo" title="Undo (Ctrl+Z)">Undo</button>
           <button class="btn btn-secondary btn-sm" type="button" id="btn-redo" title="Redo (Ctrl+Y)">Redo</button>
@@ -223,8 +231,6 @@
               <select id="snap-step" class="slicer-toolbar-select" aria-label="Snap grid" disabled>
                 <option value="1">1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option>
               </select></div>
-            <div class="tool-more-row"><button class="btn btn-secondary btn-sm" type="button" id="btn-select-all" title="Select every object on this plate (Ctrl+A). Shift-click adds or removes one.">Select all</button></div>
-            <div class="tool-more-row"><button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button></div>
           </div>
         </details>
       </div>
