@@ -249,7 +249,7 @@ function handleMessage(msg) {
       refreshQueueSoon();  // live progress and start availability in the queue panel
       renderPrinter(msg.printer);
       if (_activePrinterId === msg.printer.id) renderPrinterDetail(msg.printer);
-      else if (location.hash === `#printer=${encodeURIComponent(msg.printer.id)}`) _showPrinterDashboard(msg.printer.id);
+      else if (_printerRouteId() === msg.printer.id) _showPrinterDashboard(msg.printer.id);
       syncEmptyState();
       _checkActiveTrayChange(msg.printer);
       break;
@@ -853,10 +853,14 @@ function _fanSpeed(printer, key) {
   return Number.isFinite(Number(value)) ? Math.max(0, Math.min(100, Math.round(Number(value)))) : 0;
 }
 
+// #printer=<id>[&tab=<tab>]: the id, whatever else the hash carries
+function _printerRouteId() {
+  return location.hash.startsWith("#printer=") ? new URLSearchParams(location.hash.slice(1)).get("printer") : null;
+}
+
 function openPrinterDashboard(printerId) {
   if (!printers[printerId]) return;
-  const nextHash = `#printer=${encodeURIComponent(printerId)}`;
-  if (location.hash !== nextHash) location.hash = nextHash;
+  if (_printerRouteId() !== printerId) location.hash = `#printer=${encodeURIComponent(printerId)}`;
   else _showPrinterDashboard(printerId);
 }
 
@@ -869,6 +873,8 @@ function _showPrinterDashboard(printerId) {
     renderPrinter(printers[previousPrinterId]);
   }
   _activePrinterId = printerId;
+  const rememberedStep = window.cockpitPref?.(printerId, "jog");   // each printer keeps its own jog distance
+  _detailJogStep = [0.1, 1, 10].includes(rememberedStep) ? rememberedStep : 1;
   document.getElementById("empty-state").style.display = "none";
   document.getElementById("printer-grid").style.display = "none";
   const detail = document.getElementById("printer-detail");
@@ -895,7 +901,7 @@ function _syncPrinterRoute() {
     closePrinterDashboard();
     return;
   }
-  const printerId = decodeURIComponent(location.hash.slice("#printer=".length));
+  const printerId = _printerRouteId();
   if (printers[printerId]) _showPrinterDashboard(printerId);
 }
 
@@ -1088,6 +1094,7 @@ function showDangerZone(buttonId, show) {
 
 function setJogStep(step) {
   _detailJogStep = step;
+  if (_activePrinterId) window.cockpitPref?.(_activePrinterId, "jog", step);
   if (_activePrinterId && printers[_activePrinterId]) renderPrinterDetail(printers[_activePrinterId]);
 }
 

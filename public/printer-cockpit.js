@@ -9,7 +9,31 @@
  * same layout pinned over the viewport instead.
  */
 (() => {
-  let tab = "motion";                       // active tab (in memory only)
+  const TAB_KEYS = ["motion", "temps", "air", "files"];
+  // Per-printer tab and jog step. A per-viewer convenience: kept in localStorage when it is allowed, in memory otherwise.
+  const PREF_KEY = "cockpit-prefs";
+  let prefs = {};
+  try { prefs = JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch (_) { prefs = {}; }
+  window.cockpitPref = (printerId, key, value) => {
+    if (value === undefined) return prefs[printerId]?.[key];
+    (prefs[printerId] ||= {})[key] = value;
+    try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)); } catch (_) { /* storage can be blocked */ }
+  };
+  // #printer=<id>[&tab=<tab>]: the URL names the tab, so a reload or a shared link lands on it; without one the last tab for this printer
+  const routeParams = () => (location.hash.startsWith("#printer=") ? new URLSearchParams(location.hash.slice(1)) : null);
+  const currentTab = printerId => {
+    const fromUrl = routeParams()?.get("tab");
+    if (TAB_KEYS.includes(fromUrl)) return fromUrl;
+    const remembered = window.cockpitPref(printerId, "tab");
+    return TAB_KEYS.includes(remembered) ? remembered : "motion";
+  };
+  // Keep the URL in step with the tab without adding a history entry (no hashchange, so nothing re-renders)
+  const syncTabUrl = (printerId, t) => {
+    const params = routeParams();
+    if (!params || params.get("printer") !== printerId) return;
+    const wanted = `#printer=${encodeURIComponent(printerId)}${t === "motion" ? "" : `&tab=${t}`}`;
+    if (location.hash !== wanted) history.replaceState(null, "", location.pathname + location.search + wanted);
+  };
   const COMPACT_KEY = "cockpit-compact-camera";
   let compact = false;
   try { compact = localStorage.getItem(COMPACT_KEY) === "1"; } catch (_) { /* storage can be blocked */ }
@@ -28,13 +52,17 @@
     if (_activePrinterId && printers[_activePrinterId]) renderPrinterDetail(printers[_activePrinterId]);
   };
   window.selectPrinterTab = t => {
-    tab = t; rerender();
+    const printerId = _activePrinterId;
+    if (!printerId || !TAB_KEYS.includes(t)) return;
+    window.cockpitPref(printerId, "tab", t);
+    syncTabUrl(printerId, t);
+    rerender();
     document.getElementById(`printer-tab-${t}`)?.focus();
   };
   document.addEventListener("keydown", event => {
     if (!event.target.matches(".pv-tabs [role=tab]")) return;
-    const keys = ["motion", "temps", "air", "files"];
-    let index = keys.indexOf(tab);
+    const keys = TAB_KEYS;
+    let index = keys.indexOf(currentTab(_activePrinterId));
     if (event.key === "ArrowRight") index = (index + 1) % keys.length;
     else if (event.key === "ArrowLeft") index = (index + keys.length - 1) % keys.length;
     else if (event.key === "Home") index = 0;
@@ -70,9 +98,9 @@
   const cam = c => `
     <div class="detail-camera pv-cam" ondblclick="toggleCameraFullscreen()" title="Double-click for full screen"><div class="camera-placeholder" style="display:flex"><span>${c.connected ? "Camera unavailable" : "Printer offline"}</span></div></div>`;
   const chip = c => `<span class="live-chip${c.cameraUrl ? "" : " offline"}" id="detail-live-chip">${c.cameraUrl ? "● Live" : "○ No signal"}</span>`;
-  const fsBtn = () => `<button class="pv-fsbtn" data-focus-key="fullscreen" onclick="toggleCameraFullscreen()" aria-label="${isFs() ? "Exit full screen" : "Full screen video"}" title="${isFs() ? "Exit full screen" : "Full screen"}">${isFs() ? "⤡" : "⛶"}</button>`;
+  const fsBtn = () => `<button class="pv-fsbtn" data-focus-key="fullscreen" onclick="toggleCameraFullscreen()" aria-label="${isFs() ? "Exit full screen" : "Full screen video"}" title="${isFs() ? "Exit full screen" : "Full screen"}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${isFs() ? '<path d="M20 10h-6V4M4 14h6v6M14 10l7-7M10 14l-7 7"/>' : '<path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/>'}</svg></button>`;
   const compactBtn = (c, on) => c.cameraUrl ? `<button class="pv-fsbtn pv-compact" data-focus-key="compact" onclick="toggleCockpitCompact()" aria-pressed="${on}" aria-label="Compact camera" title="${on ? "Show the camera larger" : "Shrink the camera so the controls stay in view"}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">${on ? '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>' : '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>'}</svg></button>` : "";
-  const back = `<button class="pv-back" data-focus-key="back" onclick="returnToPrinterGrid()">‹ All printers</button>`;
+  const back = `<button class="pv-back" data-focus-key="back" onclick="returnToPrinterGrid()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg><span>All printers</span></button>`;
   const title = c => `<span class="status-dot ${c.sc}"></span><b role="heading" aria-level="1">${escHtml(c.printer.name)}</b><small>${escHtml(c.printer.ip)}${c.printer.attrs?.FirmwareVersion ? ` · firmware ${escHtml(c.printer.attrs.FirmwareVersion)}` : ""}</small>`;
   const id = c => escAttr(c.printer.id);
 
@@ -145,10 +173,36 @@
       ? `<button class="btn btn-secondary" data-focus-key="pause" onclick="printerAction('${id(c)}','pause')">Pause</button>`
       : `<button class="btn btn-primary" data-focus-key="resume" onclick="printerAction('${id(c)}','resume')">Resume</button>`}
     <button class="btn btn-danger" data-focus-key="stop" onclick="confirmStop('${id(c)}')">Stop</button>` : "";
+  // Recent prints for the Files tab, fetched when the tab is shown and cached for 30 s so status updates do not refetch
+  const recent = {};
+  const recentHtml = printerId => {
+    const r = recent[printerId];
+    if (!r || (r.loading && !r.prints)) return `<small>Loading recent prints…</small>`;
+    if (r.error) return `<small>Couldn't load recent prints.</small>`;
+    if (!r.prints.length) return `<small>No prints recorded for this printer yet.</small>`;
+    return `<ul class="pv-recent">${r.prints.map(p => `<li><span class="pv-recent-name" title="${escAttr(p.file_name)}">${escHtml(p.file_name)}</span>
+      <span class="pv-recent-meta">${escHtml(p.outcome ? (OUTCOME_LABEL[p.outcome] || p.outcome) : "Printing")} · ${escHtml(new Date(p.started_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }))}</span></li>`).join("")}</ul>`;
+  };
+  const loadRecent = printerId => {
+    const r = recent[printerId];
+    if (r && (r.loading || Date.now() - r.at < 30000)) return;
+    recent[printerId] = { ...r, loading: true, at: Date.now() };
+    fetch(`/api/prints?printer_id=${encodeURIComponent(printerId)}&limit=5`)
+      .then(res => { if (!res.ok) throw new Error(String(res.status)); return res.json(); })
+      .then(data => { recent[printerId] = { prints: Array.isArray(data.prints) ? data.prints : [], at: Date.now() }; })
+      .catch(() => { recent[printerId] = { error: true, at: Date.now() }; })
+      .finally(() => {   // fill the list in place: re-rendering the page would drop focus
+        const el = document.getElementById("pv-recent");
+        if (el && el.dataset.printer === printerId) el.innerHTML = recentHtml(printerId);
+      });
+  };
   const browseBtn = c => `<button class="btn btn-primary" data-focus-key="browse" onclick="openFileBrowser('${id(c)}')">Browse & start print</button>`;
 
   // ── Cockpit ────────────────────────────────────────────────────────────────
   window.cockpitPrinterHtml = c => {
+    const tab = currentTab(c.printer.id);
+    syncTabUrl(c.printer.id, tab);
+    if (tab === "files") loadRecent(c.printer.id);
     const tabs = { motion: "Motion", temps: "Temperatures", air: "Air & light", files: "Files" };
     const controlReason = !c.connected ? "Printer offline. Reconnect the printer to use controls." : c.printer.printer_type !== "cc1" ? "Motion, temperature and fan controls are available for Centauri Carbon 1 only." : "";
     const body = {
@@ -159,7 +213,8 @@
       temps: `<div class="pv-col wide"><small>Nozzle target: 0–300 °C · Bed target: 0–110 °C. Zero turns heating off.</small>${temp(c, "nozzle", "Nozzle", c.nozzle, c.nozzleTarget, 300)}${temp(c, "bed", "Bed", c.bed, c.bedTarget, 110)}${temp(c, "chamber", "Chamber", c.chamber, 0, 0, true)}</div>`,
       air: `<div class="pv-col wide">${fan(c, "model", "Model fan", c.modelFan)}${fan(c, "auxiliary", "Side fan", c.auxiliaryFan)}${fan(c, "chamber", "Chamber fan", c.chamberFan)}${speed(c)}
         <small>Fans: 0–100%.</small><div class="pv-light"><span>Chamber light</span>${light(c)}</div></div>`,
-      files: `<div class="pv-col">${browseBtn(c)}<small>Pick a file already on the printer.</small></div>`,
+      files: `<div class="pv-col"><h2 class="pv-sub">Recent prints</h2><div id="pv-recent" data-printer="${id(c)}" aria-live="polite">${recentHtml(c.printer.id)}</div>
+        ${browseBtn(c)}<small>Pick a file already on the printer.</small></div>`,
     };
     return `<div class="pv pv-b">
       <div class="pv-hero${!c.cameraUrl ? " nofeed" : compact ? " compact" : ""}">
@@ -213,11 +268,12 @@
   .pv-hud{position:absolute;left:0;right:0;display:flex;align-items:center;gap:12px;padding:12px 16px;z-index:2;color:#fff;flex-wrap:wrap;pointer-events:none}
   .pv-hud>*{pointer-events:auto}
   .pv-hud.top{top:0;background:linear-gradient(#000a,transparent)}.pv-hud.bot{bottom:0;background:linear-gradient(transparent,#000c);justify-content:space-between;align-items:flex-end}
-  .pv-hud .pv-back{color:#fff}.pv-hud .live-chip{margin-left:auto}
+  .pv-hud .pv-back{color:#fff}
+  .pv-back{display:inline-flex;align-items:center;gap:4px;min-width:44px}.pv-back svg{width:18px;height:18px;flex:none}.pv-hud .live-chip{margin-left:auto}
   .pv-pills{display:flex;gap:8px;flex-wrap:wrap}.pv-pill{display:inline-flex;align-items:center;gap:5px;background:#000a;border-radius:99px;padding:4px 12px;backdrop-filter:blur(6px);font-size:13px;font-variant-numeric:tabular-nums}.pv-pill svg{width:14px;height:14px;flex:none}.pv-pill small{font-size:12px;opacity:.85}.pv-pill-label{font-size:12px;opacity:.9}
   .pv-hudjob{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#000a;border-radius:var(--radius-sm);padding:8px 12px;backdrop-filter:blur(6px);flex:1;max-width:620px}
   .pv-hudjob .pv-bar{flex:1}.pv-hudjob.idle{flex:0 0 auto}
-  .pv-fsbtn{background:#0008;border:1px solid #fff4;border-radius:8px;width:34px;height:34px;font-size:18px;line-height:1;color:#fff;backdrop-filter:blur(6px)}
+  .pv-fsbtn{background:#0008;border:1px solid #fff4;border-radius:8px;width:44px;height:44px;font-size:18px;line-height:1;color:#fff;backdrop-filter:blur(6px);display:inline-flex;align-items:center;justify-content:center;padding:0}
   .pv-fsbtn:hover{background:#000b}.pv-fsbtn svg{width:18px;height:18px}
   /* compact camera: a shorter hero keeps the tabs and key state in view; no feed collapses it */
   .pv-b .pv-hero.compact{min-height:min(32vh,240px)}.pv-b .pv-hero.nofeed{min-height:170px}
@@ -238,6 +294,15 @@
     .pv-tabbody{padding:10px}.pv-temp{flex-wrap:wrap}.pv-tgt{margin-left:0;flex-wrap:wrap}
     .pv-temp>span:first-child{width:65px}.pv-temp strong{min-width:70px}
     .pv-row-wrap{gap:12px}.pv-jog{gap:8px}.pv-pills span{padding:4px 8px}
+  }
+  /* Ticket 25 · recent prints on the Files tab; on a phone the status dot sits on the first line of a wrapped printer name */
+  .pv-sub{font-size:1em;margin:0;color:var(--text-muted);font-weight:600}
+  .pv-recent{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+  .pv-recent li{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap}
+  .pv-recent-name{overflow-wrap:anywhere;min-width:0}.pv-recent-meta{color:var(--text-muted);font-size:13px}
+  @media(max-width:640px){
+    .pv-title{flex:1 1 150px;flex-wrap:nowrap;align-items:flex-start}   /* the dot stays beside the name; the name wraps in its own column */
+    .pv-title .status-dot{margin-top:.55em;margin-top:calc((1lh - 10px) / 2)}
   }
   /* full screen: only the hero stays */
   body.pv-fs-lock{overflow:hidden}
