@@ -2206,29 +2206,65 @@ async function confirmBedCleared(printerId) {
 }
 
 // ─── Toast ─────────────────────────────────────────────────────────────────────
-function toast(msg, isError = false) {
+// toast(msg, isError = false, { action: { label, onClick }, duration } = {})
+//   Success toasts last 4 s, action toasts 8 s; all pause while hovered or focused.
+//   Errors stay 12 s (paused while hovered or focused) or until dismissed, and render as role="alert".
+//   `action` adds a keyboard-reachable button (Undo, Open record); clicking it dismisses the toast.
+// toastAction(msg, btnLabel, onClick, duration = 8000) stays call-compatible and wraps the same code.
+const TOAST_MS = 4000;
+const TOAST_ACTION_MS = 8000;
+const TOAST_ERROR_MS = 12000;
+
+function toast(msg, isError = false, opts = {}) {
   const area = document.getElementById("toast-area");
+  if (!area) return null;
+  if (isError) {
+    // An identical error already on screen is not stacked again
+    const dup = [...area.querySelectorAll(".toast.error")].find(t => t.dataset.msg === String(msg));
+    if (dup) return dup;
+  }
+  const action = opts.action;
   const el = document.createElement("div");
-  el.className = "toast" + (isError ? " error" : "");
-  el.textContent = msg;
+  el.className = "toast" + (isError ? " error" : "") + (action ? " toast-action" : "");
+  if (isError) { el.setAttribute("role", "alert"); el.dataset.msg = String(msg); }
+  const span = document.createElement("span");
+  span.className = "toast-msg";
+  span.textContent = msg;
+  el.appendChild(span);
+  if (action) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-btn";
+    btn.textContent = action.label;
+    btn.addEventListener("click", () => { el.remove(); action.onClick?.(); });
+    el.appendChild(btn);
+  }
+  if (isError) {
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "toast-close";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "×";
+    close.addEventListener("click", () => el.remove());
+    el.appendChild(close);
+  }
   area.appendChild(el);
-  setTimeout(() => el.remove(), 3500);
+  {
+    let remaining = opts.duration ?? (isError ? TOAST_ERROR_MS : action ? TOAST_ACTION_MS : TOAST_MS);
+    let timer = null, startedAt = 0;
+    const start = () => { if (timer || !el.isConnected) return; startedAt = Date.now(); timer = setTimeout(() => el.remove(), remaining); };
+    const pause = () => { if (!timer) return; clearTimeout(timer); timer = null; remaining = Math.max(1500, remaining - (Date.now() - startedAt)); };
+    el.addEventListener("mouseenter", pause);
+    el.addEventListener("mouseleave", start);
+    el.addEventListener("focusin", pause);
+    el.addEventListener("focusout", () => { if (!el.matches(":hover")) start(); });
+    start();
+  }
+  return el;
 }
 
-function toastAction(msg, btnLabel, onClick, duration = 8000) {
-  const area = document.getElementById("toast-area");
-  const el = document.createElement("div");
-  el.className = "toast toast-action";
-  const span = document.createElement("span");
-  span.textContent = msg;
-  const btn = document.createElement("button");
-  btn.className = "toast-btn";
-  btn.textContent = btnLabel;
-  btn.addEventListener("click", () => { el.remove(); onClick(); });
-  el.appendChild(span);
-  el.appendChild(btn);
-  area.appendChild(el);
-  setTimeout(() => el.remove(), duration);
+function toastAction(msg, btnLabel, onClick, duration = TOAST_ACTION_MS) {
+  return toast(msg, false, { action: { label: btnLabel, onClick }, duration });
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
