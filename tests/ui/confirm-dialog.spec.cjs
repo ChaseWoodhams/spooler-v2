@@ -101,7 +101,7 @@ async function askThenDo(fx, trigger, { name, body, verb, command }) {
 
 async function hardware(fx) {
   const { page } = fx;
-  await page.locator('#card-p1').focus();
+  await page.locator('#card-p1 .card-title-btn').focus();
   await page.keyboard.press('Enter');
   await page.getByRole('tab', { name: 'Motion', exact: true }).waitFor();
   await askThenDo(fx, () => page.getByRole('button', { name: 'Home XY', exact: true }).click(),
@@ -117,7 +117,7 @@ async function stopPrint(fx) {
   const { page } = fx;
   fx.printer = { ...idle, status: printingStatus };
   await fx.update({});
-  await page.locator('#card-p1').focus();
+  await page.locator('#card-p1 .card-title-btn').focus();
   await page.keyboard.press('Enter');
   const pause = page.locator('.pv-btns').getByRole('button', { name: 'Pause', exact: true });
   const stop = page.locator('.pv-btns').getByRole('button', { name: 'Stop', exact: true });

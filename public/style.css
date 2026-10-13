@@ -2390,3 +2390,16 @@ body.light-mode { --st-completed: #0f766e; --st-failed: #be123c; --st-cancelled:
 .temp-label, .temp-target, .status-badge, .sidenav-badge, #btn-header-more { font-size: 12px; }
 @media (max-width: 400px) { .more-extra { display: none; } }
 @media (max-width: 340px) { .header-actions > #btn-quick-print, .header-actions > #btn-new-project { font-size: 12px; padding-inline: 8px; } }
+
+/* Ticket 24 · P3 shell: the card title is the one keyboard control, the card light is a toggle, the Queue entry is a full-size target */
+.card-title-btn { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; max-width: 100%; text-align: left; cursor: pointer;
+  white-space: inherit; overflow: hidden; text-overflow: ellipsis; display: block; }
+.card-title-btn:hover { text-decoration: underline; }
+.btn-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: var(--hit-min, 44px); min-height: var(--hit-min, 44px);
+  background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }
+.btn-toggle:hover:not(:disabled) { background: var(--border); }
+.btn-toggle.is-on, .btn-toggle[aria-pressed="true"] { color: var(--text); border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.btn-toggle svg { width: 18px; height: 18px; flex: none; }
+.btn-toggle .toggle-state { font-size: 12px; font-weight: 600; }
+.dash-bar #btn-queue { min-height: var(--hit-min, 44px); min-width: var(--hit-min, 44px); }
+.sidenav-badge.is-zero { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }

@@ -79,7 +79,7 @@ async function fixturePage(browser, baseUrl, width, height = 900) {
 }
 async function cockpit(fixture) {
   const { page } = fixture;
-  await page.locator('#card-operator-fixture').focus();
+  await page.locator('#card-operator-fixture .card-title-btn').focus();
   await page.keyboard.press('Enter');
   await page.getByRole('tab', { name: 'Motion', exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Home XY', exact: true }).isEnabled(), true);
@@ -137,7 +137,7 @@ async function hardwareFeedback(fixture) {
   const fb = key => page.locator(`[data-fb="${key}"]`);
   const expectFb = async (locator, pattern) => { const deadline = Date.now() + 5000; let text = ""; while (Date.now() < deadline) { text = await locator.innerText(); if (pattern.test(text)) return; await sleep(30); } assert.match(text, pattern); };
   await page.evaluate(() => { _HW.debounce = 250; _HW.confirm = 700; _HW.jog = 600; _HW.flash = 400; });
-  await page.locator('#card-operator-fixture').focus();
+  await page.locator('#card-operator-fixture .card-title-btn').focus();
   await page.keyboard.press('Enter');
   await page.getByRole('tab', { name: 'Air & light', exact: true }).click();
 
