@@ -52,6 +52,7 @@
       transition: border-color 0.15s;
     }
     input:focus { border-color: #ff6b2b; }
+    input:focus-visible, button:focus-visible { outline: 3px solid #ff6b2b; outline-offset: 3px; } /* 6.6:1 on #181921 */
     button[type="submit"] {
       width: 100%;
       padding: 11px;

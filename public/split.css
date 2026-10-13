@@ -19,6 +19,7 @@
 .split-side input, .split-side select { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text);
   padding: 6px 8px; font-size: 13px; outline: none; width: 100%; }
 .split-side input:focus, .split-side select:focus { border-color: var(--accent); }
+.split-side input:focus-visible, .split-side select:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .split-section { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); padding: 10px 12px;
   display: flex; flex-direction: column; gap: 8px; }
 .split-section h4 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); overflow-wrap: anywhere; }

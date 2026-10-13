@@ -15,6 +15,7 @@
   --border:      #2a2d38;
   --accent:      #ff6b2b;
   --accent-dim:  #b64210;
+  --focus-ring: var(--accent); /* keyboard focus ring colour; every :focus-visible rule uses it */
   --accent-fill: #b64210; /* paints the accent behind text; white on it is 5.56:1 (raw --accent is 2.84:1) */
   --green:       #22c55e;
   --yellow:      #eab308;
@@ -38,6 +39,7 @@ body.light-mode {
   --text:     #1a1c2a;
   --text-muted: #525b6a;
   --accent: #a63808;
+  --focus-ring: var(--accent);
   --accent-dim: #8e2e06;
   --accent-fill: #a63808;
   --green: #166534;
@@ -343,7 +345,7 @@ main {
   font-size: 12px;
   cursor: pointer;
 }
-.camera-view-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.camera-view-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .camera-placeholder {
   position: absolute;
   inset: 0;
@@ -694,7 +696,7 @@ main {
   cursor: pointer;
 }
 .toast-btn:hover { opacity: .85; }
-.toast-btn:focus-visible, .toast-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toast-btn:focus-visible, .toast-close:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 /* Toast text never blocks a control underneath (e.g. a dialog button on a phone); its own buttons still work */
 #toast-area, .toast { pointer-events: none; }
 .toast button { pointer-events: auto; }
@@ -1767,7 +1769,7 @@ input[aria-invalid="true"] { border-color: var(--red) !important; }
   width: 16px; height: 16px; left: 3px; top: 3px;
   background: #fff; border-radius: 50%; transition: transform .2s;
 }
-.toggle-switch input:focus-visible + .toggle-slider { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toggle-switch input:focus-visible + .toggle-slider { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .toggle-switch input:checked + .toggle-slider { background: var(--accent); box-shadow: none; }
 .toggle-switch input:checked + .toggle-slider::before { transform: translateX(22px); }
 
@@ -1826,7 +1828,7 @@ input[aria-invalid="true"] { border-color: var(--red) !important; }
 
 /* ─── Per-printer control dashboard ─────────────────────────────────────── */
 .printer-card-interactive { cursor: pointer; }
-.printer-card-interactive:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.printer-card-interactive:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 .printer-detail { max-width: 1500px; margin: 0 auto; }
 .detail-nav {
   display: grid;
@@ -1898,8 +1900,8 @@ input[aria-invalid="true"] { border-color: var(--red) !important; }
 .z-jog button:not(:disabled), .xy-jog button:not(:disabled), .home-stack button:not(:disabled) { cursor: pointer; transition: box-shadow .12s; }
 .z-jog button:not(:disabled):hover, .xy-jog button:not(:disabled):hover, .home-stack button:not(:disabled):hover { box-shadow: inset 0 0 0 999px rgba(255,255,255,.08); }
 .z-jog button:not(:disabled):active, .xy-jog button:not(:disabled):active, .home-stack button:not(:disabled):active { box-shadow: inset 0 0 0 999px rgba(255,255,255,.16); }
-.z-jog button:focus-visible, .xy-jog button:focus-visible, .home-stack button:focus-visible, .detail-step:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.detail-toggle:focus-visible, .detail-slider:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.z-jog button:focus-visible, .xy-jog button:focus-visible, .home-stack button:focus-visible, .detail-step:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.detail-toggle:focus-visible, .detail-slider:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .detail-help { margin-top: 14px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .fan-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .detail-control-row, .detail-light-control, .detail-speed-row { padding: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface2); }
@@ -2188,7 +2190,7 @@ body.import-dropping::after { content: "Drop to import"; position: fixed; inset:
 
 /* Keep keyboard focus visible over field and menu resets. */
 body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
-  outline: 3px solid var(--accent);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 3px;
 }
 

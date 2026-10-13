@@ -11,6 +11,12 @@ const fixtures = [0, 3, 15, 6, 9, 14, 0].map((code, i) => ({
     TempOfNozzle: 210, TempOfHotbed: 60, TempOfBox: 22 }, camera_url: null,
 }));
 (async () => {
+ // Static guard: every file that resets an outline must also define a :focus-visible ring built on --focus-ring.
+ for (const file of ['style.css','slicer.css','history-quality.css','quick-print-quality.css','split.css','login.html']) {
+  const text = require('node:fs').readFileSync(path.join(root, 'public', file), 'utf8');
+  if (/outline:\s*(0|none)/.test(text)) assert.ok(/:focus-visible[^{]*\{[^}]*outline:\s*\d+px solid (var\(--focus-ring\)|#ff6b2b)/.test(text), file + ' removes an outline without a :focus-visible replacement');
+  assert.ok(!/:focus-visible[^{]*\{[^}]*outline:[^;}]*var\(--accent\)/.test(text), file + ' focus ring must use var(--focus-ring), not --accent');
+ }
  const server = http.createServer(async (req, res) => {
   try {
    const pathname = new URL(req.url, 'http://localhost').pathname;
@@ -126,6 +132,31 @@ const fixtures = [0, 3, 15, 6, 9, 14, 0].map((code, i) => ({
     }
     console.log(`${theme} selected jog chip cue ${JSON.stringify(accent.cue)}`);
     if (!(accent.cue.weight > accent.cue.idleWeight) || !/2713|✓/.test(accent.cue.mark)) failures.push({ theme, state, selector: '.pv-chip.on non-colour cue', ...accent.cue });
+   }
+   if (state === 'connected') {
+    // Every input/select/textarea family and the card Files button must show the one --focus-ring ring (>= 2px, >= 3:1 vs its surround).
+    await page.addStyleTag({ url: `http://127.0.0.1:${server.address().port}/split.css` });
+    const rings = await page.evaluate(async () => {
+     const parse = c => c.match(/[\d.]+/g).map(Number);
+     const lum = c => { const v = parse(c).slice(0,3).map(x => { x /= 255; return x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4; }); return v[0]*.2126 + v[1]*.7152 + v[2]*.0722; };
+     const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x,y)+.05)/(Math.min(x,y)+.05); };
+     const surface = el => { for (let e = el; e; e = e.parentElement) { const c = getComputedStyle(e).backgroundColor; if (parse(c).length < 4 || parse(c)[3] > .9) return c; } return 'rgb(255,255,255)'; };
+     const probes = { '.card-files-btn': '<button class="card-files-btn">f</button>', '.modal-box input': '<div class="modal-box"><input></div>', '.modal-box select': '<div class="modal-box"><select></select></div>', '.modal-box textarea': '<div class="modal-box"><textarea></textarea></div>', '.panel-form input': '<div class="panel-form"><input></div>', '.panel-form select': '<div class="panel-form"><select></select></div>', '.history-filters input': '<div class="history-filters"><input></div>', '.history-filters select': '<div class="history-filters"><select></select></div>', '.history-notes textarea': '<div class="history-notes"><textarea></textarea></div>', '.split-side input': '<div class="split-side"><input></div>' };
+     const token = getComputedStyle(document.body).getPropertyValue('--focus-ring').trim();
+     const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 50))));
+     const out = [];
+     for (const [selector, html] of Object.entries(probes)) {
+      const host = document.createElement('div'); host.innerHTML = html; document.body.appendChild(host);
+      const el = host.querySelector('button,input,select,textarea'); el.focus(); await frames(); // outline colour transitions in; measure once settled
+      const st = getComputedStyle(el), r = { selector, token, focusVisible: el.matches(':focus-visible'), style: st.outlineStyle, width: parseFloat(st.outlineWidth), color: st.outlineColor, ratio: contrast(st.outlineColor, surface(host)) };
+      host.remove(); out.push(r);
+     }
+     return out;
+    });
+    for (const r of rings) {
+     console.log(`${theme} ring ${r.selector} ${r.width}px ${r.color} = ${r.ratio.toFixed(2)}:1`);
+     if (!r.token || !r.focusVisible || r.style === 'none' || r.width < 2 || r.ratio < 3) failures.push({ theme, state, ...r });
+    }
    }
    for(const item of measurements.motion) if(item.animation > .01 || item.transition > .01 || (item.animation > 0 && item.iterations==='infinite')) failures.push({theme,state,motion:item});
    await context.close();

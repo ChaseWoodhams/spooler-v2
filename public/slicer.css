@@ -448,7 +448,8 @@ body.embedded .slicer-home { display: none; }
 .slicer-tool-group { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 4px; background: var(--surface); }
 .slicer-tool-group > span { color: var(--text-muted); font-size: 12px; }
 .slicer-toolbar { flex-wrap: wrap; right: 10px; }
-.slicer-page :focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+.slicer-page { --focus-ring: var(--text); } /* accent-filled controls: a text-colour ring stays visible on them */
+.slicer-page :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
 @media (min-width: 901px) {
   .sidebar-collapsed .slicer-body { grid-template-columns: minmax(0, 1fr); }
   .sidebar-collapsed .slicer-sidebar { display: none; }
