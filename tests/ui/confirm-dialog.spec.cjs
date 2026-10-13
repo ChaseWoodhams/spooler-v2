@@ -108,7 +108,7 @@ async function hardware(fx) {
     { name: 'Home the X and Y axes on Voxel?', body: /chamber is clear/, verb: 'Home XY', command: 'home_axes' });
   await page.getByRole('tab', { name: 'Temperatures', exact: true }).click();
   await page.getByRole('spinbutton', { name: 'Nozzle target temperature (°C)' }).fill('210');
-  await askThenDo(fx, () => page.getByRole('button', { name: 'Apply nozzle target', exact: true }).click(),
+  await askThenDo(fx, () => page.getByRole('button', { name: 'Set nozzle target', exact: true }).click(),
     { name: 'Set the nozzle target to 210 °C on Voxel?', body: /heating straight away/, verb: 'Heat nozzle', command: 'set_temperature' });
   console.log(`PASS: Home and set temperature name the printer and ask in-app ${page.viewportSize().width}`);
 }
