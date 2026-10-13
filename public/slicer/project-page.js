@@ -66,7 +66,9 @@ function duration(seconds) {
   return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes} min`;
 }
 
-const chip = s => s === "printed_ok" || s === "failed" ? statusBadge(s === "failed" ? "failed" : "completed") : `<span class="pp-chip st-${s}"><i class="pp-dot st-${s}"></i>${STATUS[s]}</span>`;
+const chip = (s, text) => s === "printed_ok" || s === "failed" ? statusBadge(s === "failed" ? "failed" : "completed", text) : `<span class="pp-chip st-${s}"><i class="pp-dot st-${s}"></i>${text || STATUS[s]}</span>`;
+// The progress header's chips, in the order a Plate moves through them (a zero count gets no chip)
+const COUNT_LABEL = [["unsliced", "unsliced"], ["sliced", "sliced"], ["queued", "queued Jobs"], ["waiting", "held Jobs"], ["printing", "printing"], ["printed_ok", "completed"], ["failed", "failed"]];
 const printerName = id => printers.find(p => p.id === id)?.name || "";
 const plateOf = id => status?.plates.find(p => p.id === id);
 
@@ -74,12 +76,13 @@ function header() {
   const { progress } = status;
   const c = progress.counts;
   const grams = progress.filament_g;
-  const waiting = c.queued + c.waiting, toSlice = c.sliced + c.unsliced;
+  const counted = COUNT_LABEL.filter(([key]) => c[key] > 0).map(([key, noun]) => [key, `${c[key]} ${noun}`]);
+  const unknown = progress.outcome_unknown;
   return `<div class="pp-card pp-progress">
     <div class="pp-progress-head"><b>${progress.printed_ok} of ${plural(progress.total, "plate")} completed</b>
-      <span class="slicer-muted">${c.unsliced} unsliced · ${c.sliced} sliced · ${c.queued} queued Jobs · ${c.waiting} held Jobs · ${c.printing} printing · ${c.printed_ok} completed · ${c.failed} failed</span></div>
-    <p class="slicer-muted">${progress.outcome_unknown ?? 'Unavailable:'} latest Outcome unknown${progress.outcome_unknown === 1 ? '' : 's'}${progress.outcome_unknown ? ' — verify these Prints in History. This overlaps the Plate status counts above; it is not another completed Plate.' : ''}</p>
-    <div class="pp-bar" role="img" aria-label="${progress.printed_ok} of ${progress.total} plates completed">${BAR_ORDER.map(s =>
+      <ul class="pp-counts" aria-label="Plates by status">${counted.map(([key, text]) => `<li>${chip(key, text)}</li>`).join("") || '<li class="slicer-muted">No plates yet</li>'}</ul></div>
+    <p class="slicer-muted pp-outcomes">${unknown === 0 ? 'No outcomes to confirm.' : `${unknown ?? 'Unavailable:'} latest Outcome unknown${unknown === 1 ? '' : 's'}${unknown ? ' — verify these Prints in History. This overlaps the Plate status counts above; it is not another completed Plate.' : ''}`}</p>
+    <div class="pp-bar" role="img" aria-label="${progress.printed_ok} of ${progress.total} plates completed${counted.length ? `; ${counted.map(([, text]) => text).join(", ")}` : ""}">${BAR_ORDER.map(s =>
       `<i class="st-${s}" style="width:${progress.total ? c[s] / progress.total * 100 : 0}%" title="${STATUS[s]}: ${c[s]}"></i>`).join("")}</div>
     ${filament(grams)}
   </div>`;
@@ -108,7 +111,8 @@ function perChoice(grams) {
 
 function printerCards() {
   if (!printers.length) return `<div class="pp-card slicer-muted">No printers that can print yet.</div>`;
-  return `<div class="pp-printers">${printers.map(printer => {
+  return `<p id="pp-autostart-note" class="slicer-muted pp-autostart-note">Auto-start: when it is on for a printer, confirming Bed cleared there lets the next eligible queued Job start by itself, through the preflight checks. Holds wait for their prerequisite to print OK. When it is off, Bed cleared only records that the bed is free, and you start the next Job from Review &amp; start.</p>
+    <div class="pp-printers">${printers.map(printer => {
     const running = jobs.find(j => j.printer_id === printer.id && (j.state === "printing" || j.state === "starting"));
     const waitingFor = jobs.filter(j => j.printer_id === printer.id && j.state === "queued");
     const queued = waitingFor.length;
@@ -123,8 +127,7 @@ function printerCards() {
     const auto = autoStart[printer.id] !== false;
     return `<div class="pp-card pp-printer st-${cls}" id="pp-printer-${esc(printer.id)}"><b>${esc(printer.name)}</b> <span class="pp-chip st-${cls}">${label}</span>
       <div class="slicer-muted">${note}</div>
-      <label class="pp-autostart" title="When on, Bed cleared starts the next Plate in the queue on this printer by itself"><input type="checkbox" data-autostart="${esc(printer.id)}"${auto ? " checked" : ""}> Auto-start next Plate</label>
-      <p class="slicer-muted">${auto ? 'After you confirm Bed cleared, the next eligible queued Job can start automatically through preflight. Holds wait for their prerequisite to print OK.' : 'Bed cleared records that the bed is free. Start the next Job from Review & start.'}</p>
+      <label class="pp-autostart"><input type="checkbox" role="switch" data-autostart="${esc(printer.id)}" aria-label="Auto-start next Plate on ${esc(printer.name)}" aria-describedby="pp-autostart-note"${auto ? " checked" : ""}> <span>Auto-start next Plate</span> <b class="pp-autostart-state">${auto ? "On" : "Off"}</b></label>
       ${asking ? `<button type="button" class="btn btn-primary btn-sm" data-outcome="${esc(printer.id)}">Print ended: Printed OK · Bed cleared / Failed…</button>` : ""}</div>`;
   }).join("")}</div>`;
 }
@@ -492,9 +495,17 @@ function bind() {
     const toggle = e.target.closest("[data-autostart]");
     if (toggle) {
       const printerId = toggle.dataset.autostart, enabled = toggle.checked;
+      if (enabled && !await confirmDialog({
+        title: `Turn on Auto-start for ${printerName(printerId) || "this printer"}?`,
+        body: "After you confirm Bed cleared on this printer, the next eligible queued Job can start there by itself, through the preflight checks. Turn it on only if you are happy for the printer to start without you pressing Start.",
+        confirmLabel: "Turn on Auto-start",
+        opener: toggle,
+      })) { toggle.checked = false; return; }
       try {
         await host.api("POST", `/api/printers/${encodeURIComponent(printerId)}/auto-start`, { enabled });
         autoStart[printerId] = enabled;
+        const state = toggle.closest(".pp-autostart")?.querySelector(".pp-autostart-state");
+        if (state) state.textContent = enabled ? "On" : "Off";
         host.toast(`Auto-start ${enabled ? "on" : "off"} for ${printerName(printerId)}`);
       } catch (err) { toggle.checked = !enabled; host.toast(err.message, true); }
       return;

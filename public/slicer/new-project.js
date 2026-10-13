@@ -271,7 +271,7 @@ function refreshAction() {
     return;
   }
   $("btn-new-create").disabled = !canCreate();
-  $("new-create-reason").textContent = $("new-intake").hidden || creating ? "" : blocker();
+  $("new-create-reason").textContent = creating ? "" : blocker();   // before any model is added it says to add one
 }
 
 function render() {
@@ -293,7 +293,6 @@ function render() {
   const notes = box.querySelector(".intake-notes");
   notes.hidden = !importNotes.length;
   notes.textContent = importNotes.length ? `Opened with ${importNotes.length === 1 ? "a note" : `${importNotes.length} notes`}: ${importNotes.join(" · ")}` : "";
-  if (!existing) $("btn-new-create").hidden = box.hidden;
   syncName();   // before the action, which wants the name
   refreshAction();
 }
@@ -417,8 +416,8 @@ function dropDraft() {
   if (!nameTouched) $("new-project-name").value = "";
   nameTouched = nameCleared = false;
   $("new-intake").hidden = true;
-  $("btn-new-create").hidden = true;
   $("dlg-projects").classList.remove("has-intake");
+  refreshAction();   // back to "Add a model to continue"
 }
 
 /** Models for a project that is already open: they upload straight into it and show here until Done */
@@ -516,6 +515,7 @@ function bindPack() {
 
 function bind() {
   bindPack();
+  refreshAction();   // Create is on show from the start, with the reason it cannot be used yet
   $("new-project-name").addEventListener("input", e => { nameTouched = !!e.target.value.trim(); nameCleared = !e.target.value; refreshAction(); });
   $("btn-new-create").addEventListener("click", create);
   $("dlg-projects").addEventListener("close", discard);

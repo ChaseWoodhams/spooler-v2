@@ -71,5 +71,22 @@ class ProjectListStatusTests(unittest.TestCase):
         self.assertEqual((rows["Other"]["queued"], rows["Other"]["printing"]), (0, 1), "starting counts as printing")
 
 
+    def test_plates_whose_latest_print_has_an_unknown_outcome_are_counted(self):
+        project, other = projects.create_project("Needs outcome"), projects.create_project("Settled")
+        def record(project_id, plate_id, started, outcome):
+            with database.transaction() as conn:
+                conn.execute("INSERT INTO prints (printer_id, printer_name, file_name, started_at, ended_at, outcome, project_id, plate_id) "
+                             "VALUES ('p1', 'P1', 'x.gcode', ?, ?, ?, ?, ?)", (started, started + 1, outcome, project_id, plate_id))
+        record(project["id"], 1, 10, "completed")
+        record(project["id"], 1, 20, "unknown")      # the latest print of plate 1 is unknown: it needs an Outcome
+        record(project["id"], 2, 10, "unknown")
+        record(project["id"], 2, 20, "failed")       # confirmed since: nothing to confirm
+        record(project["id"], 3, 10, "unknown")      # a second plate waiting on an Outcome
+        record(other["id"], 1, 10, "completed")
+        rows = {r["name"]: r for r in projects.list_projects()}
+        self.assertEqual(rows["Needs outcome"]["outcome_unknown"], 2)
+        self.assertEqual(rows["Settled"]["outcome_unknown"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

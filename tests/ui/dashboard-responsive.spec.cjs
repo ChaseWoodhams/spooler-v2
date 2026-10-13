@@ -315,7 +315,7 @@ const viewports = [
       });
       await hit.goto(`${baseUrl}/slicer.html`);
       await hit.locator("#project-list .slicer-project-row").first().waitFor({ timeout: 8000 });
-      const rows = await hit.evaluate(() => [...document.querySelectorAll("#project-list .slicer-project-row .btn")].map(el => {
+      const rows = await hit.evaluate(() => [...document.querySelectorAll("#project-list .slicer-project-row .btn, #project-list .slicer-project-row .pd-open")].map(el => {
         const r = el.getBoundingClientRect();
         return { text: el.textContent.trim(), w: Math.round(r.width), h: Math.round(r.height) };
       }));

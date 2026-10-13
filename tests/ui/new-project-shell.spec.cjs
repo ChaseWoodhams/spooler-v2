@@ -51,7 +51,8 @@ const created = { id: 9, name: 'bracket', revision: 1, split_id: null, models: [
     assert.equal(await dialog.locator('#new-scale, #new-up').count(), 0, 'Units and Up axis are not asked up front');
     assert.doesNotMatch(await dialog.innerText(), /Quick print on the dashboard/);
     assert.match(await page.locator('#projects-dashboard #project-list').innerText(), /Existing project/);
-    assert.match(await dialog.innerText(), /Drop STL, OBJ or 3MF models or a folder here/);
+    assert.match(await dialog.innerText(), /Drop models or a folder here/);
+    assert.match(await dialog.innerText(), /Accepts STL, OBJ or 3MF models/);
     assert.match(await dialog.locator('#new-model-input').getAttribute('accept'), /\.stl.*\.obj.*\.3mf/);
     assert.equal(await dialog.locator('#new-folder-input').getAttribute('webkitdirectory') !== null, true);
     console.log('PASS: New project page shows Name first, drop zone, pickers and existing projects');
