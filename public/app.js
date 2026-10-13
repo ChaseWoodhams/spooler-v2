@@ -556,13 +556,13 @@ function renderPrinter(printer) {
         <div class="card-subtitle">${escHtml(printer.ip)}${printer.attrs?.FirmwareVersion ? ` · fw ${escHtml(printer.attrs.FirmwareVersion)}` : ""}</div>
       </div>
       <span class="status-badge ${sc}">${status}</span>
-      <button class="card-files-btn" onclick="openPrinterDashboard('${escAttr(printer.id)}')" title="Open printer controls" aria-label="Open printer controls">
+      <button class="card-files-btn" onclick="openPrinterDashboard('${escAttr(printer.id)}')" title="Open printer controls" aria-label="Open controls for ${escAttr(printer.name || "printer")}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/>
           <path d="M1 14h6M9 8h6M17 16h6"/>
         </svg>
       </button>
-      <button class="card-files-btn" onclick="openFileBrowser('${escAttr(printer.id)}')" title="Browse files">
+      <button class="card-files-btn" onclick="openFileBrowser('${escAttr(printer.id)}')" title="Browse files" aria-label="Browse files on ${escAttr(printer.name || "printer")}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
         </svg>
@@ -626,7 +626,8 @@ function renderPrinter(printer) {
           </div>
         ` : `<span class="spool-none">No spool assigned</span>`}
         <button class="btn btn-sm btn-secondary spool-assign-btn"
-                onclick="openSpoolPicker('${escAttr(printer.id)}')">
+                onclick="openSpoolPicker('${escAttr(printer.id)}')"
+                aria-label="${s ? "Change" : "Assign"} spool for ${escAttr(printer.name || "printer")}">
           ${s ? "Change" : "Assign"}
         </button>
       </div>`;
@@ -716,7 +717,7 @@ function renderPrinter(printer) {
         </button>
       ` : ""}
       <button class="btn btn-secondary btn-sm" onclick="QuickPrint.pick({ printerId: '${escAttr(printer.id)}' })"
-              title="Pick a model or G-code file and print it on ${escAttr(printer.name)} without making a Project" ${!connected ? "disabled" : ""}>Quick print here</button>
+              title="Pick a model or G-code file and print it on ${escAttr(printer.name)} without making a Project" aria-label="Quick print on ${escAttr(printer.name)}" ${!connected ? "disabled" : ""}>Quick print here</button>
       <div class="controls-spacer"></div>
       <button class="btn btn-sm ${lightOn ? "btn-primary" : "btn-secondary"}"
               onclick="printerAction('${escAttr(printer.id)}','${lightOn ? "light_off" : "light_on"}')"
@@ -953,13 +954,13 @@ function renderPrinterDetail(printer) {
           <div class="motion-layout">
             <div class="z-jog">
               <button onclick="jogPrinter('${escAttr(printer.id)}','Z',1)" ${disableMotion} title="Move Z positive">Z+</button>
-              <button class="motion-home" onclick="homePrinter('${escAttr(printer.id)}','Z')" ${disableMotion} title="Home Z" aria-label="Home Z">⌂</button>
+              <button class="motion-home" onclick="homePrinter('${escAttr(printer.id)}','Z')" ${disableMotion} title="Home Z" aria-label="Home Z axis">⌂</button>
               <button onclick="jogPrinter('${escAttr(printer.id)}','Z',-1)" ${disableMotion} title="Move Z negative">Z−</button>
             </div>
             <div class="xy-jog" role="group" aria-label="X and Y movement controls">
               <button class="jog-y-plus" onclick="jogPrinter('${escAttr(printer.id)}','Y',1)" ${disableMotion} title="Move Y positive">Y+</button>
               <button class="jog-x-minus" onclick="jogPrinter('${escAttr(printer.id)}','X',-1)" ${disableMotion} title="Move X negative">X−</button>
-              <button class="motion-home jog-home" onclick="homePrinter('${escAttr(printer.id)}','XY')" ${disableMotion} title="Home X and Y" aria-label="Home X and Y">⌂</button>
+              <button class="motion-home jog-home" onclick="homePrinter('${escAttr(printer.id)}','XY')" ${disableMotion} title="Home X and Y" aria-label="Home X and Y axes">⌂</button>
               <button class="jog-x-plus" onclick="jogPrinter('${escAttr(printer.id)}','X',1)" ${disableMotion} title="Move X positive">X+</button>
               <button class="jog-y-minus" onclick="jogPrinter('${escAttr(printer.id)}','Y',-1)" ${disableMotion} title="Move Y negative">Y−</button>
             </div>
@@ -1503,7 +1504,7 @@ function _renderSettingsPrinters() {
         <span class="settings-printer-name">${escHtml(p.name)}</span>
         <span class="settings-printer-meta">${escHtml(p.ip)} &nbsp;·&nbsp; ${p.printer_type?.toUpperCase() || "CC1"}</span>
       </div>
-      <button class="btn btn-secondary btn-sm" onclick="_settingsEditPrinter('${escAttr(p.id)}')">Edit</button>
+      <button class="btn btn-secondary btn-sm" onclick="_settingsEditPrinter('${escAttr(p.id)}')" aria-label="Edit ${escAttr(p.name || "printer")}">Edit</button>
     </div>
   `).join("");
 }
@@ -2156,6 +2157,7 @@ function renderFileList(files, error) {
       const btn = document.createElement("button");
       btn.className = "btn btn-primary btn-sm";
       btn.textContent = "Print";
+      btn.setAttribute("aria-label", `Print ${fileName}`);
       btn.addEventListener("click", () => {
         const meta = _currentFileList.find(x => x.path === filePath) || {};
         openPrintOpts(filePath, fileName, meta);
@@ -2166,6 +2168,7 @@ function renderFileList(files, error) {
         const queueBtn = document.createElement("button");
         queueBtn.className = "btn btn-secondary btn-sm";
         queueBtn.textContent = "Queue";
+        queueBtn.setAttribute("aria-label", `Queue ${fileName}`);
         queueBtn.title = "Add this file to the print queue";
         queueBtn.addEventListener("click", () => {
           const meta = _currentFileList.find(x => x.path === filePath) || { path: filePath };
@@ -2651,7 +2654,7 @@ function renderSpoolPanel() {
             </svg>
             ${escHtml(printerName)}
           </span>` : "<span></span>"}
-          <button class="btn btn-sm btn-secondary" onclick="deleteSpool('${escAttr(s.id)}')">Remove</button>
+          <button class="btn btn-sm btn-secondary" onclick="deleteSpool('${escAttr(s.id)}')" aria-label="Remove ${escAttr([vendor, colorName, material].filter(Boolean).join(" ") || "spool #" + s.id)}">Remove</button>
         </div>
       </div>
     </div>`;

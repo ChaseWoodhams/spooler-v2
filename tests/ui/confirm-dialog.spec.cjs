@@ -137,7 +137,7 @@ async function editPrinter(fx) {
     await page.locator('#btn-mobile-settings').click();
   } else await page.locator('#btn-app-settings').click();
   await page.locator('#btn-settings-goto-printers').click();
-  await page.locator('#settings-printer-list').getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.locator('#settings-printer-list').getByRole('button', { name: /^Edit / }).click();
   const remove = page.locator('#btn-settings-printer-remove');
   await remove.waitFor();
   assert.equal(await remove.evaluate(el => !el.closest('.modal-actions')), true, 'Remove is outside the Save row');
@@ -154,7 +154,7 @@ async function filesAndSpools(fx) {
   await page.evaluate(() => renderFileList([{ name: 'cube.gcode', path: '/usb/cube.gcode', size: 2048, is_dir: false }]));
   const del = page.locator('#files-list').getByRole('button', { name: 'Delete cube.gcode', exact: true });
   await del.waitFor();
-  const [print, d] = await Promise.all([page.locator('#files-list').getByRole('button', { name: 'Print', exact: true }).boundingBox(), del.boundingBox()]);
+  const [print, d] = await Promise.all([page.locator('#files-list').getByRole('button', { name: 'Print cube.gcode', exact: true }).boundingBox(), del.boundingBox()]);
   assert.ok(d.x - (print.x + print.width) >= 16, 'Delete is held apart from Print/Queue in the Files modal');
   await askThenDo(fx, () => del.click(),
     { name: 'Delete cube.gcode?', body: /Voxel's storage.*cannot be undone/s, verb: 'Delete file', command: 'delete_file' });
@@ -162,7 +162,7 @@ async function filesAndSpools(fx) {
   console.log(`PASS: Delete file names the file and printer ${page.viewportSize().width}`);
 
   await page.locator('#btn-spools').click();
-  const removeSpool = page.locator('#spools-list').getByRole('button', { name: 'Remove', exact: true });
+  const removeSpool = page.locator('#spools-list').getByRole('button', { name: /^Remove / });
   await removeSpool.waitFor();
   await removeSpool.click();
   const box = dialogOf(page, 'Remove Fixture brand Blue PLA?');

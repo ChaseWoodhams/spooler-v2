@@ -26,6 +26,7 @@
   (function () { const q = new URLSearchParams(location.search); if (window.self === window.top && q.get("project") && q.get("printer")) location.replace("/#projects=" + encodeURIComponent(q.get("project")) + "&printer=" + encodeURIComponent(q.get("printer")) + (q.get("plate") ? "&plate=" + encodeURIComponent(q.get("plate")) : "")); })();
   </script>
   <script>if (window.self !== window.top) { document.body.classList.add("embedded"); const b = document.createElement("base"); b.target = "_top"; document.head.appendChild(b); }</script>
+  <a class="skip-link" href="#slicer-main">Skip to main content</a>
   <header class="slicer-top">
     <a href="/" class="slicer-home" title="Back to the dashboard"><img src="/icon.svg" alt="" /><span>Spooler</span></a>
     <div class="slicer-project">
@@ -108,12 +109,12 @@
           <select id="preset-machine-select"></select></div>
         <div class="preset-row"><label for="preset-filament-select">Filament</label>
           <select id="preset-filament-select"></select>
-          <button id="btn-save-filament" class="preset-btn" type="button" title="Save the filament changes as a preset" hidden>Save</button>
-          <button id="btn-delete-filament" class="preset-btn" type="button" title="Delete this saved preset" hidden>Delete</button></div>
+          <button id="btn-save-filament" class="preset-btn" type="button" aria-label="Save filament preset" title="Save the filament changes as a preset" hidden>Save</button>
+          <button id="btn-delete-filament" class="preset-btn" type="button" aria-label="Delete filament preset" title="Delete this saved preset" hidden>Delete</button></div>
         <div class="preset-row"><label for="preset-process-select">Process</label>
           <select id="preset-process-select"></select>
-          <button id="btn-save-process" class="preset-btn" type="button" title="Save the process changes as a preset" hidden>Save</button>
-          <button id="btn-delete-process" class="preset-btn" type="button" title="Delete this saved preset" hidden>Delete</button></div>
+          <button id="btn-save-process" class="preset-btn" type="button" aria-label="Save process preset" title="Save the process changes as a preset" hidden>Save</button>
+          <button id="btn-delete-process" class="preset-btn" type="button" aria-label="Delete process preset" title="Delete this saved preset" hidden>Delete</button></div>
         <label class="slicer-field">Build plate
           <select id="bed-select"><option value="textured">Textured PEI (Side A)</option><option value="smooth">Smooth PEI (Side B)</option></select>
         </label>
@@ -160,7 +161,8 @@
       </details>
     </aside>
 
-    <main class="slicer-main">
+    <main class="slicer-main" id="slicer-main" tabindex="-1">
+      <h1 class="sr-only" id="slicer-heading">Projects</h1>
       <div id="project-page" class="project-page" hidden></div>
       <div id="plate-tabs" class="slicer-plates"></div>
       <div class="slicer-toolbar plate-tools" id="prepare-tools" role="toolbar" aria-label="Plate tools">
