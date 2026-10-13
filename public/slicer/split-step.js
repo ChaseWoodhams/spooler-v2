@@ -47,6 +47,10 @@ let guide = null;        // the Assembly guide job and the PDF on disk for the c
 let guideInfo = null;    // what the server can do: PDF library present, default paper
 let guideTimer = null;
 let paperChoice = "";
+let planEditing = false; // the plan editor is open in the Assembly guide panel
+let editStep = null;     // id of the step selected in the editor
+let editReceivers = null; // {step id, receivers} the validator accepts for the selected step
+let editMessage = "";    // why the last edit was refused, in plain words
 
 function geometryFrom(mesh) {
   return smoothGeometry(mesh.positions, mesh.index);
@@ -458,7 +462,7 @@ function guidePanel() {
   const why = !info.available ? info.hint : g.blocked;
   const disabled = working || !!why;
   const summary = plan?.ok ? `<p class="split-hint">${plural(plan.summary.parts, "part")}, ${plural(plan.summary.sections, "Section")}, ${plural(plan.summary.steps, "step")}, ${plural(plan.summary.rods, "rod")}. Plan code <strong>${esc(plan.code)}</strong>.</p>` : "";
-  const warnings = plan?.ok ? plan.sections.filter(sec => sec.note).map(sec => `<p class="split-warn">Section ${esc(sec.letter)}: ${esc(sec.note)}</p>`).join("") : "";
+  const warnings = plan?.ok ? (plan.warnings || []).map(w => `<p class="split-warn">${w.step ? `Step ${esc(w.step)}: ` : w.section ? `Section ${esc(w.section)}: ` : ""}${esc(w.message)}</p>`).join("") : "";
   const pdf = g.has_pdf
     ? `<p>${g.out_of_date ? '<span class="split-warn">Out of date: regenerate.</span> ' : ""}PDF made ${esc(new Date(g.generated_at * 1000).toLocaleString())}, plan code ${esc(g.plan_code)}, ${g.paper === "letter" ? "Letter" : "A4"}.
          <a class="btn btn-secondary btn-sm" href="/api/splits/${current.id}/guide.pdf" download>Download PDF</a></p>`
@@ -475,8 +479,69 @@ function guidePanel() {
     ${working ? `<div class="split-progress" role="status"><progress max="100" value="${g.percent || 0}"></progress> ${esc(g.stage || "Working")}</div>` : ""}
     ${g.state === "failed" && g.error ? `<div class="job-error" role="alert">${esc(g.error)}</div>` : ""}
     ${pdf}
+    ${plan?.ok ? `<div class="split-actions-row"><button class="btn btn-secondary btn-sm" data-action="edit-toggle" aria-pressed="${planEditing}">${planEditing ? "Close the plan editor" : "Edit plan"}</button></div>` : ""}
+    ${plan?.ok && planEditing ? planEditor() : ""}
     ${fold("split-assembly", "Steps", plan?.ok ? `${plural(plan.summary.sections, "Section")}, ${plural(plan.summary.steps, "step")}` : "", planHtml())}
   </section>`;
+}
+
+// ─── Plan editor ──────────────────────────────────────────────────────────────
+const stepById = id => plan?.ok ? plan.sections.flatMap(sec => sec.steps).find(st => st.id === id) : null;
+
+function planEditor() {
+  const edits = plan.edits || { state: "none", count: 0 };
+  const note = edits.state === "outdated"
+    ? `<p class="split-warn" role="alert">Your edits no longer match this split, so the automatic plan is shown. ${esc(edits.reason)}</p>` : "";
+  const picked = stepById(editStep);
+  const options = editReceivers && editReceivers.step === editStep ? editReceivers.receivers : null;
+  const outline = `<ol class="split-assembly split-edit-outline">${plan.sections.map(sec => `<li><strong>Section ${esc(sec.letter)}</strong>${sec.main ? " (main)" : ""}
+      <ol>${sec.steps.map((st, i) => `<li><button type="button" class="btn btn-sm ${st.id === editStep ? "btn-primary" : "btn-secondary"}" data-action="edit-select" data-step="${esc(st.id)}" aria-pressed="${st.id === editStep}">
+        ${esc(st.id)}: ${st.kind === "section" ? `Join Section ${esc(st.section)}` : `Add ${listText(st.parts)}`}</button></li>`).join("")}</ol></li>`).join("")}</ol>`;
+  const controls = picked ? `<div class="split-actions-row">
+      <label class="split-inline">Move to <select id="split-edit-move" ${options ? "" : "disabled"}>
+        <option value="">${options ? (options.length ? "Choose where…" : "Nowhere else works") : "Looking…"}</option>
+        ${(options || []).map(r => `<option value="${r.parts.join(",")}">${r.kind === "section" ? "Section of " : "Part "}${listText(r.parts)}</option>`).join("")}</select></label>
+      <button type="button" class="btn btn-secondary btn-sm" data-action="edit-up" aria-label="Move ${esc(picked.id)} earlier">Up</button>
+      <button type="button" class="btn btn-secondary btn-sm" data-action="edit-down" aria-label="Move ${esc(picked.id)} later">Down</button>
+    </div>` : '<p class="split-hint">Pick a step to see where it can go. The 3D view shows its parts.</p>';
+  return `<section class="split-section split-plan-editor">
+    <h4>Edit plan${edits.count ? ` <small>${plural(edits.count, "edit")} saved</small>` : ""}</h4>
+    ${note}${outline}${controls}
+    ${editMessage ? `<p class="split-bad" role="alert">${esc(editMessage)}</p>` : ""}
+    ${edits.count ? '<div class="split-actions-row"><button type="button" class="btn btn-secondary btn-sm" data-action="edit-reset">Reset to automatic</button></div>' : ""}
+  </section>`;
+}
+
+async function selectEditStep(id) {
+  editStep = id;
+  editMessage = "";
+  editReceivers = null;
+  const step = stepById(id);
+  viewer?.highlight(step ? step.parts : null);
+  renderSide();
+  if (!step) return;
+  try {
+    const found = await host.api("GET", `/api/splits/${current.id}/plan-edits?receivers_for=${step.parts.join(",")}`);
+    if (editStep === id) { editReceivers = { step: id, receivers: found.receivers }; renderSide(); }
+  } catch (err) {
+    if (editStep === id) { editReceivers = { step: id, receivers: [] }; editMessage = err.message; renderSide(); }
+  }
+}
+
+async function sendEdit(body) {
+  editMessage = "";
+  try {
+    const done = await host.api("POST", `/api/splits/${current.id}/plan-edits`, body);
+    plan = done.plan;
+    editStep = null;
+    editReceivers = null;
+    viewer?.highlight(null);
+    renderSide();
+    loadGuide();   // the PDF on disk may now be out of date
+  } catch (err) {
+    editMessage = err.message;   // the typed reason in plain words
+    renderSide();
+  }
 }
 
 async function startGuide() {
@@ -512,7 +577,7 @@ function planHtml() {
   return `<ol class="split-assembly">${plan.sections.map(sec => `<li><strong>Section ${sec.letter}</strong>${sec.main ? " (main)" : ""}: ${listText(sec.parts)}
       ${sec.note ? `<span class="split-warn">${esc(sec.note)}</span>` : ""}
       <ol>${sec.steps.map(st => `<li>${st.id}: ${st.kind === "section" ? `Join Section ${st.section} (${listText(st.parts)})` : `Add ${listText(st.parts)}`}
-        to ${where(st.receiver)} along ${dirText(st.direction)} — ${st.glue_only ? "glue only" : plural(st.rods, "rod")}.</li>`).join("")}</ol></li>`).join("")}</ol>`;
+        to ${where(st.receiver)} along ${dirText(st.direction)} — ${st.glue_only ? "glue only" : plural(st.rods, "rod")}.${(st.warnings || []).map(w => ` <span class="split-warn">${esc(w.message)}</span>`).join("")}</li>`).join("")}</ol></li>`).join("")}</ol>`;
 }
 
 // Second-level controls sit in folds that stay closed until asked for; which ones are open survives a re-render.
@@ -890,6 +955,11 @@ function bindEvents() {
         case "delete-cut":   removeCut(Number(el.dataset.cut)); break;
         case "split":        await startSplit(); break;
         case "guide":        await startGuide(); break;
+        case "edit-toggle":  planEditing = !planEditing; editStep = null; editMessage = ""; viewer?.highlight(null); renderSide(); break;
+        case "edit-select":  await selectEditStep(el.dataset.step); break;
+        case "edit-up":
+        case "edit-down":    await sendEdit({ op: "reorder", parts: stepById(editStep).parts, direction: el.dataset.action === "edit-up" ? "up" : "down" }); break;
+        case "edit-reset":   await sendEdit({ op: "reset" }); break;
       }
     } catch (err) {
       if ($('split-input-error')) $('split-input-error').textContent = err.message;
@@ -905,6 +975,9 @@ function bindEvents() {
         cut.offset = clampOffset(cut, value);
         cutsEdited();
       }
+    } else if (t.id === "split-edit-move") {
+      const step = stepById(editStep);
+      if (step && t.value) sendEdit({ op: "move", parts: step.parts, to: t.value.split(",").map(Number) });
     } else if (t.id === "split-guide-paper") {
       paperChoice = t.value;
     } else if (t.id === "split-conn-preset") {

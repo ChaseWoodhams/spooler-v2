@@ -231,7 +231,8 @@ class ContentTests(GuideCase):
             self.assertIn(code, text)
             self.assertIn("model", text)
             self.assertIn(f"Split {split_id}", text)
-            self.assertRegex(text, r"Sections? [A-Z]")
+            if "Rods to cut" not in text:   # the rod page belongs to no Section
+                self.assertRegex(text, r"Sections? [A-Z]")
 
     def test_the_guide_lists_every_section_and_step_in_plan_order(self):
         split_id = self.make_split(*grid_split())
@@ -285,6 +286,11 @@ def body_text(text: str) -> str:
     return text.rsplit("model  |  Split", 1)[0]
 
 
+def step_pages(pages: list) -> list:
+    """The pages of the step section: the ones with a Section header or a step (not the cover or the rod page)."""
+    return [t for t in pages[1:] if "Made of" in body_text(t) or step_ids(t)]
+
+
 def step_ids(text: str) -> list:
     return re.findall(r"\b([A-Z]\d{1,2}) (?=Add|Join)", body_text(text))
 
@@ -296,26 +302,26 @@ class StepPageTests(GuideCase):
 
     def test_steps_are_numbered_per_section_and_follow_the_plan(self):
         split_id = self.make_split(*lattice_split())
-        pages = self.pages(split_id)
+        pages = step_pages(self.pages(split_id))
         plan = splits.assembly_plan(split_id)
         expected = [step["id"] for section in plan["sections"] for step in section["steps"]]
         self.assertGreater(len(plan["sections"]), 2)
-        self.assertEqual([i for text in pages[1:] for i in step_ids(text)], expected)
+        self.assertEqual([i for text in pages for i in step_ids(text)], expected)
         self.assertEqual(len(set(expected)), len(expected))
 
     def test_two_steps_flow_to_a_page_and_a_step_is_never_split(self):
         split_id = self.make_split(*stack_split(7))   # one Section of six steps
-        pages = self.pages(split_id)
-        per_page = [step_ids(text) for text in pages[1:]]
+        pages = step_pages(self.pages(split_id))
+        per_page = [step_ids(text) for text in pages]
         self.assertEqual(per_page, [["A1", "A2"], ["A3", "A4"], ["A5", "A6"]])
-        for text in pages[1:]:     # every step's caption sits on the page with its number
+        for text in pages:     # every step's caption sits on the page with its number
             self.assertEqual(body_text(text).count("slide"), len(step_ids(text)))
 
     def test_section_headers_are_inline_and_side_sections_end_with_set_aside(self):
         split_id = self.make_split(*lattice_split())
-        pages = self.pages(split_id)
+        pages = step_pages(self.pages(split_id))
         plan = splits.assembly_plan(split_id)
-        body = " ".join(body_text(t) for t in pages[1:])
+        body = " ".join(body_text(t) for t in pages)
         for section in plan["sections"]:
             header = body.index(f"Section {section['letter']}")
             if section["steps"]:
@@ -328,7 +334,7 @@ class StepPageTests(GuideCase):
     def test_a_section_header_is_never_alone_at_the_bottom_of_a_page(self):
         for size in (3, 4):
             split_id = self.make_split(*lattice_split(size))
-            for text in self.pages(split_id)[1:]:
+            for text in step_pages(self.pages(split_id)):
                 body = body_text(text)
                 headers = list(re.finditer(r"Section [A-Z]( \(main\))? Made of", body))
                 if headers:

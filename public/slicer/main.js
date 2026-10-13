@@ -237,8 +237,8 @@ async function boot() {
     onSlice: plateId => requestPlateSlice(plateId),
     onOpenPlate: plateId => { selectPlate(plateId); setStep("plates"); },
     onOpenSlice: () => setStep("slice"),
-    hasAssembly: () => !!(splitIdsOf(state.project).length && splitStep.split?.result?.assembly),
-    onOpenAssembly: async () => { await setStep("split"); document.querySelector(".split-assembly")?.scrollIntoView({ block: "center" }); },
+    hasAssembly: () => !!splitIdsOf(state.project).length,
+    onOpenAssembly: () => openAssemblyGuide().catch(err => toast(err.message, true)),
     sendPlates: (ids, options) => queuePlates(ids, options),
     balance: ids => balancePlates(ids.map(plateById)) ? Object.fromEntries(ids.map(id => [id, plateById(id).printer_id])) : null,
     plateFilament: plateId => plateFilamentLabel(plateId),
@@ -2513,6 +2513,34 @@ async function openCreated({ project, step, arranged }, { plan, id }) {
   else if (arranged?.error) toast(`The models are on plate 1: ${arranged.error}`, true);
 }
 
+// The Print page's Assembly guide action: one guide per split. The only split opens its guide panel directly; several
+// splits are listed with their guide state, and each opens its own guide (there is no combined guide).
+const GUIDE_STATE_TEXT = { none: "No guide yet", generating: "Generating", ready: "Ready", failed: "Failed" };
+const guideStateText = g => g.state === "ready" && g.out_of_date ? "Out of date" : GUIDE_STATE_TEXT[g.state] || g.state;
+
+async function showGuideFor(splitId) {
+  $("dlg-guides").close();
+  if (splitStep.split?.id !== splitId) await splitStep.open(splitId);
+  await setStep("split");
+  document.querySelector("[data-guide]")?.scrollIntoView({ block: "center" });
+}
+
+async function openAssemblyGuide() {
+  const { guides } = await api("GET", `/api/projects/${state.project.id}/guides`);
+  if (guides.length === 1) {
+    if (splitStep.split?.id !== guides[0].split_id) await splitStep.open(guides[0].split_id);
+    await setStep("split");
+    document.querySelector("[data-guide]")?.scrollIntoView({ block: "center" });
+    return;
+  }
+  $("guide-choices").innerHTML = guides.map(g => `
+    <div class="slicer-project-row">
+      <div><strong>${esc(g.name)}</strong><small>${esc(guideStateText(g.guide))}</small></div>
+      <button class="btn btn-secondary btn-sm" type="button" data-guide-split="${g.split_id}">Open guide</button>
+    </div>`).join("") || '<p class="slicer-muted">This project has no splits.</p>';
+  $("dlg-guides").showModal();
+}
+
 async function openSplitDialog() {
   const dialog = $("dlg-split");
   $("split-choices").innerHTML = '<p class="slicer-muted">Loading…</p>';
@@ -2567,6 +2595,10 @@ function bindUi() {
     else $('viewport').append(panel);
   };
   compactPreview.addEventListener('change', movePreview); movePreview();
+  $("guide-choices").addEventListener("click", e => {
+    const button = e.target.closest("[data-guide-split]");
+    if (button) showGuideFor(Number(button.dataset.guideSplit)).catch(err => toast(err.message, true));
+  });
   document.querySelectorAll("dialog [data-close]").forEach(btn => btn.addEventListener("click", () => btn.closest("dialog").close()));
 
   $("step-bar").addEventListener("click", e => {

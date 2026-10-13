@@ -26,6 +26,7 @@ import threading
 import time
 from pathlib import Path
 
+import assembly_edits as edits
 import assembly_plan as planner
 import database
 import jobs  # used as a module: jobs.JobError, …
@@ -58,6 +59,7 @@ DEFAULT_SETTINGS = {
     "connectors": {"kind": "rod", "diameter": 2.0, "fallback_diameter": 1.0, "clearance": 0.15, "depth": 6.5,
                    "spacing": 100.0, "max_per_joint": 8},
     "labels":     {"enabled": True},      # Part numbers debossed into each part
+    "guide":      {"heavy_kg": 2.0, "heavy_mm": 400.0},   # Assembly guide: warn when a join moves more than this weight or length
 }
 
 _data_dir: Path = DATA_DIR
@@ -142,6 +144,7 @@ def normalize_settings(raw: dict | None, base: dict | None = None) -> dict:
         raise jobs.JobError("Settings must be an object")
     out = base
     out.setdefault("labels", dict(DEFAULT_SETTINGS["labels"]))   # splits saved before part numbers existed
+    out.setdefault("guide", dict(DEFAULT_SETTINGS["guide"]))     # ... or before the guide's warnings
     if "scale" in raw:
         out["scale"] = _number(raw["scale"], "Scale", 1e-4, 1e5)
     if "up" in raw:
@@ -182,6 +185,11 @@ def normalize_settings(raw: dict | None, base: dict | None = None) -> dict:
         if not isinstance(labels["enabled"], bool):
             raise jobs.JobError("Part numbers must be on or off")
         out["labels"]["enabled"] = labels["enabled"]
+    guide = raw.get("guide") or {}
+    if "heavy_kg" in guide:
+        out["guide"]["heavy_kg"] = _number(guide["heavy_kg"], "Heavy join weight", 0.1, 1000)
+    if "heavy_mm" in guide:
+        out["guide"]["heavy_mm"] = _number(guide["heavy_mm"], "Heavy join length", 10, 10000)
     return out
 
 
@@ -436,26 +444,96 @@ def part_path(split_id: int, number: int) -> tuple:
 
 # ── The assembly plan ──────────────────────────────────────────────────────────
 
-_plans: dict = {}   # split id → (files' modification times, plan dict)
+_plans: dict = {}   # split id → (files' modification times, planning record)
 
 
-def assembly_plan(split_id: int) -> dict:
-    """How the split goes together (Sections, steps), or why it cannot be assembled as cut. Read-only and cached."""
+def _planning(split_id: int) -> dict:
+    """The model, the automatic plan and the plan to use (edits applied when they are valid). Cached; read-only."""
     get_split(split_id)
     work = work_dir(split_id)
     result = _read(work, "result.json")
     if not result:
         raise jobs.JobError("Split the model first", 409)
-    stamp = tuple((work / name).stat().st_mtime_ns if (work / name).is_file() else 0
-                  for name in ("result.json", "cuts.json", "parts_preview.bin"))
+    limits = {**DEFAULT_SETTINGS["guide"], **(get_split(split_id)["settings"].get("guide") or {})}
+    stamp = (limits["heavy_kg"], limits["heavy_mm"]) + tuple((work / name).stat().st_mtime_ns if (work / name).is_file() else 0
+                                                              for name in ("result.json", "cuts.json", "parts_preview.bin", edits.FILE))
     cached = _plans.get(split_id)
     if cached and cached[0] == stamp:
         return cached[1]
     cuts = result.get("cuts") or (_read(work, "cuts.json") or {}).get("cuts") or []
     model = planner.SplitModel(result, cuts, planner.read_preview(work / "parts_preview.bin"))
-    plan = planner.build_plan(model).to_dict()
-    _plans[split_id] = (stamp, plan)
-    return plan
+    auto = planner.build_plan(model, heavy_kg=limits["heavy_kg"], heavy_mm=limits["heavy_mm"])
+    record = {"model": model, "auto": auto, "plan": auto.to_dict(), "edits": [], "state": "none", "reason": "", "failed": None}
+    saved = edits.load(work)
+    if saved and saved["edits"]:
+        record["edits"] = saved["edits"]
+        record["state"], record["reason"] = "outdated", "The cuts or parts have changed since these edits were made."
+        if auto.ok and saved.get("fingerprint") == model.fingerprint:
+            done = edits.replay(model, auto.plan, saved["edits"])
+            if done.ok:
+                record["state"], record["reason"] = "applied", ""
+                record["plan"] = planner.add_warnings(model, planner.PlanResult(plan=done.plan), limits["heavy_kg"], limits["heavy_mm"]).to_dict()
+            else:
+                index, _edit, refused = done.dropped[0]
+                record["failed"], record["reason"] = index, f"Edit {index + 1} no longer works: {refused}"
+    if auto.ok:
+        record["plan"]["edits"] = {"state": record["state"], "count": len(record["edits"]), "reason": record["reason"], "failed": record["failed"]}
+    _plans[split_id] = (stamp, record)
+    return record
+
+
+def assembly_plan(split_id: int) -> dict:
+    """How the split goes together (Sections, steps), or why it cannot be assembled as cut. Read-only and cached.
+    Saved edits are applied when they still match the split and pass the validator; otherwise the automatic plan is
+    served and `edits.state` says "outdated"."""
+    return _planning(split_id)["plan"]
+
+
+def assembly_edits(split_id: int) -> dict:
+    """The saved edit list, whether it applies, and the plan it gives."""
+    record = _planning(split_id)
+    return {"state": record["state"], "count": len(record["edits"]), "edits": record["edits"], "reason": record["reason"],
+            "failed": record["failed"], "plan": record["plan"]}
+
+
+def _edit_base(split_id: int) -> dict:
+    _require(split_id, (SPLIT, QUEUED), "edit the plan")
+    record = _planning(split_id)
+    if not record["auto"].ok:
+        raise jobs.JobError("The plan has to work as cut before it can be edited.", 409)
+    if record["state"] == "outdated":
+        raise jobs.JobError("Your edits no longer match this split. Discard them or try to keep them first.", 409)
+    return record
+
+
+def edit_plan(split_id: int, body: dict | None = None) -> dict:
+    """Apply one edit ({"op": "move"|"reorder"|"reset"}) and save the edit list with the split, or refuse it with the reason."""
+    body = body or {}
+    work = work_dir(split_id)
+    if body.get("op") == "reset":
+        get_split(split_id)
+        edits.reset(work)
+        _plans.pop(split_id, None)
+        return assembly_edits(split_id)
+    record = _edit_base(split_id)
+    edit = body
+    if body.get("op") == "reorder" and "order" not in body:
+        edit = edits.reorder_for_step(record["model"], record["auto"].plan, record["edits"], body.get("parts") or [], str(body.get("direction")))
+    _plan, stored = edits.apply_edit(record["model"], record["auto"].plan, record["edits"], edit)
+    edits.save(work, record["model"].fingerprint, record["edits"] + [stored])
+    _plans.pop(split_id, None)
+    return assembly_edits(split_id)
+
+
+def edit_receivers(split_id: int, parts) -> dict:
+    """Where a part or finished Section can be moved to; only receivers the step validator accepts are listed."""
+    record = _edit_base(split_id)
+    try:
+        parts = sorted({int(p) for p in parts if str(p).strip()})
+    except ValueError:
+        raise jobs.JobError("Part numbers must be numbers") from None
+    found = edits.valid_receivers(record["model"], record["auto"].plan, record["edits"], parts)
+    return {"parts": parts, "receivers": found}
 
 
 # ── The Assembly guide ─────────────────────────────────────────────────────────
@@ -553,6 +631,7 @@ def guide_path(split_id: int) -> tuple:
 
 def _make_guide(split_id: int) -> None:
     """Build the guide PDF for a split whose guide.json says generating. Blocking."""
+    import assembly_bom
     import assembly_pdf   # imports reportlab, so only when a guide is really made
     import assembly_render
 
@@ -567,10 +646,11 @@ def _make_guide(split_id: int) -> None:
     if not plan["ok"]:
         raise jobs.JobError(plan["headline"])
     progress("Preparing the parts", 4)
-    result = _read(work, "result.json")
+    result = _read(work, "result.json") or {}
     scene = assembly_render.Scene.from_split(result, planner.read_preview(work / "parts_preview.bin"))
+    bom = assembly_bom.build_bom(result.get("pins") or [], plan)   # refuses when counts disagree
     data = assembly_pdf.GuideData(model_name=Path(get_split(split_id)["source_name"]).stem, split_id=split_id,
-                                  plan=plan, paper=paper, scene=scene)
+                                  plan=plan, paper=paper, bom=bom, plan_line=edits.plan_line(plan.get("edits")), scene=scene)
     tmp = work / "guide.pdf.tmp"
     pages = assembly_pdf.render_guide(tmp, data, progress)
     os.replace(tmp, work / "guide.pdf")

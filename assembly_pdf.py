@@ -53,6 +53,7 @@ class GuideData:
     plan: dict                 # splits.assembly_plan(): sections, summary, code
     paper: str                 # "a4" or "letter"
     plan_line: str = "Automatic plan"
+    bom: object = None         # assembly_bom.Bom, or None when the split needs no rods (then there is no rod page)
     scene: object = None       # assembly_render.Scene: the parts' meshes and rods the step drawings come from
 
 
@@ -197,8 +198,20 @@ def step_text(step: dict) -> str:
     action = f"Join Section {step['section']} ({parts_text(step['parts'])})" if step["kind"] == "section" else f"Add {parts_text(step['parts'])}"
     receiver = step["receiver"]
     where = f"the {len(receiver)} parts built so far" if len(receiver) > 4 else parts_text(receiver)
-    how = "glue only" if step["glue_only"] else plural(step["rods"], "rod")
+    how = "glue the face, no rods" if step["glue_only"] else plural(step["rods"], "rod")
     return f"{step['id']}: {action} to {where} along {direction_text(step['direction'])}, {how}."
+
+
+# ── Warnings: the step-page code calls these ───────────────────────────────────
+
+def step_warning_lines(step: dict) -> list:
+    """The warnings for one step as printable lines (a heavy join etc.). Empty when there are none."""
+    return [w["message"] for w in step.get("warnings") or []]
+
+
+def plan_note_lines(plan: dict) -> list:
+    """Plan-level notes for the front of the step list, e.g. parts with no number printed on them."""
+    return [w["message"] for w in plan.get("warnings") or [] if w["kind"] == "unlabelled"]
 
 
 def _cover(flow: PageFlow, data: GuideData) -> None:
@@ -217,7 +230,7 @@ def _cover(flow: PageFlow, data: GuideData) -> None:
     c.setFont(FONT, MIN_FONT)
     c.drawString(area.left, area.top - 110 * MM, f"Split {data.split_id}. Compare the plan code on two printed copies to see that they are the same plan.")
     if not summary["rods"]:
-        c.drawString(area.left, area.top - 118 * MM, "No rods needed: glue the faces.")
+        c.drawString(area.left, area.top - 118 * MM, "Glue the faces: no rods needed.")
     flow.y = area.bottom   # the cover is a page of its own
 
 
@@ -239,14 +252,15 @@ def step_caption(step: dict) -> str:
     where = f"the {len(receiver)} parts built so far" if len(receiver) > 4 else parts_text(receiver)
     moved = f"Section {step['section']}" if step["kind"] == "section" else parts_text(step["parts"])
     if step["glue_only"]:
-        return f"Glue the face of {where} and slide {moved} on."
+        return f"No rods: glue the face of {where} and slide {moved} on."
     return f"Push {plural(step['rods'], 'rod')} into the holes of {where}, glue the face, slide {moved} on."
 
 
 def _step_block(flow: PageFlow, art, step: dict) -> tuple:
     """(height of the whole step block, caption lines): number and title, two frames, caption."""
     import assembly_render
-    lines = wrap(step_caption(step), FONT, 10.5, flow.content.width)
+    lines = [(FONT, line) for line in wrap(step_caption(step), FONT, 10.5, flow.content.width)]
+    lines += [(BOLD, line) for text in step_warning_lines(step) for line in wrap(f"Warning: {text}", BOLD, 10, flow.content.width)]
     return STEP_TITLE_H + assembly_render.step_height(art, flow.content.width) + 3 * MM + len(lines) * 10.5 * 1.3 + STEP_GAP, lines
 
 
@@ -261,9 +275,9 @@ def _draw_step_block(flow: PageFlow, art, step: dict, top: float, lines: list) -
     frames = assembly_render.draw_step(c, art, left, top - STEP_TITLE_H, flow.content.width)
     y = top - STEP_TITLE_H - frames - 3 * MM
     c.setFillGray(0)
-    c.setFont(FONT, 10.5)
-    for line in lines:
+    for font, line in lines:
         y -= 10.5 * 1.3
+        c.setFont(font, 10.5 if font == FONT else 10)
         c.drawString(left, y + 3, line)
 
 
@@ -297,6 +311,8 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
     sections, total, done, camera = data.plan["sections"], max(data.plan["summary"]["steps"], 1), 0, None
     flow.new_page()
     c = flow.canvas
+    for line in plan_note_lines(data.plan):
+        flow.paragraph(f"Note: {line}", FONT, 10, gap=2)
     for index, section in enumerate(sections):
         picture = assembly_render.section_picture(data.scene, section["parts"])
         steps = section["steps"]
@@ -348,6 +364,10 @@ def render_guide(path, data: GuideData, progress=None) -> int:
     canvas.setCreator("Spooler")
     flow = PageFlow(canvas, data.paper)
     _cover(flow, data)
+    if data.bom:
+        import assembly_rod_page
+        canvas.setViewerPreference("PrintScaling", "None")   # the rod page is true size: ask viewers not to scale
+        assembly_rod_page.draw_rod_page(flow, data.bom)
     _steps(flow, data, progress)
     progress("Saving the PDF", 95)
     canvas.showPage()
