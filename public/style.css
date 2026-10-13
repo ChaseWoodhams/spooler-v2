@@ -581,8 +581,9 @@ main {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 28px;
-  width: 380px;
+  --modal-pad: 28px;
+  padding: var(--modal-pad);
+  width: min(380px, 100% - 32px);
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -623,7 +624,17 @@ main {
 .modal-box select:focus { border-color: var(--accent); }
 .modal-box select option,
 .modal-box select optgroup { background: var(--surface2); color: var(--text); }
-.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+/* The box scrolls; the action row stays reachable at the bottom edge (phones, short windows). */
+.modal-actions {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px;
+  position: sticky; bottom: calc(var(--modal-pad) * -1); z-index: 1;
+  background: var(--surface);
+  margin-inline: calc(var(--modal-pad) * -1);
+  margin-bottom: calc(var(--modal-pad) * -1);
+  padding: 12px var(--modal-pad) var(--modal-pad);
+  border-top: 1px solid var(--border);
+}
+@media (max-width: 640px) { .modal-box { --modal-pad: 20px; } .modal-actions { flex-wrap: wrap; } }
 .input-hint { font-size: 11px; color: var(--text-muted); margin-top: -2px; }
 .settings-readonly {
   display: block;
@@ -1081,7 +1092,7 @@ body.panel-open { overflow: hidden; }
 .print-opts-row:last-child { border-bottom: none; padding-bottom: 2px; }
 
 /* ─── Spool picker modal ──────────────────────────────────────────────────── */
-.modal-box-wide { width: min(500px, 92vw); }
+.modal-box-wide { width: min(500px, 100% - 32px); }
 
 .spool-picker-list {
   display: flex;
@@ -1499,7 +1510,6 @@ body.panel-open { overflow: hidden; }
 .job-progress, .job-upload-progress { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
 .job-progress-bar, .job-upload-bar { width: 0; height: 100%; background: var(--accent); transition: width .3s; }
 .job-modal-file { margin-top: -8px; font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
-#modal-job .modal-box { max-height: 92vh; overflow-y: auto; }
 .modal-box textarea {
   width: 100%;
   padding: 9px 12px;
@@ -1533,7 +1543,7 @@ body.panel-open { overflow: hidden; }
 }
 
 /* ─── Job review ──────────────────────────────────────────────────────────── */
-.review-box { width: min(1040px, 96vw); max-height: 94vh; overflow-y: auto; }
+.review-box { width: min(1040px, 100% - 32px); }
 .review-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .review-heading { min-width: 0; }
 .review-heading .job-modal-file { margin-top: 2px; }
@@ -1728,8 +1738,7 @@ input[aria-invalid="true"] { border-color: var(--red) !important; }
 
 /* ─── Changelog modal ─────────────────────────────────────────────────────── */
 .modal-box-changelog {
-  width: min(520px, 94vw);
-  max-height: 82vh;
+  width: min(520px, 100% - 32px);
   display: flex;
   flex-direction: column;
 }
@@ -2161,3 +2170,18 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
   box-shadow: var(--shadow);
   cursor: pointer;
 }
+
+/* ─── Outcome prompt (built on .modal / .modal-box by outcome-prompt.js) ───────── */
+.modal.outcome-prompt { z-index: 2000; }
+.outcome-prompt .modal-box { width: min(440px, 100% - 32px); }
+.outcome-prompt .modal-box h3 { margin: 0; overflow-wrap: anywhere; }
+.outcome-detail { color: var(--text-muted); }
+.outcome-snapshot { width: 100%; border-radius: var(--radius-sm); }
+.outcome-prompt .btn { min-height: 48px; justify-content: center; }
+.outcome-prompt .btn-sm { min-height: 44px; }
+.outcome-fieldset { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; }
+.outcome-fieldset legend { padding: 0 4px; }
+.outcome-prompt .outcome-check { display: flex; flex-direction: row; align-items: center; gap: 8px; min-height: 32px; }
+.outcome-prompt .outcome-check input { width: auto; accent-color: var(--accent); }
+.outcome-prompt textarea { width: 100%; }
+.outcome-prompt .modal-actions .btn-primary { flex: 1; }

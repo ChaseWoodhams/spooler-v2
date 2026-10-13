@@ -25,12 +25,8 @@ let _reviewRequest = 0;
 
 // ─── Open / check / start ─────────────────────────────────────────────────────
 async function openReview(job) {
-  _review = { job, report: null, toolpath: null, layer: 0, view: "3d", opener: document.activeElement };
-  const dialog = document.querySelector("#modal-review .review-box");
-  dialog.setAttribute("role", "dialog");
-  dialog.setAttribute("aria-modal", "true");
-  dialog.setAttribute("aria-labelledby", "review-title");
-  dialog.tabIndex = -1;
+  _review = { job, report: null, toolpath: null, layer: 0, view: "3d" };
+  const opener = document.activeElement;
   if (!document.getElementById("review-warnings-ack")) {
     const ack = document.querySelector("#modal-review .review-ack");
     ack.insertAdjacentHTML("beforebegin", '<label class="review-ack" id="review-warnings-label" hidden><input type="checkbox" id="review-warnings-ack"> I have reviewed the preflight warnings</label><p id="review-start-reason" role="status"></p>');
@@ -46,17 +42,13 @@ async function openReview(job) {
   select.disabled = job.source === "printer";
   document.getElementById("review-ack").checked = false;
   _setReviewView("3d");
-  document.getElementById("modal-review").classList.add("open");
   document.getElementById("btn-review-recheck").textContent = "Recheck";
-  dialog.focus();
+  openModal(document.getElementById("modal-review"), { opener, onClose: () => { _review = null; }, focus: document.getElementById("review-title") });
   await runReview();
 }
 
 function closeReview() {
-  document.getElementById("modal-review").classList.remove("open");
-  const opener = _review?.opener;
-  _review = null;
-  if (opener?.isConnected) opener.focus();
+  closeModal(document.getElementById("modal-review"));
 }
 
 async function runReview() {
@@ -375,18 +367,5 @@ document.getElementById("btn-review-nozzle-save").addEventListener("click", asyn
   }
   e.currentTarget.disabled = false;
 });
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && document.getElementById("modal-review").classList.contains("open")) closeReview();
-});
 window.addEventListener("resize", () => { if (_review) drawReview(); });
 
-// Keep keyboard focus inside the physical-start review until it closes.
-document.getElementById("modal-review").addEventListener("keydown", e => {
-  if (e.key !== "Tab") return;
-  const box = document.querySelector("#modal-review .review-box");
-  const items = [...box.querySelectorAll("button,input,select,a[href],[tabindex]:not([tabindex='-1'])")].filter(el => !el.disabled && el.offsetParent !== null);
-  const first = items[0], last = items[items.length - 1];
-  if (!first) return;
-  if (e.shiftKey && (document.activeElement === first || document.activeElement === box)) { e.preventDefault(); last.focus(); }
-  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-});

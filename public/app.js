@@ -54,7 +54,6 @@ let currentPickerTrayId    = null; // non-null → picker is in tray-link mode
 let _currentFilePrinterId  = null;
 let _currentFileList       = []; // cached file objects for the open file browser
 let _fileListTimer = null;
-let _fileBrowserOpener = null;
 const _cameraPreferences = new Map();
 let _cameraResizeTimer = null;
 let _materialDensityMap = {}; // material name → density g/cm³
@@ -1217,39 +1216,7 @@ document.addEventListener("keydown", event => {
 });
 
 const sidePanelFocus = new WeakMap();
-const operatorDialogFocus = new WeakMap();
-function openOperatorDialog(modal) {
-  operatorDialogFocus.set(modal, document.activeElement);
-  modal.classList.add("open");
-  const title = modal.querySelector("h3");
-  if (title) { title.tabIndex = -1; title.focus(); }
-}
-function closeOperatorDialog(modal) {
-  if (!modal.classList.contains("open")) return;
-  modal.classList.remove("open");
-  const opener = operatorDialogFocus.get(modal);
-  operatorDialogFocus.delete(modal);
-  if (opener?.isConnected) opener.focus();
-}
-document.addEventListener("keydown", event => {
-  const modal = [...document.querySelectorAll(".operator-dialog.open")].at(-1);
-  if (!modal) return;
-  if (event.key === "Escape") {
-    event.preventDefault(); event.stopImmediatePropagation();
-    closeOperatorDialog(modal);
-  } else if (event.key === "Tab") {
-    const items = [...modal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]')]
-      .filter(element => element.getClientRects().length);
-    const first = items[0], last = items.at(-1);
-    if (!first) return;
-    if (event.shiftKey && (document.activeElement === first || !items.includes(document.activeElement))) {
-      event.preventDefault(); last.focus();
-    } else if (!event.shiftKey && (document.activeElement === last || !items.includes(document.activeElement))) {
-      event.preventDefault(); first.focus();
-    }
-    event.stopImmediatePropagation();
-  }
-}, true);
+// Modals: openModal / closeModal / topModal live in modal.js (layer stack, focus trap, Escape = topmost layer only).
 let activeSidePanel = null;
 const sidePanelFocusable = 'button:not([disabled]), a[href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -1927,22 +1894,18 @@ document.getElementById("btn-remove-printer").addEventListener("click", () => {
 // ─── File browser ─────────────────────────────────────────────────────────────
 function openFileBrowser(printerId) {
   _currentFilePrinterId = printerId;
-  _fileBrowserOpener = document.activeElement;
   const p = printers[printerId];
   document.getElementById("files-modal-title").textContent = `Files – ${p?.name || printerId}`;
-  document.getElementById("modal-files").classList.add("open");
-  document.getElementById("files-modal-title").focus();
+  openModal(document.getElementById("modal-files"), { opener: document.activeElement, onClose: _afterFileBrowserClose });
   requestPrinterFiles(printerId);
 }
 
-function closeFileBrowser() {
+function _afterFileBrowserClose() {
   clearTimeout(_fileListTimer);
   _fileListTimer = null;
-  document.getElementById("modal-files").classList.remove("open");
   _currentFilePrinterId = null;
-  if (_fileBrowserOpener?.isConnected) _fileBrowserOpener.focus();
-  _fileBrowserOpener = null;
 }
+function closeFileBrowser() { closeModal(document.getElementById("modal-files")); }
 
 function requestPrinterFiles(printerId = _currentFilePrinterId) {
   if (!printerId || printerId !== _currentFilePrinterId) return;
@@ -2158,15 +2121,15 @@ function openPrintOpts(filePath, fileName, meta = {}) {
     thumbImg.src = `/api/thumbnail/${encodeURIComponent(_currentFilePrinterId)}/${encodeURIComponent(bare)}`;
   }
 
-  document.getElementById("modal-print-opts").classList.add("open");
+  openModal(document.getElementById("modal-print-opts"), { opener: document.activeElement, onClose: _afterPrintOptsClose });
 }
 
-function closePrintOpts() {
-  document.getElementById("modal-print-opts").classList.remove("open");
+function _afterPrintOptsClose() {
   _printOptsFile = null;
   _printOptsName = null;
   _printOptsFilename = null;
 }
+function closePrintOpts() { closeModal(document.getElementById("modal-print-opts")); }
 
 function _setPrintPlate(plateId) {
   document.getElementById("print-plate-textured").className =
@@ -2175,6 +2138,8 @@ function _setPrintPlate(plateId) {
     "btn print-plate-btn " + (plateId === 1 ? "btn-primary" : "btn-secondary");
   document.getElementById("print-plate-textured").dataset.selected = plateId === 0 ? "1" : "";
   document.getElementById("print-plate-smooth").dataset.selected   = plateId === 1 ? "1" : "";
+  document.getElementById("print-plate-textured").setAttribute("aria-pressed", String(plateId === 0));
+  document.getElementById("print-plate-smooth").setAttribute("aria-pressed", String(plateId === 1));
 }
 
 document.getElementById("print-plate-textured").addEventListener("click", () => _setPrintPlate(0));
@@ -2277,7 +2242,7 @@ function escAttr(s) {
 // ─── History panel ────────────────────────────────────────────────────────────
 // Print history (loadHistory, openHistory, closeHistory) lives in history.js.
 const historyBackdrop = document.getElementById("panel-backdrop");
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeHistory(); closeSpools(); closePrinters(); closeFileBrowser(); closePrintOpts(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeHistory(); closeSpools(); closePrinters(); } }); // modals handle their own Escape (modal.js)
 
 // ─── Spoolman / Spools ────────────────────────────────────────────────────────
 let _spoolLoadState = "loading";
@@ -2823,7 +2788,7 @@ function loadQrLib() {
 
 async function openScanner() {
   _resetScannerError();
-  document.getElementById("modal-scanner").classList.add("open");
+  openModal(document.getElementById("modal-scanner"), { opener: document.activeElement, onClose: _stopScanner });
 
   if (!window.isSecureContext) {
     _setScannerError("Live scanner requires HTTPS", {
@@ -2837,9 +2802,7 @@ async function openScanner() {
   let timedOut = false;
   const giveUpTimer = setTimeout(() => {
     timedOut = true;
-    const s = _liveScanner;
-    _liveScanner = null;
-    s?.stop().catch(() => {}).finally(() => { try { s.clear(); } catch {} });
+    _stopScanner();
     _setScannerError("No camera found on this device");
   }, 5000);
 
@@ -2856,21 +2819,19 @@ async function openScanner() {
   } catch (e) {
     clearTimeout(giveUpTimer);
     if (timedOut) return;
-    const s = _liveScanner;
-    _liveScanner = null;
-    s?.stop().catch(() => {}).finally(() => { try { s.clear(); } catch {} });
+    _stopScanner();
     _setScannerError(e.name === "NotFoundError" ? "No camera found on this device" : "Camera not available");
   }
 }
 
-function closeScanner() {
-  document.getElementById("modal-scanner").classList.remove("open");
+function closeScanner() { closeModal(document.getElementById("modal-scanner")); }
+function _stopScanner() {
   if (_liveScanner) {
     const s = _liveScanner;
     _liveScanner = null;
-    s.stop()
-      .catch(() => {})
-      .finally(() => { try { s.clear(); } catch {} });
+    try {   // stop() throws synchronously when the camera never started
+      Promise.resolve(s.stop()).catch(() => {}).finally(() => { try { s.clear(); } catch {} });
+    } catch { try { s.clear(); } catch {} }
   }
 }
 
@@ -2935,15 +2896,15 @@ function openChangelog() {
         ${entry.changes.map(c => `<li>${escHtml(c)}</li>`).join("")}
       </ul>
     </div>`).join("");
-  document.getElementById("modal-changelog")?.classList.add("open");
+  const modal = document.getElementById("modal-changelog");
+  if (modal) openModal(modal, { opener: document.activeElement });
 }
 
 document.getElementById("version-badge")?.addEventListener("click", openChangelog);
 document.getElementById("btn-changelog-close")?.addEventListener("click", () =>
-  document.getElementById("modal-changelog")?.classList.remove("open"));
+  closeModal(document.getElementById("modal-changelog")));
 document.getElementById("modal-changelog")?.addEventListener("click", e => {
-  if (e.target.id === "modal-changelog")
-    e.target.classList.remove("open");
+  if (e.target.id === "modal-changelog") closeModal(e.target);
 });
 
 // ─── Boot ──────────────────────────────────────────────────────────────────────

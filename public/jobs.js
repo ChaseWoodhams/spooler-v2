@@ -358,6 +358,8 @@ function setJobPlate(smooth) {
   document.getElementById("job-plate-textured").className = `btn print-plate-btn ${smooth ? "btn-secondary" : "btn-primary"}`;
   document.getElementById("job-plate-smooth").className = `btn print-plate-btn ${smooth ? "btn-primary" : "btn-secondary"}`;
   document.getElementById("job-plate-smooth").dataset.selected = smooth ? "1" : "";
+  document.getElementById("job-plate-textured").setAttribute("aria-pressed", String(!smooth));
+  document.getElementById("job-plate-smooth").setAttribute("aria-pressed", String(smooth));
 }
 
 function openJobEditor(editor) {
@@ -381,13 +383,11 @@ function openJobEditor(editor) {
   document.getElementById("job-input-notes").value = job.notes || "";
   const save = document.getElementById("btn-job-save");
   save.disabled = false;
-  document.getElementById("modal-job").classList.add("open");
-  document.getElementById("job-input-name").focus();
+  openModal(document.getElementById("modal-job"), { opener: document.activeElement, onClose: () => { _jobEditor = null; }, focus: document.getElementById("job-input-name") });
 }
 
 function closeJobEditor() {
-  document.getElementById("modal-job").classList.remove("open");
-  _jobEditor = null;
+  closeModal(document.getElementById("modal-job"));
 }
 
 async function saveJobEditor() {
@@ -443,7 +443,5 @@ document.getElementById("btn-queue-close").addEventListener("click", () => {
 });
 document.getElementById("panel-backdrop").addEventListener("click", closeQueue);
 document.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape") return;
-  if (document.getElementById("modal-job").classList.contains("open")) closeJobEditor();
-  else closeQueue();
+  if (e.key === "Escape") closeQueue();   // an open job editor / review handles Escape itself (modal.js)
 });
