@@ -23,6 +23,7 @@
   --blue:        #3b82f6;
   --text:        #e8eaf0;
   --text-muted:  #9ca3af;
+  --placeholder: #8a92a2;   /* >=4.5:1 on the input fills; one token for every placeholder */
   --link:        #7db3ff; /* 9.3:1 on --bg, 8.2:1 on --surface */
   --check-size:  16px;
   --radius:      12px;
@@ -40,6 +41,7 @@ body.light-mode {
   --border:   #d0d3de;
   --text:     #1a1c2a;
   --text-muted: #525b6a;
+  --placeholder: #5f6877;
   --link: #1d4ed8; /* 6.0:1 on --surface2, 6.7:1 on white */
   --accent: #a63808;
   --focus-ring: var(--accent);
@@ -51,6 +53,7 @@ body.light-mode {
   --blue: #1d4ed8;
   --shadow:   0 4px 24px rgba(0,0,0,.1);
 }
+::placeholder { color: var(--placeholder); opacity: 1; }
 body.light-mode .camera-placeholder { color: #c4cad4; }
 body.light-mode .progress-filename { color: var(--text); }
 
@@ -1356,6 +1359,14 @@ body.panel-open { overflow: hidden; }
   overflow-x: hidden;
 }
 
+.files-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+.files-search { flex: 1 1 160px; }
+.files-search input { width: 100%; min-height: 44px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); padding: 6px 10px; }
+.files-sort { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); }
+.files-sort select { min-height: 44px; }
+.files-path { flex-basis: 100%; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); overflow-wrap: anywhere; }
+.file-name .file-folder { max-width: 100%; text-align: left; overflow: hidden; text-overflow: ellipsis; }
+.file-deleting { opacity: .6; }
 .files-list-items {
   list-style: none;
   margin: 0;

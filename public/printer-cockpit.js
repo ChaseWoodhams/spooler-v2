@@ -10,6 +10,15 @@
  */
 (() => {
   let tab = "motion";                       // active tab (in memory only)
+  const COMPACT_KEY = "cockpit-compact-camera";
+  let compact = false;
+  try { compact = localStorage.getItem(COMPACT_KEY) === "1"; } catch (_) { /* storage can be blocked */ }
+  window.toggleCockpitCompact = () => {
+    compact = !compact;
+    try { localStorage.setItem(COMPACT_KEY, compact ? "1" : "0"); } catch (_) { /* per-viewer convenience only */ }
+    rerender();
+    document.querySelector("[data-focus-key=compact]")?.focus();
+  };
 
   const detailEl = () => document.getElementById("printer-detail");
   const apiFullscreen = () => document.fullscreenElement || document.webkitFullscreenElement;
@@ -57,12 +66,14 @@
 
   // ── shared bits ────────────────────────────────────────────────────────────
   const T = (n) => Number(n).toFixed(1);
+  const mm = v => v == null ? "--" : `${_coordText(v)} mm`;
   const cam = c => `
     <div class="detail-camera pv-cam" ondblclick="toggleCameraFullscreen()" title="Double-click for full screen"><div class="camera-placeholder" style="display:flex"><span>${c.connected ? "Camera unavailable" : "Printer offline"}</span></div></div>`;
   const chip = c => `<span class="live-chip${c.cameraUrl ? "" : " offline"}" id="detail-live-chip">${c.cameraUrl ? "● Live" : "○ No signal"}</span>`;
-  const fsBtn = () => `<button class="pv-fsbtn" onclick="toggleCameraFullscreen()" aria-label="${isFs() ? "Exit full screen" : "Full screen video"}" title="${isFs() ? "Exit full screen" : "Full screen"}">${isFs() ? "⤡" : "⛶"}</button>`;
-  const back = `<button class="pv-back" onclick="returnToPrinterGrid()">‹ All printers</button>`;
-  const title = c => `<span class="status-dot ${c.sc}"></span><b role="heading" aria-level="1">${escHtml(c.printer.name)}</b><small>${escHtml(c.printer.ip)}</small>`;
+  const fsBtn = () => `<button class="pv-fsbtn" data-focus-key="fullscreen" onclick="toggleCameraFullscreen()" aria-label="${isFs() ? "Exit full screen" : "Full screen video"}" title="${isFs() ? "Exit full screen" : "Full screen"}">${isFs() ? "⤡" : "⛶"}</button>`;
+  const compactBtn = (c, on) => c.cameraUrl ? `<button class="pv-fsbtn pv-compact" data-focus-key="compact" onclick="toggleCockpitCompact()" aria-pressed="${on}" aria-label="Compact camera" title="${on ? "Show the camera larger" : "Shrink the camera so the controls stay in view"}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">${on ? '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>' : '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>'}</svg></button>` : "";
+  const back = `<button class="pv-back" data-focus-key="back" onclick="returnToPrinterGrid()">‹ All printers</button>`;
+  const title = c => `<span class="status-dot ${c.sc}"></span><b role="heading" aria-level="1">${escHtml(c.printer.name)}</b><small>${escHtml(c.printer.ip)}${c.printer.attrs?.FirmwareVersion ? ` · firmware ${escHtml(c.printer.attrs.FirmwareVersion)}` : ""}</small>`;
   const id = c => escAttr(c.printer.id);
 
   // Feedback sits beside the control it belongs to: pending, confirmed (from the printer's report) or error
@@ -95,12 +106,12 @@
     const busy = c.hw?.light?.state === "pending";
     return `<span class="pv-light-ctl">${fb(c, "light")}<button class="detail-toggle ${c.lightOn ? "active" : ""}" id="detail-light-toggle" onclick="printerAction('${id(c)}','${c.lightOn ? "light_off" : "light_on"}')" ${c.connected ? "" : "disabled"} aria-pressed="${c.lightOn}" aria-busy="${busy}" aria-label="Chamber lighting"><span></span></button></span>`;
   };
-  const steps = c => [0.1, 1, 10].map(v => `<button class="pv-chip ${c.jogStep === v ? "on" : ""}" aria-pressed="${c.jogStep === v}" aria-label="Jog distance ${v} mm" onclick="setJogStep(${v})">${v}</button>`).join("");
+  const steps = c => [0.1, 1, 10].map(v => `<button class="pv-chip ${c.jogStep === v ? "on" : ""}" data-focus-key="step-${v}" aria-pressed="${c.jogStep === v}" aria-label="Jog distance ${v} mm" onclick="setJogStep(${v})">${v}</button>`).join("");
   const jog = c => {
     // aria-disabled (not disabled) while a move is in flight, so keyboard focus stays on the pressed button
     const busy = c.jogBusy ? ' aria-disabled="true"' : "";
     const b = (axis, dir, label) => `<button id="jog-${axis}${dir > 0 ? "plus" : "minus"}" onclick="jogPrinter('${id(c)}','${axis}',${dir})" ${c.disableMotion}${busy}>${label}</button>`;
-    const home = axis => `<button class="home" id="jog-home-${axis}" onclick="homePrinter('${id(c)}','${axis}')" ${c.disableMotion}${busy} aria-label="Home ${axis}">⌂</button>`;
+    const home = axis => `<button class="home" id="jog-home-${axis}" onclick="homePrinter('${id(c)}','${axis}')" ${c.disableMotion}${busy} aria-label="Home ${axis}" title="Home ${axis === "XY" ? "X and Y" : "Z"}">⌂<small>${axis}</small></button>`;
     return `
     <div class="pv-jog${c.jogBusy ? " busy" : ""}" aria-busy="${!!c.jogBusy}">
       <div class="pv-xy">
@@ -118,16 +129,23 @@
       <span>${label}</span><strong class="${tempColor(val)}">${T(val)} °C</strong>
       ${ro ? `<em>sensor only</em>` : `
       <span class="pv-tgt">Target <input id="detail-${key}-target" type="number" min="0" max="${max}" value="${Math.round(tgt)}" aria-label="${label} target temperature (°C)" ${c.disableConnected}>°C
-      <button aria-label="Apply ${label.toLowerCase()} target" onclick="setPrinterTemperature('${id(c)}','${key}','detail-${key}-target')" ${c.disableConnected}>Set</button></span>`}
+      <button data-focus-key="set-${key}" aria-label="Set ${label.toLowerCase()} target" onclick="setPrinterTemperature('${id(c)}','${key}','detail-${key}-target')" ${c.disableConnected}>Set</button></span>`}
     </div>`;
+  // Temperature pills: one style, an SVG icon plus a short label; the target shows as "/200" (no target for the chamber)
+  const PILL_ICON = {
+    nozzle: '<path d="M7 3h10v4l-2 3v3l-3 4-3-4v-3L7 7z"/>',
+    bed: '<rect x="3" y="14" width="18" height="5" rx="1"/><path d="M8 10c0-2 2-2 2-4M14 10c0-2 2-2 2-4"/>',
+    chamber: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/>',
+  };
+  const pill = (key, label, val, tgt) => `<span class="pv-pill" aria-label="${label} ${T(val)} degrees${tgt != null ? `, target ${Math.round(tgt)}` : ""}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${PILL_ICON[key]}</svg><span class="pv-pill-label">${label}</span> ${T(val)}°${tgt != null ? `<small>/${Math.round(tgt)}</small>` : ""}</span>`;
   const pct = c => c.detailProgress ?? 0;
   const eta = c => c.detailRemaining > 0 ? formatTime(c.detailRemaining) : "—";
   const jobBtns = c => c.printing || c.paused ? `
     ${c.printing
-      ? `<button class="btn btn-secondary" onclick="printerAction('${id(c)}','pause')">Pause</button>`
-      : `<button class="btn btn-primary" onclick="printerAction('${id(c)}','resume')">Resume</button>`}
-    <button class="btn btn-danger" onclick="confirmStop('${id(c)}')">Stop</button>` : "";
-  const browseBtn = c => `<button class="btn btn-primary" onclick="openFileBrowser('${id(c)}')">Browse & start print</button>`;
+      ? `<button class="btn btn-secondary" data-focus-key="pause" onclick="printerAction('${id(c)}','pause')">Pause</button>`
+      : `<button class="btn btn-primary" data-focus-key="resume" onclick="printerAction('${id(c)}','resume')">Resume</button>`}
+    <button class="btn btn-danger" data-focus-key="stop" onclick="confirmStop('${id(c)}')">Stop</button>` : "";
+  const browseBtn = c => `<button class="btn btn-primary" data-focus-key="browse" onclick="openFileBrowser('${id(c)}')">Browse & start print</button>`;
 
   // ── Cockpit ────────────────────────────────────────────────────────────────
   window.cockpitPrinterHtml = c => {
@@ -135,8 +153,8 @@
     const controlReason = !c.connected ? "Printer offline. Reconnect the printer to use controls." : c.printer.printer_type !== "cc1" ? "Motion, temperature and fan controls are available for Centauri Carbon 1 only." : "";
     const body = {
       motion: `<div class="pv-row-wrap">${jog(c)}<div class="pv-col"><div class="pv-chips">Step ${steps(c)} mm</div>
-        <div class="pv-xyz">X ${_coordText(c.coords.x)} · Y ${_coordText(c.coords.y)} · Z ${_coordText(c.coords.z)}</div>
-        <button class="pv-chip" onclick="homePrinter('${id(c)}','XYZ')" ${c.disableMotion}>Home all</button>
+        <div class="pv-xyz">X ${mm(c.coords.x)} · Y ${mm(c.coords.y)} · Z ${mm(c.coords.z)}</div>
+        <button class="pv-chip" data-focus-key="home-all" onclick="homePrinter('${id(c)}','XYZ')" ${c.disableMotion}>Home all</button>
         <small>${c.controlsEnabled ? "Ready to move" : c.connected ? `Locked while ${c.status}` : "Printer offline"}</small>${fb(c, "jog")}</div></div>`,
       temps: `<div class="pv-col wide"><small>Nozzle target: 0–300 °C · Bed target: 0–110 °C. Zero turns heating off.</small>${temp(c, "nozzle", "Nozzle", c.nozzle, c.nozzleTarget, 300)}${temp(c, "bed", "Bed", c.bed, c.bedTarget, 110)}${temp(c, "chamber", "Chamber", c.chamber, 0, 0, true)}</div>`,
       air: `<div class="pv-col wide">${fan(c, "model", "Model fan", c.modelFan)}${fan(c, "auxiliary", "Side fan", c.auxiliaryFan)}${fan(c, "chamber", "Chamber fan", c.chamberFan)}${speed(c)}
@@ -144,11 +162,11 @@
       files: `<div class="pv-col">${browseBtn(c)}<small>Pick a file already on the printer.</small></div>`,
     };
     return `<div class="pv pv-b">
-      <div class="pv-hero">
+      <div class="pv-hero${!c.cameraUrl ? " nofeed" : compact ? " compact" : ""}">
         ${cam(c)}
-        <div class="pv-hud top">${back}<span class="pv-title">${title(c)}</span><span class="status-badge ${c.sc}">${c.status}</span>${chip(c)}${fsBtn()}</div>
+        <div class="pv-hud top">${back}<span class="pv-title">${title(c)}</span><span class="status-badge ${c.sc}">${c.status}</span>${chip(c)}${compactBtn(c, compact)}${fsBtn()}</div>
         <div class="pv-hud bot">
-          <div class="pv-pills"><span>🔥 ${T(c.nozzle)}°<small>/${Math.round(c.nozzleTarget)}</small></span><span>▦ ${T(c.bed)}°<small>/${Math.round(c.bedTarget)}</small></span><span>▢ ${T(c.chamber)}°</span></div>
+          <div class="pv-pills" role="group" aria-label="Temperatures">${pill("nozzle", "Nozzle", c.nozzle, c.nozzleTarget)}${pill("bed", "Bed", c.bed, c.bedTarget)}${pill("chamber", "Chamber", c.chamber)}</div>
           ${c.printing || c.paused ? `<div class="pv-hudjob"><b>${escHtml(c.detailFilename || "Print")}</b><div class="pv-bar"><span style="width:${pct(c)}%"></span></div><small>${pct(c)}% · ${eta(c)} left</small><span class="pv-btns">${jobBtns(c)}</span></div>` : `<div class="pv-hudjob idle"><b>Idle</b>${browseBtn(c)}</div>`}
         </div>
       </div>
@@ -177,7 +195,8 @@
   .pv-xy{display:grid;grid-template-columns:repeat(3,48px);grid-auto-rows:48px;gap:4px}
   .pv-z{display:grid;grid-template-rows:repeat(3,48px);gap:4px;width:48px}
   .pv-jog button{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm)}
-  .pv-jog .home{color:var(--accent)}
+  .pv-jog .home{color:var(--accent);display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1;gap:1px}.pv-jog .home small{font-size:12px;color:var(--text-muted)}
+  .pv small{font-size:12.5px}
   /* sliders / temps */
   .pv-slider{display:grid;grid-template-columns:1fr auto;gap:2px 8px}.pv-slider input{grid-column:1/3;accent-color:var(--accent)}
   .pv-temp{display:flex;align-items:center;gap:10px;padding:6px 0}.pv-temp>span:first-child{width:76px;color:var(--text-muted)}.pv-temp strong{font-size:1.25em;min-width:64px}.pv-temp em{color:var(--text-muted)}
@@ -195,11 +214,14 @@
   .pv-hud>*{pointer-events:auto}
   .pv-hud.top{top:0;background:linear-gradient(#000a,transparent)}.pv-hud.bot{bottom:0;background:linear-gradient(transparent,#000c);justify-content:space-between;align-items:flex-end}
   .pv-hud .pv-back{color:#fff}.pv-hud .live-chip{margin-left:auto}
-  .pv-pills{display:flex;gap:8px}.pv-pills span{background:#000a;border-radius:99px;padding:4px 12px;backdrop-filter:blur(6px)}.pv-pills small{opacity:.6}
+  .pv-pills{display:flex;gap:8px;flex-wrap:wrap}.pv-pill{display:inline-flex;align-items:center;gap:5px;background:#000a;border-radius:99px;padding:4px 12px;backdrop-filter:blur(6px);font-size:13px;font-variant-numeric:tabular-nums}.pv-pill svg{width:14px;height:14px;flex:none}.pv-pill small{font-size:12px;opacity:.85}.pv-pill-label{font-size:12px;opacity:.9}
   .pv-hudjob{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#000a;border-radius:var(--radius-sm);padding:8px 12px;backdrop-filter:blur(6px);flex:1;max-width:620px}
   .pv-hudjob .pv-bar{flex:1}.pv-hudjob.idle{flex:0 0 auto}
   .pv-fsbtn{background:#0008;border:1px solid #fff4;border-radius:8px;width:34px;height:34px;font-size:18px;line-height:1;color:#fff;backdrop-filter:blur(6px)}
-  .pv-fsbtn:hover{background:#000b}
+  .pv-fsbtn:hover{background:#000b}.pv-fsbtn svg{width:18px;height:18px}
+  /* compact camera: a shorter hero keeps the tabs and key state in view; no feed collapses it */
+  .pv-b .pv-hero.compact{min-height:min(32vh,240px)}.pv-b .pv-hero.nofeed{min-height:170px}
+  @media(max-height:640px){.pv-b .pv-hero{min-height:min(40vh,240px)}.pv-b .pv-hero.nofeed{min-height:170px}}
   .pv-tabs{display:flex;gap:4px;border-bottom:1px solid var(--border)}
   .pv-tabs button{background:none;border:0;border-bottom:2px solid transparent;padding:10px 16px;color:var(--text-muted)}.pv-tabs button.on{color:var(--text);border-color:var(--accent)}
   .pv-tabbody{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px;min-height:190px}

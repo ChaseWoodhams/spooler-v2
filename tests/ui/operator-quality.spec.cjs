@@ -94,7 +94,7 @@ async function cockpit(fixture) {
   assert.equal(await page.getByRole('spinbutton', { name: 'Bed target temperature (°C)' }).getAttribute('max'), '110');
   await expectText(page.getByRole('tabpanel'), /Zero turns heating off/);
   await nozzle.fill('301');
-  await page.getByRole('button', { name: 'Apply nozzle target', exact: true }).click();
+  await page.getByRole('button', { name: 'Set nozzle target', exact: true }).click();
   assert.equal(await nozzle.evaluate(el => el.validity.rangeOverflow), true);
   await nozzle.fill('0');
   await temperatures.focus();

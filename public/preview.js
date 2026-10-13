@@ -28,13 +28,16 @@ async function openReview(job) {
   _review = { job, report: null, toolpath: null, layer: 0, view: "3d" };
   const opener = document.activeElement;
   if (!document.getElementById("review-warnings-ack")) {
-    const ack = document.querySelector("#modal-review .review-ack");
-    ack.insertAdjacentHTML("beforebegin", '<label class="review-ack" id="review-warnings-label" hidden><input type="checkbox" id="review-warnings-ack"> I have reviewed the preflight warnings</label><p id="review-start-reason" role="status"></p>');
+    document.querySelector("#modal-review .review-ack").insertAdjacentHTML("beforebegin", '<label class="review-ack" id="review-warnings-label" hidden><input type="checkbox" id="review-warnings-ack"> I have reviewed the preflight warnings (this does not confirm the bed is clear)</label><p id="review-start-reason" role="status"></p>');
     document.getElementById("review-warnings-ack").addEventListener("change", _updateReviewStart);
   }
+  const preview = document.getElementById("review-canvas");
+  preview.setAttribute("role", "img");
+  preview.setAttribute("aria-describedby", "review-summary");
+  preview.textContent = "Toolpath preview of the sliced file. The summary beside it lists the size, layers and settings.";
   document.getElementById("review-printer").setAttribute("aria-label", "Job review printer");
   document.getElementById("review-layer").setAttribute("aria-label", "Preview layer");
-  document.getElementById("review-no-preview").textContent = "No toolpath preview is available. Verify the file, dimensions, printer and material below. Use Recheck to retry; preflight still applies.";
+  document.getElementById("review-no-preview").textContent = "No toolpath preview is available. Verify the file, dimensions, printer and material below. Use Check again to retry; preflight still applies.";
   document.getElementById("review-title").textContent = job.name;
   document.getElementById("review-subtitle").textContent = jobMetaText(job);
   const select = document.getElementById("review-printer");
@@ -42,7 +45,7 @@ async function openReview(job) {
   select.disabled = job.source === "printer";
   document.getElementById("review-ack").checked = false;
   _setReviewView("3d");
-  document.getElementById("btn-review-recheck").textContent = "Recheck";
+  document.getElementById("btn-review-recheck").textContent = "Check again";
   openModal(document.getElementById("modal-review"), { opener, onClose: () => { _review = null; }, focus: document.getElementById("review-title") });
   await runReview();
 }
@@ -83,7 +86,7 @@ async function runReview() {
     if (_review !== review || requestId !== _reviewRequest) return;
     review.report = null;
     _setReviewStatus("fail");
-    document.getElementById("review-start-reason").textContent = "Preflight failed. Check the connection and use Recheck to retry.";
+    document.getElementById("review-start-reason").textContent = "Preflight failed. Check the connection and use Check again to retry.";
     document.getElementById("review-check-list").innerHTML =
       `<li class="review-check fail"><span class="review-check-icon">✕</span><div class="review-check-title">${escHtml(err.message)}</div></li>`;
   }
@@ -113,6 +116,11 @@ async function startFromReview() {
 async function acceptWarningsForLater() {
   const review = _review;
   if (!review?.report?.can_start || !document.getElementById("review-warnings-ack").checked) return;
+  if (!(await confirmDialog({
+    title: "Accept these warnings for later?",
+    body: "Bed cleared can then start this job without asking about them again. This does not confirm the bed is clear.",
+    confirmLabel: "Accept warnings",
+  }))) return;
   const btn = document.getElementById("btn-review-accept");
   btn.disabled = true;
   try {
@@ -133,7 +141,7 @@ function _updateReviewStart() {
       (report.needs_acknowledgement && !document.getElementById("review-warnings-ack").checked);
   document.getElementById("btn-review-accept").disabled = !document.getElementById("review-warnings-ack").checked;
   document.getElementById("review-start-reason").textContent = !report ? "Run preflight before starting." : !report.can_start
-    ? "Start is blocked. Resolve the blockers below, then Recheck."
+    ? "Start is blocked. Resolve the blockers below, then Check again."
     : report.needs_acknowledgement && !document.getElementById("review-warnings-ack").checked
       ? "Review and acknowledge the warnings. This does not confirm the bed is clear."
       : !document.getElementById("review-ack").checked ? "Confirm the build plate is clear and the right filament is loaded before starting."
@@ -152,7 +160,7 @@ function _renderReviewReport() {
   const { report } = _review;
   _setReviewStatus(report.status);
 
-  const groups = [["Blockers", "fail", "Resolve this condition and use Recheck before starting."],
+  const groups = [["Blockers", "fail", "Resolve this condition and use Check again before starting."],
     ["Warnings", "warn", "Verify this condition, then acknowledge the warnings before starting."],
     ["Information", "info", "Compare this information with the file, printer and loaded material."],
     ["Passed checks", "pass", "This check passed for the selected printer."]];
@@ -187,6 +195,7 @@ function _renderReviewReport() {
     if (settings.length) summary.push(`<span>${escHtml(settings.join(" · "))}</span>`);
   }
   document.getElementById("review-summary").innerHTML = summary.join("");
+  document.getElementById("review-canvas").setAttribute("aria-label", preview ? `Toolpath preview of ${job.file_name || job.name}, ${preview.layers.length} layers` : "Toolpath preview not available");
 
   const nozzleCheck = report.checks.find(c => c.id === "nozzle");
   document.getElementById("review-nozzle").hidden = !(report.printer_id && nozzleCheck && nozzleCheck.level === "info");

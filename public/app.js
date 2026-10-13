@@ -907,6 +907,7 @@ function renderPrinterDetail(printer) {
 
   const activeInput = detail.contains(document.activeElement) ? document.activeElement : null;
   const activeInputId = activeInput?.id;
+  const activeFocusKey = !activeInputId ? activeInput?.dataset?.focusKey : null;   // id-less cockpit buttons restore by data-focus-key
   const activeInputValue = activeInput?.value;
   const activeSliderDirty = activeInput?.matches('input[type="range"]') && activeInput.dataset.userEdited === "true";
   const detailCamera = detail.querySelector(".detail-camera img");
@@ -1089,6 +1090,8 @@ function renderPrinterDetail(printer) {
       if (restored.matches('input[type="range"]')) restored.dataset.userEdited = String(activeSliderDirty);
       restored.focus();
     }
+  } else if (activeFocusKey) {
+    detail.querySelector(`[data-focus-key="${CSS.escape(activeFocusKey)}"]`)?.focus();
   }
 }
 
@@ -2362,8 +2365,13 @@ document.getElementById("btn-remove-printer").addEventListener("click", async ()
 });
 
 // ─── File browser ─────────────────────────────────────────────────────────────
+// File browser view state: search text, sort, the folder being shown, and a delete waiting for the printer's own list to drop the file
+let _filesQuery = "", _filesSort = "name", _filesDir = "", _fileDeleting = null, _fileDeleteTimer = null;
+const _FILE_DELETE_POLL_MS = 1200, _FILE_DELETE_GIVE_UP_MS = 9000;
+
 function openFileBrowser(printerId) {
   _currentFilePrinterId = printerId;
+  _filesDir = "";
   const p = printers[printerId];
   document.getElementById("files-modal-title").textContent = `Files – ${p?.name || printerId}`;
   openModal(document.getElementById("modal-files"), { opener: document.activeElement, onClose: _afterFileBrowserClose });
@@ -2373,7 +2381,11 @@ function openFileBrowser(printerId) {
 function _afterFileBrowserClose() {
   clearTimeout(_fileListTimer);
   _fileListTimer = null;
+  clearTimeout(_fileDeleteTimer);
+  _fileDeleteTimer = null;
+  _fileDeleting = null;
   _currentFilePrinterId = null;
+  _filesDir = "";
 }
 function closeFileBrowser() { closeModal(document.getElementById("modal-files")); }
 
@@ -2399,6 +2411,7 @@ function renderFileList(files, error) {
   clearTimeout(_fileListTimer);
   _fileListTimer = null;
   _currentFileList = files || [];
+  if (!error) _settleFileDelete(_currentFileList);
   document.getElementById("files-loading").style.display = "none";
   const list = document.getElementById("files-list");
 
@@ -2418,14 +2431,30 @@ function renderFileList(files, error) {
   const ul = document.createElement("ul");
   ul.className = "files-list-items";
 
-  for (const f of files) {
+  const view = _fileView(files);
+  if (!view.length) {
+    list.innerHTML = '<p class="files-empty" role="status">' + (_filesQuery ? `No files match "${escHtml(_filesQuery)}".` : "This folder is empty.") + "</p>";
+    list.prepend(_fileBar());
+    return;
+  }
+  for (const f of view) {
     const li = document.createElement("li");
     li.className = "file-item" + (f.is_dir ? " file-item-dir" : "");
 
     const nameEl = document.createElement("div");
     nameEl.className = "file-name";
-    nameEl.textContent = f.name || f.path || "";
     nameEl.title = f.path || "";
+    if (f.is_dir) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "btn btn-secondary btn-sm file-folder";
+      open.textContent = `📁 ${f.name || f.path}`;
+      open.setAttribute("aria-label", `Open folder ${f.name || f.path}`);
+      open.addEventListener("click", () => { _filesDir = f.path; renderFileList(_currentFileList); document.querySelector("#files-list .file-up")?.focus(); });
+      nameEl.appendChild(open);
+    } else {
+      nameEl.textContent = f.name || f.path || "";
+    }
     li.appendChild(nameEl);
 
     const metaRow = document.createElement("div");
@@ -2470,6 +2499,7 @@ function renderFileList(files, error) {
       delBtn.className = "btn btn-danger-quiet btn-sm file-delete";
       delBtn.textContent = "Delete";
       delBtn.setAttribute("aria-label", `Delete ${fileName}`);
+      if (_fileDeleting?.path === filePath) { delBtn.disabled = true; delBtn.textContent = "Deleting…"; li.classList.add("file-deleting"); }
       delBtn.addEventListener("click", async () => {
         const printerId = _currentFilePrinterId;
         if (await confirmDialog({
@@ -2478,13 +2508,7 @@ function renderFileList(files, error) {
           confirmLabel: "Delete file",
           danger: true,
         }) && printerId === _currentFilePrinterId) {
-          send({ action: "delete_file", printer_id: _currentFilePrinterId, filename: filePath });
-          toast(`Deleting: ${fileName}`);
-          setTimeout(() => {
-            document.getElementById("files-list").innerHTML = "";
-            document.getElementById("files-loading").style.display = "";
-            send({ action: "list_files", printer_id: _currentFilePrinterId });
-          }, 600);
+          _startFileDelete(printerId, filePath, fileName);
         }
       });
       actions.appendChild(delBtn);
@@ -2496,7 +2520,104 @@ function renderFileList(files, error) {
   }
 
   list.innerHTML = "";
+  list.appendChild(_fileBar());
   list.appendChild(ul);
+}
+
+// Entries for the current folder (or every match when searching), sorted. Folders are the is_dir entries plus any
+// folder implied by a nested path.
+// Every file usually sits under one storage folder (/usb, /local). That folder is the root: it is not shown as a folder.
+function _fileRoot(files) {
+  const norm = p => String(p || "").replace(/^\/+/, "");
+  const parents = files.filter(f => !f.is_dir).map(f => norm(f.path || f.name).split("/").slice(0, -1));
+  if (!parents.length) return "";
+  let common = parents[0];
+  for (const parts of parents) { let i = 0; while (i < common.length && common[i] === parts[i]) i++; common = common.slice(0, i); }
+  return common.join("/");
+}
+function _fileDir(files) {
+  const root = _fileRoot(files), here = String(_filesDir || "").replace(/^\/+/, "");
+  return here.length > root.length && here.startsWith(root) ? here : root;
+}
+function _fileView(files) {
+  const norm = p => String(p || "").replace(/^\/+/, "");
+  const q = _filesQuery.trim().toLowerCase();
+  const byName = (x, y) => String(x.name || x.path).localeCompare(String(y.name || y.path), undefined, { sensitivity: "base", numeric: true });
+  const bySize = (x, y) => (y.size || 0) - (x.size || 0) || byName(x, y);
+  const cmp = _filesSort === "size" ? bySize : byName;
+  if (q) return files.filter(f => !f.is_dir && `${f.name || ""} ${f.path || ""}`.toLowerCase().includes(q)).sort(cmp);
+  const dir = _fileDir(files);
+  const prefix = dir ? `${dir}/` : "";
+  const dirs = new Map(), here = [];
+  for (const f of files) {
+    const path = norm(f.path || f.name);
+    if (prefix && !path.startsWith(prefix)) continue;
+    const rest = path.slice(prefix.length);
+    const slash = rest.indexOf("/");
+    if (slash > 0) dirs.set(rest.slice(0, slash), { is_dir: true, name: rest.slice(0, slash), path: prefix + rest.slice(0, slash) });
+    else if (f.is_dir) { if (rest) dirs.set(rest, { ...f, name: f.name || rest, path }); }
+    else here.push(f);
+  }
+  return [...[...dirs.values()].sort(byName), ...here.sort(cmp)];
+}
+
+function _fileBar() {
+  const bar = document.createElement("div");
+  bar.className = "files-bar";
+  bar.innerHTML = `<label class="files-search"><span class="sr-only">Search files</span><input id="files-search" type="search" placeholder="Search files" value="${escAttr(_filesQuery)}" autocomplete="off"></label>
+    <label class="files-sort"><span>Sort</span><select id="files-sort"><option value="name"${_filesSort === "name" ? " selected" : ""}>Name</option><option value="size"${_filesSort === "size" ? " selected" : ""}>Size, largest first</option></select></label>`;
+  const dir = _fileDir(_currentFileList), root = _fileRoot(_currentFileList);
+  if (dir !== root && !_filesQuery) {
+    const up = document.createElement("div");
+    up.className = "files-path";
+    up.innerHTML = `<button type="button" class="btn btn-secondary btn-sm file-up">‹ Up</button><span>${escHtml(dir.slice(root.length).replace(/^\//, ""))}</span>`;
+    up.querySelector("button").addEventListener("click", () => {
+      const parent = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
+      _filesDir = parent.length > root.length ? parent : "";
+      renderFileList(_currentFileList);
+    });
+    bar.appendChild(up);
+  }
+  const search = bar.querySelector("input"), sort = bar.querySelector("select");
+  search.addEventListener("input", () => {
+    _filesQuery = search.value;
+    const at = search.selectionStart;
+    renderFileList(_currentFileList);
+    const again = document.getElementById("files-search");
+    again?.focus(); again?.setSelectionRange(at, at);
+  });
+  sort.addEventListener("change", () => { _filesSort = sort.value; renderFileList(_currentFileList); document.getElementById("files-sort")?.focus(); });
+  return bar;
+}
+
+// The printer gives no acknowledgement for a delete, so the row stays "Deleting…" until a fresh list no longer has the file.
+function _startFileDelete(printerId, filePath, fileName) {
+  clearTimeout(_fileDeleteTimer);
+  _fileDeleting = { printerId, path: filePath, name: fileName, since: Date.now() };
+  send({ action: "delete_file", printer_id: printerId, filename: filePath });
+  renderFileList(_currentFileList);
+  const poll = () => {
+    if (!_fileDeleting || _fileDeleting.printerId !== _currentFilePrinterId) return;
+    if (Date.now() - _fileDeleting.since > _FILE_DELETE_GIVE_UP_MS) {
+      const name = _fileDeleting.name;
+      _fileDeleting = null;
+      toast(`${name} is still on the printer. It may be in use, or the printer did not accept the delete.`, true);
+      renderFileList(_currentFileList);
+      return;
+    }
+    send({ action: "list_files", printer_id: _currentFilePrinterId });
+    _fileDeleteTimer = setTimeout(poll, _FILE_DELETE_POLL_MS);
+  };
+  _fileDeleteTimer = setTimeout(poll, _FILE_DELETE_POLL_MS);
+}
+
+function _settleFileDelete(files) {
+  if (!_fileDeleting || files.some(f => f.path === _fileDeleting.path)) return;
+  const name = _fileDeleting.name;
+  clearTimeout(_fileDeleteTimer);
+  _fileDeleteTimer = null;
+  _fileDeleting = null;
+  toast(`Deleted ${name}`);
 }
 
 function formatFileSize(bytes) {
