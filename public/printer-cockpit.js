@@ -62,7 +62,7 @@
   const chip = c => `<span class="live-chip${c.cameraUrl ? "" : " offline"}" id="detail-live-chip">${c.cameraUrl ? "● Live" : "○ No signal"}</span>`;
   const fsBtn = () => `<button class="pv-fsbtn" onclick="toggleCameraFullscreen()" aria-label="${isFs() ? "Exit full screen" : "Full screen video"}" title="${isFs() ? "Exit full screen" : "Full screen"}">${isFs() ? "⤡" : "⛶"}</button>`;
   const back = `<button class="pv-back" onclick="returnToPrinterGrid()">‹ All printers</button>`;
-  const title = c => `<span class="status-dot ${c.sc}"></span><b>${escHtml(c.printer.name)}</b><small>${escHtml(c.printer.ip)}</small>`;
+  const title = c => `<span class="status-dot ${c.sc}"></span><b role="heading" aria-level="1">${escHtml(c.printer.name)}</b><small>${escHtml(c.printer.ip)}</small>`;
   const id = c => escAttr(c.printer.id);
 
   const fan = (c, key, label, v) => `
@@ -86,13 +86,13 @@
       <div class="pv-xy">
         <i></i><button onclick="jogPrinter('${id(c)}','Y',1)" ${c.disableMotion}>Y+</button><i></i>
         <button onclick="jogPrinter('${id(c)}','X',-1)" ${c.disableMotion}>X−</button>
-        <button class="home" onclick="homePrinter('${id(c)}','XY')" ${c.disableMotion} aria-label="Home XY">⌂</button>
+        <button class="home" onclick="homePrinter('${id(c)}','XY')" ${c.disableMotion} aria-label="Home X and Y axes">⌂</button>
         <button onclick="jogPrinter('${id(c)}','X',1)" ${c.disableMotion}>X+</button>
         <i></i><button onclick="jogPrinter('${id(c)}','Y',-1)" ${c.disableMotion}>Y−</button><i></i>
       </div>
       <div class="pv-z">
         <button onclick="jogPrinter('${id(c)}','Z',1)" ${c.disableMotion}>Z+</button>
-        <button class="home" onclick="homePrinter('${id(c)}','Z')" ${c.disableMotion} aria-label="Home Z">⌂</button>
+        <button class="home" onclick="homePrinter('${id(c)}','Z')" ${c.disableMotion} aria-label="Home Z axis">⌂</button>
         <button onclick="jogPrinter('${id(c)}','Z',-1)" ${c.disableMotion}>Z−</button>
       </div>
     </div>`;

@@ -1159,7 +1159,7 @@ function renderObjects() {
       <div class="slicer-object-name"><button type="button" class="slicer-object-select" aria-label="Select ${esc(object.name)}" aria-pressed="${chosen}">${esc(object.name)}</button><br>${status}</div>
       ${model?.state === "failed" ? `<button class="btn btn-secondary btn-sm slicer-retry-btn" type="button" data-retry-model="${model.id}" title="Try importing this model again">Retry</button>`
         : overrides ? `<span class="slicer-badge" title="Settings changed for this object">${overrides}</span>` : "<span></span>"}
-      <button class="slicer-icon-btn" type="button" data-remove-object="${object.id}" title="Remove from the plate">✕</button>
+      <button class="slicer-icon-btn" type="button" data-remove-object="${object.id}" title="Remove from the plate" aria-label="Remove ${esc(object.name)} from the plate">✕</button>
     </div>`;
   });
   $("object-list").innerHTML = rows.join("") || '<p class="slicer-muted">No objects on this plate. Add a model or drop STL files on the bed.</p>';
@@ -1291,6 +1291,19 @@ function renderViewport() {
   viewport.setBed(bedLimits(base?.machine), data().bed === "smooth");
   viewport.setObjects(plateObjects(), state.project.models, state.selected);
   viewport.setGroup(state.group.filter(id => plateObjects().some(o => o.id === id)));
+  describeViewport();
+}
+
+// The 3D canvas is a picture to assistive tech: say what is on the plate and what is selected.
+function describeViewport() {
+  const canvas = state.viewport?.renderer?.domElement;
+  if (!canvas || !state.project) return;
+  const objects = plateObjects();
+  const names = selectionIds().map(id => objects.find(o => o.id === id)?.name).filter(Boolean);
+  const plate = data().plates.find(p => p.id === state.plate);
+  const selection = names.length === 0 ? "nothing selected" : names.length === 1 ? names[0] + " selected" : names.length + " objects selected";
+  canvas.setAttribute("role", "img");
+  canvas.setAttribute("aria-label", "3D view of " + (plate?.name || "the plate") + ": " + plural(objects.length, "object") + ", " + selection);
 }
 
 function renderTools() {
@@ -1342,7 +1355,7 @@ function renderObjectPanel() {
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="turn-left" title="Turn each 90° anticlockwise">Turn −90°</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="turn-right" title="Turn each 90° clockwise">Turn +90°</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="flat-all">Lay flat</button>
-      <button class="btn btn-secondary btn-sm" type="button" data-object-action="remove-all">Remove</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-object-action="remove-all" aria-label="Remove the selected objects">Remove</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="single">Select only one</button>
     </div>`;
     return;
@@ -1414,6 +1427,7 @@ function selectObject(id, { additive = false } = {}) {
   if (!state.selected && state.settingsTab === "object") state.settingsTab = "process";
   state.viewport?.select(state.selected);
   state.viewport?.setGroup(state.group);
+  describeViewport();
   renderTools();
   renderObjects();
   renderObjectPanel();
@@ -2323,7 +2337,7 @@ function projectRow(p) {
       <div><strong>${esc(p.name)}</strong>${p.split_id ? '<span class="slicer-tag">from a model upload</span>' : ""}
         <small>${plural(p.plates, "plate")} · ${plural(p.objects, "object")} · edited ${new Date(p.updated_at * 1000).toLocaleString()}</small>
         <div class="pd-chips">${projectChips(p)}</div></div>
-      <button class="btn btn-primary btn-sm" type="button" data-open-project="${p.id}">Open</button>
+      <button class="btn btn-primary btn-sm" type="button" data-open-project="${p.id}" aria-label="Open ${esc(p.name)}">Open</button>
       <button class="btn btn-danger-quiet btn-sm project-delete" type="button" data-delete-project="${p.id}" aria-label="Delete ${esc(p.name)}">Delete</button>
     </div>`;
 }

@@ -186,3 +186,19 @@ if (typeof applyJobs === "function") {
 setInterval(() => { if (!document.hidden && !document.body.classList.contains("view-projects")) loadDashboard(); }, 5000);
 syncShellView();
 loadDashboard();
+
+// ─── Side nav: exactly one item is aria-current="page" ──────────────────────
+// Panels opened from the nav (History, Spools) win over the page behind them; otherwise Projects or Printers.
+function syncNavCurrent() {
+  const nav = document.querySelector("nav.sidenav");
+  if (!nav) return;
+  const items = [...nav.querySelectorAll(".sidenav-item")];
+  const order = ["btn-history", "btn-spools", "btn-slicer", "btn-printers-nav"];
+  const current = order.map(id => document.getElementById(id)).find(el => el?.classList.contains("active"));
+  for (const item of items) {
+    if (item === current) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  }
+}
+new MutationObserver(syncNavCurrent).observe(document.querySelector("nav.sidenav"), { subtree: true, attributes: true, attributeFilter: ["class"] });
+syncNavCurrent();

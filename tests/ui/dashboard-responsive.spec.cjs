@@ -231,6 +231,43 @@ const viewports = [
     if (!toastPass) process.exitCode = 1;
     await page.close();
 
+    // Accessible names and landmarks: no two buttons in one list share a name; one aria-current in the nav
+    for (const [width, height] of [[1098, 507], [390, 844]]) {
+      const a11y = await browser.newPage({ viewport: { width, height }, serviceWorkers: "block" });
+      await a11y.routeWebSocket(/.*/, ws => ws.close());
+      await a11y.route("**/api/**", route => route.fulfill({ json: {} }));
+      await a11y.goto(baseUrl);
+      const found = await a11y.evaluate(() => {
+        const mk = (id, name) => ({ id, name, ip: "192.0.2." + id.length, connected: true, printer_type: "cc1", status: {}, camera_url: null });
+        printers.alpha = mk("alpha", "Alpha");
+        printers.bravo = mk("bravo", "Bravo");
+        document.getElementById("printer-grid").style.display = "grid";
+        renderPrinter(printers.alpha); renderPrinter(printers.bravo);
+        _renderSettingsPrinters?.();
+        const dupes = [];
+        const lists = [...document.querySelectorAll("#printer-grid, #settings-printers-list, .settings-printer-list, nav.sidenav")];
+        for (const list of lists) {
+          const rows = [...list.querySelectorAll("button, a[href]")].filter(el => el.getClientRects().length);
+          const names = rows.map(el => (el.getAttribute("aria-label") || el.textContent).trim().replace(/s+/g, " "));
+          const seen = new Set();
+          for (const n of names) { if (seen.has(n) && !/^(Camera|Expand|Collapse)/i.test(n)) dupes.push(n); seen.add(n); }
+        }
+        const nav = document.querySelector("nav.sidenav");
+        return { dupes, current: nav.querySelectorAll("[aria-current=page]").length,
+          navLabel: nav.getAttribute("aria-label"), h1: [...document.querySelectorAll("h1")].filter(el => el.getClientRects().length).length,
+          navNames: [...nav.querySelectorAll(".sidenav-item")].map(el => el.getAttribute("aria-label")),
+          skip: document.querySelector(".skip-link")?.getAttribute("href") === "#main" && !!document.getElementById("main") };
+      });
+      await a11y.locator("#btn-slicer").click();
+      await a11y.waitForFunction(() => document.getElementById("btn-slicer").classList.contains("active"));
+      const projectsCurrent = await a11y.evaluate(() => [...document.querySelectorAll("nav.sidenav [aria-current=page]")].map(el => el.id));
+      const a11yPass = found.dupes.length === 0 && found.current === 1 && found.navLabel === "Main" && found.h1 === 1 && found.skip
+        && found.navNames.every(Boolean) && projectsCurrent.join() === "btn-slicer";
+      console.log(`${width}x${height} Accessible names ${a11yPass ? "PASS" : "FAIL"}`, JSON.stringify({ found, projectsCurrent }));
+      if (!a11yPass) process.exitCode = 1;
+      await a11y.close();
+    }
+
     // Hit targets at 768 px with a coarse pointer: every listed control is at least 44 px each way, and nothing overflows.
     for (const [width, height] of [[768, 1024], [1098, 507]]) {
       const context = await browser.newContext({ viewport: { width, height }, hasTouch: true, serviceWorkers: "block" });
