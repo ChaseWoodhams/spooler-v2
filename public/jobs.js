@@ -5,8 +5,8 @@
 const JOB_READY_CODES = [0, 8, 9, 14]; // PrintInfo.Status values that let a new job start
 const JOB_OPEN_STATES = ["queued", "starting", "printing"];
 const JOB_STATE_LABEL = {
-  queued: "Queued", starting: "Starting", printing: "Printing", completed: "Completed",
-  cancelled: "Cancelled", failed: "Failed", unknown: "Outcome unknown",
+  queued: "Queued", starting: "Starting", printing: "Printing", completed: OUTCOME_LABEL.completed,
+  cancelled: OUTCOME_LABEL.cancelled, failed: OUTCOME_LABEL.failed, unknown: OUTCOME_LABEL.unknown,
 };
 const JOB_STATE_CLASS = {
   queued: "idle", starting: "warmingup", printing: "printing", completed: "complete",
@@ -206,7 +206,7 @@ function queueSection(title, list, render, emptyText) {
 function jobTitle(job) {
   return `<div class="job-title-row">
     <span class="job-name" title="${_jobAttr(job.file_name)}">${escHtml(job.name)}</span>
-    <span class="status-badge ${JOB_STATE_CLASS[job.state]}">${JOB_STATE_LABEL[job.state]}</span>
+    ${OUTCOME_KIND[job.state] ? outcomeBadge(job.state) : `<span class="status-badge ${JOB_STATE_CLASS[job.state]}">${JOB_STATE_LABEL[job.state]}</span>`}
   </div>`;
 }
 

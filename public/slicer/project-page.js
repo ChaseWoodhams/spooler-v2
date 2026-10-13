@@ -8,7 +8,7 @@
 
 const STATUS = {
   unsliced: "Not sliced", sliced: "Sliced", waiting: "Waiting on plate", queued: "Queued",
-  printing: "Printing", printed_ok: "Printed OK", failed: "Failed",
+  printing: "Printing", printed_ok: OUTCOME_LABEL.completed, failed: OUTCOME_LABEL.failed,
 };
 const BAR_ORDER = ["printed_ok", "unsliced", "sliced", "waiting", "queued", "printing", "failed"];  // plate order is never status order
 const POLL_MS = 4000;
@@ -66,7 +66,7 @@ function duration(seconds) {
   return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes} min`;
 }
 
-const chip = s => `<span class="pp-chip st-${s}"><i class="pp-dot st-${s}"></i>${STATUS[s]}</span>`;
+const chip = s => s === "printed_ok" || s === "failed" ? statusBadge(s === "failed" ? "failed" : "completed") : `<span class="pp-chip st-${s}"><i class="pp-dot st-${s}"></i>${STATUS[s]}</span>`;
 const printerName = id => printers.find(p => p.id === id)?.name || "";
 const plateOf = id => status?.plates.find(p => p.id === id);
 
@@ -76,10 +76,10 @@ function header() {
   const grams = progress.filament_g;
   const waiting = c.queued + c.waiting, toSlice = c.sliced + c.unsliced;
   return `<div class="pp-card pp-progress">
-    <div class="pp-progress-head"><b>${progress.printed_ok} of ${plural(progress.total, "plate")} printed</b>
+    <div class="pp-progress-head"><b>${progress.printed_ok} of ${plural(progress.total, "plate")} completed</b>
       <span class="slicer-muted">${c.unsliced} unsliced · ${c.sliced} sliced · ${c.queued} queued Jobs · ${c.waiting} held Jobs · ${c.printing} printing · ${c.printed_ok} completed · ${c.failed} failed</span></div>
     <p class="slicer-muted">${progress.outcome_unknown ?? 'Unavailable:'} latest Outcome unknown${progress.outcome_unknown === 1 ? '' : 's'}${progress.outcome_unknown ? ' — verify these Prints in History. This overlaps the Plate status counts above; it is not another completed Plate.' : ''}</p>
-    <div class="pp-bar" role="img" aria-label="${progress.printed_ok} of ${progress.total} plates printed">${BAR_ORDER.map(s =>
+    <div class="pp-bar" role="img" aria-label="${progress.printed_ok} of ${progress.total} plates completed">${BAR_ORDER.map(s =>
       `<i class="st-${s}" style="width:${progress.total ? c[s] / progress.total * 100 : 0}%" title="${STATUS[s]}: ${c[s]}"></i>`).join("")}</div>
     ${filament(grams)}
   </div>`;
@@ -131,7 +131,7 @@ function printerCards() {
 
 // What a Plate is doing, in words, from its open Job (a Print with no Job reads "printing now")
 const JOB_WORD = { printing: "printing now", queued: "in the queue", starting: "starting to print" };
-const PLATE_WORD = { unsliced: "needs slicing", sliced: "sliced", printed_ok: "printed OK", failed: "failed", waiting: "in the queue", queued: "in the queue", printing: "printing now" };
+const PLATE_WORD = { unsliced: "needs slicing", sliced: "sliced", printed_ok: "completed", failed: "failed", waiting: "in the queue", queued: "in the queue", printing: "printing now" };
 const GROUPS = [["attention", "Needs attention"], ["printing", "Printing"], ["queued", "Queued"], ["ready", "Ready"], ["done", "Done"]];
 
 /** Sort every Plate into one board group, with the words that describe it and (for Needs attention) why. */

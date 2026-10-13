@@ -39,7 +39,7 @@ async function open(browser, { remembered = null, refuse = false } = {}) {
     });
     const count = status => out.filter(r => r.status === status).length;
     const summary = { models: out.length, objects: out.length, split: count('split'), fits: count('fits'), check_units: 0, analysing: 0, failed: 0, can_create: out.length > 0 };
-    summary.steps = (summary.split ? ['split'] : []).concat(['plates', 'slice', 'queue']);
+    summary.steps = (summary.split ? ['split'] : []).concat(['plates', 'slice', 'print']);
     return { rows: out, summary };
   };
   const plates = preset => {

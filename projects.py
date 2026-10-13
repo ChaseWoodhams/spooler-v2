@@ -235,6 +235,21 @@ def list_projects(include_quick: bool = False) -> list:
         for row in conn.execute("SELECT project_id, state, COUNT(*) AS n FROM jobs WHERE project_id IS NOT NULL "
                                 "AND state IN ('queued', 'starting', 'printing') GROUP BY project_id, state"):
             open_jobs.setdefault(row["project_id"], {})[row["state"]] = row["n"]
+        busy_plates = {(r["project_id"], r["plate_id"]) for r in conn.execute(
+            "SELECT project_id, plate_id FROM jobs WHERE project_id IS NOT NULL AND plate_id IS NOT NULL "
+            "AND state IN ('queued', 'starting', 'printing')")}
+        latest = {}   # (project, plate) → outcome of its latest known Print, as plate_status() reads it
+        for r in conn.execute("SELECT project_id, plate_id, outcome FROM prints WHERE project_id IS NOT NULL "
+                              "AND plate_id IS NOT NULL ORDER BY started_at, id"):
+            if r["outcome"] != "unknown":
+                latest[(r["project_id"], r["plate_id"])] = r["outcome"]
+    done = {}   # project id → {"printed_ok": n, "failed": n}
+    for (pid, plate), outcome in latest.items():
+        if (pid, plate) in busy_plates:
+            continue
+        kind = "printed_ok" if outcome == "completed" else "failed" if outcome in ("failed", "cancelled") else None
+        if kind:
+            done.setdefault(pid, {"printed_ok": 0, "failed": 0})[kind] += 1
     out = []
     for record in map(_to_project, rows):
         data = record["data"]
@@ -245,6 +260,7 @@ def list_projects(include_quick: bool = False) -> list:
                     "plates": len(data.get("plates", [])), "objects": len(data.get("objects", [])), "models": len(record["models"]),
                     "sliced": slices.count(SLICED), "slicing": sum(s in (QUEUED, SLICING) for s in slices),
                     "queued": jobs_here.get("queued", 0), "printing": jobs_here.get("starting", 0) + jobs_here.get("printing", 0),
+                    "printed_ok": done.get(record["id"], {}).get("printed_ok", 0), "failed": done.get(record["id"], {}).get("failed", 0),
                     "busy": any(m["state"] == IMPORTING for m in record["models"])
                     or any(s.get("state") in (QUEUED, SLICING) for s in record["slices"].values())})
     return out

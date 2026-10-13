@@ -2266,3 +2266,30 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
   input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; }
   .file-actions { flex-wrap: wrap; }
 }
+
+/* ─── Outcome status badges (status-badge.js): icon + label, own colours ──────── */
+:root { --st-completed: #2dd4bf; --st-failed: #fb7185; --st-cancelled: #94a3b8; --st-unconfirmed: #c4b5fd; --st-unknown: #cbd5e1; --st-printing: #7dd3fc; --toggle-on: #38bdf8; }
+body.light-mode { --st-completed: #0f766e; --st-failed: #be123c; --st-cancelled: #475569; --st-unconfirmed: #6d28d9; --st-unknown: #334155; --st-printing: #0369a1; --toggle-on: #0369a1; --toggle-tick: #fff; }
+.outcome-badge { --c: var(--text-muted); color: var(--c); background: color-mix(in srgb, var(--c) 16%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 45%, transparent); }
+.outcome-badge .sb-icon { width: 12px; height: 12px; flex-shrink: 0; }
+.outcome-badge.sb-completed   { --c: var(--st-completed); }
+.outcome-badge.sb-failed      { --c: var(--st-failed); }
+.outcome-badge.sb-cancelled   { --c: var(--st-cancelled); }
+.outcome-badge.sb-unconfirmed { --c: var(--st-unconfirmed); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 70%, transparent); border-style: dashed; }
+.outcome-badge.sb-unknown     { --c: var(--st-unknown); }
+.outcome-badge.sb-printing    { --c: var(--st-printing); }
+.pd-chip .sb-icon { width: 11px; height: 11px; vertical-align: -1px; margin-right: 3px; }
+.pd-chip.sb-completed { color: var(--st-completed); border-color: var(--st-completed); }
+.pd-chip.sb-failed { color: var(--st-failed); border-color: var(--st-failed); }
+
+/* Health pill: an icon shape per state (the dot alone was colour only), at every width */
+.health-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.health-pill[data-state="ok"] .health-icon { color: var(--green); }
+.health-pill[data-state="warn"] .health-icon { color: var(--yellow); }
+.health-pill[data-state="down"] .health-icon { color: var(--red); }
+.health-pill[data-state="unknown"] .health-icon { color: var(--text-muted); }
+
+/* "On" toggles are not the primary-button orange, and carry a tick as well as the knob position */
+.toggle-switch input:checked + .toggle-slider, .detail-toggle.active { background: var(--toggle-on); }
+.toggle-switch input:checked + .toggle-slider::after { content: ""; position: absolute; left: 9px; top: 6px; width: 5px; height: 9px; border: solid var(--toggle-tick, #0b1220); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.detail-toggle.active span { background: #fff; }

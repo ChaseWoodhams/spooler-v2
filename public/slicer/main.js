@@ -2358,8 +2358,10 @@ const projectChips = p => {
   if (p.printing) chips.push(["busy", p.printing === 1 ? "Printing" : `${p.printing} printing`]);
   if (p.queued) chips.push(["go", `${p.queued} in the queue`]);
   if (p.sliced && !p.queued && !p.printing) chips.push(["go", p.sliced === p.plates ? "All plates sliced" : `${p.sliced} of ${plural(p.plates, "plate")} sliced`]);
+  if (p.printed_ok) chips.push(["sb-completed", `${p.printed_ok} completed`, "completed"]);
+  if (p.failed) chips.push(["sb-failed", `${p.failed} failed`, "failed"]);
   if (!p.sliced && !p.slicing && !p.queued && !p.printing) chips.push(["", p.objects ? "Not sliced yet" : "Empty"]);
-  return chips.map(([kind, text]) => `<span class="pd-chip ${kind}">${esc(text)}</span>`).join("");
+  return chips.map(([kind, text, icon]) => `<span class="pd-chip ${kind}">${icon ? statusIcon(icon) : ""}${esc(text)}</span>`).join("");
 };
 
 function projectRow(p) {

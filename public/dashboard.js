@@ -87,7 +87,7 @@ function renderNeedsYou() {
     const next = item.next_job ? ` Next up: ${escHtml(item.next_job.file_name || "queued job")}.` : "";
     return `<div class="needs-row">
       <div class="needs-text"><strong>${escHtml(item.printer_name)}</strong>: ${escHtml(print.file_name || "print")} ${_outcomeWord(print)}
-        <span class="needs-sub">${ok ? "Printed OK? Clear the bed to continue." : "Check the print, then clear the bed."}${next}</span></div>
+        <span class="needs-sub">${ok ? "Check it printed fine, then clear the bed to continue." : "Check the print, then clear the bed."}${next}</span></div>
       <div class="needs-actions">
         <button class="btn btn-primary" onclick="confirmBedCleared('${pid}')">${ok ? "Printed OK · Bed cleared" : "Bed cleared"}</button>
         ${ok ? "" : `<button class="btn btn-secondary" onclick="dashOpenUnconfirmed()">Set outcome</button>`}
@@ -117,7 +117,7 @@ function renderDashProjects() {
     <a class="dash-project" href="#projects=${p.id}">
       <span class="dash-project-name">${escHtml(p.name)}</span>
       <span class="dash-project-bar"><span style="width:${p.percent}%"></span></span>
-      <span class="dash-project-count">${p.printed_ok} of ${p.total} printed</span>
+      <span class="dash-project-count">${p.printed_ok} of ${p.total} completed</span>
     </a>`).join("");
 }
 
