@@ -217,8 +217,10 @@ function _featureColor(name) {
 
 function _setReviewView(view) {
   if (_review) _review.view = view;
-  document.getElementById("review-view-3d").classList.toggle("active", view === "3d");
-  document.getElementById("review-view-layer").classList.toggle("active", view === "layer");
+  for (const [id, on] of [["review-view-3d", view === "3d"], ["review-view-layer", view === "layer"]]) {
+    const b = document.getElementById(id);
+    b.classList.toggle("active", on); b.setAttribute("aria-pressed", String(on));
+  }
 }
 
 function drawReview() {

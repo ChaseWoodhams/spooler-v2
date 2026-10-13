@@ -3,8 +3,7 @@
 "use strict";
 
 const HISTORY_PAGE = 50;
-const PRINT_OUTCOME_LABEL = { completed: "Completed", cancelled: "Cancelled", failed: "Failed", unknown: "Outcome unknown" };
-const PRINT_OUTCOME_CLASS = { completed: "complete", cancelled: "cancelled", failed: "offline", unknown: "paused" };
+const PRINT_OUTCOME_LABEL = OUTCOME_LABEL; // the one Outcome vocabulary (status-badge.js)
 
 // The reason ids and labels live on the backend (GET /api/failure-reasons); loadFailureReasons() fetches them once.
 let _failureReasons = { cancel_reasons: [], labels: {} };
@@ -152,8 +151,8 @@ function historyItem(p) {
         ${p.quick && p.thumbnail ? `<img class="history-thumb" src="${_histAttr(p.thumbnail)}" alt="" loading="lazy" onerror="this.remove()">` : ""}${p.color_hex ? `<span class="history-swatch" style="background:#${_safeColor(p.color_hex)}"></span>` : ""}${escHtml(p.quick && p.project_name ? p.project_name : p.file_name)}${p.quick ? ` <span class="history-quick">Quick print</span>` : ""}
       </span>
       <span class="history-printer">${escHtml(p.printer_name)}</span>
-      <span class="status-badge ${p.outcome ? PRINT_OUTCOME_CLASS[p.outcome] : "printing"}">${escHtml(printOutcomeLabel(p.outcome))}</span>
-      ${p.outcome_unconfirmed ? `<span class="status-badge paused" title="Reported by the printer, not confirmed by you">Unconfirmed</span>` : ""}
+      ${outcomeBadge(p.outcome)}
+      ${p.outcome_unconfirmed ? unconfirmedBadge() : ""}
       <span class="history-stats">${escHtml(stats.join(" · "))}</span>
     </button>
     ${open ? historyDetail(p) : ""}

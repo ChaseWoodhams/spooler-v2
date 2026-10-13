@@ -49,6 +49,14 @@ function systemIssues() {
   return issues;
 }
 
+// A shape per state so the pill never relies on colour: tick = ok, triangle = warning, cross = down, question mark = unknown
+const HEALTH_ICON = {
+  ok: '<circle cx="12" cy="12" r="9"/><path d="m8 12.5 3 3 5-6"/>',
+  warn: '<path d="M12 3.5 22 20H2z"/><path d="M12 10v4.5"/><circle cx="12" cy="17.3" r=".6"/>',
+  down: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/>',
+  unknown: '<circle cx="12" cy="12" r="9"/><path d="M9.7 9.6a2.4 2.4 0 1 1 3.4 2.1c-.7.4-1.1.8-1.1 1.6"/><circle cx="12" cy="16.8" r=".6"/>',
+};
+
 function renderSystemHealth() {
   const issues = systemIssues();
   const pill  = document.getElementById("btn-system-health");
@@ -56,6 +64,7 @@ function renderSystemHealth() {
   const level = issues.length ? issues[0].level
     : (_wsConnected && systemStatus) ? "ok" : "unknown";
   pill.dataset.state = level;
+  document.getElementById("health-pill-icon").innerHTML = HEALTH_ICON[level] || HEALTH_ICON.unknown;
   label.textContent = issues.length
     ? issues[0].text + (issues.length > 1 ? ` +${issues.length - 1}` : "")
     : level === "ok" ? "All systems OK" : "Connecting…";

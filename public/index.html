@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=64" />
+  <link rel="stylesheet" href="style.css?v=65" />
   <link rel="stylesheet" href="history-quality.css?v=1" />
   <script src="net.js?v=1"></script>
   <script src="modal.js?v=1"></script>
@@ -26,7 +26,7 @@
     </div>
     <div class="header-actions">
       <button id="btn-system-health" class="health-pill" data-state="unknown" title="System health" aria-label="System health: Connecting">
-        <span class="health-dot"></span>
+        <svg id="health-pill-icon" class="health-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"></svg>
         <span id="health-pill-label" class="health-pill-label" role="status" aria-live="polite">Connecting…</span>
       </button>
       <button id="btn-discover" class="btn btn-secondary" title="Auto-discover printers on network">
@@ -821,16 +821,17 @@
   <div id="toast-area" role="status" aria-live="polite"></div>
 
   <script src="/config.js"></script>
-  <script src="health.js?v=2"></script>
-  <script src="jobs.js?v=11"></script>
-  <script src="preview.js?v=2"></script>
-  <script src="history.js?v=8"></script>
+  <script src="status-badge.js?v=1"></script>
+  <script src="health.js?v=3"></script>
+  <script src="jobs.js?v=12"></script>
+  <script src="preview.js?v=3"></script>
+  <script src="history.js?v=9"></script>
   <script src="outcome-prompt.js?v=6"></script>
-  <script src="app.js?v=71"></script>
+  <script src="app.js?v=72"></script>
   <script src="quick-print.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
   <script src="import.js?v=7"></script>
-  <script src="dashboard.js?v=9"></script>
+  <script src="dashboard.js?v=10"></script>
   <script src="printer-cockpit.js?v=4"></script>
   <script>
     if ("serviceWorker" in navigator) {
