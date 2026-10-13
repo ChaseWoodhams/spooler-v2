@@ -169,12 +169,12 @@ function renderSystemHealthDetail() {
 }
 
 function openSystemHealth() {
-  document.getElementById("modal-system-health").classList.add("open");
+  openModal(document.getElementById("modal-system-health"), { opener: document.activeElement });
   renderSystemHealthDetail();
 }
 
 function closeSystemHealth() {
-  document.getElementById("modal-system-health").classList.remove("open");
+  closeModal(document.getElementById("modal-system-health"));
 }
 
 document.getElementById("btn-system-health").addEventListener("click", openSystemHealth);

@@ -5,6 +5,7 @@ const http = require('node:http');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const root = path.resolve(__dirname, '../..');
+const publicDir = process.env.UI_PUBLIC_DIR || path.join(root, 'public'); // override to run the guard against another checkout
 const printer = { id: 'operator-fixture', name: 'Operator fixture printer', ip: '192.0.2.10',
   printer_type: 'cc1', connected: true, camera_url: null,
   status: { PrintInfo: { Status: 0 }, TempOfNozzle: 22, TempOfHotbed: 21, TempTargetNozzle: 0, TempTargetHotbed: 0 } };
@@ -16,11 +17,11 @@ async function waitForFixture(predicate, name) {
   assert.ok(predicate(), `${name} was requested within 5 seconds`);
 }
 function assertReadOnlyCommands(fixture) {
-  const readOnly = new Set(['list_printers', 'get_printer_files']);
+  const readOnly = new Set(['list_printers', 'get_printer_files', 'list_files']);
   assert.deepEqual(fixture.commands.filter(command => !readOnly.has(command.action)), [], 'All printer messages must be read-only');
 }
-async function fixturePage(browser, baseUrl, width) {
-  const context = await browser.newContext({ viewport: { width, height: 900 }, serviceWorkers: 'block' });
+async function fixturePage(browser, baseUrl, width, height = 900) {
+  const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
   const page = await context.newPage();
   page.on("pageerror", error => console.error("Operator browser error:", error.message));
   const fixture = { page, context, commands: [], sockets: [], inventory: [], inventoryMode: 'ready', assignmentFail: true,
@@ -48,6 +49,9 @@ async function fixturePage(browser, baseUrl, width) {
       fixture.inventory[0].location = request.postDataJSON().location;
       return route.fulfill({ json: fixture.inventory[0] });
     }
+    if (url.pathname === '/api/outcome-prompts') return route.fulfill({ json: { awaiting: [{ printer_id: 'operator-fixture',
+      printer_name: 'Operator fixture printer', print_id: 7, file_name: 'fixture.gcode', reported_outcome: 'completed', duration_s: 3600, quick: true }] } });
+    if (url.pathname === '/api/failure-reasons') return route.fulfill({ json: { failure_reasons: ['spaghetti', 'adhesion'], labels: { spaghetti: 'Spaghetti', adhesion: 'Lifted off the bed' } } });
     if (url.pathname === '/api/filament-meta') {
       if (fixture.catalogueMode === 'loading') await new Promise(resolve => { fixture.catalogueRelease = resolve; });
       if (fixture.catalogueMode === 'error') return route.fulfill({ status: 503, json: { error: 'Fixture catalogue unavailable' } });
@@ -322,11 +326,96 @@ async function notificationRecovery(fixture) {
   assert.equal(fixture.notificationPosts, 0);
   console.log(`Notification read failure/retry preserves saved rules PASS ${page.viewportSize().width}`);
 }
+// Dialog foundation: every modal has dialog semantics, a name, a focus trap, topmost-only Escape, focus restore and a reachable primary action.
+const dialogJob = { id: 'job-1', name: 'Fixture job', file_name: 'fixture.gcode', source: 'upload', printer_id: null, state: 'queued', print_opts: {} };
+const dialogOpeners = {
+  'modal-files': "openFileBrowser('operator-fixture')",
+  'modal-print-opts': "openPrintOpts('/fixture/a.gcode', 'a.gcode')",
+  'modal-scanner': 'openScanner()',
+  'modal-changelog': 'openChangelog()',
+  'modal-system-health': 'openSystemHealth()',
+  'modal-job': `openJobEditor({ mode: 'edit', job: ${JSON.stringify(dialogJob)} })`,
+  'modal-review': `openReview(${JSON.stringify(dialogJob)})`,
+  'modal-spool-picker': "openModal(document.getElementById('modal-spool-picker'))",
+  'modal-add-spool': "openModal(document.getElementById('modal-add-spool'))",
+  'modal-app-settings': "openModal(document.getElementById('modal-app-settings'))",
+  'outcome-prompt': "OutcomePrompt.open('operator-fixture')",
+};
+async function dialogs(fixture) {
+  const { page } = fixture;
+  const size = page.viewportSize();
+  await page.evaluate(() => {
+    const b = document.createElement('button'); b.id = 't-opener'; b.textContent = 'opener';
+    b.style.cssText = 'position:fixed;left:0;bottom:0;z-index:1'; document.body.appendChild(b);
+  });
+  const opener = page.locator('#t-opener');
+  const state = id => page.evaluate(id => {
+    const el = id === 'outcome-prompt' ? document.querySelector('.outcome-prompt') : document.getElementById(id);
+    return el && { open: el.classList.contains('open'), role: el.getAttribute('role'), modal: el.getAttribute('aria-modal'),
+      name: (el.getAttribute('aria-labelledby') ? document.getElementById(el.getAttribute('aria-labelledby'))?.textContent : el.getAttribute('aria-label')) || '',
+      inside: el.contains(document.activeElement), onOpener: document.activeElement?.id === 't-opener' };
+  }, id);
+  const selector = id => id === 'outcome-prompt' ? '.outcome-prompt' : '#' + id;
+  for (const [id, call] of Object.entries(dialogOpeners)) {
+    if (process.env.DIALOG_ONLY && process.env.DIALOG_ONLY !== id) continue;
+    await opener.focus();
+    await page.evaluate(call);
+    await page.waitForFunction(sel => document.querySelector(sel)?.classList.contains('open'), selector(id));
+    const opened = await state(id);
+    assert.equal(opened.role, 'dialog', id + ' role');
+    assert.equal(opened.modal, 'true', id + ' aria-modal');
+    assert.ok(opened.name.trim(), id + ' has an accessible name');
+    assert.equal(opened.inside, true, id + ' moves focus inside');
+    for (let i = 0; i < 25; i++) {
+      await page.keyboard.press(i % 5 === 4 ? 'Shift+Tab' : 'Tab');
+      assert.equal((await state(id)).inside, true, id + ' Tab stays inside (' + i + ')');
+    }
+    // the primary action must be reachable without scrolling the page
+    const reach = await page.evaluate(sel => {
+      const el = document.querySelector(sel);
+      const bar = [...el.querySelectorAll('.modal-actions')].find(a => a.getClientRects().length);
+      const btn = (bar && ([...bar.querySelectorAll('.btn-primary')].find(b => b.getClientRects().length) || bar.querySelector('button')))
+        || el.querySelector('[data-op="ok"]');
+      const r = btn.getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, w: innerWidth, h: innerHeight, box: el.querySelector('.modal-box').getBoundingClientRect().toJSON() };
+    }, selector(id));
+    assert.ok(reach.top >= 0 && reach.bottom <= reach.h + 0.5 && reach.left >= 0 && reach.right <= reach.w + 0.5,
+      `${id} primary action inside ${size.width}x${size.height}: ${JSON.stringify(reach)}`);
+    assert.ok(reach.box.left >= 0 && reach.box.right <= reach.w + 0.5, id + ' box fits the width');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(sel => !document.querySelector(sel)?.classList.contains('open'), selector(id));
+    assert.equal((await page.evaluate(() => document.activeElement.id)), 't-opener', id + ' restores focus to the opener');
+  }
+  // Escape closes the topmost layer only: Print options over Files, then Files
+  await opener.focus();
+  await page.evaluate("openFileBrowser('operator-fixture')");
+  await page.evaluate("openPrintOpts('/fixture/a.gcode', 'a.gcode')");
+  await page.keyboard.press('Escape');
+  assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('.modal.open')].map(m => m.id)), ['modal-files']);
+  await page.keyboard.press('Escape');
+  assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('.modal.open')].map(m => m.id)), []);
+  // a scanner over the Spools panel closes first; the panel stays
+  await page.evaluate('openSpools()');
+  await page.evaluate('openScanner()');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate(() => document.getElementById('modal-scanner').classList.contains('open')), false);
+  assert.equal(await page.evaluate(() => document.getElementById('panel-spools').classList.contains('open')), true, 'Spools panel stays open');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.evaluate(() => document.getElementById('panel-spools').classList.contains('open')), false);
+  // plate buttons expose the selection
+  await page.evaluate("_setPrintPlate(1)");
+  assert.equal(await page.locator('#print-plate-smooth').getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('#print-plate-textured').getAttribute('aria-pressed'), 'false');
+  await page.evaluate("setJobPlate(false)");
+  assert.equal(await page.locator('#job-plate-textured').getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('#job-plate-smooth').getAttribute('aria-pressed'), 'false');
+  console.log(`Dialog foundation PASS ${size.width}x${size.height}`);
+}
 (async () => {
   const server = http.createServer(async (request, response) => {
     try {
       const pathname = new URL(request.url, 'http://localhost').pathname;
-      const filename = path.join(root, 'public', pathname === '/' ? 'index.html' : pathname);
+      const filename = path.join(publicDir, pathname === '/' ? 'index.html' : pathname);
       const content = await fs.readFile(filename);
       response.setHeader('Content-Type', filename.endsWith('.js') ? 'text/javascript' : filename.endsWith('.css') ? 'text/css' : 'text/html');
       response.end(content);
@@ -335,11 +424,15 @@ async function notificationRecovery(fixture) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const browser = await chromium.launch();
   try {
-    for (const width of [320, 390, 430, 768, 1440]) {
+    for (const width of process.env.DIALOG_ONLY ? [] : [320, 390, 430, 768, 1440]) {
       for (const scenario of [cockpit, inventory, settings, notificationRecovery, pushDeliveryWarning]) {
         const fixture = await fixturePage(browser, `http://127.0.0.1:${server.address().port}`, width);
         try { await scenario(fixture); assertReadOnlyCommands(fixture); } finally { await fixture.context.close(); }
       }
+    }
+    for (const [width, height] of [[390, 844], [1098, 507]]) {
+      const fixture = await fixturePage(browser, `http://127.0.0.1:${server.address().port}`, width, height);
+      try { await dialogs(fixture); assertReadOnlyCommands(fixture); } finally { await fixture.context.close(); }
     }
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
