@@ -15,7 +15,9 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import locale
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,6 +41,8 @@ MODEL_SUFFIXES  = (".stl", ".obj", ".3mf")
 RECENT_LIMIT    = 30
 NO_WINDOW       = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 REQUIRED_MODULES = ("manifold3d", "trimesh", "numpy", "scipy", "networkx")
+GUIDE_MODULES    = ("reportlab",)          # only the Assembly guide needs these; without them only Generate is off
+PAPER_SIZES      = ("a4", "letter")
 
 ANALYZING, PLANNING, READY, CHECKING = "analyzing", "planning", "ready", "checking"
 SPLITTING, SPLIT, QUEUED, FAILED     = "splitting", "split", "queued", "failed"
@@ -87,6 +91,21 @@ def missing_modules() -> list:
     return [name for name in REQUIRED_MODULES if importlib.util.find_spec(name) is None]
 
 
+def missing_guide_modules() -> list:
+    return [name for name in GUIDE_MODULES if importlib.util.find_spec(name) is None]
+
+
+def system_locale() -> str | None:
+    """The machine's language and region, e.g. "en_US" or "English_United States" (patched in tests)."""
+    return locale.getlocale()[0] or os.environ.get("LC_ALL") or os.environ.get("LANG")
+
+
+def default_paper() -> str:
+    """Letter for a US locale, A4 for everything else."""
+    name = (system_locale() or "").replace("-", "_")
+    return "letter" if name.startswith("en_US") or "United States" in name else "a4"
+
+
 def init() -> None:
     database.migrate()
     missing = missing_modules()
@@ -96,7 +115,10 @@ def init() -> None:
 
 def status() -> dict:
     missing = missing_modules()
-    return {"available": not missing, "missing": missing, "defaults": DEFAULT_SETTINGS,
+    guide_missing = missing_guide_modules()
+    guide = {"available": not guide_missing, "missing": guide_missing, "default_paper": default_paper(), "papers": list(PAPER_SIZES),
+             "hint": f"Install {', '.join(guide_missing)} to make the Assembly guide (pip install -r requirements.txt)" if guide_missing else ""}
+    return {"available": not missing, "missing": missing, "guide": guide, "defaults": DEFAULT_SETTINGS,
             "model_types": list(MODEL_SUFFIXES), "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024)}
 
 
@@ -391,6 +413,7 @@ def delete_split(split_id: int) -> None:
         conn.execute("DELETE FROM splits WHERE id = ?", (split_id,))
     shutil.rmtree(work_dir(split_id), ignore_errors=True)
     _progress.pop(split_id, None)
+    _guide_progress.pop(split_id, None)
 
 
 def file_path(split_id: int, kind: str) -> Path:
@@ -433,6 +456,153 @@ def assembly_plan(split_id: int) -> dict:
     plan = planner.build_plan(model).to_dict()
     _plans[split_id] = (stamp, plan)
     return plan
+
+
+# ── The Assembly guide ─────────────────────────────────────────────────────────
+#
+# A guide is a background job tracked apart from the split's own state: guide.json holds a small status record
+# (generating, ready or failed, with the stage text), guide.pdf the finished PDF, guide_meta.json when it was made, for
+# which plan code and paper size, and guide_plan.json the plan it was made from. A new try replaces them only once it
+# has succeeded; a failed try keeps the PDF from before.
+
+_guide_progress: dict = {}   # split id → {"stage": text, "percent": n} while a guide is being made
+
+
+def _guide_file(split_id: int, name: str) -> Path:
+    return work_dir(split_id) / name
+
+
+def _write_json(path: Path, record: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(record, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _guide_blocker(split_id: int) -> str:
+    """Why a guide cannot be made right now ("" when it can)."""
+    missing = missing_guide_modules()
+    if missing:
+        return f"The PDF library is not installed. Install {', '.join(missing)} (pip install -r requirements.txt)."
+    if get_split(split_id)["state"] not in (SPLIT, QUEUED):
+        return "Split the model first."
+    try:
+        plan = assembly_plan(split_id)
+    except jobs.JobError as e:
+        return str(e)
+    if not plan["ok"]:
+        return f"{plan['headline']}: {plan['failure']['message']}"
+    return ""
+
+
+def guide_status(split_id: int) -> dict:
+    """The guide job's state, the PDF on disk (date, plan code, paper, out of date) and why Generate is off, if it is."""
+    get_split(split_id)
+    work = work_dir(split_id)
+    record = _read(work, "guide.json") or {}
+    meta = _read(work, "guide_meta.json")
+    has_pdf = bool(meta) and (work / "guide.pdf").is_file()
+    state_name = record.get("state") or ("ready" if has_pdf else "none")
+    status = {"state": state_name, "stage": None, "percent": None, "error": record.get("error"),
+              "has_pdf": has_pdf, "paper": None, "generated_at": None, "plan_code": None,
+              "out_of_date": False, "blocked": _guide_blocker(split_id)}
+    if state_name == "generating":
+        progress = _guide_progress.get(split_id) or {}
+        status["stage"] = progress.get("stage") or record.get("stage") or "Waiting to start"
+        status["percent"] = progress.get("percent", 0)
+        status["paper"] = record.get("paper")
+    if has_pdf:
+        status.update(paper=meta["paper"], generated_at=meta["generated_at"], plan_code=meta["plan_code"])
+        try:
+            current = assembly_plan(split_id)
+            status["out_of_date"] = not current["ok"] or current["code"] != meta["plan_code"]
+        except jobs.JobError:
+            status["out_of_date"] = True
+    return status
+
+
+def start_guide(split_id: int, body: dict | None = None) -> dict:
+    """Queue the Assembly guide for a finished split. Never changes the split's own state."""
+    body = body or {}
+    _require(split_id, (SPLIT, QUEUED), "make the Assembly guide")
+    paper = str(body.get("paper") or default_paper()).lower()
+    if paper not in PAPER_SIZES:
+        raise jobs.JobError("Paper must be A4 or Letter")
+    blocked = _guide_blocker(split_id)
+    if blocked:
+        raise jobs.JobError(blocked, 409)
+    if (_read(work_dir(split_id), "guide.json") or {}).get("state") == "generating":
+        raise jobs.JobError("The guide is already being made", 409)
+    _write_json(_guide_file(split_id, "guide.json"), {"state": "generating", "paper": paper, "stage": "Waiting to start",
+                                                    "started_at": time.time()})
+    _guide_progress[split_id] = {"stage": "Waiting to start", "percent": 0}
+    notify_worker()
+    return guide_status(split_id)
+
+
+def guide_path(split_id: int) -> tuple:
+    """The stored PDF and its download name: "<model name> - assembly guide.pdf"."""
+    record = get_split(split_id)
+    path = _guide_file(split_id, "guide.pdf")
+    if not path.is_file():
+        raise jobs.JobError("The guide hasn't been made yet", 404)
+    name = re.sub(r'[^ -~]|["\\/:*?<>|]', "_", Path(record["source_name"]).stem).strip() or "model"
+    return path, f"{name} - assembly guide.pdf"
+
+
+def _make_guide(split_id: int) -> None:
+    """Build the guide PDF for a split whose guide.json says generating. Blocking."""
+    import assembly_pdf   # imports reportlab, so only when a guide is really made
+
+    def progress(stage: str, percent: int) -> None:
+        _guide_progress[split_id] = {"stage": stage, "percent": percent}
+
+    work = work_dir(split_id)
+    record = _read(work, "guide.json") or {}
+    paper = record.get("paper") if record.get("paper") in PAPER_SIZES else default_paper()
+    progress("Planning the build", 2)
+    plan = assembly_plan(split_id)
+    if not plan["ok"]:
+        raise jobs.JobError(plan["headline"])
+    data = assembly_pdf.GuideData(model_name=Path(get_split(split_id)["source_name"]).stem, split_id=split_id,
+                                  plan=plan, paper=paper)
+    tmp = work / "guide.pdf.tmp"
+    pages = assembly_pdf.render_guide(tmp, data, progress)
+    os.replace(tmp, work / "guide.pdf")
+    _write_json(work / "guide_plan.json", plan)
+    _write_json(work / "guide_meta.json", {"plan_code": plan["code"], "paper": paper, "generated_at": time.time(),
+                                           "pages": pages, "bytes": (work / "guide.pdf").stat().st_size})
+
+
+def _next_guide_job() -> int | None:
+    root = splits_dir()
+    if not root.is_dir():
+        return None
+    for folder in sorted((p for p in root.iterdir() if p.name.isdigit()), key=lambda p: int(p.name)):
+        if (_read(folder, "guide.json") or {}).get("state") == "generating":
+            return int(folder.name)
+    return None
+
+
+async def process_next_guide() -> bool:
+    """Make one waiting Assembly guide. Returns False when none is waiting. A guide interrupted by a restart runs again."""
+    split_id = _next_guide_job()
+    if split_id is None:
+        return False
+    _guide_progress[split_id] = {"stage": "Starting", "percent": 1}
+    await broadcast()
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, _make_guide, split_id)
+    except Exception as e:
+        message = str(e) or type(e).__name__
+        if work_dir(split_id).is_dir():
+            _write_json(_guide_file(split_id, "guide.json"), {"state": "failed", "error": message, "failed_at": time.time()})
+        print(f"[Split] #{split_id} guide failed: {message}")
+    else:
+        _write_json(_guide_file(split_id, "guide.json"), {"state": "ready"})
+    _guide_progress.pop(split_id, None)
+    await broadcast()
+    return True
 
 
 # ── Sending parts to the queue ─────────────────────────────────────────────────
@@ -526,7 +696,7 @@ async def process_next() -> bool:
         row = conn.execute(f"SELECT id, state, created_at FROM splits WHERE state IN ({', '.join('?' * len(STAGE_FOR))}) "
                            "ORDER BY updated_at, id LIMIT 1", tuple(STAGE_FOR)).fetchone()
     if row is None:
-        return False
+        return await process_next_guide()
     split_id, current, created_at = row["id"], row["state"], row["created_at"]
     stage = STAGE_FOR[current]
     _progress[split_id] = {"stage": stage, "percent": 0, "message": "Starting…"}

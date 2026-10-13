@@ -1096,6 +1096,11 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._send_file(splits.file_path(split_id, parts[4]), "application/octet-stream")
             elif len(parts) == 5 and parts[4] == "assembly-plan":
                 self._json(splits.assembly_plan(split_id))
+            elif len(parts) == 5 and parts[4] == "guide":
+                self._json(splits.guide_status(split_id))
+            elif len(parts) == 5 and parts[4] == "guide.pdf":
+                path, name = splits.guide_path(split_id)
+                self._send_file(path, "application/pdf", download_name=name)
             elif len(parts) == 6 and parts[4] == "parts" and parts[5].endswith(".stl") and parts[5][:-4].isdigit():
                 path, name = splits.part_path(split_id, int(parts[5][:-4]))
                 self._send_file(path, "model/stl", download_name=name)
@@ -1140,6 +1145,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             "split":    lambda: splits.request_split(self._job_id()),
             "retry":    lambda: splits.retry(self._job_id()),
             "queue":    lambda: splits.queue_parts(self._job_id(), self._json_body()),
+            "guide":    lambda: splits.start_guide(self._job_id(), self._json_body()),
         }
         action = parts[4] if len(parts) == 5 else None
         if action not in actions:

@@ -298,7 +298,7 @@ function detail() {
   }
   if (plate.status === "failed") actions.push(btn("reprint", "Reprint", true, ' title="Send this Plate again from its stored G-code"'));
   actions.push(btn("open", "Open in Plates", false));
-  if (host.hasAssembly?.()) actions.push(btn("assembly", "Assembly order", false, ' title="Which parts join in what order, from the Split step"'));
+  if (host.hasAssembly?.()) actions.push(btn("assembly", "Assembly guide", false, ' title="Instructions for putting the parts together, from the Split step"'));
   const job = plate.job_id ? allJobs.find(j => j.id === plate.job_id) : null;
   const holds = job?.holds || [];
   const holdName = h => h.after_job_id != null ? `Job ${esc(allJobs.find(j => j.id === h.after_job_id)?.name || h.after_job_id)}`
