@@ -2,7 +2,7 @@
 #panel-history .history-row { gap: 8px; }
 #panel-history .history-save-feedback { margin: 0; min-height: 1.4em; color: var(--text); overflow-wrap: anywhere; }
 #panel-history .history-save-feedback.error { color: var(--danger, #f87171); }
-#panel-history button:focus-visible, #panel-history summary:focus-visible, #panel-history input:focus-visible, #panel-history select:focus-visible, #panel-history textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#panel-history button:focus-visible, #panel-history summary:focus-visible, #panel-history input:focus-visible, #panel-history select:focus-visible, #panel-history textarea:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 #panel-history .history-events li { overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   #panel-history .history-row { grid-template-columns: minmax(0, 1fr) auto; padding: 14px 12px; }
