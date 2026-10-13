@@ -26,6 +26,7 @@ import threading
 import time
 from pathlib import Path
 
+import assembly_edits as edits
 import assembly_plan as planner
 import database
 import jobs  # used as a module: jobs.JobError, …
@@ -436,26 +437,95 @@ def part_path(split_id: int, number: int) -> tuple:
 
 # ── The assembly plan ──────────────────────────────────────────────────────────
 
-_plans: dict = {}   # split id → (files' modification times, plan dict)
+_plans: dict = {}   # split id → (files' modification times, planning record)
 
 
-def assembly_plan(split_id: int) -> dict:
-    """How the split goes together (Sections, steps), or why it cannot be assembled as cut. Read-only and cached."""
+def _planning(split_id: int) -> dict:
+    """The model, the automatic plan and the plan to use (edits applied when they are valid). Cached; read-only."""
     get_split(split_id)
     work = work_dir(split_id)
     result = _read(work, "result.json")
     if not result:
         raise jobs.JobError("Split the model first", 409)
     stamp = tuple((work / name).stat().st_mtime_ns if (work / name).is_file() else 0
-                  for name in ("result.json", "cuts.json", "parts_preview.bin"))
+                  for name in ("result.json", "cuts.json", "parts_preview.bin", edits.FILE))
     cached = _plans.get(split_id)
     if cached and cached[0] == stamp:
         return cached[1]
     cuts = result.get("cuts") or (_read(work, "cuts.json") or {}).get("cuts") or []
     model = planner.SplitModel(result, cuts, planner.read_preview(work / "parts_preview.bin"))
-    plan = planner.build_plan(model).to_dict()
-    _plans[split_id] = (stamp, plan)
-    return plan
+    auto = planner.build_plan(model)
+    record = {"model": model, "auto": auto, "plan": auto.to_dict(), "edits": [], "state": "none", "reason": "", "failed": None}
+    saved = edits.load(work)
+    if saved and saved["edits"]:
+        record["edits"] = saved["edits"]
+        record["state"], record["reason"] = "outdated", "The cuts or parts have changed since these edits were made."
+        if auto.ok and saved.get("fingerprint") == model.fingerprint:
+            done = edits.replay(model, auto.plan, saved["edits"])
+            if done.ok:
+                record["state"], record["reason"] = "applied", ""
+                record["plan"] = planner.PlanResult(plan=done.plan).to_dict()
+            else:
+                index, _edit, refused = done.dropped[0]
+                record["failed"], record["reason"] = index, f"Edit {index + 1} no longer works: {refused}"
+    if auto.ok:
+        record["plan"]["edits"] = {"state": record["state"], "count": len(record["edits"]), "reason": record["reason"], "failed": record["failed"]}
+    _plans[split_id] = (stamp, record)
+    return record
+
+
+def assembly_plan(split_id: int) -> dict:
+    """How the split goes together (Sections, steps), or why it cannot be assembled as cut. Read-only and cached.
+    Saved edits are applied when they still match the split and pass the validator; otherwise the automatic plan is
+    served and `edits.state` says "outdated"."""
+    return _planning(split_id)["plan"]
+
+
+def assembly_edits(split_id: int) -> dict:
+    """The saved edit list, whether it applies, and the plan it gives."""
+    record = _planning(split_id)
+    return {"state": record["state"], "count": len(record["edits"]), "edits": record["edits"], "reason": record["reason"],
+            "failed": record["failed"], "plan": record["plan"]}
+
+
+def _edit_base(split_id: int) -> dict:
+    _require(split_id, (SPLIT, QUEUED), "edit the plan")
+    record = _planning(split_id)
+    if not record["auto"].ok:
+        raise jobs.JobError("The plan has to work as cut before it can be edited.", 409)
+    if record["state"] == "outdated":
+        raise jobs.JobError("Your edits no longer match this split. Discard them or try to keep them first.", 409)
+    return record
+
+
+def edit_plan(split_id: int, body: dict | None = None) -> dict:
+    """Apply one edit ({"op": "move"|"reorder"|"reset"}) and save the edit list with the split, or refuse it with the reason."""
+    body = body or {}
+    work = work_dir(split_id)
+    if body.get("op") == "reset":
+        get_split(split_id)
+        edits.reset(work)
+        _plans.pop(split_id, None)
+        return assembly_edits(split_id)
+    record = _edit_base(split_id)
+    edit = body
+    if body.get("op") == "reorder" and "order" not in body:
+        edit = edits.reorder_for_step(record["model"], record["auto"].plan, record["edits"], body.get("parts") or [], str(body.get("direction")))
+    _plan, stored = edits.apply_edit(record["model"], record["auto"].plan, record["edits"], edit)
+    edits.save(work, record["model"].fingerprint, record["edits"] + [stored])
+    _plans.pop(split_id, None)
+    return assembly_edits(split_id)
+
+
+def edit_receivers(split_id: int, parts) -> dict:
+    """Where a part or finished Section can be moved to; only receivers the step validator accepts are listed."""
+    record = _edit_base(split_id)
+    try:
+        parts = sorted({int(p) for p in parts if str(p).strip()})
+    except ValueError:
+        raise jobs.JobError("Part numbers must be numbers") from None
+    found = edits.valid_receivers(record["model"], record["auto"].plan, record["edits"], parts)
+    return {"parts": parts, "receivers": found}
 
 
 # ── The Assembly guide ─────────────────────────────────────────────────────────
@@ -564,7 +634,7 @@ def _make_guide(split_id: int) -> None:
     if not plan["ok"]:
         raise jobs.JobError(plan["headline"])
     data = assembly_pdf.GuideData(model_name=Path(get_split(split_id)["source_name"]).stem, split_id=split_id,
-                                  plan=plan, paper=paper)
+                                  plan=plan, paper=paper, plan_line=edits.plan_line(plan.get("edits")))
     tmp = work / "guide.pdf.tmp"
     pages = assembly_pdf.render_guide(tmp, data, progress)
     os.replace(tmp, work / "guide.pdf")

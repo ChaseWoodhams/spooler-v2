@@ -969,7 +969,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             else:
                 result = fn()
         except jobs.JobError as e:
-            self._json({"error": str(e)}, e.status)
+            self._json({"error": str(e), **getattr(e, "extra", {})}, e.status)
             return
         if broadcast and not coroutine:
             jobs.broadcast_threadsafe()
@@ -1096,6 +1096,12 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._send_file(splits.file_path(split_id, parts[4]), "application/octet-stream")
             elif len(parts) == 5 and parts[4] == "assembly-plan":
                 self._json(splits.assembly_plan(split_id))
+            elif len(parts) == 5 and parts[4] == "plan-edits":
+                query = urllib.parse.parse_qs(self.path.partition("?")[2])
+                if query.get("receivers_for"):
+                    self._json(splits.edit_receivers(split_id, query["receivers_for"][0].split(",")))
+                else:
+                    self._json(splits.assembly_edits(split_id))
             elif len(parts) == 5 and parts[4] == "guide":
                 self._json(splits.guide_status(split_id))
             elif len(parts) == 5 and parts[4] == "guide.pdf":
@@ -1146,6 +1152,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             "retry":    lambda: splits.retry(self._job_id()),
             "queue":    lambda: splits.queue_parts(self._job_id(), self._json_body()),
             "guide":    lambda: splits.start_guide(self._job_id(), self._json_body()),
+            "plan-edits": lambda: splits.edit_plan(self._job_id(), self._json_body()),
         }
         action = parts[4] if len(parts) == 5 else None
         if action not in actions:
