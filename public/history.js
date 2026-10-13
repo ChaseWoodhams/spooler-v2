@@ -214,7 +214,11 @@ function historyDetail(p) {
 // (and Reprint its stored G-code); without them the Print stays in History and the buttons are disabled.
 function quickPrintButtons(p) {
   const gone = "The hidden project for this quick print is gone";
-  const button = (action, label, why) => `<button class="btn btn-secondary btn-sm" data-history-action="${action}" data-print-id="${p.id}"${why ? ` disabled title="${_histAttr(why)}"` : ""}>${label}</button>`;
+  // aria-disabled (not disabled) keeps the button focusable, so a keyboard user reaches the reason that sits under it
+  const button = (action, label, why) => {
+    const reasonId = `qp-why-${p.id}-${action}`;
+    return `<span class="qp-action"><button class="btn btn-secondary btn-sm" data-history-action="${action}" data-print-id="${p.id}"${why ? ` aria-disabled="true" aria-describedby="${reasonId}"` : ""}>${label}</button>${why ? `<small class="reason-line" id="${reasonId}">${_histAttr(why)}</small>` : ""}</span>`;
+  };
   const reprintWhy = !p.outcome ? "Still printing" : !p.reprint_available ? (p.project_available ? "The stored G-code for this print is gone" : gone) : "";
   const openWhy = p.project_available ? "" : gone;
   const changeWhy = !p.outcome ? "Still printing" : openWhy;
@@ -273,7 +277,7 @@ document.getElementById("history-list").addEventListener("click", async (e) => {
   }
 
   const btn = e.target.closest("[data-history-action]");
-  if (!btn) return;
+  if (!btn || btn.getAttribute("aria-disabled") === "true") return;
   const id = Number(btn.dataset.printId);
   const record = historyPrints.find(p => p.id === id);
   if (!record) return;
