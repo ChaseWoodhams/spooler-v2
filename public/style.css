@@ -139,6 +139,11 @@ header {
 .btn-danger { background: #b91c1c; color: #fff; }
 .btn-danger:hover:not(:disabled) { background: #dc2626; }
 
+/* Destructive actions that sit beside a primary row: outlined, not filled, and held apart from it (confirm-dialog.js asks before any of them runs) */
+.btn-danger-quiet { background: transparent; color: var(--red); border: 1px solid var(--red); }
+.btn-danger-quiet:hover:not(:disabled) { background: var(--red); color: #fff; }
+.danger-zone { margin-top: 12px; padding-top: 16px; border-top: 1px solid var(--border); display: flex; }
+
 .btn-sm { padding: 5px 10px; font-size: 12px; }
 
 /* ─── App body + side navigation ─────────────────────────────────────────── */
@@ -635,6 +640,10 @@ main {
   border-top: 1px solid var(--border);
 }
 @media (max-width: 640px) { .modal-box { --modal-pad: 20px; } .modal-actions { flex-wrap: wrap; } }
+/* confirmDialog (confirm-dialog.js): above every other modal, and inside an open native <dialog> when it is asked from one */
+.confirm-dialog { z-index: 300; }
+.confirm-dialog .modal-box { width: min(420px, 100% - 32px); }
+.confirm-body { margin: 0; font-size: 14px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
 .input-hint { font-size: 11px; color: var(--text-muted); margin-top: -2px; }
 .settings-readonly {
   display: block;
@@ -1338,6 +1347,7 @@ body.panel-open { overflow: hidden; }
   gap: 6px;
   flex-shrink: 0;
 }
+.file-actions .file-delete { margin-left: 18px; }
 
 
 /* ─── Footer ──────────────────────────────────────────────────────────────── */

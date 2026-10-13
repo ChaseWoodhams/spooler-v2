@@ -407,7 +407,11 @@ async function act(name, button) {
     await host.api("POST", `/api/projects/${host.projectId()}/plates/${selected}/reprint`, {});
     host.toast(`${plate.name} is back in the queue`);
   } else if (name === "copy") {
-    if (!confirm(`${plate.name} is already ${plate.status === "printing" ? "printing" : "in the queue"}. Send another copy?`)) return;
+    if (!await confirmDialog({
+      title: `Send another copy of ${plate.name}?`,
+      body: `${plate.name} is already ${plate.status === "printing" ? "printing" : "in the queue"}. Another copy is queued as well.`,
+      confirmLabel: "Send another copy",
+    })) return;
     const result = await host.sendPlates([plate.id], { ...sendOpts, again: true });
     if (result) host.toast(`Sent another copy of ${plate.name}`);
   } else if (name === "accept-warnings") {

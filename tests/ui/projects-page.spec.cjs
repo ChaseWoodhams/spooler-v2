@@ -108,8 +108,15 @@ async function open(browser, { projects = PROJECTS, search = '' } = {}) {
       const { page, server } = await open(browser);
       const list = page.locator('#project-list');
       await list.getByText('Bracket set').waitFor({ timeout: 8000 });
-      page.once('dialog', dialog => dialog.accept());
-      await list.locator('.slicer-project-row', { hasText: 'Bracket set' }).getByRole('button', { name: 'Delete' }).click();
+      const row = list.locator('.slicer-project-row', { hasText: 'Bracket set' });
+      await row.getByRole('button', { name: 'Delete' }).click();
+      const confirmBox = page.getByRole('dialog', { name: /Delete the Project Bracket set/ });
+      await confirmBox.waitFor();
+      assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Cancel', 'focus starts on Cancel');
+      await confirmBox.getByRole('button', { name: 'Cancel' }).click();
+      assert.deepEqual(server.calls.filter(c => c.method === 'DELETE'), [], 'Cancel deletes nothing');
+      await row.getByRole('button', { name: 'Delete' }).click();
+      await confirmBox.getByRole('button', { name: 'Delete Project', exact: true }).click();
       await page.waitForFunction(() => !document.getElementById('project-list').innerText.includes('Bracket set'));
       assert.deepEqual(server.calls.filter(c => c.method === 'DELETE').map(c => c.path), ['/api/projects/9']);
       console.log('PASS: Delete removes the project from the page');

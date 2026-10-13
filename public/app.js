@@ -1043,6 +1043,12 @@ document.addEventListener("change", event => {
   if (event.target.matches('#printer-detail input[type="range"]')) _cockpitDraftValues.delete(event.target.id);
 });
 
+// The Remove printer buttons sit in a .danger-zone of their own, apart from Add/Save; show or hide the zone with its button.
+function showDangerZone(buttonId, show) {
+  const button = document.getElementById(buttonId);
+  if (button) (button.closest(".danger-zone") || button).style.display = show ? "" : "none";
+}
+
 function setJogStep(step) {
   _detailJogStep = step;
   if (_activePrinterId && printers[_activePrinterId]) renderPrinterDetail(printers[_activePrinterId]);
@@ -1052,9 +1058,14 @@ function jogPrinter(printerId, axis, direction) {
   send({ action: "move_axis", printer_id: printerId, axis, step: _detailJogStep * direction });
 }
 
-function homePrinter(printerId, axis) {
+async function homePrinter(printerId, axis) {
   const label = axis === "XYZ" ? "all axes" : axis === "XY" ? "the X and Y axes" : `the ${axis} axis`;
-  if (!confirm(`Home ${label}? Make sure the build chamber is clear before continuing.`)) return;
+  const name = printers[printerId]?.name || "this printer";
+  if (!await confirmDialog({
+    title: `Home ${label} on ${name}?`,
+    body: "The print head and bed will move. Make sure the build chamber is clear first.",
+    confirmLabel: axis === "XYZ" ? "Home all axes" : `Home ${axis}`,
+  })) return;
   send({ action: "home_axes", printer_id: printerId, axis });
 }
 
@@ -1062,7 +1073,7 @@ function setPrinterFan(printerId, fan, speed) {
   send({ action: "set_fan", printer_id: printerId, fan, speed });
 }
 
-function setPrinterTemperature(printerId, target, inputId) {
+async function setPrinterTemperature(printerId, target, inputId) {
   const input = document.getElementById(inputId);
   if (!input || input.value === "") return;
   const value = Number(input.value);
@@ -1070,7 +1081,12 @@ function setPrinterTemperature(printerId, target, inputId) {
     input.reportValidity();
     return;
   }
-  if (value > 0 && !confirm(`Set the ${target} target to ${value} °C?`)) return;
+  const heater = target === "bed" ? "heated bed" : target;
+  if (value > 0 && !await confirmDialog({
+    title: `Set the ${heater} target to ${value} °C on ${printers[printerId]?.name || "this printer"}?`,
+    body: `The ${heater} starts heating straight away.`,
+    confirmLabel: `Heat ${heater}`,
+  })) return;
   send({ action: "set_temperature", printer_id: printerId, target, value });
 }
 
@@ -1109,16 +1125,26 @@ function setSpeed(id, speed) {
   send({ action: "set_speed", printer_id: id, speed });
 }
 
-function confirmStop(id) {
-  if (confirm("Stop the current print? This cannot be undone.")) {
-    send({ action: "stop", printer_id: id });
-  }
+async function confirmStop(id) {
+  const printer = printers[id];
+  const progress = printer ? getProgress(printer) : null;
+  const file = printer ? getFilename(printer).split("/").pop() : "";
+  const done = progress == null ? "" : ` (${progress}% done)`;
+  if (await confirmDialog({
+    title: `Stop the print on ${printer?.name || "this printer"}?`,
+    body: `${file ? `${file}${done}` : `The current print${done}`} ends now. A stopped print cannot be resumed.`,
+    confirmLabel: "Stop print",
+    danger: true,
+  })) send({ action: "stop", printer_id: id });
 }
 
-function removePrinter(id) {
-  if (confirm("Remove this printer?")) {
-    send({ action: "remove_printer", printer_id: id });
-  }
+async function removePrinter(id) {
+  if (await confirmDialog({
+    title: `Remove ${printers[id]?.name || "this printer"}?`,
+    body: "This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.",
+    confirmLabel: "Remove printer",
+    danger: true,
+  })) send({ action: "remove_printer", printer_id: id });
 }
 
 function openPrinterSettings(id) {
@@ -1156,7 +1182,7 @@ function openPrinterSettings(id) {
   document.getElementById("printer-panel-divider").style.display = "none";
   document.getElementById("printer-form-label").textContent = "Printer details";
   document.getElementById("btn-modal-confirm").innerHTML = "Save Changes";
-  document.getElementById("btn-remove-printer").style.display = "";
+  showDangerZone("btn-remove-printer", true);
 
   openPrinters();
   document.getElementById("input-name").focus();
@@ -1389,7 +1415,7 @@ function _settingsEditPrinter(id) {
   ac.removeAttribute("aria-invalid");
   document.getElementById("settings-edit-access-code-error").hidden = true;
 
-  document.getElementById("btn-settings-printer-remove").style.display = isNew ? "none" : "";
+  showDangerZone("btn-settings-printer-remove", !isNew);
   document.getElementById("btn-settings-printer-save").textContent = isNew ? "Add Printer" : "Save";
 
   _showSettingsPage(_settingsPrinterEditPage);
@@ -1463,10 +1489,16 @@ document.getElementById("btn-settings-printer-save")?.addEventListener("click", 
   _renderSettingsPrinters();
   _showSettingsPage(_settingsPrintersPage);
 });
-document.getElementById("btn-settings-printer-remove")?.addEventListener("click", () => {
+document.getElementById("btn-settings-printer-remove")?.addEventListener("click", async () => {
   if (!_settingsEditingPrinterId) return;
   const name = printers[_settingsEditingPrinterId]?.name || "this printer";
-  if (!confirm(`Remove ${name}? This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.`)) return;
+  if (!await confirmDialog({
+    title: `Remove ${name}?`,
+    body: "This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.",
+    confirmLabel: "Remove printer",
+    danger: true,
+  })) return;
+  if (!_settingsEditingPrinterId) return;
   send({ action: "remove_printer", printer_id: _settingsEditingPrinterId });
   _renderSettingsPrinters();
   _showSettingsPage(_settingsPrintersPage);
@@ -1765,7 +1797,7 @@ function resetPrinterForm() {
   document.getElementById("btn-modal-confirm").innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <path d="M12 5v14M5 12h14"/>
   </svg> Add Printer`;
-  document.getElementById("btn-remove-printer").style.display = "none";
+  showDangerZone("btn-remove-printer", false);
 }
 
 inputType.addEventListener("change", () => {
@@ -1882,10 +1914,15 @@ document.getElementById("btn-modal-confirm").addEventListener("click", () => {
   closePrinters();
 });
 
-document.getElementById("btn-remove-printer").addEventListener("click", () => {
+document.getElementById("btn-remove-printer").addEventListener("click", async () => {
   if (!_editingPrinterId) return;
   const name = printers[_editingPrinterId]?.name || "this printer";
-  if (confirm(`Remove ${name}? This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.`)) {
+  if (await confirmDialog({
+    title: `Remove ${name}?`,
+    body: "This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.",
+    confirmLabel: "Remove printer",
+    danger: true,
+  }) && _editingPrinterId) {
     send({ action: "remove_printer", printer_id: _editingPrinterId });
     closePrinters();
   }
@@ -1995,10 +2032,17 @@ function renderFileList(files, error) {
       }
 
       const delBtn = document.createElement("button");
-      delBtn.className = "btn btn-danger btn-sm";
+      delBtn.className = "btn btn-danger-quiet btn-sm file-delete";
       delBtn.textContent = "Delete";
-      delBtn.addEventListener("click", () => {
-        if (confirm(`Delete "${fileName}"?`)) {
+      delBtn.setAttribute("aria-label", `Delete ${fileName}`);
+      delBtn.addEventListener("click", async () => {
+        const printerId = _currentFilePrinterId;
+        if (await confirmDialog({
+          title: `Delete ${fileName}?`,
+          body: `It is deleted from ${printers[printerId]?.name || "the printer"}'s storage. This cannot be undone.`,
+          confirmLabel: "Delete file",
+          danger: true,
+        }) && printerId === _currentFilePrinterId) {
           send({ action: "delete_file", printer_id: _currentFilePrinterId, filename: filePath });
           toast(`Deleting: ${fileName}`);
           setTimeout(() => {
@@ -2475,10 +2519,16 @@ function linkTray(printerId, trayId, spoolId) {
 }
 
 async function deleteSpool(spoolId) {
-  if (!confirm("Remove this spool?")) return;
+  const spool = spools.find(s => s.id == spoolId);
+  const spoolName = [spool?.filament?.vendor?.name, spool?.filament?.name, spool?.filament?.material].filter(Boolean).join(" ") || `spool #${spoolId}`;
+  if (!await confirmDialog({
+    title: `Remove ${spoolName}?`,
+    body: "This also deletes its filament entry in Spoolman (unless another spool uses it), and the brand when no other filament uses it.",
+    confirmLabel: "Remove spool",
+    danger: true,
+  })) return;
   try {
     // Find the filament/vendor IDs before deleting the spool
-    const spool = spools.find(s => s.id == spoolId);
     const filamentId = spool?.filament?.id;
     const vendorId   = spool?.filament?.vendor?.id;
 
@@ -2534,12 +2584,12 @@ document.getElementById("btn-import-filaments").addEventListener("click", async 
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.status);
     if (d.created > 0) {
-      alert(`✓ Imported ${d.created} ELEGOO filaments into Spoolman.\n\nYou can now create spools from these in Spoolman UI or when adding a spool here.`);
+      toast(`Imported ${d.created} ELEGOO filaments into Spoolman. Create spools from them when you add a spool.`);
     } else {
-      alert(`All ${d.total} ELEGOO filaments are already in Spoolman (${d.skipped} skipped).`);
+      toast(`All ${d.total} ELEGOO filaments are already in Spoolman (${d.skipped} skipped).`);
     }
   } catch (e) {
-    alert("Import failed: " + e.message);
+    toast("Import failed: " + e.message, true);
   } finally {
     btn.disabled = false;
     btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

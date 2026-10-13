@@ -183,6 +183,7 @@ body.slicer-page a.btn { text-decoration: none; }
 .slicer-project-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; margin-top: 8px; }
 .slicer-project-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
 .slicer-project-row small { display: block; color: var(--text-muted); }
+.slicer-project-row .project-delete { margin-left: 20px; }
 
 @media (max-width: 900px) {
   body.slicer-page { overflow: auto; height: auto; }
@@ -302,6 +303,8 @@ body.slicer-page a.btn { text-decoration: none; }
   .slicer-project-row > :first-child { grid-column: 1 / -1; min-width: 0; }
   .slicer-project-row > span:empty { display: none; }
   .slicer-project-row > .btn { width: 100%; min-height: 44px; justify-content: center; }
+  .slicer-project-row > [data-open-project] { grid-column: 1 / -1; }
+  .slicer-project-row .project-delete { grid-column: 1 / -1; margin: 10px 0 0; }
 
   .slicer-dialog-actions {
     display: grid;
