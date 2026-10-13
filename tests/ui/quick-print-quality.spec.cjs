@@ -75,13 +75,13 @@ const { chromium } = playwright;
  await page.getByRole('button',{name:'Check again',exact:true}).focus();
  await page.keyboard.press('Shift+Tab');
  assert.ok(await page.locator('#modal-review').evaluate(el=>el.contains(document.activeElement)));
- assert.equal(await page.locator('#modal-review input[type=checkbox]:visible').count(),1,'one acknowledgement checkbox');
- assert.equal(await page.getByRole('button',{name:'Start print',exact:true}).isDisabled(),true,'Start waits for the acknowledgement');
- assert.match(await page.locator('#review-ack-text').innerText(),/reviewed the warnings.*build plate is clear/,'one tick covers the warnings and the bed');
+ await page.getByRole('checkbox',{name:/I have reviewed the preflight warnings/}).check();
+ assert.equal(await page.getByRole('button',{name:'Start print',exact:true}).isDisabled(),true,'Warnings alone must not confirm bed clear');
  await page.locator('#review-ack').check();
  assert.equal(await page.getByRole('button',{name:'Start print',exact:true}).isEnabled(),true);
  await page.getByRole('button',{name:'Check again',exact:false}).click();
  assert.equal(await page.locator('#review-ack').isChecked(),false,'Rechecking resets bed confirmation');
+ assert.equal(await page.getByRole('checkbox',{name:/I have reviewed the preflight warnings/}).isChecked(),false);
  await page.keyboard.press('Escape');assert.equal(await page.locator('#btn-queue').evaluate(el=>el===document.activeElement),true);
  console.log('PASS: model/G-code review, summaries, warning reset, blockers, phone layouts');
  }finally{await browser.close();await new Promise(r=>server.close(r));}

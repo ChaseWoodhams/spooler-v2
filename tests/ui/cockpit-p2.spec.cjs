@@ -182,7 +182,7 @@ async function open(browser, base, { width = 1098, height = 507, camera = false,
       console.log('PASS: A delete that never happens reports an error');
     }
 
-    // PS-19: one acknowledgement, one wording, a text alternative and a named nozzle Save
+    // PS-19: separate warnings and bed ticks, one wording, a text alternative and a named nozzle Save
     {
       const fx = await open(browser, base);
       const { page } = fx;
@@ -190,11 +190,12 @@ async function open(browser, base, { width = 1098, height = 507, camera = false,
         checks: [{ id: 'nozzle', level: 'info', title: 'Nozzle', detail: 'Unknown' }, { id: 'x', level: 'warn', title: 'Thin walls', detail: 'Check them' }], preview: null };
       await page.evaluate(() => openReview({ id: 1, name: 'cube.gcode', file_name: 'cube.gcode', printer_id: 'p1', source: 'upload' }));
       await page.locator('#review-check-list .review-check.warn').waitFor();
-      assert.equal(await page.locator('#modal-review input[type=checkbox]:visible').count(), 1, 'one acknowledgement checkbox');
-      assert.match(await page.locator('#review-ack-text').innerText(), /reviewed the warnings.*build plate is clear/);
-      assert.equal(await page.locator('#btn-review-start').isDisabled(), true);
+      assert.equal(await page.locator('#modal-review input[type=checkbox]:visible').count(), 2, 'warnings and bed are separate ticks');
+      assert.match(await page.locator('#review-warnings-label').innerText(), /does not confirm the bed is clear/);
       await page.locator('#review-ack').check();
-      assert.equal(await page.locator('#btn-review-start').isDisabled(), false, 'one tick enables Start');
+      assert.equal(await page.locator('#btn-review-start').isDisabled(), true, 'the bed tick alone does not cover the warnings');
+      await page.locator('#review-warnings-ack').check();
+      assert.equal(await page.locator('#btn-review-start').isDisabled(), false, 'both ticks enable Start');
       const names = await page.locator('#modal-review button:visible').evaluateAll(els => els.map(e => e.getAttribute('aria-label') || e.innerText.trim()));
       assert.ok(names.includes('Check again') && !names.some(n => /^Recheck$/.test(n)), `one wording: ${names}`);
       assert.ok(names.includes('Save installed nozzle size'));
@@ -205,7 +206,7 @@ async function open(browser, base, { width = 1098, height = 507, camera = false,
       await page.locator('#btn-review-accept').click();
       assert.match(await page.locator('.modal.open', { hasText: 'Accept these warnings for later?' }).innerText(), /does not confirm the bed is clear/);
       await fx.context.close();
-      console.log('PASS: Job review: one acknowledgement, one wording, named controls');
+      console.log('PASS: Job review: separate warnings and bed ticks, one wording, named controls');
     }
 
     // T15: one placeholder token that passes contrast on the input fills

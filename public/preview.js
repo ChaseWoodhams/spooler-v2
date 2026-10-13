@@ -27,8 +27,9 @@ let _reviewRequest = 0;
 async function openReview(job) {
   _review = { job, report: null, toolpath: null, layer: 0, view: "3d" };
   const opener = document.activeElement;
-  if (!document.getElementById("review-start-reason")) {
-    document.querySelector("#modal-review .review-ack").insertAdjacentHTML("beforebegin", '<p id="review-start-reason" role="status"></p>');
+  if (!document.getElementById("review-warnings-ack")) {
+    document.querySelector("#modal-review .review-ack").insertAdjacentHTML("beforebegin", '<label class="review-ack" id="review-warnings-label" hidden><input type="checkbox" id="review-warnings-ack"> I have reviewed the preflight warnings (this does not confirm the bed is clear)</label><p id="review-start-reason" role="status"></p>');
+    document.getElementById("review-warnings-ack").addEventListener("change", _updateReviewStart);
   }
   const preview = document.getElementById("review-canvas");
   preview.setAttribute("role", "img");
@@ -59,6 +60,7 @@ async function runReview() {
   const requestId = ++_reviewRequest;
   review.report = null;
   document.getElementById("review-ack").checked = false;
+  document.getElementById("review-warnings-ack").checked = false;
   document.getElementById("btn-review-accept").hidden = true;
   document.getElementById("review-start-reason").textContent = "Running preflight. Start remains disabled until the current Job is checked.";
   const printerId = document.getElementById("review-printer").value;
@@ -92,7 +94,8 @@ async function runReview() {
 
 async function startFromReview() {
   const review = _review;
-  if (!review?.report || !review.report.can_start || !document.getElementById("review-ack").checked) return;
+  if (!review?.report || !review.report.can_start || !document.getElementById("review-ack").checked ||
+      (review.report.needs_acknowledgement && !document.getElementById("review-warnings-ack").checked)) return;
   const btn = document.getElementById("btn-review-start");
   const printerId = document.getElementById("review-printer").value || null;
   btn.disabled = true;
@@ -112,7 +115,7 @@ async function startFromReview() {
 
 async function acceptWarningsForLater() {
   const review = _review;
-  if (!review?.report?.can_start) return;
+  if (!review?.report?.can_start || !document.getElementById("review-warnings-ack").checked) return;
   if (!(await confirmDialog({
     title: "Accept these warnings for later?",
     body: "Bed cleared can then start this job without asking about them again. This does not confirm the bed is clear.",
@@ -134,13 +137,14 @@ function _updateReviewStart() {
   const report = _review?.report;
   document.getElementById("btn-review-accept").hidden = !(report && report.can_start && report.needs_acknowledgement);
   document.getElementById("btn-review-start").disabled =
-    !report || !report.can_start || !document.getElementById("review-ack").checked;
-  document.getElementById("btn-review-accept").disabled = !report?.can_start;
+    !report || !report.can_start || !document.getElementById("review-ack").checked ||
+      (report.needs_acknowledgement && !document.getElementById("review-warnings-ack").checked);
+  document.getElementById("btn-review-accept").disabled = !document.getElementById("review-warnings-ack").checked;
   document.getElementById("review-start-reason").textContent = !report ? "Run preflight before starting." : !report.can_start
     ? "Start is blocked. Resolve the blockers below, then Check again."
-    : !document.getElementById("review-ack").checked
-      ? (report.needs_acknowledgement ? "Tick the box to confirm the warnings, the build plate and the filament before starting."
-        : "Confirm the build plate is clear and the right filament is loaded before starting.")
+    : report.needs_acknowledgement && !document.getElementById("review-warnings-ack").checked
+      ? "Review and acknowledge the warnings. This does not confirm the bed is clear."
+      : !document.getElementById("review-ack").checked ? "Confirm the build plate is clear and the right filament is loaded before starting."
       : "Start print sends the physical start command to the selected printer.";
 }
 
@@ -195,9 +199,8 @@ function _renderReviewReport() {
 
   const nozzleCheck = report.checks.find(c => c.id === "nozzle");
   document.getElementById("review-nozzle").hidden = !(report.printer_id && nozzleCheck && nozzleCheck.level === "info");
-  document.getElementById("review-ack-text").textContent = report.needs_acknowledgement
-    ? "I have reviewed the warnings, the build plate is clear and the right filament is loaded"
-    : "The build plate is clear and the right filament is loaded";
+  document.getElementById("review-warnings-label").hidden = !report.needs_acknowledgement;
+  document.getElementById("review-ack-text").textContent = "The build plate is clear and the right filament is loaded";
   _updateReviewStart();
 }
 
