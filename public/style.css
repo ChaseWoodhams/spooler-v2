@@ -2185,3 +2185,26 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
 .outcome-prompt .outcome-check input { width: auto; accent-color: var(--accent); }
 .outcome-prompt textarea { width: 100%; }
 .outcome-prompt .modal-actions .btn-primary { flex: 1; }
+
+/* ─── Loading / error / empty block (net.js stateBlock) ───────────────────── */
+.state-block {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  padding: 24px 16px; text-align: center; color: var(--text-muted); line-height: 1.5;
+}
+.state-block p { margin: 0; max-width: 46ch; }
+.state-block[data-state="error"] p { color: var(--text); }
+.state-block[data-state="error"] { border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 55%, var(--border)); border-radius: 8px; }
+.state-block[data-state="loading"] { animation: state-in .2s ease .3s backwards; }   /* a quick answer never flashes the block */
+.state-spinner {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  animation: state-spin .8s linear infinite;
+}
+@keyframes state-spin { to { transform: rotate(360deg); } }
+@keyframes state-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .state-spinner { animation-duration: 2.4s; } .state-block[data-state="loading"] { animation: none; } }
+/* A form that is loading or failed to load is dimmed and inert: its values are not real yet */
+.state-gated[data-gated="true"] { opacity: .45; pointer-events: none; }
+.toggle-switch input:disabled { cursor: not-allowed; }
+.toggle-switch input:disabled + .toggle-slider { opacity: .5; cursor: not-allowed; }
+#needs-you .state-block, #dash-projects .state-block { border: 0; }   /* the section already has its own frame */

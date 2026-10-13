@@ -11,9 +11,9 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=62" />
+  <link rel="stylesheet" href="style.css?v=63" />
   <link rel="stylesheet" href="history-quality.css?v=1" />
-  <script src="net.js?v=1"></script>
+  <script src="net.js?v=2"></script>
   <script src="modal.js?v=1"></script>
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
@@ -132,7 +132,8 @@
         Queue <span id="queue-count" class="sidenav-badge" hidden></span>
       </button>
     </div>
-    <div id="empty-state" class="empty-state">
+    <div id="printers-state"></div>
+    <div id="empty-state" class="empty-state" style="display:none">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
         <rect x="2" y="3" width="20" height="14" rx="2"/>
         <path d="M8 21h8M12 17v4"/>
@@ -271,8 +272,7 @@
       </div>
     </div>
     <div class="side-panel-body">
-      <p id="spools-status" role="status" aria-live="polite" hidden></p>
-      <button id="btn-spools-retry" class="btn btn-secondary" hidden>Retry inventory</button>
+      <div id="spools-status" aria-live="polite" hidden></div>
       <div id="spools-list"></div>
       <p id="spools-empty" style="display:none;text-align:center;color:var(--text-muted);padding:40px">No spools yet. Click <strong>Add Spool</strong> to get started.</p>
     </div>
@@ -581,14 +581,14 @@
       </div>
       <!-- Notifications sub-page -->
       <div id="settings-notifications" style="display:none">
-        <button id="btn-notif-load-retry" class="btn btn-secondary" hidden>Retry notification settings</button>
         <div class="settings-subpage-header">
           <button id="btn-settings-back-notif" class="settings-back-btn" aria-label="Back to Settings" title="Back">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
           <h3 tabindex="-1">Notifications</h3>
         </div>
-        <div class="notif-list">
+        <div id="notif-state"></div>
+        <div class="notif-list state-gated" id="notif-list">
           <p class="input-hint">Notifications require browser permission. Delivery while Spooler is closed also requires an active push subscription and a reachable Spooler server.</p>
 
           <div class="notif-row">

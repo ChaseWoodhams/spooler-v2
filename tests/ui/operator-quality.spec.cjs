@@ -354,8 +354,8 @@ async function notificationRecovery(fixture) {
   const notificationRead = page.waitForResponse(response => new URL(response.url()).pathname === '/api/notification-settings');
   await page.locator('#btn-settings-goto-notifications').click();
   await (await notificationRead).finished();
-  await page.waitForFunction(() => /Could not load notification settings/.test(document.getElementById('settings-feedback').textContent), null, { timeout: 5000 });
-  assert.equal(await page.locator('#settings-feedback').isVisible(), true);
+  await page.waitForFunction(() => /Could not load notification settings/.test(document.getElementById('notif-state').textContent), null, { timeout: 5000 });
+  assert.equal(await page.locator('#notif-state .state-block[data-state="error"]').isVisible(), true);
   assert.equal(await page.locator('#btn-notif-save').isDisabled(), true);
   const retry = page.getByRole('button', { name: 'Retry notification settings', exact: true });
   assert.equal(await retry.isVisible(), true);
@@ -453,6 +453,106 @@ async function dialogs(fixture) {
   assert.equal(await page.locator('#job-plate-smooth').getAttribute('aria-pressed'), 'false');
   console.log(`Dialog foundation PASS ${size.width}x${size.height}`);
 }
+// Bounded waits and real loading, error and empty states: delayed and failing responses never leave a blank panel, a false
+// "No printers connected", or a form that looks saved while it is not loaded.
+async function loadingStates(browser, baseUrl, width, height) {
+  const shots = process.env.SHOT_DIR;
+  const shot = async (page, name) => { if (shots) await page.screenshot({ path: path.join(shots, `${name}-${width}.png`) }); };
+  const open = async (setup) => {
+    const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
+    const page = await context.newPage();
+    const fx = { page, context, sockets: [], wsMode: 'silent', dashboard: 'ok', dashboardGate: null, notifications: 'ok', notificationsGate: null };
+    await page.routeWebSocket(/.*/, socket => {
+      fx.sockets.push(socket);
+      if (fx.wsMode === 'close-first' && fx.sockets.length === 1) socket.close();
+    });
+    await page.route('**/api/**', async route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/api/dashboard') {
+        if (fx.dashboardGate) await fx.dashboardGate;
+        return fx.dashboard === 'fail' ? route.fulfill({ status: 503, json: { error: 'Fixture dashboard unavailable' } })
+          : route.fulfill({ json: { needs_you: { printers: [], prints: [] }, projects: [{ id: 3, name: 'Fixture project', percent: 50, printed_ok: 1, total: 2 }] } });
+      }
+      if (url.pathname === '/api/notification-settings' && route.request().method() === 'GET') {
+        if (fx.notificationsGate) await fx.notificationsGate;
+        return fx.notifications === 'fail' ? route.fulfill({ status: 503, json: { error: 'Fixture notification settings unavailable' } }) : route.fulfill({ json: {} });
+      }
+      return route.fulfill({ json: {} });
+    });
+    setup?.(fx);
+    await page.goto(baseUrl);
+    return fx;
+  };
+
+  // Printers: nothing is claimed until the first list arrives (even an empty one)
+  {
+    const fx = await open();
+    const { page } = fx;
+    await page.locator('#printers-state .state-block[data-state="loading"]').waitFor();
+    assert.equal(await page.locator('#empty-state').isVisible(), false, 'No printers connected must not flash before the list arrives');
+    assert.equal(await page.locator('#printer-grid').isVisible(), false);
+    await shot(page, 'printers-loading');
+    for (const socket of fx.sockets) socket.send(JSON.stringify({ type: 'printers_listed' }));
+    await page.locator('#empty-state').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#printers-state .state-block').count(), 0);
+    await fx.context.close();
+  }
+  // Printers: a connection that closes before the list shows an error, not "No printers connected"
+  {
+    const fx = await open(f => { f.wsMode = 'close-first'; });
+    const { page } = fx;
+    await page.locator('#printers-state .state-block[data-state="error"]').waitFor();
+    assert.equal(await page.locator('#empty-state').isVisible(), false, 'a failure is not an empty list');
+    await shot(page, 'printers-error');
+    await page.waitForFunction(() => document.querySelector('#printers-state .state-block[data-state="loading"]'));   // the automatic reconnect is under way
+    for (const socket of fx.sockets) socket.send(JSON.stringify({ type: 'printers_listed' }));
+    await page.locator('#empty-state').waitFor({ state: 'visible' });
+    await fx.context.close();
+  }
+  // Needs you and Projects: loading while the dashboard is slow, an error with Retry when it fails, then the real data
+  {
+    let release;
+    const fx = await open(f => { f.dashboard = 'fail'; f.dashboardGate = new Promise(resolve => { release = resolve; }); });
+    const { page } = fx;
+    await page.locator('#needs-you .state-block[data-state="loading"]').waitFor();
+    await page.locator('#dash-projects .state-block[data-state="loading"]').waitFor();
+    await shot(page, 'dashboard-loading');
+    release();
+    const error = page.locator('#needs-you .state-block[data-state="error"]');
+    await error.waitFor();
+    await page.locator('#dash-projects .state-block[data-state="error"]').waitFor();
+    await shot(page, 'dashboard-error');
+    fx.dashboard = 'ok'; fx.dashboardGate = null;
+    await error.getByRole('button', { name: 'Retry' }).click();
+    await page.locator('#dash-projects').getByText('Fixture project').waitFor();
+    assert.equal(await page.locator('#needs-you').isVisible(), false, 'nothing needs you: the section is gone, not blank');
+    await fx.context.close();
+  }
+  // Notification settings: dimmed and inert while loading, the error and Retry on failure, Save stays disabled
+  {
+    let release;
+    const fx = await open(f => { f.notifications = 'fail'; f.notificationsGate = new Promise(resolve => { release = resolve; }); });
+    const { page } = fx;
+    if (width < 641) { await page.locator('#btn-mobile-more').click(); await page.locator('#btn-mobile-settings').click(); }
+    else await page.locator('#btn-app-settings').click();
+    await page.locator('#btn-settings-goto-notifications').click();
+    await page.locator('#notif-state .state-block[data-state="loading"]').waitFor();
+    assert.equal(await page.locator('#notif-list').getAttribute('data-gated'), 'true');
+    assert.equal(await page.locator('#notif-list').evaluate(el => getComputedStyle(el).pointerEvents), 'none', 'the form is inert while loading');
+    assert.equal(await page.locator('#notif-finished-on').isDisabled(), true);
+    assert.equal(await page.locator('#btn-notif-save').isDisabled(), true);
+    await shot(page, 'notifications-loading');
+    release();
+    await page.locator('#notif-state .state-block[data-state="error"]').waitFor();
+    assert.equal(await page.locator('#notif-list').getAttribute('data-gated'), 'true', 'unloaded values are never shown as real');
+    assert.equal(await page.locator('#btn-notif-save').isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: 'Retry notification settings' }).isVisible(), true);
+    await shot(page, 'notifications-error');
+    await fx.context.close();
+  }
+  console.log(`Loading, error and empty states PASS ${width}`);
+}
+
 (async () => {
   const server = http.createServer(async (request, response) => {
     try {
@@ -472,6 +572,7 @@ async function dialogs(fixture) {
         try { await scenario(fixture); assertReadOnlyCommands(fixture); } finally { await fixture.context.close(); }
       }
     }
+    for (const [width, height] of [[390, 844], [1098, 507]]) await loadingStates(browser, `http://127.0.0.1:${server.address().port}`, width, height);
     for (const [width, height] of [[390, 844], [1098, 507]]) {
       const fixture = await fixturePage(browser, `http://127.0.0.1:${server.address().port}`, width, height);
       try { await dialogs(fixture); assertReadOnlyCommands(fixture); } finally { await fixture.context.close(); }

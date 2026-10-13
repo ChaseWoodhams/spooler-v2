@@ -5,6 +5,7 @@
 let _dashboard = { needs_you: { printers: [], prints: [] }, projects: [] };
 let _dashboardTimer = null;
 let _dashboardBusy = false;
+let _dashLoad = "loading";   // loading → ready | error. A failed poll after a success keeps the last good data on screen.
 // The Queue step is Print now: a link to either lands on Print.
 const isPrintStep = step => step === "print" || step === "queue";
 
@@ -21,10 +22,29 @@ async function loadDashboard() {
   if (_dashboardBusy) return;
   _dashboardBusy = true;
   try {
-    const resp = await fetch("/api/dashboard");
-    if (resp.ok) { _dashboard = await resp.json(); renderDashboard(); }
-  } catch (_) { /* server may be restarting */ }
+    const resp = await fetchWithTimeout("/api/dashboard", {}, { timeoutMs: 8000, retries: 1 });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    _dashboard = { needs_you: { printers: [], prints: [], ...data.needs_you }, projects: data.projects || [] };
+    _dashLoad = "ready";
+    renderDashboard();
+  } catch (_) {   // server may be restarting or slow
+    if (_dashLoad !== "ready" && _dashLoad !== "error") { _dashLoad = "error"; renderDashboard(); }
+  }
   _dashboardBusy = false;
+}
+
+function retryDashboard() {
+  _dashLoad = "loading";
+  renderDashboard();
+  loadDashboard();
+}
+
+// While the first answer is pending or has failed, a section shows the shared loading / error block instead of staying blank.
+function dashStateBlock(box, loadingCopy, errorCopy) {
+  box.hidden = false;
+  if (box.firstElementChild?.dataset.state === _dashLoad) return;
+  stateBlock(box, _dashLoad, _dashLoad === "error" ? errorCopy : loadingCopy, retryDashboard);
 }
 
 function refreshDashboardSoon() {
@@ -44,6 +64,7 @@ function _outcomeWord(print) {
 
 function renderNeedsYou() {
   const box = document.getElementById("needs-you");
+  if (_dashLoad !== "ready") return dashStateBlock(box, "Checking what needs you…", "Couldn't check what needs you. Check that Spooler is running, then retry.");
   const { printers: waiting, prints } = _dashboard.needs_you;
   box.hidden = !waiting.length && !prints.length;
   if (box.hidden) { box.innerHTML = ""; return; }
@@ -84,6 +105,7 @@ function renderNeedsYou() {
 
 function renderDashProjects() {
   const box = document.getElementById("dash-projects");
+  if (_dashLoad !== "ready") return dashStateBlock(box, "Loading active projects…", "Couldn't load active projects. Check that Spooler is running, then retry.");
   const rows = _dashboard.projects;
   box.hidden = !rows.length;
   if (!rows.length) { box.innerHTML = ""; return; }
@@ -177,5 +199,6 @@ if (typeof applyJobs === "function") {
   };
 }
 setInterval(() => { if (!document.hidden && !document.body.classList.contains("view-projects")) loadDashboard(); }, 5000);
+renderDashboard();   // the loading blocks, until the first answer
 syncShellView();
 loadDashboard();

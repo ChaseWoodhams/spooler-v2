@@ -52,12 +52,14 @@ function toast(message, error = false) {
   setTimeout(() => el.remove(), error ? 6000 : 3500);
 }
 
-async function api(method, path, body) {
-  const response = await fetch(path, {
+// Every wait is bounded (net.js fetchWithTimeout): reads give up after 20 s and retry once; writes get 2 minutes because
+// planning, packing and arranging compute on the server, and are never retried.
+async function api(method, path, body, { timeoutMs = method === "GET" ? 20000 : 120000 } = {}) {
+  const response = await fetchWithTimeout(path, {
     method,
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  }, { timeoutMs, retries: 1 });
   if (response.status === 401) {
     location.replace("/login");
     throw new Error("Signed out");
@@ -72,7 +74,7 @@ async function api(method, path, body) {
 }
 
 async function binary(path) {
-  const response = await fetch(path);
+  const response = await fetchWithTimeout(path, {}, { timeoutMs: 60000, retries: 1 });
   if (response.status === 401) location.replace("/login");
   if (!response.ok) throw new Error(`Couldn't load ${path} (HTTP ${response.status})`);
   return response.arrayBuffer();
@@ -443,8 +445,27 @@ async function bundleSettings(bundleId) {
   return state.bundleSettings.get(bundleId);
 }
 
+// "Opening project…" while the project's data is fetched, with an in-place Retry when that fails.
+// outcome: undefined = loading, null = done, an Error = failed.
+function showOpening(id, options, outcome) {
+  const box = $("project-opening");
+  box.hidden = outcome === null;
+  if (outcome === null) stateBlock(box);
+  else if (outcome) stateBlock(box, "error", `Couldn't open this project: ${outcome.message}`, () => openProject(id, options).catch(err => toast(err.message, true)), "Retry opening");
+  else stateBlock(box, "loading", "Opening project…");
+}
+
 async function openProject(id, { toPrinter = false, toPrint = false, restoring = false } = {}) {
-  const project = await api("GET", `/api/projects/${id}`);
+  const options = { toPrinter, toPrint, restoring };
+  showOpening(id, options);
+  let project;
+  try {
+    project = await api("GET", `/api/projects/${id}`);
+  } catch (err) {
+    showOpening(id, options, err.status === 404 ? null : err);
+    throw err;
+  }
+  showOpening(id, options, null);
   if (restoring && (project.quick || project.draft)) throw Object.assign(new Error("A hidden quick project is never reopened on its own"), { quick: true });   // the caller falls back to the list
   document.body.classList.remove("view-dashboard");
   $("projects-dashboard").hidden = true;
@@ -465,15 +486,35 @@ async function openProject(id, { toPrinter = false, toPrint = false, restoring =
   else splitStep.close();
   await loadJobs({ quiet: true });
   renderAll();
-  await loadGeometry();
-  state.viewport?.fit(state.viewport.objectsBox());
   // Print absorbed the old Queue step: a remembered "queue", a ?step=queue link and a push link (?printer=) all land on Print.
   const saved = stepAliases(remember(`slicer.step.${id}`));
   const landing = (toPrinter || toPrint) && stepAvailable("print") ? "print" : saved && stepAvailable(saved) ? saved : defaultStep();
-  await setStep(landing, { force: true });
+  await setStep(landing, { force: true });   // the steps and sidebar are up now; the 3D models stream in behind a loading block
   loadProblems();
   schedulePoll();
   maybeAutoPlan();
+  loadOpeningGeometry(id);
+}
+
+// Fetch the project's 3D models after it is shown: a large project is never a blank, dead page while they download.
+async function loadOpeningGeometry(id) {
+  const message = $("viewport-message");
+  const pending = state.project?.models.filter(m => m.state === "ready").length;
+  if (pending) stateBlock(message, "loading", "Loading the 3D models…"), message.hidden = false;
+  try {
+    const failed = await loadGeometry();
+    if (state.project?.id !== id) return;
+    if (failed) {
+      message.hidden = false;
+      stateBlock(message, "error", `${plural(failed, "model")} didn't load.`, () => loadOpeningGeometry(id), "Retry models");
+      return;
+    }
+    stateBlock(message);
+    message.hidden = true;
+    state.viewport?.fit(state.viewport.objectsBox());
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 // Inside the app shell, record the project now open in the shell's address and frame route. Otherwise the shell still
@@ -556,15 +597,18 @@ async function loadGeometry() {
     }
   }
   const ready = state.project.models.filter(m => m.state === "ready" && !state.viewport.hasGeometry(m.id));
+  let failed = 0;
   for (const model of ready) {
     try {
       state.viewport.addModelGeometry(model.id, await binary(`/api/projects/${state.project.id}/models/${model.id}/preview`));
       state.loadedModels.set(model.id, model.sha256);
     } catch (err) {
+      failed++;
       toast(err.message, true);
     }
   }
   renderViewport();
+  return failed;
 }
 
 // ── Steps ───────────────────────────────────────────────────────────────────────
@@ -1713,7 +1757,7 @@ async function suggestOrientation(object = selectedObject(), mode = state.orient
   // Looks favours the side facing the viewer (the front of the bed), as the model sees it
   const face = mode === "looks" ? `&face=${orient.toModelSpace([0, -1, 0], object.rotation).join(",")}` : "";
   try {
-    const result = await api("GET", `/api/projects/${state.project.id}/objects/${object.id}/orientation?mode=${mode}${face}`);
+    const result = await api("GET", `/api/projects/${state.project.id}/objects/${object.id}/orientation?mode=${mode}${face}`, undefined, { timeoutMs: 90000 });
     state.orientSuggestion = { objectId: object.id, mode, result };
   } catch (e) {
     return toast(e.message, true);
@@ -2301,7 +2345,7 @@ function projectRow(p) {
 
 async function loadProjectsPage() {
   const list = $("project-list");
-  if (!list.children.length) list.innerHTML = '<p class="slicer-muted">Loading…</p>';
+  if (!list.children.length || list.querySelector(".state-block")) stateBlock(list, "loading", "Loading your projects…");
   try {
     const [{ projects }, { splits }] = await Promise.all([api("GET", "/api/projects"), api("GET", "/api/splits").catch(() => ({ splits: [] }))]);
     const loose = splits.filter(s => !s.project_id);   // the server marks splits owned by any project, hidden quick ones included
@@ -2316,7 +2360,7 @@ async function loadProjectsPage() {
       </div>`).join("") : "");
     filterProjects();
   } catch (err) {
-    list.innerHTML = `<p class="slicer-muted">${esc(err.message)}</p>`;
+    stateBlock(list, "error", `Couldn't load your projects: ${err.message}`, loadProjectsPage, "Retry projects");
   }
 }
 
