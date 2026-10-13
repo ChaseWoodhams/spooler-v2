@@ -2403,3 +2403,12 @@ body.light-mode { --st-completed: #0f766e; --st-failed: #be123c; --st-cancelled:
 .btn-toggle .toggle-state { font-size: 12px; font-weight: 600; }
 .dash-bar #btn-queue { min-height: var(--hit-min, 44px); min-width: var(--hit-min, 44px); }
 .sidenav-badge.is-zero { background: var(--surface2); color: var(--text-muted); border: 1px solid var(--border); }
+
+/* Ticket 27 · Settings menu rows and Close reach the 44 px hit target; the whole Light mode row is the control; threshold hints and errors */
+.settings-menu-item { min-height: var(--hit-min, 44px); }
+#btn-app-settings-cancel { min-height: var(--hit-min, 44px); }
+.settings-toggle-row { cursor: pointer; }
+.settings-toggle-text { display: flex; flex-direction: column; gap: 2px; }
+.settings-toggle-text .settings-item-note { margin-left: 0; }
+.notif-param .input-hint, .notif-param .field-error { margin-top: 2px; font-size: 12px; }
+.notif-param .input-hint { color: var(--text-muted); }

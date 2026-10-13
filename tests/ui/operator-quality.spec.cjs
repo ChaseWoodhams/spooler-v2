@@ -339,7 +339,8 @@ async function settings(fixture) {
   assert.equal(await page.locator('#notif-layer-on').isChecked(), true);
   await page.locator('#notif-layer-number').fill('0');
   await page.locator('#btn-notif-save').click();
-  await expectText(page.locator('#settings-feedback'), /outside its allowed range/);
+  await expectText(page.locator('#settings-feedback'), /needs fixing/);
+  await expectText(page.locator('#notif-layer-number-error'), /1 or more/);
   assert.equal(await page.locator('#notif-layer-number').evaluate(el => document.activeElement === el), true);
   assert.equal(fixture.notificationPosts, 0);
   await page.locator('#notif-layer-on').focus();

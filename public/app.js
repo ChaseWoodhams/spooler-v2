@@ -2028,6 +2028,24 @@ function _syncNotifParams() {
 ["notif-layer-on","notif-nozzle-idle-on","notif-nozzle-printing-on","notif-spool-low-on"].forEach(id =>
   document.getElementById(id)?.addEventListener("change", _syncNotifParams));
 
+// Threshold fields: units and range are helper text (index.html); an out-of-range value gets an inline error tied to the field
+function _thresholdMessage(input) {
+  const label = (input.labels?.[0]?.firstChild?.textContent || "Value").trim();
+  const min = input.min, max = input.max;
+  const unit = /°C/.test(label) ? " °C" : /\(g\)/.test(label) ? " g" : "";
+  const range = max ? `between ${min} and ${max}${unit}` : `${min}${unit} or more`;
+  return input.value === "" || isNaN(parseFloat(input.value)) ? `Enter a number ${range}.` : `${label.replace(/\s*\(.*\)/, "")} must be ${range}.`;
+}
+function _setThresholdError(input, message) {
+  const error = document.getElementById(`${input.id}-error`);
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = !message;
+  if (message) input.setAttribute("aria-invalid", "true"); else input.removeAttribute("aria-invalid");
+}
+["notif-layer-number", "notif-nozzle-idle-threshold", "notif-nozzle-printing-threshold", "notif-spool-low-threshold"].forEach(id =>
+  document.getElementById(id)?.addEventListener("input", e => { if (e.target.checkValidity()) _setThresholdError(e.target, ""); }));
+
 document.getElementById("btn-settings-goto-notifications")?.addEventListener("click", () => {
   _populateNotifForm();
   _showSettingsPage(_settingsNotifPage);
@@ -2035,7 +2053,12 @@ document.getElementById("btn-settings-goto-notifications")?.addEventListener("cl
 document.getElementById("btn-settings-back-notif")?.addEventListener("click", _backToSettingsMenu);
 document.getElementById("btn-notif-save")?.addEventListener("click", async () => {
   const gb = id => document.getElementById(id)?.checked ?? false;
-  const gv = id => parseFloat(document.getElementById(id)?.value) || 0;
+  // An empty field keeps its default (the markup's value) instead of being saved as 0, and the field shows what was kept
+  const gv = id => {
+    const input = document.getElementById(id);
+    if (input && input.value.trim() === "") input.value = input.defaultValue;
+    return parseFloat(input?.value) || 0;
+  };
   const s = {
     finished:        { enabled: gb("notif-finished-on") },
     layer:           { enabled: gb("notif-layer-on"),           layer:     gv("notif-layer-number") },
@@ -2045,11 +2068,13 @@ document.getElementById("btn-notif-save")?.addEventListener("click", async () =>
   };
   const anyEnabled = Object.values(s).some(v => v.enabled);
   const thresholdIds = ["notif-layer-number", "notif-nozzle-idle-threshold", "notif-nozzle-printing-threshold", "notif-spool-low-threshold"];
-  const invalidThreshold = thresholdIds.map(id => document.getElementById(id)).find(input =>
+  const invalidThresholds = thresholdIds.map(id => document.getElementById(id)).filter(input =>
     input.offsetParent !== null && !input.checkValidity());
-  if (invalidThreshold) {
-    _settingsFeedback(`${invalidThreshold.labels?.[0]?.textContent || "Notification threshold"} is outside its allowed range.`, "error");
-    invalidThreshold.focus();
+  for (const id of thresholdIds) _setThresholdError(document.getElementById(id), "");
+  if (invalidThresholds.length) {
+    for (const input of invalidThresholds) _setThresholdError(input, _thresholdMessage(input));
+    _settingsFeedback(invalidThresholds.length === 1 ? "One notification value needs fixing before it can be saved." : `${invalidThresholds.length} notification values need fixing before they can be saved.`, "error");
+    invalidThresholds[0].focus();
     return;
   }
   const button = document.getElementById("btn-notif-save");
