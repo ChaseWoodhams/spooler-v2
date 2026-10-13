@@ -23,6 +23,8 @@
   --blue:        #3b82f6;
   --text:        #e8eaf0;
   --text-muted:  #9ca3af;
+  --link:        #7db3ff; /* 9.3:1 on --bg, 8.2:1 on --surface */
+  --check-size:  16px;
   --radius:      12px;
   --radius-sm:   8px;
   --shadow:      0 4px 24px rgba(0,0,0,.5);
@@ -38,6 +40,7 @@ body.light-mode {
   --border:   #d0d3de;
   --text:     #1a1c2a;
   --text-muted: #525b6a;
+  --link: #1d4ed8; /* 6.0:1 on --surface2, 6.7:1 on white */
   --accent: #a63808;
   --focus-ring: var(--accent);
   --accent-dim: #8e2e06;
@@ -50,6 +53,15 @@ body.light-mode {
 }
 body.light-mode .camera-placeholder { color: #c4cad4; }
 body.light-mode .progress-filename { color: var(--text); }
+
+/* ─── Native controls: inherit the app font, use tokens (no raw browser defaults) ─ */
+button, input, select, textarea { font: inherit; }
+select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; color-scheme: dark; }
+body.light-mode select { color-scheme: light; }
+select option, select optgroup { background: var(--surface2); color: var(--text); }
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-fill); width: var(--check-size); height: var(--check-size); cursor: pointer; }
+a:not([class]), .link { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+a:not([class]):hover, .link:hover { text-decoration-thickness: 2px; }
 
 /* ─── Scrollbars ─────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -1116,7 +1128,8 @@ body.panel-open { overflow: hidden; }
   margin-bottom: 10px;
 }
 .print-plate-row  { display: flex; gap: 8px; }
-.print-plate-btn  { flex: 1; font-size: 13px; padding: 8px 4px; }
+.print-plate-btn  { flex: 1; font-size: 13px; padding: 8px 4px; border: 1px solid var(--border); }
+.print-plate-btn[aria-pressed="true"] { border-color: var(--accent-fill); }
 .print-opts-rows  { display: flex; flex-direction: column; gap: 0; }
 .print-opts-row {
   display: flex;

@@ -1,4 +1,5 @@
 /* Spooler – project workspace (slicer.html): Model → Split → Plates → Slice → Print */
+button, input, select, textarea { font: inherit; }
 body.slicer-page { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 body.slicer-page [hidden] { display: none !important; }
 body.slicer-page a.btn { text-decoration: none; }
@@ -593,7 +594,7 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .pp-card-acts { display: flex; gap: 6px; flex-basis: 100%; padding: 2px 0 6px; }
 .pp-card-act, .pp-printer [data-outcome], .pp-actions .btn { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
 .pp-autostart { min-height: 44px; }
-.pp-queue-link { font-size: 13px; justify-self: end; }
+.pp-queue-link { font-size: 13px; justify-self: end; color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
 .pp-slice-first { margin: 8px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
 /* Print step: tick Ready Plates and send them from a pinned bar */
 .pp-ticks { display: inline-flex; gap: 6px; }
