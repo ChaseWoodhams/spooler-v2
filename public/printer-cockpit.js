@@ -148,7 +148,7 @@
   .pv-back{background:none;border:0;color:var(--text-muted)}
   .pv-title{display:flex;align-items:center;gap:8px}.pv-title small{color:var(--text-muted)}
   .pv-chip{background:var(--surface2);border:1px solid var(--border);border-radius:99px;padding:4px 12px}
-  .pv-chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .pv-chip.on{background:var(--accent-fill);border-color:var(--accent-fill);color:#fff;font-weight:700}.pv-chip.on::before{content:"\\2713\\00a0"}
   .pv-chips{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
   .pv-bar{height:6px;background:var(--surface2);border-radius:4px;overflow:hidden;min-width:80px}.pv-bar span{display:block;height:100%;background:var(--accent)}
   .pv-btns{display:flex;gap:8px;flex-wrap:wrap}
