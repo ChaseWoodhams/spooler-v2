@@ -162,8 +162,11 @@ async function filesAndSpools(fx) {
   console.log(`PASS: Delete file names the file and printer ${page.viewportSize().width}`);
 
   await page.locator('#btn-spools').click();
-  const removeSpool = page.locator('#spools-list').getByRole('button', { name: /^Remove / });
-  await removeSpool.waitFor();
+  // Remove lives in the per-spool actions menu now
+  const spoolMenu = page.locator('#spools-list').getByRole('button', { name: /^Actions for / });
+  const removeSpool = page.getByRole('menuitem', { name: /^Remove / });
+  await spoolMenu.waitFor();
+  await spoolMenu.click();
   await removeSpool.click();
   const box = dialogOf(page, 'Remove Fixture brand Blue PLA?');
   await box.waitFor();
@@ -171,6 +174,7 @@ async function filesAndSpools(fx) {
   assert.equal(await focused(page), 'Cancel');
   await box.getByRole('button', { name: 'Cancel', exact: true }).click();
   assert.deepEqual(fx.deletes, [], 'Cancel removes nothing');
+  await spoolMenu.click();
   await removeSpool.click();
   await box.getByRole('button', { name: 'Remove spool', exact: true }).click();
   await page.waitForTimeout(300);

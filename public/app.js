@@ -2845,6 +2845,7 @@ async function fetchSpools() {
 
 
 function renderSpoolPanel() {
+  closeSpoolMenu();
   const list  = document.getElementById("spools-list");
   const empty = document.getElementById("spools-empty");
   const status = document.getElementById("spools-status");
@@ -2894,7 +2895,8 @@ function renderSpoolPanel() {
             </svg>
             ${escHtml(printerName)}
           </span>` : "<span></span>"}
-          <button class="btn btn-sm btn-secondary" onclick="deleteSpool('${escAttr(s.id)}')" aria-label="Remove ${escAttr([vendor, colorName, material].filter(Boolean).join(" ") || "spool #" + s.id)}">Remove</button>
+          <button type="button" class="btn btn-sm btn-secondary spool-menu-btn" data-spool-menu="${escAttr(s.id)}" aria-haspopup="menu" aria-expanded="false"
+            aria-label="Actions for ${escAttr([vendor, colorName, material].filter(Boolean).join(" ") || "spool #" + s.id)}">${MORE_ICON}</button>
         </div>
       </div>
     </div>`;
@@ -3048,6 +3050,80 @@ function linkTray(printerId, trayId, spoolId) {
   closeOperatorDialog(document.getElementById("modal-spool-picker"));
   toast(spoolId != null ? `Slot ${trayId + 1} linked` : `Slot ${trayId + 1} unlinked`);
 }
+
+// ─── Per-spool actions menu (Edit / Assign / Remove) ───────────────────────
+const MORE_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+let _spoolMenu = null, _spoolMenuTrigger = null;
+
+function closeSpoolMenu(refocus = false) {
+  if (!_spoolMenu) return;
+  _spoolMenu.remove();
+  _spoolMenuTrigger?.setAttribute("aria-expanded", "false");
+  if (refocus) _spoolMenuTrigger?.focus();
+  _spoolMenu = _spoolMenuTrigger = null;
+}
+
+function spoolMenuItems(spool) {
+  const label = [spool.filament?.vendor?.name, spool.filament?.name, spool.filament?.material].filter(Boolean).join(" ") || `spool #${spool.id}`;
+  const assigned = printerByLocation(spoolAssignedTo(spool));
+  const ui = (document.getElementById("btn-spoolman-ui")?.getAttribute("href") || "").replace(/\/$/, "");
+  const items = [];
+  // The app has no edit form of its own: editing happens in Spoolman, so say so
+  if (ui && ui !== "#") items.push({ text: "Edit in Spoolman", name: `Edit ${label} in Spoolman`, href: `${ui}/spool/edit/${encodeURIComponent(spool.id)}` });
+  for (const p of Object.values(printers)) {
+    if (assigned?.id === p.id) continue;
+    items.push({ text: `Assign to ${p.name || p.id}`, name: `Assign ${label} to ${p.name || p.id}`, run: () => assignSpool(p.id, spool.id) });
+  }
+  if (assigned) items.push({ text: `Unassign from ${assigned.name || assigned.id}`, name: `Unassign ${label} from ${assigned.name || assigned.id}`, run: () => assignSpool(assigned.id, null) });
+  items.push({ text: "Remove", name: `Remove ${label}`, danger: true, run: () => deleteSpool(spool.id) });
+  return items;
+}
+
+function openSpoolMenu(trigger) {
+  const reopen = _spoolMenuTrigger === trigger;
+  closeSpoolMenu();
+  if (reopen) return;
+  const spool = spools.find(x => String(x.id) === trigger.dataset.spoolMenu);
+  if (!spool) return;
+  const menu = document.createElement("div");
+  menu.className = "spool-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", trigger.getAttribute("aria-label"));
+  for (const it of spoolMenuItems(spool)) {
+    const el = document.createElement(it.href ? "a" : "button");
+    el.className = "spool-menu-item" + (it.danger ? " danger" : "");
+    el.setAttribute("role", "menuitem");
+    el.setAttribute("aria-label", it.name);
+    el.textContent = it.text;
+    if (it.href) { el.href = it.href; el.target = "_blank"; el.rel = "noopener"; el.addEventListener("click", () => closeSpoolMenu()); }
+    else { el.type = "button"; el.addEventListener("click", () => { closeSpoolMenu(true); it.run(); }); }
+    menu.appendChild(el);
+  }
+  // The cards clip their contents, so the menu is one fixed element placed from the trigger
+  document.body.appendChild(menu);
+  const r = trigger.getBoundingClientRect(), mh = menu.offsetHeight, mw = menu.offsetWidth;
+  menu.style.left = `${Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8))}px`;
+  menu.style.top = `${r.bottom + 4 + mh > window.innerHeight - 8 ? Math.max(8, r.top - mh - 4) : r.bottom + 4}px`;
+  trigger.setAttribute("aria-expanded", "true");
+  _spoolMenu = menu; _spoolMenuTrigger = trigger;
+  menu.querySelector(".spool-menu-item")?.focus();
+}
+
+document.getElementById("spools-list").addEventListener("click", e => {
+  const trigger = e.target.closest("[data-spool-menu]");
+  if (trigger) { e.stopPropagation(); openSpoolMenu(trigger); }
+});
+document.addEventListener("click", e => { if (_spoolMenu && !_spoolMenu.contains(e.target)) closeSpoolMenu(); });
+document.addEventListener("keydown", e => {
+  if (!_spoolMenu) return;
+  const items = [..._spoolMenu.querySelectorAll(".spool-menu-item")], at = items.indexOf(document.activeElement);
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeSpoolMenu(true); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); items[(at + 1) % items.length].focus(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); items[(at - 1 + items.length) % items.length].focus(); }
+  else if (e.key === "Tab") closeSpoolMenu();
+}, true);
+window.addEventListener("resize", () => closeSpoolMenu());
+document.getElementById("spools-list").addEventListener("scroll", () => closeSpoolMenu());
 
 async function deleteSpool(spoolId) {
   const spool = spools.find(s => s.id == spoolId);

@@ -23,3 +23,14 @@
   #modal-add-spool .colour-pick input[type="color"] { height: 44px; }
   #modal-add-spool .spool-advanced summary { min-height: 44px; }
 }
+
+/* Ticket 26 · Spools panel: padded status line and a per-spool actions menu (PS-59) */
+#spools-status { padding-inline: 20px; }
+#spools-status:empty { padding: 0; }
+.spool-menu-btn { min-width: var(--hit-min, 44px); min-height: var(--hit-min, 44px); padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.spool-menu { position: fixed; z-index: 1500; min-width: 200px; max-width: calc(100vw - 16px); display: flex; flex-direction: column; padding: 4px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: 0 8px 24px rgba(0, 0, 0, .35); }
+.spool-menu-item { display: flex; align-items: center; min-height: var(--hit-min, 44px); padding: 0 12px; border: 0; border-radius: var(--radius-sm); background: none;
+  color: var(--text); font: inherit; font-size: 14px; text-align: left; text-decoration: none; cursor: pointer; }
+.spool-menu-item:hover, .spool-menu-item:focus-visible { background: var(--surface2); }
+.spool-menu-item.danger { color: var(--red); }

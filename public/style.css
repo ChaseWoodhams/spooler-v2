@@ -2279,8 +2279,8 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
 .outcome-prompt .btn-sm { min-height: 44px; }
 .outcome-fieldset { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; }
 .outcome-fieldset legend { padding: 0 4px; }
-.outcome-prompt .outcome-check { display: flex; flex-direction: row; align-items: center; gap: 8px; min-height: 32px; }
-.outcome-prompt .outcome-check input { width: auto; accent-color: var(--accent); }
+.outcome-prompt .outcome-check { display: flex; flex-direction: row; align-items: center; gap: 8px; min-height: var(--hit-min, 44px); }
+.outcome-prompt .outcome-check input { width: var(--check-size, 16px); height: var(--check-size, 16px); flex: none; accent-color: var(--accent-fill); }
 .outcome-prompt textarea { width: 100%; }
 .outcome-prompt .modal-actions .btn-primary { flex: 1; }
 
