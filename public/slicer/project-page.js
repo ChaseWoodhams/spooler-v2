@@ -157,6 +157,16 @@ function boardGroups() {
   return GROUPS.filter(([id]) => groups[id].length).map(([id, title]) => ({ id, title, cards: groups[id] }));
 }
 
+/** One status indicator per row. The group heading already says Ready, Queued, Printing or Done, and a reason line says why a Plate needs attention, so a row repeats neither: it shows its own word only when that adds something (needs slicing, starting to print). */
+const GROUP_WORD = { ready: "sliced", queued: "in the queue", printing: "printing now", done: "completed" };
+const rowStatus = (group, plate, word, reason) => reason || GROUP_WORD[group] === word ? "" : `<span class="pp-state"><i class="pp-dot st-${plate.status}"></i>${word}</span>`;
+
+/** What a Plate will take: its estimated time and filament, when the slice knows them. */
+const plateMeta = plate => {
+  const bits = [plate.estimate_s != null ? duration(plate.estimate_s) || "0 min" : "", plate.estimate_g != null ? `${Number(plate.estimate_g.toFixed(1))} g` : ""].filter(Boolean);
+  return bits.length ? `<span class="pp-meta slicer-muted">${bits.join(" · ")}</span>` : "";
+};
+
 /** The actions a Plate's own card offers: Start (through Review) for a queued one that is not held, the Outcome for one whose print ended, Reprint for a failed one, and another copy of one already sent. */
 function cardActions(plate) {
   const acts = [];
@@ -261,7 +271,8 @@ function plateBoard() {
     <ul class="pp-plates"${folds.has(id) ? " hidden" : ""}>${cards.map(({ plate, word, reason }) => `<li class="pp-plate st-${plate.status}${plate.id === selected ? " sel" : ""}${ticked.has(plate.id) ? " ticked" : ""}" data-plate-card>
       ${id === "ready" && sendable(plate) ? `<input type="checkbox" class="pp-tick" data-tick="${plate.id}" aria-label="Send ${esc(plate.name)}, ${esc(word)}"${ticked.has(plate.id) ? " checked" : ""}>` : ""}
       <button type="button" class="pp-plate-btn" data-plate="${plate.id}" aria-pressed="${plate.id === selected}">${esc(plate.name)}</button>
-      <span class="pp-state"><i class="pp-dot st-${plate.status}"></i>${word}</span>
+      ${rowStatus(id, plate, word, reason)}
+      ${plateMeta(plate)}
       ${reason ? `<span class="pp-reason">${esc(reason)}</span>` : ""}${cardActions(plate)}</li>`).join("")}</ul></section>`).join("")}</div>`;
 }
 

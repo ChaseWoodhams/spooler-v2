@@ -729,3 +729,6 @@ body[data-workflow-step="model"] .slicer-small-screen-note, body[data-workflow-s
 .slicer-layer-readout, .slicer-step small, .pack-presets button small, .pack-map-card small, .pp-chip, .slicer-fold > summary > span, .pd-chip,
 .tool-more-head, .split-section h4 { font-size: 12px; }
 .slicer-page small, .slicer-page .preset-btn { font-size: 12px; }
+
+/* Ticket 28 · a Plate row says its status once, then what it will take */
+.pp-meta { font-size: 13px; white-space: nowrap; }
