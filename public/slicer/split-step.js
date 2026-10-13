@@ -47,6 +47,7 @@ let guide = null;        // the Assembly guide job and the PDF on disk for the c
 let guideInfo = null;    // what the server can do: PDF library present, default paper
 let guideTimer = null;
 let paperChoice = "";
+let droppedEdits = null; // edits Try to keep could not keep: [{index, edit, reason}], shown until dismissed
 let planEditing = false; // the plan editor is open in the Assembly guide panel
 let editStep = null;     // id of the step selected in the editor
 let editReceivers = null; // {step id, receivers} the validator accepts for the selected step
@@ -479,6 +480,7 @@ function guidePanel() {
     ${working ? `<div class="split-progress" role="status"><progress max="100" value="${g.percent || 0}"></progress> ${esc(g.stage || "Working")}</div>` : ""}
     ${g.state === "failed" && g.error ? `<div class="job-error" role="alert">${esc(g.error)}</div>` : ""}
     ${pdf}
+    ${editsBanner()}
     ${plan?.ok ? `<div class="split-actions-row"><button class="btn btn-secondary btn-sm" data-action="edit-toggle" aria-pressed="${planEditing}">${planEditing ? "Close the plan editor" : "Edit plan"}</button></div>` : ""}
     ${plan?.ok && planEditing ? planEditor() : ""}
     ${fold("split-assembly", "Steps", plan?.ok ? `${plural(plan.summary.sections, "Section")}, ${plural(plan.summary.steps, "step")}` : "", planHtml())}
@@ -488,10 +490,36 @@ function guidePanel() {
 // ─── Plan editor ──────────────────────────────────────────────────────────────
 const stepById = id => plan?.ok ? plan.sections.flatMap(sec => sec.steps).find(st => st.id === id) : null;
 
+function editText(e) {
+  if (e.op === "move") return `Move ${listText(e.parts)} to ${listText(e.to)}`;
+  return `Reorder the steps of the Section of ${listText(e.section)}`;
+}
+
+// The outdated-edits banner (Discard / Try to keep) and, after Try to keep, the edits that were dropped.
+function editsBanner() {
+  const edits = plan?.ok && plan.edits;
+  let html = "";
+  if (edits && edits.state === "outdated") {
+    html += `<div class="split-warn" role="alert" data-edits-outdated>
+      <strong>Your edits are out of date.</strong> The automatic plan is used until you decide. ${esc(edits.reason)}
+      <div class="split-actions-row">
+        <button type="button" class="btn btn-secondary btn-sm" data-action="edits-discard">Discard</button>
+        <button type="button" class="btn btn-primary btn-sm" data-action="edits-keep">Try to keep</button>
+      </div></div>`;
+  }
+  if (droppedEdits) {
+    html += `<div class="split-warn" role="status" data-edits-dropped>
+      ${droppedEdits.length ? `<strong>${plural(droppedEdits.length, "edit")} could not be kept:</strong>
+      <ul>${droppedEdits.map(d => `<li>Edit ${d.index + 1} (${esc(editText(d.edit))}): ${esc(d.reason)}</li>`).join("")}</ul>`
+        : "All your edits still work and were kept."}
+      <div class="split-actions-row"><button type="button" class="btn btn-secondary btn-sm" data-action="edits-dismiss">OK</button></div></div>`;
+  }
+  return html;
+}
+
 function planEditor() {
   const edits = plan.edits || { state: "none", count: 0 };
-  const note = edits.state === "outdated"
-    ? `<p class="split-warn" role="alert">Your edits no longer match this split, so the automatic plan is shown. ${esc(edits.reason)}</p>` : "";
+  const note = "";
   const picked = stepById(editStep);
   const options = editReceivers && editReceivers.step === editStep ? editReceivers.receivers : null;
   const outline = `<ol class="split-assembly split-edit-outline">${plan.sections.map(sec => `<li><strong>Section ${esc(sec.letter)}</strong>${sec.main ? " (main)" : ""}
@@ -533,6 +561,7 @@ async function sendEdit(body) {
   try {
     const done = await host.api("POST", `/api/splits/${current.id}/plan-edits`, body);
     plan = done.plan;
+    if (body.op === "keep") droppedEdits = done.dropped || [];
     editStep = null;
     editReceivers = null;
     viewer?.highlight(null);
@@ -960,6 +989,9 @@ function bindEvents() {
         case "edit-up":
         case "edit-down":    await sendEdit({ op: "reorder", parts: stepById(editStep).parts, direction: el.dataset.action === "edit-up" ? "up" : "down" }); break;
         case "edit-reset":   await sendEdit({ op: "reset" }); break;
+        case "edits-discard": droppedEdits = null; await sendEdit({ op: "discard" }); break;
+        case "edits-keep":   droppedEdits = null; await sendEdit({ op: "keep" }); break;
+        case "edits-dismiss": droppedEdits = null; renderSide(); break;
       }
     } catch (err) {
       if ($('split-input-error')) $('split-input-error').textContent = err.message;
@@ -1030,6 +1062,7 @@ export const splitStep = {
     clearTimeout(pollTimer);
     const detail = await host.api("GET", `/api/splits/${splitId}`);
     current = detail;
+    droppedEdits = null;
     cuts = clone(detail.cuts?.cuts || []);
     selectedCut = null;
     pendingSave = checkDirty = false;
