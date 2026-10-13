@@ -18,7 +18,7 @@ const records = ['completed', 'cancelled', 'failed', 'unknown'].map((outcome, i)
       const file = path.join(root, 'public', relative === '/' ? 'index.html' : relative);
       let content = await fs.readFile(file);
       if (file.endsWith("index.html")) content = content.toString().replace("</head>", '<link rel="stylesheet" href="history-quality.css"></head>');
-      res.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
+      res.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript; charset=utf-8' : file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/html; charset=utf-8');
       res.end(content);
     } catch { res.writeHead(404).end(); }
   });
@@ -61,6 +61,10 @@ const records = ['completed', 'cancelled', 'failed', 'unknown'].map((outcome, i)
       await page.locator('.history-events').waitFor();
       const facts = await page.locator('.history-facts').innerText();
       assert.match(facts, /0 g/);
+      const summaryText = (await page.locator('#history-filter-summary').textContent()).trim();
+      assert.equal(summaryText, 'All prints · all time', `Filter summary text at ${width}`);
+      assert.match(facts, /Slicer estimate · duration/);
+      assert.ok(!facts.includes('�'), `No replacement characters at ${width}`);
       assert.match(facts, /Observed duration\s+0s/);
       assert.match(facts, /Slicer estimate[^\n]*duration\s+0s/);
       assert.match(await page.locator('.history-row').first().innerText(), /0s observed/);
