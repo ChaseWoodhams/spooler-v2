@@ -5,8 +5,8 @@
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=3";
-import { projectPage } from "./project-page.js?v=8";
-import { newProject } from "./new-project.js?v=9";
+import { projectPage } from "./project-page.js?v=9";
+import { newProject } from "./new-project.js?v=10";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 
 const $ = id => document.getElementById(id);
@@ -663,6 +663,7 @@ async function setStep(step, { force = false } = {}) {
   const splitView = step === "model" || step === "split";
   const pageView = step === "print";
   document.body.classList.toggle("print-step", pageView);
+  document.body.dataset.workflowStep = step;
   $("project-page").hidden = !pageView;
   $("split-stage").hidden = !splitView;
   $("split-side").hidden = !splitView;
@@ -2374,16 +2375,30 @@ const projectChips = p => {
   if (p.sliced && !p.queued && !p.printing) chips.push(["go", p.sliced === p.plates ? "All plates sliced" : `${p.sliced} of ${plural(p.plates, "plate")} sliced`]);
   if (p.printed_ok) chips.push(["sb-completed", `${p.printed_ok} completed`, "completed"]);
   if (p.failed) chips.push(["sb-failed", `${p.failed} failed`, "failed"]);
+  if (p.outcome_unknown) chips.push(["sb-unknown", p.outcome_unknown === 1 ? "Needs outcome" : `${p.outcome_unknown} need outcomes`, "unknown"]);
   if (!p.sliced && !p.slicing && !p.queued && !p.printing) chips.push(["", p.objects ? "Not sliced yet" : "Empty"]);
   return chips.map(([kind, text, icon]) => `<span class="pd-chip ${kind}">${icon ? statusIcon(icon) : ""}${esc(text)}</span>`).join("");
 };
 
+// "3 hours ago", never a locale timestamp; the exact time is in the tooltip
+function ago(seconds) {
+  const gap = Math.max(0, Date.now() / 1000 - seconds), n = (value, unit) => `${value} ${unit}${value === 1 ? "" : "s"} ago`;
+  if (gap < 60) return "just now";
+  if (gap < 3600) return n(Math.floor(gap / 60), "minute");
+  if (gap < 86400) return n(Math.floor(gap / 3600), "hour");
+  if (gap < 30 * 86400) return n(Math.floor(gap / 86400), "day");
+  if (gap < 365 * 86400) return n(Math.floor(gap / (30 * 86400)), "month");
+  return n(Math.floor(gap / (365 * 86400)), "year");
+}
+
+// The whole row opens the Project: the name is the one real button, stretched over the row (Delete sits above it)
 function projectRow(p) {
+  const when = new Date(p.updated_at * 1000);
+  const thumb = p.objects ? `<img class="pd-thumb" src="/api/projects/${p.id}/plates/1/preview.png" alt="" width="56" height="56" loading="lazy" decoding="async">` : "";
   return `<div class="slicer-project-row" data-name="${esc(p.name.toLowerCase())}">
-      <div><strong>${esc(p.name)}</strong>${p.split_id ? '<span class="slicer-tag">from a model upload</span>' : ""}
-        <small>${plural(p.plates, "plate")} · ${plural(p.objects, "object")} · edited ${new Date(p.updated_at * 1000).toLocaleString()}</small>
+      ${thumb}<div><strong><button type="button" class="pd-open" data-open-project="${p.id}" aria-label="Open ${esc(p.name)}">${esc(p.name)}</button></strong>${p.split_id ? '<span class="slicer-tag">from a model upload</span>' : ""}
+        <small>${plural(p.plates, "plate")} · ${plural(p.objects, "object")} · edited <time datetime="${when.toISOString()}" title="${esc(when.toLocaleString())}">${ago(p.updated_at)}</time></small>
         <div class="pd-chips">${projectChips(p)}</div></div>
-      <button class="btn btn-primary btn-sm" type="button" data-open-project="${p.id}" aria-label="Open ${esc(p.name)}">Open</button>
       <button class="btn btn-danger-quiet btn-sm project-delete" type="button" data-delete-project="${p.id}" aria-label="Delete ${esc(p.name)}">Delete</button>
     </div>`;
 }
@@ -2574,7 +2589,13 @@ function bindUi() {
   $("btn-empty-projects").addEventListener("click", showProjectsPage);
   $("btn-pd-new").addEventListener("click", openProjectsDialog);
   $("pd-search").addEventListener("input", filterProjects);
+  $("project-list").addEventListener("error", e => { if (e.target.matches?.(".pd-thumb")) e.target.remove(); }, true);   // no picture yet: the row just has none
   $("btn-new-upload").addEventListener("click", () => $("new-model-input").click());
+  $("new-drop").addEventListener("keydown", e => {
+    if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;   // the buttons inside keep their own keys
+    e.preventDefault();
+    $("new-model-input").click();
+  });
   const projectsDialog = $("dlg-projects");   // dropping a file on the Projects list imports it
   projectsDialog.addEventListener("dragover", e => { e.preventDefault(); projectsDialog.classList.add("dropping"); });
   projectsDialog.addEventListener("dragleave", e => { if (e.target === projectsDialog) projectsDialog.classList.remove("dropping"); });

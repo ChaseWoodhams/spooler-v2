@@ -11,7 +11,7 @@
   <script src="/modal.js?v=1"></script>
   <script src="/confirm-dialog.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=52" />
+  <link rel="stylesheet" href="slicer.css?v=53" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -275,8 +275,9 @@
       <label class="slicer-field">Name
         <input id="new-project-name" placeholder="Untitled project" maxlength="120" autocomplete="off" />
       </label>
-      <div id="new-drop" class="slicer-dropzone">
-        <strong>Drop STL, OBJ or 3MF models or a folder here</strong>
+      <div id="new-drop" class="slicer-dropzone" role="group" tabindex="0" aria-label="Add models" aria-describedby="new-drop-types">
+        <strong>Drop models or a folder here, or press Enter to choose files</strong>
+        <span id="new-drop-types" class="slicer-muted">Accepts STL, OBJ or 3MF models, a folder of them, or a single G-code file.</span>
         <span>or <button id="btn-new-upload" class="btn btn-secondary btn-sm" type="button" title="STL, OBJ, 3MF or G-code">Choose files</button>
         <button id="btn-new-folder" class="btn btn-secondary btn-sm" type="button" title="Make one project from every STL, OBJ or 3MF in a folder">Choose folder</button></span>
         <input id="new-model-input" type="file" accept=".stl,.obj,.3mf,.gcode" multiple hidden />
@@ -304,14 +305,14 @@
               <div class="pack-preview" role="status" aria-live="polite"></div>
               <label class="slicer-check"><input type="checkbox" data-pack-arrange checked> Arrange onto plates when I create</label>
             </section>
-            <p id="new-create-reason" class="plan-reason" role="status"></p>
           </aside>
         </div>
       </div>
     </section>
     <div class="slicer-dialog-actions">
       <button id="btn-new-project" class="btn btn-secondary" type="button">Create empty project</button>
-      <button id="btn-new-create" class="btn btn-primary" type="button" hidden disabled>Create project</button>
+      <p id="new-create-reason" class="plan-reason" role="status"></p>
+      <button id="btn-new-create" class="btn btn-primary" type="button" disabled aria-describedby="new-create-reason">Create project</button>
       <button class="btn btn-secondary" type="button" data-close>Close</button>
     </div>
   </dialog>
@@ -362,6 +363,6 @@
   <script src="/status-badge.js?v=1"></script>
   <script src="/outcome-prompt.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=55"></script>
+  <script type="module" src="slicer/main.js?v=56"></script>
 </body>
 </html>

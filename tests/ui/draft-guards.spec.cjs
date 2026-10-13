@@ -124,7 +124,8 @@ const waitFor = async (fn, what) => { for (let i = 0; i < 80; i++) { if (fn()) r
       await page.locator('#new-message').waitFor({ state: 'visible', timeout: 5000 });
       assert.match(await page.locator('#new-message').innerText(), /no longer there/i);
       assert.equal(await page.locator('#new-intake').isHidden(), true, 'the table is cleared');
-      assert.equal(await page.locator('#btn-new-create').isHidden(), true, 'Create is gone');
+      assert.equal(await page.locator('#btn-new-create').isDisabled(), true, 'Create stays on show but cannot be used');
+      assert.match(await page.locator('#new-create-reason').innerText(), /add a model/i, 'and says what to do');
       assert.equal(server.discarded, undefined, 'nothing is discarded: the id is not ours any more');
       await page.close();
       console.log('PASS: A swept draft stops the dialog with a plain message');
