@@ -671,7 +671,7 @@ main {
 .confirm-dialog { z-index: 300; }
 .confirm-dialog .modal-box { width: min(420px, 100% - 32px); }
 .confirm-body { margin: 0; font-size: 14px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
-.input-hint { font-size: 11px; color: var(--text-muted); margin-top: -2px; }
+.input-hint { font-size: 12px; color: var(--text-muted); margin-top: -2px; }
 .settings-readonly {
   display: block;
   padding: 8px 10px;
@@ -1475,10 +1475,22 @@ body.panel-open { overflow: hidden; }
   text-align: center;
 }
 
-.health-body { display: flex; flex-direction: column; gap: 18px; max-height: 65vh; overflow-y: auto; }
+.health-body { display: flex; flex-direction: column; gap: 18px; }
+.health-summary { margin: 0; font-size: 15px; font-weight: 600; }
+.health-summary[data-state="ok"] { color: var(--green); }
+.health-summary[data-state="warn"] { color: var(--yellow); }
+.health-summary[data-state="down"] { color: var(--red); }
+.health-summary[data-state="unknown"] { color: var(--text-muted); }
+.health-ok-fold > summary { cursor: pointer; padding: 10px 0; font-size: 14px; font-weight: 600; min-height: 44px; display: flex; align-items: center; gap: 8px; }
+.health-ok-fold > summary small { font-size: 12px; font-weight: 600; color: var(--text-muted); padding: 1px 8px; border: 1px solid var(--border); border-radius: 99px; }
+.health-ok-fold[open] > summary { margin-bottom: 4px; }
+.health-ok-fold > .health-section + .health-section { margin-top: 14px; }
+/* The backup result sits in the sticky action row, next to the Back up button */
+.health-actions { flex-wrap: wrap; }
+.health-actions .health-feedback { order: -1; flex: 1 1 100%; margin: 0; }
 .health-section h4 {
   margin-bottom: 4px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: .6px;
   text-transform: uppercase;
@@ -1488,13 +1500,13 @@ body.panel-open { overflow: hidden; }
 .health-section h4 + .health-row { border-top: none; }
 .health-row > .health-dot, .health-row > .health-dot-spacer { margin-top: 6px; }
 .health-row-main { display: flex; flex-direction: column; min-width: 0; }
-.health-row-title { font-size: 13px; font-weight: 600; }
-.health-row-detail { font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
-.health-row-next { font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
-.health-freshness, .health-feedback { margin: 0 0 12px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.health-row-title { font-size: 14px; font-weight: 600; }
+.health-row-detail { font-size: 13px; color: var(--text-muted); overflow-wrap: anywhere; }
+.health-row-next { font-size: 13px; color: var(--text-muted); overflow-wrap: anywhere; }
+.health-freshness, .health-feedback { margin: 0 0 12px; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 13px; overflow-wrap: anywhere; }
 .health-feedback[data-state="ok"] { border-color: var(--green); color: var(--text); }
 .health-feedback[data-state="warn"], .health-feedback[data-state="error"] { border-color: var(--red); color: var(--text); }
-.health-empty { font-size: 12px; color: var(--text-muted); }
+.health-empty { font-size: 13px; color: var(--text-muted); }
 
 /* ─── Print queue ─────────────────────────────────────────────────────────── */
 .sidenav-badge {
@@ -1736,7 +1748,8 @@ body.panel-open { overflow: hidden; }
   transition: background .15s, border-color .15s;
 }
 .settings-menu-item:hover { background: var(--surface3, var(--surface2)); border-color: var(--accent); }
-.settings-feedback { margin: 12px 0 0; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 13px; overflow-wrap: anywhere; }
+/* Sticky: the box scrolls, and a result must not end up above the fold when Save is pressed at the bottom */
+.settings-feedback { position: sticky; top: 0; z-index: 2; background: var(--surface); margin: 12px 0 0; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 13px; overflow-wrap: anywhere; }
 .settings-feedback[data-state="ok"] { border-color: var(--green); color: var(--text); }
 .settings-feedback[data-state="warn"], .settings-feedback[data-state="error"] { border-color: var(--red); color: var(--text); }
 .field-error { color: var(--red); font-size: 12px; }
@@ -1764,8 +1777,19 @@ input[aria-invalid="true"] { border-color: var(--red) !important; }
 }
 .settings-printer-info { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .settings-printer-name { font-size: 14px; font-weight: 500; color: var(--text); }
-.settings-printer-meta { font-size: 12px; color: var(--text-muted); }
+.settings-printer-meta { font-size: 13px; color: var(--text-muted); }
 .settings-printer-empty { color: var(--text-muted); font-size: 14px; text-align: center; padding: 24px 0; }
+/* Connected / Offline: a dot and the word, so state never rests on colour alone */
+.settings-printer-status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+.settings-printer-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
+.settings-printer-status[data-state="ok"] .settings-printer-dot { background: var(--green); }
+.settings-printer-status[data-state="down"] .settings-printer-dot { background: var(--red); }
+/* Edit Printer: what Save / Remove is doing, right above the buttons */
+.settings-edit-status { margin: 0; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 13px; overflow-wrap: anywhere; }
+.settings-edit-status[data-state="error"] { border-color: var(--red); }
+#settings-printer-edit [aria-disabled="true"] { opacity: .6; cursor: progress; }
+.modal-box label.settings-reveal { flex-direction: row; align-items: center; gap: 8px; min-height: 44px; color: var(--text); font-size: 13px; cursor: pointer; }
+.modal-box label.settings-reveal input { width: var(--check-size); height: var(--check-size); flex-shrink: 0; }
 
 /* ─── Notification settings ───────────────────────────────────────────────── */
 .notif-list { display: flex; flex-direction: column; gap: 0; margin: 16px 0 24px; }
@@ -1774,10 +1798,19 @@ input[aria-invalid="true"] { border-color: var(--red) !important; }
   padding: 12px 0; border-bottom: 1px solid var(--border);
 }
 .notif-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.notif-label { font-size: 13px; font-weight: 500; color: var(--text); }
-.notif-desc  { font-size: 11px; color: var(--text-muted); }
+.notif-label { font-size: 14px; font-weight: 500; color: var(--text); }
+.notif-desc  { font-size: 13px; color: var(--text-muted); }
 .notif-param { padding: 10px 0 6px; border-bottom: 1px solid var(--border); }
-.notif-param label { font-size: 12px; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
+.notif-param label { font-size: 13px; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
+/* This device: permission and subscription, with an explicit Enable button (so Save never opens the browser prompt) */
+.notif-device { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 4px 0 8px; }
+.notif-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.notif-chip { padding: 4px 10px; border: 1px solid var(--border); border-radius: 99px; background: var(--surface2); color: var(--text); font-size: 12px; font-weight: 600; }
+.notif-chip[data-state="ok"] { border-color: var(--green); }
+.notif-chip[data-state="warn"] { border-color: var(--yellow); }
+.notif-chip[data-state="down"] { border-color: var(--red); }
+.notif-device .input-hint { margin-top: 0; }
+.notif-device [aria-disabled="true"] { opacity: .6; cursor: progress; }
 .notif-param input { width: 100px; }
 .toggle-switch { position: relative; display: inline-block; width: 44px; height: 44px; flex-shrink: 0; }
 .toggle-switch input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; z-index: 1; cursor: pointer; }

@@ -244,7 +244,8 @@ function handleMessage(msg) {
       const linkChanged = printers[msg.printer.id]?.connected !== msg.printer.connected;
       printers[msg.printer.id] = msg.printer;
       _hwReconcile(msg.printer);
-      if (linkChanged) renderSystemHealth();
+      _settingsPendingOnPrinter(msg.printer);
+      if (linkChanged) { renderSystemHealth(); _refreshSettingsPrintersList(); }
       refreshQueueSoon();  // live progress and start availability in the queue panel
       renderPrinter(msg.printer);
       if (_activePrinterId === msg.printer.id) renderPrinterDetail(msg.printer);
@@ -254,6 +255,7 @@ function handleMessage(msg) {
       break;
     case "printer_removed":
       delete printers[msg.printer_id];
+      _settingsPendingOnRemoved(msg.printer_id);
       const el = document.getElementById(`card-${CSS.escape(msg.printer_id)}`);
       if (el) el.remove();
       if (_activePrinterId === msg.printer_id) closePrinterDashboard();
@@ -262,11 +264,13 @@ function handleMessage(msg) {
     case "info":
       if (_scanning && /^(Scanning network|Found \d+ device)/.test(msg.message || "")) break;   // the Discover panel reports the scan itself
       toast(msg.message);
+      _settingsPendingOnMessage(msg);
       break;
     case "discovery_done":
       _discoveryDone(msg);
       break;
     case "error":
+      _settingsPendingOnMessage(msg);
       if (_currentFilePrinterId && /file list/i.test(msg.message || "")) renderFileList([], msg.message);
       _hwFailSent(msg.message || "The printer refused the command.");
       toast(msg.message, true);
@@ -1513,6 +1517,10 @@ function _backToSettingsMenu() {
   else _settingsMenu.querySelector("h3")?.focus();
 }
 
+// Friendly printer type names for lists and summaries ("CC1" is a code, not a name)
+const _PRINTER_TYPE_NAMES = { cc1: "Centauri Carbon", cc2: "Centauri Carbon 2", prusa: "PrusaLink", moonraker: "Klipper" };
+const _printerTypeName = type => _PRINTER_TYPE_NAMES[type] || _PRINTER_TYPE_NAMES.cc1;
+
 function _renderSettingsPrinters() {
   const list = document.getElementById("settings-printer-list");
   if (!list) return;
@@ -1525,14 +1533,107 @@ function _renderSettingsPrinters() {
     <div class="settings-printer-row">
       <div class="settings-printer-info">
         <span class="settings-printer-name">${escHtml(p.name)}</span>
-        <span class="settings-printer-meta">${escHtml(p.ip)} &nbsp;·&nbsp; ${p.printer_type?.toUpperCase() || "CC1"}</span>
+        <span class="settings-printer-meta">${escHtml(p.ip)} &nbsp;·&nbsp; ${escHtml(_printerTypeName(p.printer_type))}</span>
+        <span class="settings-printer-status" data-state="${p.connected ? "ok" : "down"}"><i class="settings-printer-dot" aria-hidden="true"></i>${p.connected ? "Connected" : "Offline"}</span>
       </div>
-      <button class="btn btn-secondary btn-sm" onclick="_settingsEditPrinter('${escAttr(p.id)}')" aria-label="Edit ${escAttr(p.name || "printer")}">Edit</button>
+      <button class="btn btn-secondary btn-sm" data-edit-printer="${escAttr(p.id)}" onclick="_settingsEditPrinter('${escAttr(p.id)}')" aria-label="Edit ${escAttr(p.name || "printer")}">Edit</button>
     </div>
   `).join("");
 }
 
+// Connection changes arrive while the list is open: redraw it in place and keep the focused Edit button.
+function _refreshSettingsPrintersList() {
+  if (_settingsCurrentPage !== _settingsPrintersPage) return;
+  const focused = document.activeElement?.dataset?.editPrinter;
+  _renderSettingsPrinters();
+  if (focused) document.querySelector(`#settings-printer-list [data-edit-printer="${CSS.escape(focused)}"]`)?.focus();
+}
+
 let _settingsEditingPrinterId = null;
+
+// What the printer-key field asks for, per printer type. A placeholder is never a made-up value.
+const _PRINTER_KEY_HINTS = {
+  cc2: "Found on the printer under Settings → Network.",
+  prusa: "In PrusaLink, open Settings and copy the API key.",
+  moonraker: "Only needed if your Moonraker setup requires an API key.",
+};
+function _applyPrinterKeyFields(type, hasCode) {
+  const needsKey = type === "cc2" || type === "prusa" || type === "moonraker";
+  document.getElementById("settings-edit-access-code-label").style.display = needsKey ? "" : "none";
+  document.getElementById("settings-edit-access-code-text").textContent = _printerCredentialLabel(type);
+  const ac = document.getElementById("settings-edit-access-code");
+  ac.placeholder = hasCode ? "Leave blank to keep current" : "";
+  ac.required = ["cc2", "prusa"].includes(type) && !hasCode;
+  document.getElementById("settings-edit-access-code-hint").textContent = _PRINTER_KEY_HINTS[type] || "";
+  document.getElementById("settings-edit-experimental").hidden = !(type === "prusa" || type === "moonraker");   // only those two are experimental
+}
+
+// Save / Add / Remove wait for Spooler to answer before leaving the form (ack = a printer_update, an "Adding…" info or printer_removed;
+// refusal = an error). With no answer in time the form stays, says so, and lets the person try again.
+const _SETTINGS_ACK_MS = 8000;
+let _settingsPending = null;   // { kind: "save" | "add" | "remove", id?, ip?, name, before?, timer }
+
+function _settingsEditStatus(message, state = "info") {
+  const el = document.getElementById("settings-edit-status");
+  el.hidden = !message;
+  el.dataset.state = state;
+  el.textContent = message || "";
+}
+function _settingsEditSetBusy(kind) {
+  const save = document.getElementById("btn-settings-printer-save");
+  const remove = document.getElementById("btn-settings-printer-remove");
+  const isNew = !_settingsEditingPrinterId;
+  // aria-disabled, not disabled: the pressed button keeps focus, and a second press is ignored in the handlers
+  for (const b of [save, remove]) b.setAttribute("aria-disabled", kind ? "true" : "false");
+  save.textContent = kind === "save" ? "Saving…" : kind === "add" ? "Adding…" : (isNew ? "Add Printer" : "Save");
+  remove.textContent = kind === "remove" ? "Removing…" : "Remove printer";
+  _settingsPrinterEditPage.setAttribute("aria-busy", kind ? "true" : "false");
+}
+function _settingsPendingStart(pending, text) {
+  _settingsPendingClear();
+  _settingsPending = { ...pending, timer: setTimeout(() => _settingsPendingFail(
+    "Spooler did not confirm this within 8 seconds, so it may not have been saved. Check the connection, then try again."), _SETTINGS_ACK_MS) };
+  _settingsEditSetBusy(pending.kind);
+  _settingsEditStatus(text, "info");
+}
+function _settingsPendingClear() {
+  if (!_settingsPending) return;
+  clearTimeout(_settingsPending.timer);
+  _settingsPending = null;
+  _settingsEditSetBusy(null);
+}
+function _settingsPendingFail(message) {
+  if (!_settingsPending) return;
+  _settingsPendingClear();
+  _settingsEditStatus(message, "error");
+}
+function _settingsPendingDone(toastText) {
+  const onForm = _settingsCurrentPage === _settingsPrinterEditPage;
+  _settingsPendingClear();
+  _settingsEditStatus("");
+  if (toastText) toast(toastText);
+  if (onForm) { _renderSettingsPrinters(); _showSettingsPage(_settingsPrintersPage); }
+}
+// Called from handleMessage
+function _settingsPendingOnPrinter(printer) {
+  const p = _settingsPending;
+  if (!p) return;
+  // A connected printer reports constantly, so only an update that carries the new values counts as Spooler's answer
+  if (p.kind === "save" && printer.id === p.id && printer.ip === p.ip && (!p.name || printer.name === p.name)) _settingsPendingDone(`Saved ${printer.name || "printer"}`);
+  else if (p.kind === "add" && printer.ip === p.ip && !p.before.has(printer.id)) _settingsPendingDone(`Added ${printer.name || "printer"}`);
+}
+function _settingsPendingOnRemoved(id) {
+  const p = _settingsPending;
+  if (p?.kind === "remove" && p.id === id) _settingsPendingDone(`Removed ${p.name}`);
+}
+function _settingsPendingOnMessage(msg) {
+  const p = _settingsPending;
+  if (!p) return;
+  const text = msg.message || "";
+  if (msg.type === "info" && p.kind === "add" && text.startsWith("Adding ") && text.includes(`(${p.ip})`)) _settingsPendingDone(null);   // the info toast already says it
+  else if (msg.type === "info" && /already added/i.test(text)) _settingsPendingFail(text);
+  else if (msg.type === "error" && /\b(IP|printer|hostname)\b/i.test(text)) _settingsPendingFail(text);
+}
 
 function _settingsEditPrinter(id) {
   _settingsEditingPrinterId = id || null;
@@ -1544,9 +1645,14 @@ function _settingsEditPrinter(id) {
   document.getElementById("settings-edit-name").required = !isNew;
   document.getElementById("settings-edit-ip").value = p?.ip || "";
   document.getElementById("settings-edit-ip").required = true;
+  document.getElementById("settings-edit-ip").removeAttribute("aria-invalid");
+  document.getElementById("settings-edit-ip-error").hidden = true;
+  _settingsPendingClear();
+  _settingsEditStatus("");
 
   const typeSelect = document.getElementById("settings-edit-type");
   const typeReadonly = document.getElementById("settings-edit-type-readonly");
+  document.getElementById("settings-edit-type-note").hidden = isNew;
   if (isNew) {
     typeSelect.value = "cc1";
     typeSelect.style.display = "";
@@ -1565,16 +1671,9 @@ function _settingsEditPrinter(id) {
   }
 
   const curType = p ? p.printer_type : typeSelect.value;
-  const needsKey = curType === "cc2" || curType === "prusa" || curType === "moonraker";
-  document.getElementById("settings-edit-access-code-label").style.display = needsKey ? "" : "none";
-  document.getElementById("settings-edit-access-code-text").textContent = _printerCredentialLabel(curType);
   const ac = document.getElementById("settings-edit-access-code");
   ac.value = "";
-  ac.placeholder = (!isNew && p?.has_access_code)
-    ? "Leave blank to keep current"
-    : curType === "moonraker" ? "API key (optional)"
-    : curType === "prusa" ? "API key from PrusaLink settings" : "12345";
-  ac.required = ["cc2", "prusa"].includes(curType) && (isNew || !p?.has_access_code);
+  _applyPrinterKeyFields(curType, !isNew && !!p?.has_access_code);
   ac.removeAttribute("aria-invalid");
   document.getElementById("settings-edit-access-code-error").hidden = true;
 
@@ -1621,16 +1720,10 @@ document.getElementById("btn-settings-back-printer-edit")?.addEventListener("cli
   _showSettingsPage(_settingsPrintersPage);
 });
 document.getElementById("settings-edit-type")?.addEventListener("change", function () {
-  const needsKey = this.value === "cc2" || this.value === "prusa" || this.value === "moonraker";
-  document.getElementById("settings-edit-access-code-label").style.display = needsKey ? "" : "none";
-  document.getElementById("settings-edit-access-code-text").textContent = _printerCredentialLabel(this.value);
-  document.getElementById("settings-edit-access-code").placeholder =
-    this.value === "moonraker" ? "API key (optional)"
-    : this.value === "prusa" ? "API key from PrusaLink settings" : "12345";
-  document.getElementById("settings-edit-access-code").required = ["cc2", "prusa"].includes(this.value)
-    && (!_settingsEditingPrinterId || !printers[_settingsEditingPrinterId]?.has_access_code);
+  _applyPrinterKeyFields(this.value, !!(_settingsEditingPrinterId && printers[_settingsEditingPrinterId]?.has_access_code));
 });
 document.getElementById("btn-settings-printer-save")?.addEventListener("click", () => {
+  if (_settingsPending) return;
   const name = document.getElementById("settings-edit-name").value.trim();
   const ip   = document.getElementById("settings-edit-ip").value.trim();
   const access_code = document.getElementById("settings-edit-access-code").value.trim();
@@ -1643,17 +1736,21 @@ document.getElementById("btn-settings-printer-save")?.addEventListener("click", 
     return;
   }
   _settingsFeedback("");
+  if (!_wsConnected) {
+    _settingsEditStatus("Not connected to Spooler. Wait for the connection to come back, then try again.", "error");
+    return;
+  }
   if (_settingsEditingPrinterId) {
+    _settingsPendingStart({ kind: "save", id: _settingsEditingPrinterId, name, ip }, "Saving changes…");
     send({ action: "update_printer", printer_id: _settingsEditingPrinterId, name, ip, access_code });
   } else {
     const printer_type = document.getElementById("settings-edit-type").value;
+    _settingsPendingStart({ kind: "add", ip, name, before: new Set(Object.keys(printers)) }, "Adding printer…");
     send({ action: "add_printer", ip, name: name || undefined, printer_type, access_code });
   }
-  _renderSettingsPrinters();
-  _showSettingsPage(_settingsPrintersPage);
 });
 document.getElementById("btn-settings-printer-remove")?.addEventListener("click", async () => {
-  if (!_settingsEditingPrinterId) return;
+  if (!_settingsEditingPrinterId || _settingsPending) return;
   const name = printers[_settingsEditingPrinterId]?.name || "this printer";
   if (!await confirmDialog({
     title: `Remove ${name}?`,
@@ -1662,15 +1759,33 @@ document.getElementById("btn-settings-printer-remove")?.addEventListener("click"
     danger: true,
   })) return;
   if (!_settingsEditingPrinterId) return;
+  if (!_wsConnected) {
+    _settingsEditStatus("Not connected to Spooler. Wait for the connection to come back, then try again.", "error");
+    return;
+  }
+  _settingsPendingStart({ kind: "remove", id: _settingsEditingPrinterId, name }, "Removing printer…");
   send({ action: "remove_printer", printer_id: _settingsEditingPrinterId });
-  _renderSettingsPrinters();
-  _showSettingsPage(_settingsPrintersPage);
 });
 
 // Password sub-page
+// Each password field shows its own error right under it; aria-invalid marks the field that needs fixing.
+function _pwSetError(inputId, message) {
+  const input = document.getElementById(inputId), error = document.getElementById(`${inputId}-error`);
+  if (message) input.setAttribute("aria-invalid", "true"); else input.removeAttribute("aria-invalid");
+  error.textContent = message || "";
+  error.hidden = !message;
+}
+function _pwReveal(show) {
+  for (const id of ["settings-new-password", "settings-confirm-password"]) document.getElementById(id).type = show ? "text" : "password";
+  document.getElementById("settings-pw-reveal").checked = show;
+}
+document.getElementById("settings-pw-reveal")?.addEventListener("change", e => _pwReveal(e.target.checked));
 document.getElementById("btn-settings-goto-password")?.addEventListener("click", () => {
   document.getElementById("settings-new-password").value = "";
   document.getElementById("settings-confirm-password").value = "";
+  _pwSetError("settings-new-password", "");
+  _pwSetError("settings-confirm-password", "");
+  _pwReveal(false);
   _settingsFeedback("");
   _showSettingsPage(_settingsPwPage);
 });
@@ -1678,8 +1793,21 @@ document.getElementById("btn-settings-back")?.addEventListener("click", _backToS
 document.getElementById("btn-app-settings-save")?.addEventListener("click", async () => {
   const pw  = document.getElementById("settings-new-password").value;
   const pw2 = document.getElementById("settings-confirm-password").value;
-  if (pw.length < 8)  { _settingsFeedback("Password must be at least 8 characters.", "error"); return; }
-  if (pw !== pw2)     { _settingsFeedback("Passwords do not match.", "error"); return; }
+  _pwSetError("settings-new-password", "");
+  _pwSetError("settings-confirm-password", "");
+  _settingsFeedback("");
+  if (pw.length < 8) {
+    _pwSetError("settings-new-password", "Use at least 8 characters.");
+    document.getElementById("settings-new-password").focus();
+    return;
+  }
+  if (pw !== pw2) {
+    _pwSetError("settings-confirm-password", "The two passwords don't match.");
+    document.getElementById("settings-confirm-password").focus();
+    return;
+  }
+  // A failure from the server is shown under the last field (it is not a mistake in that field, so no aria-invalid)
+  const failed = message => { const e = document.getElementById("settings-confirm-password-error"); e.textContent = message; e.hidden = false; };
   const button = document.getElementById("btn-app-settings-save");
   button.disabled = true;
   button.textContent = "Saving…";
@@ -1694,12 +1822,15 @@ document.getElementById("btn-app-settings-save")?.addEventListener("click", asyn
       _settingsFeedback("Password updated.", "ok");
       document.getElementById("settings-new-password").value = "";
       document.getElementById("settings-confirm-password").value = "";
+      _pwReveal(false);
     } else {
       const d = await r.json().catch(() => ({}));
-      _settingsFeedback(d.error || "Failed to update password. Check the connection and try again.", "error");
+      _settingsFeedback("");
+      failed(d.error || "Failed to update password. Check the connection and try again.");
     }
   } catch (err) {
-    _settingsFeedback(`Failed to update password: ${err.message}. Check the connection and try again.`, "error");
+    _settingsFeedback("");
+    failed(`Failed to update password: ${err.message}. Check the connection and try again.`);
   } finally {
     button.disabled = false;
     button.textContent = "Save";
@@ -1769,8 +1900,50 @@ async function _pushWorkerReady() {
   } finally { clearTimeout(timeout); }
 }
 
+// What this browser and this device can do about notifications, shown before anyone presses Save.
+async function _refreshNotifDevice() {
+  const permChip = document.getElementById("notif-perm-chip"), subChip = document.getElementById("notif-sub-chip");
+  const hint = document.getElementById("notif-device-hint"), enable = document.getElementById("btn-notif-enable");
+  const perm = "Notification" in window ? Notification.permission : "unsupported";
+  let subscribed = false;
+  if (perm === "granted" && "serviceWorker" in navigator) {
+    try { subscribed = !!(await (await navigator.serviceWorker.getRegistration?.())?.pushManager?.getSubscription?.()); } catch { /* treat as not subscribed */ }
+  }
+  const PERM = { granted: ["ok", "Allowed"], denied: ["down", "Blocked"], default: ["warn", "Not asked yet"], unsupported: ["down", "Not supported"] };
+  const [state, word] = PERM[perm] || PERM.default;
+  permChip.dataset.state = state;
+  permChip.textContent = `Browser permission: ${word}`;
+  subChip.dataset.state = subscribed ? "ok" : "warn";
+  subChip.textContent = `This device: ${subscribed ? "subscribed" : "not subscribed"}`;
+  hint.textContent = perm === "unsupported" ? "This browser does not support notifications."
+    : perm === "denied" ? "Notifications are blocked for this site. Allow them in your browser's site settings, then reopen this page."
+    : subscribed ? "This device will receive the notifications you turn on below."
+    : perm === "granted" ? "Permission is allowed, but this device is not subscribed yet. Press Enable on this device."
+    : "Press Enable on this device so Spooler can send notifications here. Your browser will ask for permission.";
+  enable.hidden = perm === "unsupported" || perm === "denied" || subscribed;
+}
+document.getElementById("btn-notif-enable")?.addEventListener("click", async e => {
+  const button = e.currentTarget;
+  if (button.getAttribute("aria-disabled") === "true") return;
+  button.setAttribute("aria-disabled", "true");
+  button.textContent = "Enabling…";
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") _settingsFeedback("Notification permission was not granted. Allow it in your browser's site settings, then try again.", "error");
+    else if (await _subscribePush()) _settingsFeedback("This device is subscribed. Turn on the notifications you want below, then save.", "ok");
+    else _settingsFeedback("Permission is allowed, but push registration failed. Check the browser's service worker and the Spooler connection, then try again.", "warn");
+  } catch (err) {
+    _settingsFeedback(`Could not enable notifications: ${err.message}`, "error");
+  } finally {
+    button.setAttribute("aria-disabled", "false");
+    button.textContent = "Enable on this device";
+    _refreshNotifDevice();
+  }
+});
+
 // Notifications sub-page UI
 async function _populateNotifForm() {
+  _refreshNotifDevice();
   const save = document.getElementById("btn-notif-save");
   const state = document.getElementById("notif-state");
   const list = document.getElementById("notif-list");
@@ -1859,21 +2032,24 @@ document.getElementById("btn-notif-save")?.addEventListener("click", async () =>
   button.disabled = true;
   button.textContent = "Saving…";
   _settingsFeedback("Saving notification settings…", "info");
+  let devicePending = false;   // rules saved, but this browser has not been asked yet
   try {
     if (anyEnabled) {
       if (!("Notification" in window)) {
         _settingsFeedback("This browser does not support notifications. Disable notification rules or use a supported browser.", "error");
         return;
       }
-      const perm = await Notification.requestPermission();
-      if (perm !== "granted") {
+      // Saving never opens the browser's permission prompt: that is "Enable on this device"
+      if (Notification.permission === "denied") {
         _settingsFeedback("Notification permission was not granted. Allow it in browser settings, then save again.", "error");
         return;
       }
-      const sub = await _subscribePush();
-      if (!sub) {
-        _settingsFeedback("Settings can be saved, but push registration failed. Notifications may not arrive while Spooler is closed; check the browser service worker and Spooler connection.", "warn");
-      }
+      if (Notification.permission === "granted") {
+        const sub = await _subscribePush();
+        if (!sub) {
+          _settingsFeedback("Settings can be saved, but push registration failed. Notifications may not arrive while Spooler is closed; check the browser service worker and Spooler connection.", "warn");
+        }
+      } else devicePending = true;
     } else {
       await _unsubscribePush();
     }
@@ -1883,7 +2059,9 @@ document.getElementById("btn-notif-save")?.addEventListener("click", async () =>
       body: JSON.stringify(s),
     });
     if (r.ok) {
-      if (anyEnabled && !window._pushSubscriptionReady) {
+      if (devicePending) {
+        _settingsFeedback("Notification rules saved, but this device is not enabled yet, so nothing will arrive here. Press Enable on this device above.", "warn");
+      } else if (anyEnabled && !window._pushSubscriptionReady) {
         const warning = "Settings saved, but push delivery is not registered. Notifications may not arrive while Spooler is closed. Recheck browser notification permission and service worker availability, then save again.";
         _settingsFeedback(warning, "warn");
       } else {
@@ -1913,7 +2091,7 @@ document.getElementById("btn-notif-test")?.addEventListener("click", async () =>
     const r = await fetch("/api/push-test", { method: "POST" });
     if (r.ok) {
       _settingsFeedback("Test notification sent. Check the device where this browser is signed in.", "ok");
-    toast("Test notification sent — check your phone");
+    toast("Test notification sent to the devices subscribed to Spooler");
     } else {
       const d = await r.json().catch(() => ({}));
       _settingsFeedback(d.error || "Failed to send test notification. Check the connection and subscription.", "error");
