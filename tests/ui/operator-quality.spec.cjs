@@ -243,10 +243,12 @@ async function settings(fixture) {
   assert.equal(fixture.commands.some(command => ['add_printer', 'update_printer'].includes(command.action)), false);
   await page.locator('#btn-settings-back-printer-edit').click();
   await page.locator('#settings-printer-list').getByRole('button', { name: 'Edit', exact: true }).click();
-  let removalText = '';
-  page.once('dialog', async dialog => { removalText = dialog.message(); await dialog.dismiss(); });
   await page.locator('#btn-settings-printer-remove').click();
-  assert.match(removalText, /Remove Operator fixture printer.*saved printer settings.*Jobs and Prints are kept/s);
+  const removal = page.getByRole('dialog', { name: 'Remove Operator fixture printer?' });
+  await removal.waitFor();
+  await expectText(removal, /saved printer settings.*Jobs and Prints are kept/s);
+  assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Cancel', 'focus starts on Cancel');
+  await removal.getByRole('button', { name: 'Cancel' }).click();
   assert.equal(fixture.commands.some(command => command.action === 'remove_printer'), false);
   assert.equal(await page.locator('#settings-printer-edit').isVisible(), true);
   await page.locator('#btn-settings-back-printer-edit').click();

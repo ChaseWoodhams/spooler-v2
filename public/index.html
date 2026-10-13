@@ -11,10 +11,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=63" />
+  <link rel="stylesheet" href="style.css?v=65" />
   <link rel="stylesheet" href="history-quality.css?v=1" />
   <script src="net.js?v=2"></script>
   <script src="modal.js?v=1"></script>
+  <script src="confirm-dialog.js?v=1"></script>
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body>
@@ -205,9 +206,9 @@
             </svg>
             Add Printer
           </button>
-          <button id="btn-remove-printer" class="btn btn-danger" style="display:none">
-            Remove
-          </button>
+        </div>
+        <div class="danger-zone" style="display:none">
+          <button id="btn-remove-printer" class="btn btn-danger-quiet">Remove printer</button>
         </div>
       </div>
     </div>
@@ -323,24 +324,20 @@
   <!-- CC1 Print options modal -->
   <div id="modal-print-opts" class="modal">
     <div class="modal-box modal-box-wide">
-      <h3>Send Print Task</h3>
+      <h3 id="print-opts-title">Start a print</h3>
       <div id="print-opts-thumb-wrap" class="print-opts-thumb-wrap">
         <img id="print-opts-thumb" class="print-opts-thumb" alt="" />
-        <p id="print-opts-filename" class="print-opts-filename"></p>
       </div>
-      <div id="print-opts-stats" class="print-opts-stats" style="display:none">
-        <div class="print-opts-stat" id="print-opts-stat-time">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          <span id="print-opts-stat-time-val">--</span>
-        </div>
-        <div class="print-opts-stat" id="print-opts-stat-filament">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-          <span id="print-opts-stat-filament-val">--</span>
-        </div>
-        <div class="print-opts-stat" id="print-opts-stat-layers">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-          <span id="print-opts-stat-layers-val">--</span>
-        </div>
+      <dl id="print-opts-summary" class="print-opts-summary">
+        <div><dt>Printer</dt><dd id="print-opts-printer"></dd></div>
+        <div><dt>File</dt><dd id="print-opts-filename"></dd></div>
+        <div id="print-opts-plate-row"><dt>Plate</dt><dd id="print-opts-plate"></dd></div>
+        <div id="print-opts-options-row"><dt>Options</dt><dd id="print-opts-options"></dd></div>
+        <div><dt>Estimate</dt><dd id="print-opts-estimate"></dd></div>
+      </dl>
+      <div id="print-opts-bed" class="print-opts-bed" data-state="" role="status" aria-live="polite">
+        <span id="print-opts-bed-text"></span>
+        <button id="btn-print-opts-bed" class="btn btn-secondary btn-sm" type="button" style="display:none"></button>
       </div>
       <div id="print-opts-cc1-only">
         <div class="print-opts-group">
@@ -372,7 +369,7 @@
       </div>
       <div class="modal-actions">
         <button id="btn-print-opts-cancel" class="btn btn-secondary">Cancel</button>
-        <button id="btn-print-opts-send"   class="btn btn-primary">Send</button>
+        <button id="btn-print-opts-send"   class="btn btn-primary">Start print</button>
       </div>
     </div>
   </div>
@@ -574,8 +571,10 @@
           <span id="settings-edit-access-code-error" class="field-error" hidden></span>
           <span class="input-hint">Found on the printer under Settings → Network.</span>
         </label>
+        <div class="danger-zone" style="display:none">
+          <button id="btn-settings-printer-remove" class="btn btn-danger-quiet">Remove printer</button>
+        </div>
         <div class="modal-actions">
-          <button id="btn-settings-printer-remove" class="btn btn-danger" style="display:none">Remove</button>
           <button id="btn-settings-printer-save" class="btn btn-primary">Save</button>
         </div>
       </div>
@@ -819,20 +818,20 @@
   </div>
 
   <!-- Toast notifications -->
-  <div id="toast-area"></div>
+  <div id="toast-area" role="status" aria-live="polite"></div>
 
   <script src="/config.js"></script>
   <script src="health.js?v=2"></script>
-  <script src="jobs.js?v=10"></script>
+  <script src="jobs.js?v=11"></script>
   <script src="preview.js?v=2"></script>
   <script src="history.js?v=8"></script>
-  <script src="outcome-prompt.js?v=4"></script>
-  <script src="app.js?v=70"></script>
+  <script src="outcome-prompt.js?v=6"></script>
+  <script src="app.js?v=71"></script>
   <script src="quick-print.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
   <script src="import.js?v=7"></script>
-  <script src="dashboard.js?v=7"></script>
-  <script src="printer-cockpit.js?v=2"></script>
+  <script src="dashboard.js?v=9"></script>
+  <script src="printer-cockpit.js?v=4"></script>
   <script>
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});

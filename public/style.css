@@ -25,6 +25,9 @@
   --radius:      12px;
   --radius-sm:   8px;
   --shadow:      0 4px 24px rgba(0,0,0,.5);
+  --hit-min:     44px;  /* touch target floor: coarse pointers and widths up to 1100px */
+  --hit-fine:    32px;  /* fine-pointer desktop floor, with --hit-gap between neighbours */
+  --hit-gap:     8px;
 }
 
 body.light-mode {
@@ -138,6 +141,11 @@ header {
 
 .btn-danger { background: #b91c1c; color: #fff; }
 .btn-danger:hover:not(:disabled) { background: #dc2626; }
+
+/* Destructive actions that sit beside a primary row: outlined, not filled, and held apart from it (confirm-dialog.js asks before any of them runs) */
+.btn-danger-quiet { background: transparent; color: var(--red); border: 1px solid var(--red); }
+.btn-danger-quiet:hover:not(:disabled) { background: var(--red); color: #fff; }
+.danger-zone { margin-top: 12px; padding-top: 16px; border-top: 1px solid var(--border); display: flex; }
 
 .btn-sm { padding: 5px 10px; font-size: 12px; }
 
@@ -522,6 +530,8 @@ main {
   padding: 12px 18px;
   flex-wrap: wrap;
 }
+.card-next { flex-basis: 100%; font-size: 12px; color: var(--text-muted); }
+.card-next strong { color: var(--text); font-weight: 600; }
 .controls-spacer { flex: 1; }
 .card-speed {
   width: 100%;
@@ -635,6 +645,10 @@ main {
   border-top: 1px solid var(--border);
 }
 @media (max-width: 640px) { .modal-box { --modal-pad: 20px; } .modal-actions { flex-wrap: wrap; } }
+/* confirmDialog (confirm-dialog.js): above every other modal, and inside an open native <dialog> when it is asked from one */
+.confirm-dialog { z-index: 300; }
+.confirm-dialog .modal-box { width: min(420px, 100% - 32px); }
+.confirm-body { margin: 0; font-size: 14px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
 .input-hint { font-size: 11px; color: var(--text-muted); margin-top: -2px; }
 .settings-readonly {
   display: block;
@@ -680,6 +694,34 @@ main {
   cursor: pointer;
 }
 .toast-btn:hover { opacity: .85; }
+.toast-btn:focus-visible, .toast-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Toast text never blocks a control underneath (e.g. a dialog button on a phone); its own buttons still work */
+#toast-area, .toast { pointer-events: none; }
+.toast button { pointer-events: auto; }
+.toast.error { display: flex; align-items: flex-start; gap: 12px; }
+.toast .toast-msg { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.toast-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  margin: -2px -6px -2px 0;
+  cursor: pointer;
+  opacity: .7;
+}
+.toast-close:hover { opacity: 1; }
+@media (max-width: 640px) {
+  #toast-area {
+    bottom: calc(72px + env(safe-area-inset-bottom));
+    left: 16px;
+    right: 16px;
+    align-items: flex-end;
+  }
+  .toast, .toast.toast-action { max-width: 100%; }
+}
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -1039,31 +1081,24 @@ body.panel-open { overflow: hidden; }
   background: var(--surface2);
   object-fit: contain;
 }
-.print-opts-filename {
-  font-size: 12px;
-  color: var(--text-muted);
-  text-align: center;
-  word-break: break-all;
-  margin: 0;
-  line-height: 1.4;
-}
-.print-opts-stats {
-  display: flex;
-  justify-content: center;
-  gap: 24px;
+.print-opts-summary {
   background: var(--surface2);
   border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 10px;
-}
-.print-opts-stat {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  padding: 4px 12px;
+  margin: 0 0 10px;
   font-size: 13px;
-  font-weight: 500;
 }
-.print-opts-stat svg { width: 15px; height: 15px; color: var(--accent); flex-shrink: 0; }
+.print-opts-summary > div { display: flex; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--surface3, rgba(255,255,255,0.06)); }
+.print-opts-summary > div:last-child { border-bottom: none; }
+.print-opts-summary dt { flex: 0 0 64px; color: var(--text-muted); }
+.print-opts-summary dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.print-opts-bed {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px;
+  background: var(--surface2); border: 1px solid var(--border);
+}
+.print-opts-bed[data-state=""] { display: none; }
+.print-opts-bed[data-state="blocked"], .print-opts-bed[data-state="error"] { border-color: var(--yellow); }
 .print-opts-group {
   background: var(--surface2);
   border-radius: 8px;
@@ -1338,6 +1373,7 @@ body.panel-open { overflow: hidden; }
   gap: 6px;
   flex-shrink: 0;
 }
+.file-actions .file-delete { margin-left: 18px; }
 
 
 /* ─── Footer ──────────────────────────────────────────────────────────────── */
@@ -2176,6 +2212,7 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
 .outcome-prompt .modal-box { width: min(440px, 100% - 32px); }
 .outcome-prompt .modal-box h3 { margin: 0; overflow-wrap: anywhere; }
 .outcome-detail { color: var(--text-muted); }
+.outcome-next { margin: 8px 0; }
 .outcome-snapshot { width: 100%; border-radius: var(--radius-sm); }
 .outcome-prompt .btn { min-height: 48px; justify-content: center; }
 .outcome-prompt .btn-sm { min-height: 44px; }
@@ -2208,3 +2245,24 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
 .toggle-switch input:disabled { cursor: not-allowed; }
 .toggle-switch input:disabled + .toggle-slider { opacity: .5; cursor: not-allowed; }
 #needs-you .state-block, #dash-projects .state-block { border: 0; }   /* the section already has its own frame */
+/* ─── Hit targets (ticket 08) ─────────────────────────────────────────────────
+   Fine-pointer desktop: every control is at least --hit-fine (32px) with --hit-gap (8px) between neighbours.
+   Coarse pointers and anything up to 1100px wide (tablets, touch laptops): --hit-min (44px). The phone
+   breakpoints above already do this; this block carries it up to 1100px and to the small controls they miss. */
+.btn-sm, .card-settings-btn, .card-remove-btn, .card-files-btn, .settings-back-btn,
+.footer-version, .history-events summary, .detail-step, .sidenav-item { min-height: var(--hit-fine); }
+.card-settings-btn, .card-remove-btn, .card-files-btn { min-width: var(--hit-fine); align-items: center; justify-content: center; }
+.settings-back-btn { width: var(--hit-fine); height: var(--hit-fine); }
+.history-events summary { display: flex; align-items: center; }
+.file-actions, .settings-printer-row { gap: var(--hit-gap); }
+.detail-step-picker { gap: var(--hit-gap); }
+@media (pointer: coarse), (max-width: 1100px) {
+  .btn, .btn-sm, .sidenav-item, .detail-step, .footer-version, .history-events summary,
+  .home-stack button, .temperature-target input, .temperature-target button { min-height: var(--hit-min); }
+  .card-settings-btn, .card-remove-btn, .card-files-btn { min-width: var(--hit-min); min-height: var(--hit-min); }
+  .settings-back-btn { width: var(--hit-min); height: var(--hit-min); }
+  .footer-version { min-width: var(--hit-min); }
+  label:has(> input[type="checkbox"]), label:has(> input[type="radio"]) { min-height: var(--hit-min); display: flex; align-items: center; gap: 8px; }
+  input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; }
+  .file-actions { flex-wrap: wrap; }
+}

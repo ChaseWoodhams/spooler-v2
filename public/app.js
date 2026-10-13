@@ -687,10 +687,11 @@ function renderPrinter(printer) {
 
     <!-- Controls -->
     <div class="card-controls">
-      ${connected && !printing && !paused ? `
+      ${connected && !printing && !paused && bedClearedWaiting(printer.id) ? `
         <button class="btn btn-primary btn-sm" onclick="confirmBedCleared('${escAttr(printer.id)}')" title="Confirm the printed plate is off the bed; releases the next queued job when auto-start is on">
           Printed OK · Bed cleared
         </button>
+        ${bedClearedNext(printer)}
       ` : ""}
       ${printing ? `
         <button class="btn btn-secondary btn-sm" onclick="printerAction('${escAttr(printer.id)}','pause')">
@@ -1074,6 +1075,12 @@ document.addEventListener("change", event => {
   if (event.target.matches('#printer-detail input[type="range"]')) _cockpitDraftValues.delete(event.target.id);
 });
 
+// The Remove printer buttons sit in a .danger-zone of their own, apart from Add/Save; show or hide the zone with its button.
+function showDangerZone(buttonId, show) {
+  const button = document.getElementById(buttonId);
+  if (button) (button.closest(".danger-zone") || button).style.display = show ? "" : "none";
+}
+
 function setJogStep(step) {
   _detailJogStep = step;
   if (_activePrinterId && printers[_activePrinterId]) renderPrinterDetail(printers[_activePrinterId]);
@@ -1083,9 +1090,14 @@ function jogPrinter(printerId, axis, direction) {
   send({ action: "move_axis", printer_id: printerId, axis, step: _detailJogStep * direction });
 }
 
-function homePrinter(printerId, axis) {
+async function homePrinter(printerId, axis) {
   const label = axis === "XYZ" ? "all axes" : axis === "XY" ? "the X and Y axes" : `the ${axis} axis`;
-  if (!confirm(`Home ${label}? Make sure the build chamber is clear before continuing.`)) return;
+  const name = printers[printerId]?.name || "this printer";
+  if (!await confirmDialog({
+    title: `Home ${label} on ${name}?`,
+    body: "The print head and bed will move. Make sure the build chamber is clear first.",
+    confirmLabel: axis === "XYZ" ? "Home all axes" : `Home ${axis}`,
+  })) return;
   send({ action: "home_axes", printer_id: printerId, axis });
 }
 
@@ -1093,7 +1105,7 @@ function setPrinterFan(printerId, fan, speed) {
   send({ action: "set_fan", printer_id: printerId, fan, speed });
 }
 
-function setPrinterTemperature(printerId, target, inputId) {
+async function setPrinterTemperature(printerId, target, inputId) {
   const input = document.getElementById(inputId);
   if (!input || input.value === "") return;
   const value = Number(input.value);
@@ -1101,7 +1113,12 @@ function setPrinterTemperature(printerId, target, inputId) {
     input.reportValidity();
     return;
   }
-  if (value > 0 && !confirm(`Set the ${target} target to ${value} °C?`)) return;
+  const heater = target === "bed" ? "heated bed" : target;
+  if (value > 0 && !await confirmDialog({
+    title: `Set the ${heater} target to ${value} °C on ${printers[printerId]?.name || "this printer"}?`,
+    body: `The ${heater} starts heating straight away.`,
+    confirmLabel: `Heat ${heater}`,
+  })) return;
   send({ action: "set_temperature", printer_id: printerId, target, value });
 }
 
@@ -1148,16 +1165,26 @@ function setSpeed(id, speed) {
   send({ action: "set_speed", printer_id: id, speed });
 }
 
-function confirmStop(id) {
-  if (confirm("Stop the current print? This cannot be undone.")) {
-    send({ action: "stop", printer_id: id });
-  }
+async function confirmStop(id) {
+  const printer = printers[id];
+  const progress = printer ? getProgress(printer) : null;
+  const file = printer ? getFilename(printer).split("/").pop() : "";
+  const done = progress == null ? "" : ` (${progress}% done)`;
+  if (await confirmDialog({
+    title: `Stop the print on ${printer?.name || "this printer"}?`,
+    body: `${file ? `${file}${done}` : `The current print${done}`} ends now. A stopped print cannot be resumed.`,
+    confirmLabel: "Stop print",
+    danger: true,
+  })) send({ action: "stop", printer_id: id });
 }
 
-function removePrinter(id) {
-  if (confirm("Remove this printer?")) {
-    send({ action: "remove_printer", printer_id: id });
-  }
+async function removePrinter(id) {
+  if (await confirmDialog({
+    title: `Remove ${printers[id]?.name || "this printer"}?`,
+    body: "This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.",
+    confirmLabel: "Remove printer",
+    danger: true,
+  })) send({ action: "remove_printer", printer_id: id });
 }
 
 function openPrinterSettings(id) {
@@ -1195,7 +1222,7 @@ function openPrinterSettings(id) {
   document.getElementById("printer-panel-divider").style.display = "none";
   document.getElementById("printer-form-label").textContent = "Printer details";
   document.getElementById("btn-modal-confirm").innerHTML = "Save Changes";
-  document.getElementById("btn-remove-printer").style.display = "";
+  showDangerZone("btn-remove-printer", true);
 
   openPrinters();
   document.getElementById("input-name").focus();
@@ -1428,7 +1455,7 @@ function _settingsEditPrinter(id) {
   ac.removeAttribute("aria-invalid");
   document.getElementById("settings-edit-access-code-error").hidden = true;
 
-  document.getElementById("btn-settings-printer-remove").style.display = isNew ? "none" : "";
+  showDangerZone("btn-settings-printer-remove", !isNew);
   document.getElementById("btn-settings-printer-save").textContent = isNew ? "Add Printer" : "Save";
 
   _showSettingsPage(_settingsPrinterEditPage);
@@ -1502,10 +1529,16 @@ document.getElementById("btn-settings-printer-save")?.addEventListener("click", 
   _renderSettingsPrinters();
   _showSettingsPage(_settingsPrintersPage);
 });
-document.getElementById("btn-settings-printer-remove")?.addEventListener("click", () => {
+document.getElementById("btn-settings-printer-remove")?.addEventListener("click", async () => {
   if (!_settingsEditingPrinterId) return;
   const name = printers[_settingsEditingPrinterId]?.name || "this printer";
-  if (!confirm(`Remove ${name}? This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.`)) return;
+  if (!await confirmDialog({
+    title: `Remove ${name}?`,
+    body: "This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.",
+    confirmLabel: "Remove printer",
+    danger: true,
+  })) return;
+  if (!_settingsEditingPrinterId) return;
   send({ action: "remove_printer", printer_id: _settingsEditingPrinterId });
   _renderSettingsPrinters();
   _showSettingsPage(_settingsPrintersPage);
@@ -1808,7 +1841,7 @@ function resetPrinterForm() {
   document.getElementById("btn-modal-confirm").innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <path d="M12 5v14M5 12h14"/>
   </svg> Add Printer`;
-  document.getElementById("btn-remove-printer").style.display = "none";
+  showDangerZone("btn-remove-printer", false);
 }
 
 inputType.addEventListener("change", () => {
@@ -1925,10 +1958,15 @@ document.getElementById("btn-modal-confirm").addEventListener("click", () => {
   closePrinters();
 });
 
-document.getElementById("btn-remove-printer").addEventListener("click", () => {
+document.getElementById("btn-remove-printer").addEventListener("click", async () => {
   if (!_editingPrinterId) return;
   const name = printers[_editingPrinterId]?.name || "this printer";
-  if (confirm(`Remove ${name}? This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.`)) {
+  if (await confirmDialog({
+    title: `Remove ${name}?`,
+    body: "This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.",
+    confirmLabel: "Remove printer",
+    danger: true,
+  }) && _editingPrinterId) {
     send({ action: "remove_printer", printer_id: _editingPrinterId });
     closePrinters();
   }
@@ -2038,10 +2076,17 @@ function renderFileList(files, error) {
       }
 
       const delBtn = document.createElement("button");
-      delBtn.className = "btn btn-danger btn-sm";
+      delBtn.className = "btn btn-danger-quiet btn-sm file-delete";
       delBtn.textContent = "Delete";
-      delBtn.addEventListener("click", () => {
-        if (confirm(`Delete "${fileName}"?`)) {
+      delBtn.setAttribute("aria-label", `Delete ${fileName}`);
+      delBtn.addEventListener("click", async () => {
+        const printerId = _currentFilePrinterId;
+        if (await confirmDialog({
+          title: `Delete ${fileName}?`,
+          body: `It is deleted from ${printers[printerId]?.name || "the printer"}'s storage. This cannot be undone.`,
+          confirmLabel: "Delete file",
+          danger: true,
+        }) && printerId === _currentFilePrinterId) {
           send({ action: "delete_file", printer_id: _currentFilePrinterId, filename: filePath });
           toast(`Deleting: ${fileName}`);
           setTimeout(() => {
@@ -2076,6 +2121,8 @@ let _printOptsFile = null;
 let _printOptsName = null;
 
 let _printOptsFilename = null; // bare filename used as key for file_info matching
+let _printOptsMeta = {};       // estimate fields from the file list / file_info
+let _printOptsBedSeq = 0;      // discards a bed check that returns after the dialog moved on
 
 function _applyFileInfo(msg) {
   // Only update if the modal is still open for the same printer+file
@@ -2093,17 +2140,107 @@ function _applyFileInfo(msg) {
     thumbWrap.style.display = "";
   }
 
-  // Stats (fill in if present and currently showing --)
-  const statsEl = document.getElementById("print-opts-stats");
-  if (msg.print_time || msg.layers || msg.filament_g) {
-    statsEl.style.display = "";
-    if (msg.print_time)
-      document.getElementById("print-opts-stat-time-val").textContent = formatTimeLong(msg.print_time);
-    if (msg.filament_g != null)
-      document.getElementById("print-opts-stat-filament-val").textContent =
-        `${parseFloat(msg.filament_g).toFixed(2)}g`;
-    if (msg.layers != null)
-      document.getElementById("print-opts-stat-layers-val").textContent = msg.layers;
+  // Estimate
+  _printOptsMeta = { ..._printOptsMeta };
+  for (const k of ["print_time", "layers", "filament_g"]) if (msg[k] != null && msg[k] !== 0) _printOptsMeta[k] = msg[k];
+  _renderPrintSummary();
+}
+
+// Last-used options are remembered per printer (a convenience only: storage may be unavailable).
+function _printOptsStoreKey(printerId) { return `printOpts:${printerId}`; }
+function _loadPrintOpts(printerId) {
+  try {
+    const o = JSON.parse(localStorage.getItem(_printOptsStoreKey(printerId)) || "null");
+    if (o && typeof o === "object") return { timelapse: !!o.timelapse, leveling: !!o.leveling, smooth_plate: !!o.smooth_plate };
+  } catch (e) { /* storage blocked or corrupt: fall back to defaults */ }
+  return { timelapse: false, leveling: false, smooth_plate: false };
+}
+function _savePrintOpts(printerId, opts) {
+  try { localStorage.setItem(_printOptsStoreKey(printerId), JSON.stringify(opts)); } catch (e) { /* ignore */ }
+}
+
+function _currentPrintOpts() {
+  return {
+    timelapse:    document.getElementById("print-opt-timelapse").checked,
+    leveling:     document.getElementById("print-opt-leveling").checked,
+    smooth_plate: document.getElementById("print-plate-smooth").dataset.selected === "1",
+  };
+}
+
+// The summary block: what is about to start, and where.
+function _renderPrintSummary() {
+  const pr = printers[_currentFilePrinterId];
+  const isHttp = pr?.printer_type === "prusa" || pr?.printer_type === "moonraker";
+  const meta = _printOptsMeta || {};
+  document.getElementById("print-opts-printer").textContent = pr?.name || _currentFilePrinterId || "";
+  document.getElementById("print-opts-filename").textContent = _printOptsName || "";
+  document.getElementById("print-opts-plate-row").style.display = isHttp ? "none" : "";
+  document.getElementById("print-opts-options-row").style.display = isHttp ? "none" : "";
+  if (!isHttp) {
+    const o = _currentPrintOpts();
+    document.getElementById("print-opts-plate").textContent = o.smooth_plate ? "Smooth (Side B)" : "Textured (Side A)";
+    const on = [o.timelapse && "Time-lapse", o.leveling && "Heated bed leveling"].filter(Boolean);
+    document.getElementById("print-opts-options").textContent = on.length ? on.join(", ") : "None";
+  }
+  const parts = [];
+  if (meta.print_time) parts.push(formatTimeLong(meta.print_time));
+  if (meta.filament_g != null) parts.push(`${parseFloat(meta.filament_g).toFixed(2)}g`);
+  else if (meta.filament_mm != null) parts.push(`${Math.round(meta.filament_mm)}mm`);
+  if (meta.layers != null) parts.push(`${meta.layers} layers`);
+  document.getElementById("print-opts-estimate").textContent = parts.length ? parts.join(" · ") : "Estimate unavailable";
+  document.getElementById("btn-print-opts-send").textContent = `Start print on ${pr?.name || "printer"}`;
+}
+
+// Same Bed cleared rule the queue uses (GET /api/printers/<id>/bed-cleared); nothing is decided client-side.
+function _setPrintBed(state, text, actionLabel) {
+  const box = document.getElementById("print-opts-bed");
+  const btn = document.getElementById("btn-print-opts-bed");
+  box.dataset.state = state;
+  document.getElementById("print-opts-bed-text").textContent = text;
+  btn.style.display = actionLabel ? "" : "none";
+  btn.textContent = actionLabel || "";
+  btn.disabled = false;
+  document.getElementById("btn-print-opts-send").disabled = state !== "clear";
+}
+
+async function _checkPrintBed() {
+  const printerId = _currentFilePrinterId;
+  const seq = ++_printOptsBedSeq;
+  _setPrintBed("checking", "Checking that the bed is clear…");
+  try {
+    const resp = await fetch(`/api/printers/${encodeURIComponent(printerId)}/bed-cleared`);
+    const status = await resp.json();
+    if (seq !== _printOptsBedSeq) return;
+    if (!resp.ok) throw new Error(status.error || "Bed check failed");
+    if (status.valid) _setPrintBed("clear", "Bed confirmed clear.");
+    else _setPrintBed("blocked", "The bed is not confirmed clear. Remove the last print, then confirm.", "Bed cleared");
+  } catch (e) {
+    if (seq !== _printOptsBedSeq) return;
+    _setPrintBed("error", "Could not check the bed. Try again before starting.", "Check again");
+  }
+}
+
+async function _confirmPrintBed() {
+  const printerId = _currentFilePrinterId;
+  const btn = document.getElementById("btn-print-opts-bed");
+  if (document.getElementById("print-opts-bed").dataset.state === "error") { _checkPrintBed(); return; }
+  btn.disabled = true;
+  try {
+    const resp = await fetch(`/api/printers/${encodeURIComponent(printerId)}/bed-cleared`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    const result = await resp.json();
+    if (printerId !== _currentFilePrinterId || !_printOptsFile) return;
+    if (!resp.ok) { toast(result.error || "Could not confirm", true); btn.disabled = false; return; }
+    if (result.started) {   // auto-start released a queued Job onto this printer: nothing left to start here
+      toast(`Bed cleared. Starting ${result.started.file_name}`);
+      closePrintOpts();
+      return;
+    }
+    _checkPrintBed();
+  } catch (e) {
+    toast("Could not confirm Bed cleared", true);
+    btn.disabled = false;
   }
 }
 
@@ -2111,36 +2248,18 @@ function openPrintOpts(filePath, fileName, meta = {}) {
   _printOptsFile = filePath;
   _printOptsName = fileName;
   _printOptsFilename = fileName; // used for file_info matching
+  _printOptsMeta = { ...meta };
   const printerType  = printers[_currentFilePrinterId]?.printer_type;
   const isCC2        = printerType === "cc2";
   const isPrusa      = printerType === "prusa";
   const isMoonraker  = printerType === "moonraker";
   const isHttpPrinter = isPrusa || isMoonraker;
 
-  // Stats bar
-  const statsEl = document.getElementById("print-opts-stats");
-  const hasStats = meta.print_time || meta.layers || meta.filament_g || meta.filament_mm;
-  statsEl.style.display = hasStats ? "" : "none";
-  if (hasStats) {
-    document.getElementById("print-opts-stat-time-val").textContent =
-      meta.print_time ? formatTimeLong(meta.print_time) : "--";
-
-    let filamentText = "--";
-    if (meta.filament_g != null)
-      filamentText = `${parseFloat(meta.filament_g).toFixed(2)}g`;
-    else if (meta.filament_mm != null)
-      filamentText = `${Math.round(meta.filament_mm)}mm`;
-    document.getElementById("print-opts-stat-filament-val").textContent = filamentText;
-
-    document.getElementById("print-opts-stat-layers-val").textContent =
-      meta.layers != null ? meta.layers : "--";
-  }
-
-  document.getElementById("print-opts-filename").textContent = fileName;
-  document.getElementById("print-opt-timelapse").checked = false;
-  document.getElementById("print-opt-leveling").checked  = false;
-  _setPrintPlate(0);
-
+  const saved = _loadPrintOpts(_currentFilePrinterId);
+  document.getElementById("print-opt-timelapse").checked = saved.timelapse;
+  document.getElementById("print-opt-leveling").checked  = saved.leveling;
+  _setPrintPlate(saved.smooth_plate ? 1 : 0);
+  _renderPrintSummary();
 
   // CC1 and CC2 support leveling/timelapse/plate; Prusa/Moonraker handle these natively
   document.getElementById("print-opts-cc1-only").style.display = isHttpPrinter ? "none" : "";
@@ -2165,12 +2284,15 @@ function openPrintOpts(filePath, fileName, meta = {}) {
   }
 
   openModal(document.getElementById("modal-print-opts"), { opener: document.activeElement, onClose: _afterPrintOptsClose });
+  _checkPrintBed();
 }
 
 function _afterPrintOptsClose() {
   _printOptsFile = null;
   _printOptsName = null;
   _printOptsFilename = null;
+  _printOptsMeta = {};
+  _printOptsBedSeq++;
 }
 function closePrintOpts() { closeModal(document.getElementById("modal-print-opts")); }
 
@@ -2183,10 +2305,14 @@ function _setPrintPlate(plateId) {
   document.getElementById("print-plate-smooth").dataset.selected   = plateId === 1 ? "1" : "";
   document.getElementById("print-plate-textured").setAttribute("aria-pressed", String(plateId === 0));
   document.getElementById("print-plate-smooth").setAttribute("aria-pressed", String(plateId === 1));
+  if (_printOptsFile) _renderPrintSummary();
 }
 
 document.getElementById("print-plate-textured").addEventListener("click", () => _setPrintPlate(0));
 document.getElementById("print-plate-smooth").addEventListener("click",   () => _setPrintPlate(1));
+document.getElementById("print-opt-timelapse").addEventListener("change", _renderPrintSummary);
+document.getElementById("print-opt-leveling").addEventListener("change", _renderPrintSummary);
+document.getElementById("btn-print-opts-bed").addEventListener("click", _confirmPrintBed);
 
 document.getElementById("btn-print-opts-cancel").addEventListener("click", closePrintOpts);
 document.getElementById("modal-print-opts").addEventListener("click", e => {
@@ -2195,20 +2321,20 @@ document.getElementById("modal-print-opts").addEventListener("click", e => {
 
 document.getElementById("btn-print-opts-send").addEventListener("click", () => {
   if (!_printOptsFile) return;
-  const opts = {
-    timelapse:    document.getElementById("print-opt-timelapse").checked,
-    leveling:     document.getElementById("print-opt-leveling").checked,
-    smooth_plate: document.getElementById("print-plate-smooth").dataset.selected === "1",
-  };
+  if (document.getElementById("print-opts-bed").dataset.state !== "clear") return;
+  const opts = _currentPrintOpts();
+  _savePrintOpts(_currentFilePrinterId, opts);
+  const name = printers[_currentFilePrinterId]?.name || "printer";
   send({
     action:     "start_print",
     printer_id: _currentFilePrinterId,
     filename:   _printOptsFile,
     print_opts: opts,
   });
+  const started = _printOptsName;
   closePrintOpts();
   closeFileBrowser();
-  toast(`Starting: ${_printOptsName}`);
+  toast(`Starting ${started} on ${name}`);
 });
 
 document.getElementById("btn-files-close").addEventListener("click", closeFileBrowser);
@@ -2218,6 +2344,26 @@ document.getElementById("btn-files-refresh").addEventListener("click", () => {
 document.getElementById("modal-files").addEventListener("click", (e) => {
   if (e.target === document.getElementById("modal-files")) closeFileBrowser();
 });
+
+// The card's Printed OK · Bed cleared button follows the Needs you rule: only for a Print that ended and still needs the
+// bed confirmed (dashboard.js keeps _dashboard fresh and re-renders the cards when this changes).
+// _dashboard is a let in dashboard.js (loaded after this file), so it is in its temporal dead zone until then.
+function bedClearedItem(printerId) {
+  try { return _dashboard.needs_you.printers.find(i => i.printer_id === printerId) || null; } catch (_) { return null; }
+}
+function bedClearedWaiting(printerId) { return bedClearedItem(printerId)?.kind === "bed_cleared"; }
+function bedClearedNext(printer) {
+  const item = bedClearedItem(printer.id);
+  if (!item || !item.next_job || item.auto_start === false) return "";
+  const name = item.next_job.file_name || "queued job";
+  return `<span class="card-next" title="Confirming releases this Job">Next up: <strong>${escHtml(name)}</strong> starts on ${escHtml(printer.name)}</span>`;
+}
+// "Fix outcome" toast action: History, filtered to this printer
+function fixOutcome(printerId) {
+  openHistory();
+  const select = document.getElementById("history-printer");
+  if (select) { select.value = printerId; select.dispatchEvent(new Event("change")); }
+}
 
 // Printed OK · Bed cleared: pre-fills the outcome from what the printer reported (only a completed print is
 // confirmed here; anything else is corrected in History), then releases the next job if auto-start is on.
@@ -2240,38 +2386,76 @@ async function confirmBedCleared(printerId) {
     });
     const result = await resp.json();
     if (!resp.ok) { toast(result.error || "Could not confirm", true); return; }
-    if (result.started) toast(`Bed cleared. Starting ${result.started.file_name}`);
-    else if (result.start_error) toast(`Bed cleared, but nothing started: ${result.start_error}`, true);
-    else toast("Bed cleared. Printer is ready");
+    const fix = { action: { label: "Fix outcome", onClick: () => fixOutcome(printerId) } };
+    if (result.started) toast(`Bed cleared. Starting ${result.started.file_name}`, false, fix);
+    else if (result.start_error) toast(`Bed cleared, but nothing started: ${result.start_error}`, true, fix);
+    else toast("Bed cleared. Printer is ready", false, fix);
+    if (typeof loadDashboard === "function") loadDashboard();
   } catch (e) {
     toast("Could not confirm Bed cleared", true);
   }
 }
 
 // ─── Toast ─────────────────────────────────────────────────────────────────────
-function toast(msg, isError = false) {
+// toast(msg, isError = false, { action: { label, onClick }, duration } = {})
+//   Success toasts last 4 s, action toasts 8 s; all pause while hovered or focused.
+//   Errors stay 12 s (paused while hovered or focused) or until dismissed, and render as role="alert".
+//   `action` adds a keyboard-reachable button (Undo, Open record); clicking it dismisses the toast.
+// toastAction(msg, btnLabel, onClick, duration = 8000) stays call-compatible and wraps the same code.
+const TOAST_MS = 4000;
+const TOAST_ACTION_MS = 8000;
+const TOAST_ERROR_MS = 12000;
+
+function toast(msg, isError = false, opts = {}) {
   const area = document.getElementById("toast-area");
+  if (!area) return null;
+  if (isError) {
+    // An identical error already on screen is not stacked again
+    const dup = [...area.querySelectorAll(".toast.error")].find(t => t.dataset.msg === String(msg));
+    if (dup) return dup;
+  }
+  const action = opts.action;
   const el = document.createElement("div");
-  el.className = "toast" + (isError ? " error" : "");
-  el.textContent = msg;
+  el.className = "toast" + (isError ? " error" : "") + (action ? " toast-action" : "");
+  if (isError) { el.setAttribute("role", "alert"); el.dataset.msg = String(msg); }
+  const span = document.createElement("span");
+  span.className = "toast-msg";
+  span.textContent = msg;
+  el.appendChild(span);
+  if (action) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-btn";
+    btn.textContent = action.label;
+    btn.addEventListener("click", () => { el.remove(); action.onClick?.(); });
+    el.appendChild(btn);
+  }
+  if (isError) {
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "toast-close";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "×";
+    close.addEventListener("click", () => el.remove());
+    el.appendChild(close);
+  }
   area.appendChild(el);
-  setTimeout(() => el.remove(), 3500);
+  {
+    let remaining = opts.duration ?? (isError ? TOAST_ERROR_MS : action ? TOAST_ACTION_MS : TOAST_MS);
+    let timer = null, startedAt = 0;
+    const start = () => { if (timer || !el.isConnected) return; startedAt = Date.now(); timer = setTimeout(() => el.remove(), remaining); };
+    const pause = () => { if (!timer) return; clearTimeout(timer); timer = null; remaining = Math.max(1500, remaining - (Date.now() - startedAt)); };
+    el.addEventListener("mouseenter", pause);
+    el.addEventListener("mouseleave", start);
+    el.addEventListener("focusin", pause);
+    el.addEventListener("focusout", () => { if (!el.matches(":hover")) start(); });
+    start();
+  }
+  return el;
 }
 
-function toastAction(msg, btnLabel, onClick, duration = 8000) {
-  const area = document.getElementById("toast-area");
-  const el = document.createElement("div");
-  el.className = "toast toast-action";
-  const span = document.createElement("span");
-  span.textContent = msg;
-  const btn = document.createElement("button");
-  btn.className = "toast-btn";
-  btn.textContent = btnLabel;
-  btn.addEventListener("click", () => { el.remove(); onClick(); });
-  el.appendChild(span);
-  el.appendChild(btn);
-  area.appendChild(el);
-  setTimeout(() => el.remove(), duration);
+function toastAction(msg, btnLabel, onClick, duration = TOAST_ACTION_MS) {
+  return toast(msg, false, { action: { label: btnLabel, onClick }, duration });
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -2517,10 +2701,16 @@ function linkTray(printerId, trayId, spoolId) {
 }
 
 async function deleteSpool(spoolId) {
-  if (!confirm("Remove this spool?")) return;
+  const spool = spools.find(s => s.id == spoolId);
+  const spoolName = [spool?.filament?.vendor?.name, spool?.filament?.name, spool?.filament?.material].filter(Boolean).join(" ") || `spool #${spoolId}`;
+  if (!await confirmDialog({
+    title: `Remove ${spoolName}?`,
+    body: "This also deletes its filament entry in Spoolman (unless another spool uses it), and the brand when no other filament uses it.",
+    confirmLabel: "Remove spool",
+    danger: true,
+  })) return;
   try {
     // Find the filament/vendor IDs before deleting the spool
-    const spool = spools.find(s => s.id == spoolId);
     const filamentId = spool?.filament?.id;
     const vendorId   = spool?.filament?.vendor?.id;
 
@@ -2576,12 +2766,12 @@ document.getElementById("btn-import-filaments").addEventListener("click", async 
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.status);
     if (d.created > 0) {
-      alert(`✓ Imported ${d.created} ELEGOO filaments into Spoolman.\n\nYou can now create spools from these in Spoolman UI or when adding a spool here.`);
+      toast(`Imported ${d.created} ELEGOO filaments into Spoolman. Create spools from them when you add a spool.`);
     } else {
-      alert(`All ${d.total} ELEGOO filaments are already in Spoolman (${d.skipped} skipped).`);
+      toast(`All ${d.total} ELEGOO filaments are already in Spoolman (${d.skipped} skipped).`);
     }
   } catch (e) {
-    alert("Import failed: " + e.message);
+    toast("Import failed: " + e.message, true);
   } finally {
     btn.disabled = false;
     btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

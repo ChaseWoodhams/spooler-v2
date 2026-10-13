@@ -207,7 +207,87 @@ const viewports = [
       && !await page.locator("#spools-empty").isVisible();
     console.log(`Spool dependency failure ${inventoryFailureClear ? "PASS" : "FAIL"}`);
     if (!inventoryFailureClear) process.exitCode = 1;
+
+    // Toasts: announced, clear of the bottom nav, errors persist and can be dismissed, action slot works
+    await page.evaluate(() => { window.__undone = 0; toast("Saved fixture"); toast("Fixture failed to save", true); toastAction("Removed fixture", "Undo", () => window.__undone++); });
+    await page.waitForTimeout(400);  // let the entrance animation finish
+    const toastBox = await page.locator("#toast-area").evaluate(area => {
+      const nav = document.querySelector(".sidenav").getBoundingClientRect();
+      const boxes = [...area.querySelectorAll(".toast")].map(t => t.getBoundingClientRect());
+      return { live: area.getAttribute("role") === "status" && area.getAttribute("aria-live") === "polite",
+        clear: boxes.length >= 3 && boxes.every(b => b.bottom <= nav.top && b.left >= 0 && b.right <= innerWidth) };
+    });
+    await page.locator(".toast-btn", { hasText: "Undo" }).focus();
+    await page.keyboard.press("Enter");
+    const undone = await page.evaluate(() => window.__undone === 1 && !document.querySelector(".toast-action"));
+    await page.waitForTimeout(5000);
+    const successGone = await page.locator(".toast", { hasText: "Saved fixture" }).count() === 0;
+    const errorToast = page.locator(".toast.error");
+    const errorPersists = await errorToast.count() === 1 && await errorToast.getAttribute("role") === "alert";
+    await errorToast.getByRole("button", { name: "Dismiss" }).click();
+    const errorDismissed = await errorToast.count() === 0;
+    const toastPass = toastBox.live && toastBox.clear && undone && successGone && errorPersists && errorDismissed;
+    console.log(`Toasts ${toastPass ? "PASS" : "FAIL"}`, JSON.stringify({ toastBox, undone, successGone, errorPersists, errorDismissed }));
+    if (!toastPass) process.exitCode = 1;
     await page.close();
+
+    // Hit targets at 768 px with a coarse pointer: every listed control is at least 44 px each way, and nothing overflows.
+    for (const [width, height] of [[768, 1024], [1098, 507]]) {
+      const context = await browser.newContext({ viewport: { width, height }, hasTouch: true, serviceWorkers: "block" });
+      const hit = await context.newPage();
+      await hit.routeWebSocket(/.*/, ws => ws.close());
+      await hit.route("**/api/**", route => route.fulfill({ json: {} }));
+      await hit.goto(baseUrl);
+      await hit.evaluate(() => {
+        printers.fixture = { id: "fixture", name: "Fixture printer", ip: "192.0.2.10", connected: true,
+          printer_type: "cc1", status: {}, camera_url: null };
+        document.getElementById("printer-grid").style.display = "grid";
+        renderPrinter(printers.fixture);
+        openFileBrowser("fixture");
+        renderFileList([{ name: "part.gcode", size: 2048, mtime: 1 }]);
+      });
+      const measure = selectors => hit.evaluate(list => list.flatMap(selector =>
+        [...document.querySelectorAll(selector)].filter(el => el.getClientRects().length).map(el => {
+          const r = el.getBoundingClientRect();
+          return { selector, w: Math.round(r.width), h: Math.round(r.height), text: (el.textContent || el.id).trim().slice(0, 20) };
+        })), selectors);
+      const mainSelectors = [".sidenav-item", ".card-settings-btn", ".card-remove-btn", ".card-files-btn", ".footer-version", ".file-actions .btn", "#files-list .btn-sm"];
+      const small = (await measure(mainSelectors)).filter(item => item.h < 44 || (!item.selector.includes("sidenav") && item.selector.includes("btn") && item.selector !== ".file-actions .btn" && item.selector !== "#files-list .btn-sm" && item.w < 44));
+      const sawFileButtons = (await measure([".file-actions .btn"])).length > 0;
+      await hit.locator("#btn-files-close").click();
+      await hit.evaluate(() => { window.__nav = true; });
+      await hit.locator("#btn-app-settings, #btn-mobile-more").first().click().catch(() => {});
+      const back = await hit.locator("#btn-settings-goto-password").click({ timeout: 1500 }).then(() => measure([".settings-back-btn"])).catch(() => []);
+      small.push(...back.filter(item => item.w < 44 || item.h < 44));
+      const overflow = await hit.evaluate(() => document.body.scrollWidth > document.documentElement.clientWidth);
+      const pass = !small.length && sawFileButtons && !overflow;
+      console.log(`Hit targets ${width}px coarse ${pass ? "PASS" : "FAIL"}`, JSON.stringify({ small, sawFileButtons, overflow }));
+      if (!pass) process.exitCode = 1;
+      await context.close();
+    }
+
+    {
+      const context = await browser.newContext({ viewport: { width: 768, height: 1024 }, hasTouch: true, serviceWorkers: "block" });
+      const hit = await context.newPage();
+      await hit.addInitScript(() => { try { localStorage.removeItem("slicer.project"); } catch (_) { /* storage blocked */ } });
+      await hit.route("**/api/**", route => {
+        const p = new URL(route.request().url()).pathname;
+        return route.fulfill({ json: p === "/api/projects" ? { projects: [{ id: 7, name: "Garden chair", plates: 3, objects: 16, models: 4, sliced: 3,
+          slicing: 0, queued: 0, printing: 0, busy: false, split_id: null, updated_at: 1_800_000_300, created_at: 1 }] }
+          : p === "/api/splits" ? { splits: [] } : p === "/api/printers" ? [] : {} });
+      });
+      await hit.goto(`${baseUrl}/slicer.html`);
+      await hit.locator("#project-list .slicer-project-row").first().waitFor({ timeout: 8000 });
+      const rows = await hit.evaluate(() => [...document.querySelectorAll("#project-list .slicer-project-row .btn")].map(el => {
+        const r = el.getBoundingClientRect();
+        return { text: el.textContent.trim(), w: Math.round(r.width), h: Math.round(r.height) };
+      }));
+      const overflow = await hit.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+      const pass = rows.length >= 2 && rows.every(item => item.h >= 44) && !overflow;
+      console.log(`Projects list hit targets 768px ${pass ? "PASS" : "FAIL"}`, JSON.stringify({ rows, overflow }));
+      if (!pass) process.exitCode = 1;
+      await context.close();
+    }
   } finally {
     if (browser) await browser.close();
     await new Promise(resolve => server.close(resolve));

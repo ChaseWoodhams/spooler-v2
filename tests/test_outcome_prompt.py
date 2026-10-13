@@ -160,6 +160,9 @@ class OutcomePromptTests(unittest.TestCase):
         (awaiting,) = self.prompts()
         self.assertFalse(awaiting["outcome_unconfirmed"])
         self.assertTrue(awaiting["bed_cleared_needed"])
+        self.assertTrue(awaiting["next_job"])  # confirming would start this Job
+        self.call("POST", "/api/printers/p1/auto-start", {"enabled": False})
+        self.assertIsNone(self.prompts()[0]["next_job"])  # auto-start off: confirming starts nothing
 
     def test_old_prints_that_never_had_a_prompt_do_not_await(self):
         self.plates.push(13, "old.gcode", 1, 50)
