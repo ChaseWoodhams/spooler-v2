@@ -248,7 +248,7 @@ const viewports = [
         const lists = [...document.querySelectorAll("#printer-grid, #settings-printers-list, .settings-printer-list, nav.sidenav")];
         for (const list of lists) {
           const rows = [...list.querySelectorAll("button, a[href]")].filter(el => el.getClientRects().length);
-          const names = rows.map(el => (el.getAttribute("aria-label") || el.textContent).trim().replace(/s+/g, " "));
+          const names = rows.map(el => (el.getAttribute("aria-label") || el.textContent).trim().replace(/\s+/g, " "));
           const seen = new Set();
           for (const n of names) { if (seen.has(n) && !/^(Camera|Expand|Collapse)/i.test(n)) dupes.push(n); seen.add(n); }
         }

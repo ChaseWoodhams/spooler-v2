@@ -220,7 +220,7 @@ function jobActiveCard(job) {
     ${pct == null ? "" : `<div class="job-progress"><div class="job-progress-bar" style="width:${pct}%"></div></div>`}
     <div class="job-controls">
       <button class="btn btn-secondary btn-sm" data-job-action="finish" data-job-id="${job.id}"
-        title="Release the printer if it went offline or the start hung">Mark failed</button>
+        aria-label="Mark ${_jobAttr(job.name)} failed" title="Release the printer if it went offline or the start hung">Mark failed</button>
     </div>
   </div></div>`;
 }
@@ -232,9 +232,9 @@ function jobQueuedCard(job, index, list) {
     : `<select class="job-printer-select" data-job-field="printer" data-job-id="${job.id}">${jobPrinterOptions(job.printer_id)}</select>`;
   return `<div class="job-card">
     <div class="job-order">
-      <button class="job-move" data-job-action="up" data-job-id="${job.id}" title="Move up"${index === 0 ? " disabled" : ""}>▲</button>
+      <button class="job-move" data-job-action="up" data-job-id="${job.id}" aria-label="Move ${_jobAttr(job.name)} up" title="Move up"${index === 0 ? " disabled" : ""}>▲</button>
       <span class="job-position">${index + 1}</span>
-      <button class="job-move" data-job-action="down" data-job-id="${job.id}" title="Move down"${index === list.length - 1 ? " disabled" : ""}>▼</button>
+      <button class="job-move" data-job-action="down" data-job-id="${job.id}" aria-label="Move ${_jobAttr(job.name)} down" title="Move down"${index === list.length - 1 ? " disabled" : ""}>▼</button>
     </div>
     <div class="job-main">
       ${jobTitle(job)}
@@ -243,9 +243,9 @@ function jobQueuedCard(job, index, list) {
       <div class="job-controls">
         ${printerControl}
         <button class="btn btn-primary btn-sm" data-job-action="start" data-job-id="${job.id}"
-          title="Preview the toolpath and run the preflight checks">Review &amp; start</button>
-        <button class="btn btn-secondary btn-sm" data-job-action="edit" data-job-id="${job.id}">Edit</button>
-        <button class="btn btn-danger btn-sm" data-job-action="delete" data-job-id="${job.id}">Delete</button>
+          aria-label="Review and start ${_jobAttr(job.name)}" title="Preview the toolpath and run the preflight checks">Review &amp; start</button>
+        <button class="btn btn-secondary btn-sm" data-job-action="edit" data-job-id="${job.id}" aria-label="Edit ${_jobAttr(job.name)}">Edit</button>
+        <button class="btn btn-danger btn-sm" data-job-action="delete" data-job-id="${job.id}" aria-label="Delete ${_jobAttr(job.name)}">Delete</button>
       </div>
       ${blocker ? `<div class="job-blocker">${escHtml(blocker)}</div>` : ""}
     </div>
@@ -261,8 +261,8 @@ function jobDoneCard(job) {
     <div class="job-meta">${escHtml(meta.join(" · "))}</div>
     ${job.error ? `<div class="job-error">${escHtml(job.error)}</div>` : ""}
     <div class="job-controls">
-      <button class="btn btn-secondary btn-sm" data-job-action="requeue" data-job-id="${job.id}">Queue again</button>
-      <button class="btn btn-danger btn-sm" data-job-action="delete" data-job-id="${job.id}">Delete</button>
+      <button class="btn btn-secondary btn-sm" data-job-action="requeue" data-job-id="${job.id}" aria-label="Queue ${_jobAttr(job.name)} again">Queue again</button>
+      <button class="btn btn-danger btn-sm" data-job-action="delete" data-job-id="${job.id}" aria-label="Delete ${_jobAttr(job.name)}">Delete</button>
     </div>
   </div></div>`;
 }
