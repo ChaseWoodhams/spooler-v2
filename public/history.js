@@ -24,6 +24,7 @@ let _historyOpenId  = null;   // print whose details are expanded
 let _historyDetails = {};     // print id → detail payload (with job and job events)
 let _historyCurrency;         // undefined until fetched from Spoolman
 let _historySearchTimer = null;
+let _historyUnconfirmed = 0;  // Prints whose Outcome the user has not confirmed (all time, ignores the filters)
 let _historyRequest = 0;
 const _historyDrafts = {};
 const _historyFeedback = {};
@@ -118,6 +119,8 @@ function renderHistory(summary) {
     if (summary.duration_s != null) bits.push(`<span><strong>${(summary.duration_s / 3600).toFixed(1)} h</strong> printing</span>`);
     document.getElementById("history-totals").innerHTML = bits.join("");
   }
+  renderUnconfirmedChip();
+  document.getElementById("btn-history-export").disabled = historyTotal === 0;
   const list = document.getElementById("history-list");
   const active = document.activeElement;
   const focusSelector = active && list.contains(active) ? historyFocusSelector(active) : null;
@@ -131,13 +134,46 @@ function renderHistory(summary) {
   document.getElementById("btn-history-more").hidden = historyPrints.length >= historyTotal;
 }
 
+// "N unconfirmed" in the totals line (sets the Outcome filter) and a count on the History nav entry.
+function renderUnconfirmedChip() {
+  const totals = document.getElementById("history-totals");
+  totals.querySelector("#btn-history-unconfirmed")?.remove();
+  if (!_historyUnconfirmed) return;
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.id = "btn-history-unconfirmed";
+  chip.className = "history-unconfirmed-chip";
+  const active = document.getElementById("history-outcome").value === "unconfirmed";
+  chip.setAttribute("aria-pressed", String(active));
+  chip.textContent = `${_historyUnconfirmed} unconfirmed`;
+  chip.title = "Show only the Prints whose Outcome you have not confirmed";
+  totals.appendChild(chip);
+}
+function setUnconfirmedCount(n) {
+  _historyUnconfirmed = n;
+  for (const id of ["history-unconfirmed-count", "history-unconfirmed-count-mobile"]) {
+    const badge = document.getElementById(id);
+    if (!badge) continue;
+    badge.hidden = n === 0;
+    badge.innerHTML = `${n}<span class="sr-only"> unconfirmed</span>`;
+  }
+  renderUnconfirmedChip();
+}
+async function refreshUnconfirmedCount() {
+  try {
+    const r = await fetch("/api/prints?unconfirmed=1&limit=1");
+    if (r.ok) setUnconfirmedCount(Number((await r.json()).total) || 0);
+  } catch (_) { /* the count just stays as it was */ }
+}
+
 function _safeColor(hex) {
   return /^[0-9a-f]{6}([0-9a-f]{2})?$/i.test(hex || "") ? hex : "888888";
 }
 
 function historyItem(p) {
-  const when = new Date(p.started_at * 1000).toLocaleString(undefined,
-    { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const started = new Date(p.started_at * 1000);
+  const when = started.toLocaleString(undefined, { ...(started.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }),
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   const stats = [
     p.duration_s != null ? `${(p.duration_s === 0 ? '0s' : formatTime(p.duration_s))} observed` : "Duration not recorded",
     p.filament_g != null ? `${p.filament_g} g observed` : "Filament not recorded",
@@ -151,8 +187,7 @@ function historyItem(p) {
         ${p.quick && p.thumbnail ? `<img class="history-thumb" src="${_histAttr(p.thumbnail)}" alt="" loading="lazy" onerror="this.remove()">` : ""}${p.color_hex ? `<span class="history-swatch" style="background:#${_safeColor(p.color_hex)}"></span>` : ""}${escHtml(p.quick && p.project_name ? p.project_name : p.file_name)}${p.quick ? ` <span class="history-quick">Quick print</span>` : ""}
       </span>
       <span class="history-printer">${escHtml(p.printer_name)}</span>
-      ${outcomeBadge(p.outcome)}
-      ${p.outcome_unconfirmed ? unconfirmedBadge() : ""}
+      <span class="history-badges">${outcomeBadge(p.outcome)}${p.outcome_unconfirmed ? unconfirmedBadge() : ""}</span>
       <span class="history-stats">${escHtml(stats.join(" · "))}</span>
     </button>
     ${open ? historyDetail(p) : ""}
@@ -231,6 +266,21 @@ function reprintWithChanges(record) {
   window.QuickPrint.open({ projectId: record.project_id, printerId: record.printer_id });
 }
 
+// What saving would do, in words, so the change is not a surprise.
+function outcomeReadback(p, outcome, reasons) {
+  const to = printOutcomeLabel(outcome);
+  const why = reasons.length ? ` Reasons: ${reasons.map(failureReasonLabel).join(", ")}.` : "";
+  if (outcome === p.outcome) return `Outcome stays ${to}${p.outcome_unconfirmed ? " and is marked confirmed" : ""}.${why}`;
+  return `Outcome changes from ${printOutcomeLabel(p.outcome)} to ${to} and is marked confirmed.${why}`;
+}
+function updateOutcomeReadback(id) {
+  const p = historyPrints.find(x => x.id === id), out = document.querySelector(`[data-history-readback="${id}"]`);
+  if (!p || !out) return;
+  const outcome = document.querySelector(`[data-history-outcome="${id}"]`).value;
+  const reasons = [...document.querySelectorAll(`[data-history-reason="${id}"]:checked`)].map(c => c.value);
+  out.textContent = outcomeReadback(p, outcome, reasons);
+}
+
 function historyOutcomeForm(p) {
   const reasons = _failureReasons.cancel_reasons
     .map(r => `<label${r === "cancelled_on_purpose" && p.outcome !== "cancelled" ? " hidden" : ""}><input type="checkbox" data-history-reason="${p.id}" value="${r}"${(p.failure_reasons || []).includes(r) ? " checked" : ""}> ${escHtml(failureReasonLabel(r))}</label>`).join(" ");
@@ -239,7 +289,9 @@ function historyOutcomeForm(p) {
   return `<fieldset class="history-outcome-form">
     <legend>${p.outcome_unconfirmed ? "Confirm or correct the outcome" : "Correct the outcome"}</legend>
     <select data-history-outcome="${p.id}" aria-label="Outcome">${options}</select>
-    <div class="history-reasons"${p.outcome === "completed" || p.outcome === "unknown" ? " hidden" : ""}>${reasons}</div>
+    <fieldset class="history-reasons"${p.outcome === "completed" || p.outcome === "unknown" ? " hidden" : ""}>
+      <legend>What went wrong? (pick at least one for a failed print)</legend>${reasons}</fieldset>
+    <p class="history-readback" data-history-readback="${p.id}" role="status" aria-live="polite">${escHtml(outcomeReadback(p, p.outcome, p.failure_reasons || []))}</p>
     <button class="btn btn-secondary btn-sm" data-history-action="outcome" data-print-id="${p.id}">${p.outcome_unconfirmed ? "Confirm outcome" : "Save outcome"}</button>
   </fieldset>`;
 }
@@ -248,6 +300,7 @@ function onPrintRecorded(record) {
   const grams = record.filament_g ? ` · ${Math.round(record.filament_g)} g` : "";
   toast(`${record.printer_name}: ${record.file_name} — ${printOutcomeLabel(record.outcome).toLowerCase()}${grams}`,
     record.outcome !== "completed");
+  refreshUnconfirmedCount();
   if (!document.getElementById("panel-history").classList.contains("open")) return;
   if (document.activeElement?.closest?.(".history-detail")) return; // don't clobber unsaved notes
   loadHistory();
@@ -291,11 +344,18 @@ document.getElementById("history-list").addEventListener("click", async (e) => {
     } else if (btn.dataset.historyAction === "outcome") {
       const outcome = document.querySelector(`[data-history-outcome="${id}"]`).value;
       const reasons = [...document.querySelectorAll(`[data-history-reason="${id}"]:checked`)].map(c => c.value);
+      if (outcome === "failed" && !reasons.length) {   // the same rule as the Failed sheet (outcome-prompt.js)
+        historySaveFeedback(id, "Pick at least one failure reason before saving a failed print.", true);
+        document.querySelector(`[data-history-reason="${id}"]`)?.focus();
+        btn.disabled = false;
+        return;
+      }
       const updated = await jobsApi("POST", `/api/prints/${id}/outcome`, { outcome, failure_reasons: reasons });
       Object.assign(record, updated);
       _historyDetails[id] = updated;
       historySaveFeedback(id, "Outcome saved and confirmed.");
       renderHistory();
+      refreshUnconfirmedCount();
       document.querySelector(`[data-history-action="outcome"][data-print-id="${id}"]`)?.focus();
       toast("Outcome saved");
     } else if (btn.dataset.historyAction === "reprint") {
@@ -323,6 +383,8 @@ document.getElementById("history-list").addEventListener("click", async (e) => {
 });
 
 document.getElementById("history-list").addEventListener("change", (e) => {
+  const reason = e.target.closest("[data-history-reason]");
+  if (reason) { updateOutcomeReadback(Number(reason.dataset.historyReason)); return; }
   const select = e.target.closest("[data-history-outcome]");
   if (!select) return;
   const box = select.parentElement.querySelector(".history-reasons");
@@ -331,6 +393,7 @@ document.getElementById("history-list").addEventListener("change", (e) => {
     c.parentElement.hidden = select.value !== "cancelled";
     if (select.value !== "cancelled") c.checked = false;
   }
+  updateOutcomeReadback(Number(select.dataset.historyOutcome));
 });
 
 document.getElementById("history-search").addEventListener("input", () => {
@@ -341,8 +404,38 @@ for (const id of ["history-printer", "history-outcome", "history-range"]) {
   document.getElementById(id).addEventListener("change", () => loadHistory());
 }
 document.getElementById("btn-history-more").addEventListener("click", () => loadHistory(true));
-document.getElementById("btn-history-export").addEventListener("click", () => {
-  window.location.href = `/api/prints/export.csv?${_historyParams()}`;
+// Fetched, not navigated to: a failure shows a toast and leaves the page where it is.
+document.getElementById("btn-history-export").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  if (historyTotal === 0) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/prints/export.csv?${_historyParams()}`);
+    if (!r.ok) {
+      let message = `HTTP ${r.status}`;
+      try { message = (await r.json()).error || message; } catch (_) { /* not JSON */ }
+      throw new Error(message);
+    }
+    const url = URL.createObjectURL(await r.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = (/filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") || "") || [])[1] || "spooler-prints.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`Exported ${historyTotal} print${historyTotal === 1 ? "" : "s"}`);
+  } catch (err) {
+    toast(`Couldn't export history: ${err.message}`, true);
+  } finally {
+    btn.disabled = historyTotal === 0;
+  }
+});
+document.getElementById("history-totals").addEventListener("click", (e) => {
+  if (!e.target.closest("#btn-history-unconfirmed")) return;
+  const outcome = document.getElementById("history-outcome");
+  outcome.value = outcome.value === "unconfirmed" ? "" : "unconfirmed";
+  loadHistory();
 });
 
 // ─── Panel ────────────────────────────────────────────────────────────────────
@@ -354,6 +447,7 @@ function openHistory() {
   select.innerHTML = '<option value="">All printers</option>' + Object.values(printers)
     .map(p => `<option value="${_histAttr(p.id)}">${escHtml(p.name)}</option>`).join("");
   select.value = current;
+  refreshUnconfirmedCount();
   _loadCurrency().then(() => {
     if (document.getElementById("history-list").getAttribute("aria-busy") !== "true" && document.getElementById("btn-history-retry").hidden) renderHistory();
   });
@@ -373,8 +467,15 @@ const historyFilters = document.querySelector("#panel-history .history-filters")
 historyFilters.id = "history-filter-controls";
 const historyFilterBar = document.createElement("div");
 historyFilterBar.className = "history-filter-bar";
-historyFilterBar.innerHTML = '<button class="btn btn-secondary btn-sm" id="btn-history-filters" aria-expanded="true" aria-controls="history-filter-controls">Hide filters</button><span id="history-result-count" role="status" aria-live="polite"></span><span id="history-filter-summary"></span><button id="btn-history-retry" class="btn btn-secondary btn-sm" hidden>Retry history</button>';
+historyFilterBar.innerHTML = '<button class="btn btn-secondary btn-sm" id="btn-history-filters" aria-expanded="true" aria-controls="history-filter-controls">Hide filters</button><span id="history-result-count" role="status" aria-live="polite"></span><span id="history-filter-summary"></span><span id="history-filter-chips" class="history-chips"></span><button id="btn-history-retry" class="btn btn-secondary btn-sm" hidden>Retry history</button>';
 historyFilters.before(historyFilterBar);
+// On a phone the filters start collapsed; the active ones stay visible as chips you can clear one by one.
+if (window.matchMedia("(max-width: 640px)").matches) {
+  historyFilters.hidden = true;
+  const toggle = document.getElementById("btn-history-filters");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.textContent = "Show filters";
+}
 document.getElementById("btn-history-retry").addEventListener("click", () => loadHistory());
 document.getElementById("btn-history-filters").addEventListener("click", e => {
   historyFilters.hidden = !historyFilters.hidden;
@@ -390,5 +491,24 @@ function updateHistoryFilterSummary() {
     if (el.value) bits.push(el.selectedOptions[0].textContent);
   }
   document.getElementById("history-filter-summary").textContent = bits.join(" · ") || "All prints · all time";
+  const chips = document.getElementById("history-filter-chips");
+  chips.replaceChildren();
+  const addChip = (label, clear) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "history-chip";
+    chip.textContent = `${label} ✕`;
+    chip.setAttribute("aria-label", `Clear filter: ${label}`);
+    chip.addEventListener("click", () => { clear(); loadHistory(); });
+    chips.appendChild(chip);
+  };
+  if (search) addChip(`Search: ${search}`, () => { document.getElementById("history-search").value = ""; });
+  for (const id of ["history-printer", "history-outcome", "history-range"]) {
+    const el = document.getElementById(id);
+    if (el.value) addChip(el.selectedOptions[0].textContent, () => { el.value = ""; });
+  }
   document.getElementById("history-result-count").textContent = `${historyTotal} result${historyTotal === 1 ? "" : "s"}`;
 }
+
+// The count on the History entry is wanted before the panel is ever opened.
+refreshUnconfirmedCount();

@@ -12,7 +12,7 @@
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="stylesheet" href="style.css?v=65" />
-  <link rel="stylesheet" href="history-quality.css?v=1" />
+  <link rel="stylesheet" href="history-quality.css?v=2" />
   <script src="net.js?v=2"></script>
   <script src="modal.js?v=1"></script>
   <script src="confirm-dialog.js?v=1"></script>
@@ -87,6 +87,7 @@
         <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
       </svg>
       <span>History</span>
+      <span id="history-unconfirmed-count" class="sidenav-badge" hidden></span>
     </button>
     <button id="btn-spools" class="sidenav-item" title="Filament spools (Reel)" aria-label="Spools">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -121,7 +122,7 @@
   </nav>
 
   <div id="mobile-more-menu" class="mobile-more-menu" role="menu" aria-label="More navigation" hidden>
-    <button id="btn-mobile-history" type="button" role="menuitem">History</button>
+    <button id="btn-mobile-history" type="button" role="menuitem">History <span id="history-unconfirmed-count-mobile" class="sidenav-badge" hidden></span></button>
     <button id="btn-mobile-settings" type="button" role="menuitem">Settings</button>
     <button id="btn-mobile-signout" type="button" role="menuitem">Sign out</button>
   </div>
@@ -827,7 +828,7 @@
   <script src="health.js?v=3"></script>
   <script src="jobs.js?v=13"></script>
   <script src="preview.js?v=3"></script>
-  <script src="history.js?v=9"></script>
+  <script src="history.js?v=10"></script>
   <script src="outcome-prompt.js?v=6"></script>
   <script src="app.js?v=72"></script>
   <script src="quick-print.js?v=6"></script>
