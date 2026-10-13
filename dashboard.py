@@ -37,7 +37,7 @@ def needs_you() -> dict:
             kind = "bed_cleared"
         shown.add(record["id"])
         waiting.append({"printer_id": printer_id, "printer_name": printer.name, "kind": kind,
-                        "print": record, "next_job": next_job})
+                        "print": record, "next_job": next_job, "auto_start": bed_cleared.auto_start(printer_id)})
     unconfirmed = print_history.search(unconfirmed=True, limit=print_history.PAGE_LIMIT_MAX)["prints"]
     return {"printers": waiting, "prints": [p for p in unconfirmed if p["id"] not in shown and p["outcome"] is not None]}
 
