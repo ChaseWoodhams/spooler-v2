@@ -83,14 +83,33 @@ function renderSystemHealth() {
 
 // `next` is an action the operator can take; pass it only for warn/down rows (and
 // unknown rows with a concrete reason). Healthy and informational rows get no Next line.
+// Returns { html, attention }: attention rows (a problem, or an unknown with a reason) are listed first in the dialog.
 function healthRow(level, title, detail, next) {
   const dot = level ? `<span class="health-dot" data-state="${level}"></span>` : `<span class="health-dot-spacer"></span>`;
   const nextLine = next && level && level !== "ok"
     ? `<span class="health-row-next">Next: ${escHtml(next)}</span>` : "";
-  return `<div class="health-row">${dot}<div class="health-row-main">` +
+  const html = `<div class="health-row">${dot}<div class="health-row-main">` +
     `<span class="health-row-title">${escHtml(title)}</span>` +
     `<span class="health-row-detail">${escHtml(detail)}</span>` +
     `${nextLine}</div></div>`;
+  return { html, attention: !!level && level !== "ok" && (level !== "unknown" || !!next) };
+}
+
+// Whether the folded "running fine" group is open; kept here because the body is redrawn when its content changes.
+let _healthOkOpen = false;
+let _healthBodySig = "";
+const healthWithFold = html => (_healthOkOpen ? html.replace('data-fold="ok">', 'data-fold="ok" open>') : html);
+
+// groups: [[heading, rows], ...]. Problems first under one heading, everything healthy folded away.
+function healthBodyHtml(groups) {
+  const attention = groups.flatMap(([, rows]) => rows.filter(r => r.attention));
+  const fine = groups.map(([name, rows]) => [name, rows.filter(r => !r.attention)]);
+  const fineCount = fine.reduce((n, [, rows]) => n + rows.length, 0);
+  const fineHtml = fine.map(([name, rows]) =>
+    `<div class="health-section"><h4>${name}</h4>${rows.map(r => r.html).join("") || (name === "Printers" ? '<p class="health-empty">No printers configured</p>' : "")}</div>`).join("");
+  return (attention.length
+      ? `<div class="health-section health-attention"><h4>Needs attention</h4>${attention.map(r => r.html).join("")}</div>` : "") +
+    `<details class="health-ok-fold" data-fold="ok"><summary>${attention.length ? "Running fine" : "All checks"} <small>${fineCount}</small></summary>${fineHtml}</details>`;
 }
 
 function renderSystemHealthDetail() {
@@ -105,11 +124,23 @@ function renderSystemHealthDetail() {
     freshness.textContent = `Last checked ${new Date(_systemStatusAt).toLocaleTimeString()} · ${fmtDuration(age)} ago` +
       (age > HEALTH_STALE_MS / 1000 ? " · Out of date; check the dashboard connection and wait for a fresh report." : " · Current");
   }
+  const summary = document.getElementById("system-health-summary");
+  const issues = systemIssues();
+  summary.dataset.state = issues.length ? issues[0].level : (_wsConnected && s) ? "ok" : "unknown";
+  summary.textContent = issues.length ? `${issues.length} ${issues.length === 1 ? "issue needs" : "issues need"} attention`
+    : (_wsConnected && s) ? "All systems OK" : "Waiting for health data…";
+  const setBody = html => {   // redraw only on change, so focus in the dialog survives the 5 s refresh
+    if (html === _healthBodySig) return;
+    const fold = body.querySelector("[data-fold=ok]");
+    if (fold) _healthOkOpen = fold.open;   // keep the fold as the person left it (read now: the toggle event can land after the redraw)
+    _healthBodySig = html;
+    body.innerHTML = healthWithFold(html);
+  };
   const services = [healthRow(_wsConnected ? "ok" : "down", "Dashboard connection",
     _wsConnected ? "Connected" : `Reconnecting (attempt ${_wsAttempts})`,
     "Check that Spooler is running on its host computer. This page reconnects by itself once it is.")];
   if (!s) {
-    body.innerHTML = `<div class="health-section"><h4>Services</h4>${services.join("")}</div>`;
+    setBody(healthBodyHtml([["Services", services]]));
     backupBtn.disabled = true;
     return;
   }
@@ -182,10 +213,7 @@ function renderSystemHealthDetail() {
   backupRows.push(healthRow(null, "Location", b.dir));
   backupRows.push(healthRow(null, "Recovery", "Keep a verified archive and use the Recovery instructions in the Spooler handoff documentation to restore it."));
 
-  body.innerHTML =
-    `<div class="health-section"><h4>Services</h4>${services.join("")}</div>` +
-    `<div class="health-section"><h4>Printers</h4>${printerRows.join("") || '<p class="health-empty">No printers configured</p>'}</div>` +
-    `<div class="health-section"><h4>Backups</h4>${backupRows.join("")}</div>`;
+  setBody(healthBodyHtml([["Services", services], ["Printers", printerRows], ["Backups", backupRows]]));
   if (!backupBtn.dataset.busy) backupBtn.disabled = !_wsConnected || b.running;
 }
 
@@ -220,14 +248,14 @@ document.getElementById("btn-backup-now").addEventListener("click", async (e) =>
     feedback.hidden = false;
     feedback.dataset.state = errors.length ? "warn" : "ok";
     feedback.textContent = errors.length
-      ? `Backup archive ${data.name} was created on ${when} (${size}) with problems: ${errors.join("; ")}. Check the coverage and problem rows above, correct the reported issue, then create and verify another backup. ${data.path ? `Archive location: ${data.path}.` : ""} Use the Recovery instructions in the Spooler handoff documentation to restore it.`
-      : `Backup archive ${data.name} was verified on ${when} (${size}). Confirm its location and coverage above. For recovery, follow the Recovery instructions in the Spooler handoff documentation. ${data.path ? `Archive location: ${data.path}.` : ""}`;
+      ? `Backup ${data.name} was created ${when} (${size}) with problems: ${errors.join("; ")}. Fix the cause shown above, then back up again. To restore it, follow the Recovery instructions in the Spooler handoff documentation.${data.path ? ` Saved to ${data.path}.` : ""}`
+      : `Backup ${data.name} was verified ${when} (${size}). To restore it, follow the Recovery instructions in the Spooler handoff documentation.${data.path ? ` Saved to ${data.path}.` : ""}`;
     toast(errors.length ? `Backup saved with problems: ${errors.join("; ")}` : `Backup saved: ${data.name}`, errors.length > 0);
   } catch (err) {
     const feedback = document.getElementById("backup-feedback");
     feedback.hidden = false;
     feedback.dataset.state = "error";
-    feedback.textContent = `Backup failed at ${new Date().toLocaleString()}: ${err.message}. No new verified archive was confirmed. Check available storage and backup-directory permissions, then retry. Existing backups remain listed above.`;
+    feedback.textContent = `Backup failed at ${new Date().toLocaleString()}: ${err.message}. No new archive was confirmed. Check free storage and the backup folder's permissions, then retry.`;
     toast(`Backup failed: ${err.message}`, true);
   } finally {
     delete btn.dataset.busy;

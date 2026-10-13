@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=65" />
+  <link rel="stylesheet" href="style.css?v=66" />
   <link rel="stylesheet" href="history-quality.css?v=1" />
   <script src="net.js?v=2"></script>
   <script src="modal.js?v=1"></script>
@@ -553,29 +553,32 @@
         </label>
         <label>
           IP Address
-          <input id="settings-edit-ip" type="text" placeholder="192.168.1.100" aria-describedby="settings-edit-ip-error" />
+          <input id="settings-edit-ip" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="192.168.1.100" aria-describedby="settings-edit-ip-hint settings-edit-ip-error" />
+          <span id="settings-edit-ip-hint" class="input-hint">Four numbers separated by dots, like 192.168.1.100. Find it on the printer under Settings → Network.</span>
           <span id="settings-edit-ip-error" class="field-error" hidden></span>
         </label>
         <label id="settings-edit-type-label">
           Printer Type
-          <select id="settings-edit-type">
+          <select id="settings-edit-type" aria-describedby="settings-edit-type-note">
             <option value="cc1">CC1 – Centauri Carbon 1 (WebSocket/SDCP)</option>
             <option value="cc2">CC2 – Centauri Carbon 2 (MQTT)</option>
             <option value="prusa">PrusaLink (Experimental) – HTTP API</option>
             <option value="moonraker">Klipper (Experimental) – Moonraker HTTP API</option>
           </select>
           <span id="settings-edit-type-readonly" class="settings-readonly" style="display:none"></span>
+          <span id="settings-edit-type-note" class="input-hint" hidden>The type can't be changed after adding. To use a different type, remove this printer and add it again.</span>
         </label>
-        <p class="input-hint">PrusaLink and Klipper support is experimental. Verify the API address and credentials before saving.</p>
+        <p id="settings-edit-experimental" class="input-hint" hidden>PrusaLink and Klipper support is experimental. Verify the API address and credentials before saving.</p>
         <label id="settings-edit-access-code-label" style="display:none">
           <span id="settings-edit-access-code-text">MQTT Password</span>
-          <input id="settings-edit-access-code" type="password" placeholder="12345" maxlength="64" aria-describedby="settings-edit-access-code-error" />
+          <input id="settings-edit-access-code" type="password" autocomplete="off" maxlength="64" aria-describedby="settings-edit-access-code-hint settings-edit-access-code-error" />
           <span id="settings-edit-access-code-error" class="field-error" hidden></span>
-          <span class="input-hint">Found on the printer under Settings → Network.</span>
+          <span id="settings-edit-access-code-hint" class="input-hint">Found on the printer under Settings → Network.</span>
         </label>
         <div class="danger-zone" style="display:none">
           <button id="btn-settings-printer-remove" class="btn btn-danger-quiet">Remove printer</button>
         </div>
+        <p id="settings-edit-status" class="settings-edit-status" role="status" aria-live="polite" hidden></p>
         <div class="modal-actions">
           <button id="btn-settings-printer-save" class="btn btn-primary">Save</button>
         </div>
@@ -587,6 +590,14 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
           <h3 tabindex="-1">Notifications</h3>
+        </div>
+        <div class="notif-device" id="notif-device">
+          <div class="notif-chips" role="group" aria-label="Notifications on this device">
+            <span class="notif-chip" id="notif-perm-chip" data-state="unknown">Browser permission: checking…</span>
+            <span class="notif-chip" id="notif-sub-chip" data-state="unknown">This device: checking…</span>
+          </div>
+          <p class="input-hint" id="notif-device-hint"></p>
+          <button type="button" id="btn-notif-enable" class="btn btn-secondary btn-sm">Enable on this device</button>
         </div>
         <div id="notif-state"></div>
         <div class="notif-list state-gated" id="notif-list">
@@ -675,12 +686,20 @@
         </div>
         <label>
           New password
-          <input id="settings-new-password" type="password" autocomplete="new-password" placeholder="Min. 8 characters" />
+          <input id="settings-new-password" type="password" autocomplete="new-password" aria-describedby="settings-pw-hint settings-new-password-error" />
+          <span id="settings-pw-hint" class="input-hint">At least 8 characters.</span>
+          <span id="settings-new-password-error" class="field-error" hidden></span>
         </label>
         <label>
           Confirm password
-          <input id="settings-confirm-password" type="password" autocomplete="new-password" placeholder="Repeat password" />
+          <input id="settings-confirm-password" type="password" autocomplete="new-password" aria-describedby="settings-confirm-password-error" />
+          <span id="settings-confirm-password-error" class="field-error" hidden></span>
         </label>
+        <label class="settings-reveal">
+          <input type="checkbox" id="settings-pw-reveal" />
+          Show passwords
+        </label>
+        <p class="input-hint">Devices that are already signed in stay signed in for up to 30 days. The new password applies the next time anyone signs in.</p>
         <div class="modal-actions">
           <button id="btn-app-settings-save" class="btn btn-primary">Save</button>
         </div>
@@ -703,12 +722,13 @@
   <div id="modal-system-health" class="modal">
     <div class="modal-box modal-box-wide">
       <h3>System health</h3>
+      <p id="system-health-summary" class="health-summary" data-state="unknown" role="status" aria-live="polite">Checking…</p>
       <p id="system-health-updated" class="health-freshness" role="status" aria-live="polite">Waiting for health data…</p>
       <div id="system-health-body" class="health-body"></div>
-      <p id="backup-feedback" class="health-feedback" role="status" aria-live="polite" hidden></p>
-      <div class="modal-actions">
-        <button id="btn-backup-now" class="btn btn-secondary">Back up now</button>
-        <button id="btn-system-health-close" class="btn btn-primary">Close</button>
+      <div class="modal-actions health-actions">
+        <p id="backup-feedback" class="health-feedback" role="status" aria-live="polite" hidden></p>
+        <button id="btn-backup-now" class="btn btn-primary">Back up now</button>
+        <button id="btn-system-health-close" class="btn btn-secondary">Close</button>
       </div>
     </div>
   </div>
@@ -824,12 +844,12 @@
 
   <script src="/config.js"></script>
   <script src="status-badge.js?v=1"></script>
-  <script src="health.js?v=3"></script>
+  <script src="health.js?v=4"></script>
   <script src="jobs.js?v=13"></script>
   <script src="preview.js?v=3"></script>
   <script src="history.js?v=9"></script>
   <script src="outcome-prompt.js?v=6"></script>
-  <script src="app.js?v=72"></script>
+  <script src="app.js?v=73"></script>
   <script src="quick-print.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
   <script src="import.js?v=7"></script>

@@ -130,7 +130,7 @@ const viewports = [
     await page.locator("#settings-new-password").fill("short");
     await page.locator("#settings-confirm-password").fill("short");
     await page.locator("#btn-app-settings-save").click();
-    const passwordFeedback = await page.locator("#settings-feedback").innerText().catch(() => "");
+    const passwordFeedback = await page.locator("#settings-new-password-error").innerText().catch(() => "");   // the rule shows under its field
     const passwordRejectedClearly = /at least 8 characters/i.test(passwordFeedback);
     console.log(`Password validation ${passwordRejectedClearly ? "PASS" : "FAIL"}`);
     if (!passwordRejectedClearly) process.exitCode = 1;
