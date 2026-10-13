@@ -621,6 +621,7 @@ def guide_path(split_id: int) -> tuple:
 
 def _make_guide(split_id: int) -> None:
     """Build the guide PDF for a split whose guide.json says generating. Blocking."""
+    import assembly_bom
     import assembly_pdf   # imports reportlab, so only when a guide is really made
 
     def progress(stage: str, percent: int) -> None:
@@ -633,8 +634,9 @@ def _make_guide(split_id: int) -> None:
     plan = assembly_plan(split_id)
     if not plan["ok"]:
         raise jobs.JobError(plan["headline"])
+    bom = assembly_bom.build_bom((_read(work, "result.json") or {}).get("pins") or [], plan)   # refuses when counts disagree
     data = assembly_pdf.GuideData(model_name=Path(get_split(split_id)["source_name"]).stem, split_id=split_id,
-                                  plan=plan, paper=paper, plan_line=edits.plan_line(plan.get("edits")))
+                                  plan=plan, paper=paper, bom=bom, plan_line=edits.plan_line(plan.get("edits")))
     tmp = work / "guide.pdf.tmp"
     pages = assembly_pdf.render_guide(tmp, data, progress)
     os.replace(tmp, work / "guide.pdf")
