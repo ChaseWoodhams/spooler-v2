@@ -11,3 +11,6 @@ networkx
 
 # nesting parts by outline (nesting.py)
 shapely==2.1.2
+
+# the Assembly guide PDF (assembly_pdf.py)
+reportlab==4.4.4

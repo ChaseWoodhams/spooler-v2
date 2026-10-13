@@ -43,6 +43,10 @@ let checkDirty = false;  // local cuts differ from the last finished check
 let geometryKey = "";
 let plan = null;         // how the parts go together (Sections, steps) or why they can't, for the current split
 let planKey = "";
+let guide = null;        // the Assembly guide job and the PDF on disk for the current split
+let guideInfo = null;    // what the server can do: PDF library present, default paper
+let guideTimer = null;
+let paperChoice = "";
 
 function geometryFrom(mesh) {
   return smoothGeometry(mesh.positions, mesh.index);
@@ -416,6 +420,7 @@ async function loadPlan() {
   if (key === planKey) return;
   planKey = key;
   plan = null;
+  if (!guide || guide.split_id !== id) guide = null;
   try {
     const loaded = await host.api("GET", `/api/splits/${id}/assembly-plan`);
     if (!current || current.id !== id || planKey !== key) return;
@@ -425,6 +430,60 @@ async function loadPlan() {
     plan = { error: err.message };
   }
   if (view && sub === "parts") renderSide();
+  loadGuide();   // whether the PDF on disk is out of date depends on the plan
+}
+
+async function loadGuide() {
+  if (!current) return;
+  const id = current.id;
+  try {
+    if (!guideInfo) guideInfo = (await host.api("GET", "/api/splits/status")).guide || { available: true, default_paper: "a4", papers: ["a4", "letter"] };
+    const loaded = await host.api("GET", `/api/splits/${id}/guide`);
+    if (!current || current.id !== id) return;
+    guide = { ...loaded, split_id: id };
+  } catch (err) {
+    if (!current || current.id !== id) return;
+    guide = { state: "failed", error: err.message, blocked: "", has_pdf: false, split_id: id };
+  }
+  clearTimeout(guideTimer);
+  if (guide.state === "generating") guideTimer = setTimeout(loadGuide, 1500);
+  if (view && sub === "parts") renderSide();
+}
+
+function guidePanel() {
+  const info = guideInfo || { available: true, default_paper: "a4", papers: ["a4", "letter"] };
+  const g = guide || { state: "none", blocked: "", has_pdf: false };
+  const working = g.state === "generating";
+  const paper = paperChoice || g.paper || info.default_paper;
+  const why = !info.available ? info.hint : g.blocked;
+  const disabled = working || !!why;
+  const summary = plan?.ok ? `<p class="split-hint">${plural(plan.summary.parts, "part")}, ${plural(plan.summary.sections, "Section")}, ${plural(plan.summary.steps, "step")}, ${plural(plan.summary.rods, "rod")}. Plan code <strong>${esc(plan.code)}</strong>.</p>` : "";
+  const warnings = plan?.ok ? plan.sections.filter(sec => sec.note).map(sec => `<p class="split-warn">Section ${esc(sec.letter)}: ${esc(sec.note)}</p>`).join("") : "";
+  const pdf = g.has_pdf
+    ? `<p>${g.out_of_date ? '<span class="split-warn">Out of date: regenerate.</span> ' : ""}PDF made ${esc(new Date(g.generated_at * 1000).toLocaleString())}, plan code ${esc(g.plan_code)}, ${g.paper === "letter" ? "Letter" : "A4"}.
+         <a class="btn btn-secondary btn-sm" href="/api/splits/${current.id}/guide.pdf" download>Download PDF</a></p>`
+    : "";
+  return `<section class="split-section" data-guide>
+    <h4>Assembly guide</h4>
+    ${summary}${warnings}
+    <div class="split-actions-row">
+      <label class="split-inline">Paper <select id="split-guide-paper"${working ? " disabled" : ""}>
+        ${["a4", "letter"].map(v => `<option value="${v}"${paper === v ? " selected" : ""}>${v === "a4" ? "A4" : "Letter"}</option>`).join("")}</select></label>
+      <button class="btn btn-primary btn-sm" data-action="guide"${disabled ? " disabled" : ""}${why ? ' aria-describedby="split-guide-why"' : ""}>${g.has_pdf ? "Generate again" : "Generate"}</button>
+    </div>
+    ${why ? `<small class="reason-line" id="split-guide-why">${esc(why)}</small>` : ""}
+    ${working ? `<div class="split-progress" role="status"><progress max="100" value="${g.percent || 0}"></progress> ${esc(g.stage || "Working")}</div>` : ""}
+    ${g.state === "failed" && g.error ? `<div class="job-error" role="alert">${esc(g.error)}</div>` : ""}
+    ${pdf}
+    ${fold("split-assembly", "Steps", plan?.ok ? `${plural(plan.summary.sections, "Section")}, ${plural(plan.summary.steps, "step")}` : "", planHtml())}
+  </section>`;
+}
+
+async function startGuide() {
+  guide = await host.api("POST", `/api/splits/${current.id}/guide`, { paper: $("split-guide-paper").value });
+  paperChoice = "";
+  renderSide();
+  loadGuide();
 }
 
 const FAILURE_TITLE = { rod_direction: "Rods point in different directions", rod_side: "Rods meet from opposite sides", blocked: "A part is in the way",
@@ -633,7 +692,7 @@ function sideParts() {
       </tr>`).join("")}</tbody>
     </table></div>
   </section>
-  ${fold("split-assembly", "Assembly", plan?.ok ? `${plural(plan.summary.sections, "Section")}, ${plural(plan.summary.steps, "step")}` : "", planHtml())}
+  ${guidePanel()}
   <div class="split-actions"><button class="btn btn-primary" data-action="layout">Lay out on plates →</button></div>`;
 }
 
@@ -830,6 +889,7 @@ function bindEvents() {
         case "select-cut":   if (!e.target.closest("input")) selectCut(Number(el.dataset.cut)); break;
         case "delete-cut":   removeCut(Number(el.dataset.cut)); break;
         case "split":        await startSplit(); break;
+        case "guide":        await startGuide(); break;
       }
     } catch (err) {
       if ($('split-input-error')) $('split-input-error').textContent = err.message;
@@ -845,6 +905,8 @@ function bindEvents() {
         cut.offset = clampOffset(cut, value);
         cutsEdited();
       }
+    } else if (t.id === "split-guide-paper") {
+      paperChoice = t.value;
     } else if (t.id === "split-conn-preset") {
       applyConnectorPreset(t.value);
     } else if (t.id?.startsWith("split-conn-")) {
