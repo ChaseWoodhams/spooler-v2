@@ -65,13 +65,24 @@
   const title = c => `<span class="status-dot ${c.sc}"></span><b>${escHtml(c.printer.name)}</b><small>${escHtml(c.printer.ip)}</small>`;
   const id = c => escAttr(c.printer.id);
 
-  const fan = (c, key, label, v) => `
+  // Feedback sits beside the control it belongs to: pending, confirmed (from the printer's report) or error
+  const fb = (c, k) => {
+    const h = c.hw?.[k];
+    const mark = h?.state === "error" ? "⚠ " : h?.state === "ok" ? "✓ " : "";
+    return `<span class="pv-fb${h ? " " + h.state : ""}" data-fb="${k}" role="${h?.state === "error" ? "alert" : "status"}">${h ? mark + escHtml(h.text) : ""}</span>`;
+  };
+  const fan = (c, key, label, v) => {
+    const h = c.hw?.[`fan_${key}`];
+    if (h?.state === "pending") v = h.value;            // keep the requested value until the printer reports it
+    return `
     <label class="pv-slider">
       <span>${label}</span><strong id="detail-${key}-value">${v}%</strong>
       <input id="detail-${key}-slider" type="range" min="0" max="100" step="5" value="${v}" aria-label="${label}"
         oninput="document.getElementById('detail-${key}-value').textContent=this.value+'%'"
         onchange="setPrinterFan('${id(c)}','${key}',+this.value)" ${c.disableConnected}>
+      ${fb(c, `fan_${key}`)}
     </label>`;
+  };
   const speed = c => `
     <label class="pv-slider">
       <span>Print speed</span><strong id="detail-speed-value">${c.speed}%</strong>
@@ -79,23 +90,28 @@
         oninput="document.getElementById('detail-speed-value').textContent=this.value+'%'"
         onchange="setSpeed('${id(c)}',+this.value)" ${c.printing || c.paused ? "" : "disabled"}>
     </label>`;
-  const light = c => `<button class="detail-toggle ${c.lightOn ? "active" : ""}" onclick="printerAction('${id(c)}','${c.lightOn ? "light_off" : "light_on"}')" ${c.connected ? "" : "disabled"} aria-pressed="${c.lightOn}" aria-label="Chamber lighting"><span></span></button>`;
+  const light = c => {
+    const busy = c.hw?.light?.state === "pending";
+    return `<span class="pv-light-ctl">${fb(c, "light")}<button class="detail-toggle ${c.lightOn ? "active" : ""}" id="detail-light-toggle" onclick="printerAction('${id(c)}','${c.lightOn ? "light_off" : "light_on"}')" ${c.connected ? "" : "disabled"} aria-pressed="${c.lightOn}" aria-busy="${busy}" aria-label="Chamber lighting"><span></span></button></span>`;
+  };
   const steps = c => [0.1, 1, 10].map(v => `<button class="pv-chip ${c.jogStep === v ? "on" : ""}" aria-pressed="${c.jogStep === v}" aria-label="Jog distance ${v} mm" onclick="setJogStep(${v})">${v}</button>`).join("");
-  const jog = c => `
-    <div class="pv-jog">
+  const jog = c => {
+    // aria-disabled (not disabled) while a move is in flight, so keyboard focus stays on the pressed button
+    const busy = c.jogBusy ? ' aria-disabled="true"' : "";
+    const b = (axis, dir, label) => `<button id="jog-${axis}${dir > 0 ? "plus" : "minus"}" onclick="jogPrinter('${id(c)}','${axis}',${dir})" ${c.disableMotion}${busy}>${label}</button>`;
+    const home = axis => `<button class="home" id="jog-home-${axis}" onclick="homePrinter('${id(c)}','${axis}')" ${c.disableMotion}${busy} aria-label="Home ${axis}">⌂</button>`;
+    return `
+    <div class="pv-jog${c.jogBusy ? " busy" : ""}" aria-busy="${!!c.jogBusy}">
       <div class="pv-xy">
-        <i></i><button onclick="jogPrinter('${id(c)}','Y',1)" ${c.disableMotion}>Y+</button><i></i>
-        <button onclick="jogPrinter('${id(c)}','X',-1)" ${c.disableMotion}>X−</button>
-        <button class="home" onclick="homePrinter('${id(c)}','XY')" ${c.disableMotion} aria-label="Home XY">⌂</button>
-        <button onclick="jogPrinter('${id(c)}','X',1)" ${c.disableMotion}>X+</button>
-        <i></i><button onclick="jogPrinter('${id(c)}','Y',-1)" ${c.disableMotion}>Y−</button><i></i>
+        <i></i>${b("Y", 1, "Y+")}<i></i>
+        ${b("X", -1, "X−")}${home("XY")}${b("X", 1, "X+")}
+        <i></i>${b("Y", -1, "Y−")}<i></i>
       </div>
       <div class="pv-z">
-        <button onclick="jogPrinter('${id(c)}','Z',1)" ${c.disableMotion}>Z+</button>
-        <button class="home" onclick="homePrinter('${id(c)}','Z')" ${c.disableMotion} aria-label="Home Z">⌂</button>
-        <button onclick="jogPrinter('${id(c)}','Z',-1)" ${c.disableMotion}>Z−</button>
+        ${b("Z", 1, "Z+")}${home("Z")}${b("Z", -1, "Z−")}
       </div>
     </div>`;
+  };
   const temp = (c, key, label, val, tgt, max, ro) => `
     <div class="pv-temp">
       <span>${label}</span><strong class="${tempColor(val)}">${T(val)} °C</strong>
@@ -120,7 +136,7 @@
       motion: `<div class="pv-row-wrap">${jog(c)}<div class="pv-col"><div class="pv-chips">Step ${steps(c)} mm</div>
         <div class="pv-xyz">X ${_coordText(c.coords.x)} · Y ${_coordText(c.coords.y)} · Z ${_coordText(c.coords.z)}</div>
         <button class="pv-chip" onclick="homePrinter('${id(c)}','XYZ')" ${c.disableMotion}>Home all</button>
-        <small>${c.controlsEnabled ? "Ready to move" : c.connected ? `Locked while ${c.status}` : "Printer offline"}</small></div></div>`,
+        <small>${c.controlsEnabled ? "Ready to move" : c.connected ? `Locked while ${c.status}` : "Printer offline"}</small>${fb(c, "jog")}</div></div>`,
       temps: `<div class="pv-col wide"><small>Nozzle target: 0–300 °C · Bed target: 0–110 °C. Zero turns heating off.</small>${temp(c, "nozzle", "Nozzle", c.nozzle, c.nozzleTarget, 300)}${temp(c, "bed", "Bed", c.bed, c.bedTarget, 110)}${temp(c, "chamber", "Chamber", c.chamber, 0, 0, true)}</div>`,
       air: `<div class="pv-col wide">${fan(c, "model", "Model fan", c.modelFan)}${fan(c, "auxiliary", "Side fan", c.auxiliaryFan)}${fan(c, "chamber", "Chamber fan", c.chamberFan)}${speed(c)}
         <small>Fans: 0–100%. Print speed: 10–200%, available during a Print.</small><div class="pv-light"><span>Chamber light</span>${light(c)}</div></div>`,
@@ -166,7 +182,11 @@
   .pv-temp{display:flex;align-items:center;gap:10px;padding:6px 0}.pv-temp>span:first-child{width:76px;color:var(--text-muted)}.pv-temp strong{font-size:1.25em;min-width:64px}.pv-temp em{color:var(--text-muted)}
   .pv-tgt{display:flex;align-items:center;gap:4px;margin-left:auto}.pv-tgt input{width:60px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:4px 6px}
   .pv-tgt button{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:3px 10px}
-  .pv-light{display:flex;align-items:center;justify-content:space-between}
+  .pv-light{display:flex;align-items:center;justify-content:space-between}.pv-light-ctl{display:flex;align-items:center;gap:10px}
+  .pv-fb{font-size:.85em;color:var(--text-muted)}.pv-fb:empty{display:none}
+  .pv-fb.ok{color:var(--green)}.pv-fb.error{color:var(--red);font-weight:600}
+  .pv-slider .pv-fb{grid-column:1/3}
+  .pv-jog button[aria-disabled=true]{opacity:.5;cursor:progress}
   /* hero */
   .pv-b .pv-hero{position:relative;border-radius:var(--radius);overflow:hidden;background:#000;min-height:min(62vh,560px)}
   .pv-b .pv-cam{position:absolute;inset:0;border-radius:0;max-height:none;aspect-ratio:auto;cursor:zoom-in}.pv-b .pv-cam img{width:100%;height:100%;object-fit:contain}
