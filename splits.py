@@ -515,6 +515,8 @@ def edit_plan(split_id: int, body: dict | None = None) -> dict:
         edits.reset(work)
         _plans.pop(split_id, None)
         return assembly_edits(split_id)
+    if body.get("op") in ("discard", "keep"):
+        return _settle_outdated(split_id, body["op"])
     record = _edit_base(split_id)
     edit = body
     if body.get("op") == "reorder" and "order" not in body:
@@ -523,6 +525,31 @@ def edit_plan(split_id: int, body: dict | None = None) -> dict:
     edits.save(work, record["model"].fingerprint, record["edits"] + [stored])
     _plans.pop(split_id, None)
     return assembly_edits(split_id)
+
+
+def _settle_outdated(split_id: int, op: str) -> dict:
+    """Discard (delete the override) or Try to keep (replay each edit, keep those that still pass, stamp the split's
+    fingerprint) for edits marked outdated. `dropped` lists what Try to keep could not keep."""
+    _require(split_id, (SPLIT, QUEUED), "settle the edits")
+    record = _planning(split_id)
+    if record["state"] != "outdated":
+        raise jobs.JobError("There are no outdated edits to settle.", 409)
+    work = work_dir(split_id)
+    dropped = []
+    if op == "discard":
+        edits.reset(work)
+    else:
+        if not record["auto"].ok:
+            raise jobs.JobError("The plan has to work as cut before edits can be kept.", 409)
+        done = edits.replay(record["model"], record["auto"].plan, record["edits"], keep_going=True)
+        dropped = [{"index": i, "edit": edit, "parts": list(refused.parts), "kind": refused.kind, "reason": str(refused)}
+                   for i, edit, refused in done.dropped]
+        if done.kept:
+            edits.save(work, record["model"].fingerprint, done.kept)
+        else:
+            edits.reset(work)
+    _plans.pop(split_id, None)
+    return {**assembly_edits(split_id), "dropped": dropped}
 
 
 def edit_receivers(split_id: int, parts) -> dict:
