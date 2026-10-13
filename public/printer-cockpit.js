@@ -167,7 +167,7 @@
   .pv-chip.on{background:var(--accent-fill);border-color:var(--accent-fill);color:#fff;font-weight:700}.pv-chip.on::before{content:"\\2713\\00a0"}
   .pv-chips{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
   .pv-bar{height:6px;background:var(--surface2);border-radius:4px;overflow:hidden;min-width:80px}.pv-bar span{display:block;height:100%;background:var(--accent)}
-  .pv-btns{display:flex;gap:8px;flex-wrap:wrap}
+  .pv-btns{display:flex;gap:16px 8px;flex-wrap:wrap}.pv-btns .btn-danger{margin-left:24px}
   .pv-row-wrap{display:flex;gap:24px;flex-wrap:wrap;align-items:center}
   .pv-col{display:flex;flex-direction:column;gap:10px}.pv-col.wide{width:100%;max-width:520px}
   .pv-xyz{font-variant-numeric:tabular-nums;color:var(--text-muted)}

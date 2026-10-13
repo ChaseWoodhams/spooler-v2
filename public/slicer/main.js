@@ -5,7 +5,7 @@
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=3";
-import { projectPage } from "./project-page.js?v=7";
+import { projectPage } from "./project-page.js?v=8";
 import { newProject } from "./new-project.js?v=9";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 
@@ -942,7 +942,12 @@ function bindFolds() {
 async function choosePreset(kind, name) {
   const names = currentPresets();
   if (!names || names[kind] === name) return renderProfile();
-  if (presetChanges(kind) && !confirm(`Switching ${kind} presets discards your unsaved ${kind} changes. Continue?`)) return renderProfile();
+  if (presetChanges(kind) && !await confirmDialog({
+    title: `Switch the ${kind} preset to ${name}?`,
+    body: `Your unsaved ${kind} changes are discarded.`,
+    confirmLabel: "Switch preset",
+    danger: true,
+  })) return renderProfile();
   const next = { ...names, [kind]: name };
   if (kind === "machine") {  // the process and filament must suit the new printer
     const fits = key => state.presets[PRESET_LISTS[key]][name] || [];
@@ -995,7 +1000,12 @@ async function savePreset() {
 
 async function deletePreset(kind) {
   const names = currentPresets();
-  if (!confirm(`Delete the saved ${kind} preset “${names[kind]}”? Projects already using it keep working.`)) return;
+  if (!await confirmDialog({
+    title: `Delete the ${kind} preset “${names[kind]}”?`,
+    body: "Projects already using it keep working.",
+    confirmLabel: "Delete preset",
+    danger: true,
+  })) return;
   try {
     await api("DELETE", `/api/slicer/presets/${kind}/${encodeURIComponent(names[kind])}`);
     await loadPresets();
@@ -1670,12 +1680,17 @@ function resetSettings(target, keys) {
   renderObjects();
 }
 
-function usePlateSettingsEverywhere() {
+async function usePlateSettingsEverywhere() {
   const source = currentPlate();
   const overrides = source.overrides || {};
   const differing = data().plates.filter(p => p.id !== source.id && Object.keys(p.overrides || {}).length
     && JSON.stringify(p.overrides) !== JSON.stringify(overrides));
-  if (differing.length && !confirm(`${listNames(differing.map(p => p.name))} ${differing.length === 1 ? "has its" : "have their"} own settings. Replace them with ${source.name}'s?`)) return;
+  if (differing.length && !await confirmDialog({
+    title: `Use ${source.name}'s settings on every plate?`,
+    body: `${listNames(differing.map(p => p.name))} ${differing.length === 1 ? "has its" : "have their"} own settings, which are replaced.`,
+    confirmLabel: "Replace settings",
+    danger: true,
+  })) return;
   data().plates.forEach(plate => { plate.overrides = clone(overrides); });
   changed();
   renderAll({ geometry: false });
@@ -1902,7 +1917,11 @@ async function mergeInto(targetId) {
   const source = currentPlate(), target = plateById(targetId);
   if (!source || !target) return;
   const own = JSON.stringify(source.overrides || {}) !== JSON.stringify(target.overrides || {}) && Object.keys(source.overrides || {}).length;
-  if (own && !confirm(`${source.name} has settings of its own. The merged plate keeps ${target.name}'s settings. Merge anyway?`)) return;
+  if (own && !await confirmDialog({
+    title: `Merge ${source.name} into ${target.name}?`,
+    body: `${source.name} has settings of its own. The merged plate keeps ${target.name}'s settings.`,
+    confirmLabel: "Merge plates",
+  })) return;
   await flushSave();
   await withButton($("merge-plate"), async () => {
     applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${source.id}/merge`, { into: target.id }));
@@ -2047,7 +2066,12 @@ async function afterSplitPlaced() {
 async function layOutParts() {
   const splitId = splitStep.split?.id ?? state.project.split_id;
   const placed = state.project.models.some(m => m.split?.id === splitId);
-  if (placed && !confirm("Lay the parts out again? This replaces the parts on your plates, including any moves or settings you gave them.")) return;
+  if (placed && !await confirmDialog({
+    title: "Lay the parts out again?",
+    body: "This replaces the parts on your plates, including any moves or settings you gave them.",
+    confirmLabel: "Lay out again",
+    danger: true,
+  })) return;
   await flushSave();
   applyProject(await api("POST", `/api/projects/${state.project.id}/layout`, { split_id: splitId }));
   resetEdits();
@@ -2062,7 +2086,12 @@ async function layOutParts() {
 async function placeWhole() {
   const splitId = splitStep.split?.id ?? state.project.split_id;
   const placed = state.project.models.some(m => m.split?.id === splitId);
-  if (placed && !confirm("Put the model on a plate again? This replaces what's on your plates from this model.")) return;
+  if (placed && !await confirmDialog({
+    title: "Put the model on a plate again?",
+    body: "This replaces what's on your plates from this model.",
+    confirmLabel: "Put on a plate",
+    danger: true,
+  })) return;
   await flushSave();
   applyProject(await api("POST", `/api/projects/${state.project.id}/whole`, { split_id: splitId }));
   renderAll();
@@ -2295,7 +2324,7 @@ function projectRow(p) {
         <small>${plural(p.plates, "plate")} · ${plural(p.objects, "object")} · edited ${new Date(p.updated_at * 1000).toLocaleString()}</small>
         <div class="pd-chips">${projectChips(p)}</div></div>
       <button class="btn btn-primary btn-sm" type="button" data-open-project="${p.id}">Open</button>
-      <button class="btn btn-danger btn-sm" type="button" data-delete-project="${p.id}">Delete</button>
+      <button class="btn btn-danger-quiet btn-sm project-delete" type="button" data-delete-project="${p.id}" aria-label="Delete ${esc(p.name)}">Delete</button>
     </div>`;
 }
 
@@ -2523,7 +2552,14 @@ function bindUi() {
         const project = await api("POST", "/api/projects", { name: adopt.dataset.name, split_id: Number(adopt.dataset.adoptSplit) });
         $("dlg-projects").close();
         await openProject(project.id);
-      } else if (remove && confirm("Delete this project, its uploaded model and its sliced plates? Jobs already in the queue stay there.")) {
+      } else if (remove) {
+        const name = remove.closest(".slicer-project-row")?.querySelector("strong")?.textContent || "this Project";
+        if (!await confirmDialog({
+          title: `Delete the Project ${name}?`,
+          body: "Its uploaded model and its sliced plates are deleted too, and this cannot be undone. Jobs already in the queue stay there.",
+          confirmLabel: "Delete Project",
+          danger: true,
+        })) return;
         await api("DELETE", `/api/projects/${remove.dataset.deleteProject}`);
         if (state.project?.id === Number(remove.dataset.deleteProject)) {
           state.project = null;

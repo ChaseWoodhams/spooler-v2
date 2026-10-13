@@ -1,6 +1,6 @@
 /* Outcome prompt: shown for a printer whose last print has ended. Pre-filled with what the printer reported, with the
    end-of-print snapshot where there is one. "Printed OK · Bed cleared" confirms and frees the bed in one request;
-   "Failed…" opens a sheet (reasons, note, Bed cleared ticked, Reprint this plate next) that does it all in one submit.
+   "Failed…" opens a sheet (reasons, note, Bed cleared and Reprint this plate next, both unticked: only the user confirms the bed) that does it all in one submit.
    Built on .modal / .modal-box and the shared openModal helper (modal.js), so it has dialog semantics, a focus trap and Escape.
    Plain script: used by the dashboard (index.html) and the project page (slicer.html).
    Public: OutcomePrompt.open(printerId), OutcomePrompt.awaiting() -> Promise<array of printer ids awaiting>. */
@@ -11,8 +11,8 @@ const OutcomePrompt = (() => {
     return data.failure_reasons.map(id => [id, data.labels[id] || id]);
   }
   const esc = s => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  const say = (msg, bad) => {
-    if (typeof toast === "function") return toast(msg, bad);
+  const say = (msg, bad, opts) => {
+    if (typeof toast === "function") return toast(msg, bad, opts);
     const area = document.getElementById("toast-area");   // the project page keeps its toast in a module, but shares the area
     if (!area) return console[bad ? "error" : "log"](msg);
     const el = document.createElement("div");
@@ -21,6 +21,8 @@ const OutcomePrompt = (() => {
     area.appendChild(el);
     setTimeout(() => el.remove(), 3500);
   };
+  // "Fix outcome" opens History on the printer's prints (the dashboard only; the project page has no History panel)
+  const fixAction = printerId => typeof fixOutcome === "function" ? { action: { label: "Fix outcome", onClick: () => fixOutcome(printerId) } } : undefined;
   const minutes = s => (s ? `${Math.floor(s / 3600) ? Math.floor(s / 3600) + "h " : ""}${String(Math.floor(s / 60) % 60).padStart(2, "0")}m` : "");
   let box = null;
 
@@ -57,7 +59,8 @@ const OutcomePrompt = (() => {
     ${item.snapshot ? `<img src="${esc(item.snapshot)}" alt="Printer camera when the print ended" class="outcome-snapshot">` : ""}`;
 
   function question(item) {
-    show(`${heading(item)}
+    const next = item.next_job ? `<p class="outcome-next">Next up: <b>${esc(item.next_job)}</b> starts on ${esc(item.printer_name)} when you confirm.</p>` : "";
+    show(`${heading(item)}${next}
       <button class="btn btn-primary" data-op="ok">Printed OK · Bed cleared</button>
       <button class="btn btn-secondary" data-op="failed">Failed…</button>
       <button class="btn btn-secondary btn-sm" data-op="later">Later</button>`);
@@ -67,7 +70,8 @@ const OutcomePrompt = (() => {
       try {
         const r = await api("POST", `/api/printers/${encodeURIComponent(item.printer_id)}/bed-cleared`, { print_id: item.print_id, outcome: "completed" });
         close();
-        say(r.started ? `Bed cleared. Starting ${r.started.file_name}` : r.start_error ? `Bed cleared, but nothing started: ${r.start_error}` : "Printed OK. Bed cleared");
+        say(r.started ? `Bed cleared. Starting ${r.started.file_name}` : r.start_error ? `Bed cleared, but nothing started: ${r.start_error}` : "Printed OK. Bed cleared",
+          !!r.start_error && !r.started, fixAction(item.printer_id));
       } catch (e) { say(e.message, true); }
     };
   }
@@ -82,7 +86,7 @@ const OutcomePrompt = (() => {
       <fieldset class="outcome-fieldset"><legend>What went wrong? (pick at least one)</legend>
         ${reasonList.map(([id, label]) => `<label class="outcome-check"><input type="checkbox" data-reason value="${id}"> ${esc(label)}</label>`).join("")}</fieldset>
       <label>Note (optional) <textarea data-note rows="2"></textarea></label>
-      <label class="outcome-check"><input type="checkbox" data-bed checked> Bed cleared</label>
+      <label class="outcome-check"><input type="checkbox" data-bed> Bed cleared (the plate is off the bed)</label>
       ${canReprint ? `<label class="outcome-check"><input type="checkbox" data-reprint> Reprint this ${what} next</label>` : ""}
       <div class="modal-actions"><button class="btn btn-secondary" data-op="back">Back</button>
         <button class="btn btn-primary" data-op="submit">Save failure</button></div>`);
@@ -107,7 +111,7 @@ const OutcomePrompt = (() => {
         }
         close();
         say(result.reprint_error ? `Failure saved, but the ${what} was not re-queued: ${result.reprint_error}` : "Failure saved" + (reprint ? `. ${item.quick ? "Print" : "Plate"} queued again` : ""),
-          !!result.reprint_error);
+          !!result.reprint_error, bed ? fixAction(item.printer_id) : undefined);
       } catch (e) { say(e.message, true); }
     };
   }

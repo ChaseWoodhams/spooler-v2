@@ -172,7 +172,8 @@ def snapshot_file(print_id: int) -> Path:
 
 def awaiting() -> list:
     """Each printer's latest closed Print while its Outcome is unconfirmed or a queued Job waits for Bed cleared."""
-    queued = {j["printer_id"] for j in jobs.list_jobs() if j["state"] == jobs.QUEUED and j["printer_id"]}
+    queued_jobs = [j for j in jobs.list_jobs() if j["state"] == jobs.QUEUED and j["printer_id"]]
+    queued = {j["printer_id"] for j in queued_jobs}
     out = []
     for record in print_history.latest_closed_prints():
         if state.printers.get(record["printer_id"]) is None:
@@ -181,10 +182,13 @@ def awaiting() -> list:
         if not (record["outcome_unconfirmed"] or needs_bed):
             continue
         project, plate = _names(record)
+        # What confirming starts next: the printer's first queued, not-held Job, when auto-start would release it
+        next_job = next((j for j in queued_jobs if j["printer_id"] == record["printer_id"] and not j["held"]), None)
         out.append({"print_id": record["id"], "printer_id": record["printer_id"], "printer_name": record["printer_name"],
                     "file_name": record["file_name"], "project_id": record["project_id"], "project_name": project,
                     "plate_id": record["plate_id"], "plate_name": plate, "quick": _is_quick(record), "reported_outcome": record["outcome"],
                     "outcome_unconfirmed": record["outcome_unconfirmed"], "bed_cleared_needed": needs_bed,
+                    "next_job": (next_job.get("file_name") or "queued job") if next_job and bed_cleared.auto_start(record["printer_id"]) else None,
                     "ended_at": record["ended_at"], "duration_s": record["duration_s"], "estimate_s": record["estimate_s"],
                     "snapshot": f"/api/prints/{record['id']}/snapshot" if record["end_snapshot"] else None,
                     "url": deep_link(record)})

@@ -11,10 +11,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=62" />
+  <link rel="stylesheet" href="style.css?v=64" />
   <link rel="stylesheet" href="history-quality.css?v=1" />
   <script src="net.js?v=1"></script>
   <script src="modal.js?v=1"></script>
+  <script src="confirm-dialog.js?v=1"></script>
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body>
@@ -204,9 +205,9 @@
             </svg>
             Add Printer
           </button>
-          <button id="btn-remove-printer" class="btn btn-danger" style="display:none">
-            Remove
-          </button>
+        </div>
+        <div class="danger-zone" style="display:none">
+          <button id="btn-remove-printer" class="btn btn-danger-quiet">Remove printer</button>
         </div>
       </div>
     </div>
@@ -570,8 +571,10 @@
           <span id="settings-edit-access-code-error" class="field-error" hidden></span>
           <span class="input-hint">Found on the printer under Settings → Network.</span>
         </label>
+        <div class="danger-zone" style="display:none">
+          <button id="btn-settings-printer-remove" class="btn btn-danger-quiet">Remove printer</button>
+        </div>
         <div class="modal-actions">
-          <button id="btn-settings-printer-remove" class="btn btn-danger" style="display:none">Remove</button>
           <button id="btn-settings-printer-save" class="btn btn-primary">Save</button>
         </div>
       </div>
@@ -819,16 +822,16 @@
 
   <script src="/config.js"></script>
   <script src="health.js?v=2"></script>
-  <script src="jobs.js?v=10"></script>
+  <script src="jobs.js?v=11"></script>
   <script src="preview.js?v=2"></script>
   <script src="history.js?v=8"></script>
-  <script src="outcome-prompt.js?v=4"></script>
-  <script src="app.js?v=70"></script>
+  <script src="outcome-prompt.js?v=6"></script>
+  <script src="app.js?v=71"></script>
   <script src="quick-print.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
   <script src="import.js?v=7"></script>
-  <script src="dashboard.js?v=7"></script>
-  <script src="printer-cockpit.js?v=2"></script>
+  <script src="dashboard.js?v=9"></script>
+  <script src="printer-cockpit.js?v=4"></script>
   <script>
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
