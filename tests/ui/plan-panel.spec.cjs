@@ -53,7 +53,7 @@ async function open(browser, viewport = { width: 1280, height: 800 }) {
     const analysing = out.filter(r => r.state === 'analysing').length;
     const summary = { models: out.length, objects: out.reduce((a, r) => a + r.copies, 0), split: count('split'), fits: count('fits'), check_units: count('check_units'), analysing, failed: 0 };
     summary.can_create = out.length > 0 && !summary.check_units && !analysing;
-    summary.steps = (summary.split ? ['split'] : []).concat(['plates', 'slice', 'queue']);
+    summary.steps = (summary.split ? ['split'] : []).concat(['plates', 'slice', 'print']);
     return { rows: out, summary };
   };
   await page.route('**/api/**', async route => {
@@ -114,7 +114,7 @@ const reasonHas = (page, re) => page.waitForFunction(re => new RegExp(re, 'i').t
     const a = await open(browser);
     await drop(a.page, ['small.stl', 'tiny.stl']);
     await chips(a.page, 'ok', 2);
-    assert.deepEqual(await stepNames(a.page), ['Plates', 'Slice', 'Queue']);
+    assert.deepEqual(await stepNames(a.page), ['Plates', 'Slice', 'Print']);
     const plan = a.page.locator('#new-intake .intake-plan');
     assert.match(await plan.innerText(), /2 objects/);
     assert.match(await plan.innerText(), /default settings/i);
@@ -136,7 +136,7 @@ const reasonHas = (page, re) => page.waitForFunction(re => new RegExp(re, 'i').t
     const b = await open(browser);
     await drop(b.page, ['big.stl']);
     await chips(b.page, 'split', 1);
-    assert.deepEqual(await stepNames(b.page), ['Split', 'Plates', 'Slice', 'Queue']);
+    assert.deepEqual(await stepNames(b.page), ['Split', 'Plates', 'Slice', 'Print']);
     assert.match(await b.page.locator('#new-intake .intake-plan').innerText(), /1 model bigger than the bed/);
     assert.equal(await b.page.locator('#new-intake .plan-mixed:not([hidden])').count(), 0, 'a lone big model is not a mixed upload');
     await b.page.waitForFunction(() => !document.getElementById('btn-new-create').disabled);
