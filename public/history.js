@@ -85,7 +85,7 @@ async function loadHistory(append = false) {
   params.set("offset", append ? historyPrints.length : 0);
   const request = ++_historyRequest;
   const results = document.getElementById("history-result-count");
-  results.textContent = append ? "Loading more prints…" : "Loading history…";
+  results.textContent = append ? "Loading more printsâ€¦" : "Loading historyâ€¦";
   document.getElementById("btn-history-retry").hidden = true;
   document.getElementById("history-list").setAttribute("aria-busy", "true");
   try {
@@ -167,11 +167,11 @@ function historyDetail(p) {
     ["Started", at(p.started_at)],
     ["Ended", p.ended_at != null ? at(p.ended_at) : p.outcome ? "End time not recorded" : "Still printing"],
     ["Observed duration", p.duration_s != null ? (p.duration_s === 0 ? '0s' : formatTime(p.duration_s)) : "Not recorded"],
-    ["Slicer estimate · duration", p.estimate_s != null ? (p.estimate_s === 0 ? '0s' : formatTime(p.estimate_s)) : "Not available"],
+    ["Slicer estimate Â· duration", p.estimate_s != null ? (p.estimate_s === 0 ? '0s' : formatTime(p.estimate_s)) : "Not available"],
     ["Layers", p.total_layers != null ? `${p.layer != null ? p.layer : "Not recorded"} of ${p.total_layers}` : "Not recorded"],
     ["Observed filament", (p.filament_g != null ? `${p.filament_g} g` : "Weight not recorded") +
-      " · " + (p.filament_mm != null ? `${(p.filament_mm / 1000).toFixed(2)} m` : "Length not recorded")],
-    ["Slicer estimate · filament", p.estimate_g != null ? `${p.estimate_g} g` : "Not available"],
+      " Â· " + (p.filament_mm != null ? `${(p.filament_mm / 1000).toFixed(2)} m` : "Length not recorded")],
+    ["Slicer estimate Â· filament", p.estimate_g != null ? `${p.estimate_g} g` : "Not available"],
     ["Material", [p.vendor, p.material, p.filament_name].filter(Boolean).join(" ") || "â€”"],
     ["Cost", p.cost != null ? formatCost(p.cost) : "â€”"],
     ["Queue job", p.job_id ? `#${p.job_id}${detail?.job ? ` Â· ${detail.job.name}` : ""}` : "Started outside the queue"],
@@ -390,6 +390,6 @@ function updateHistoryFilterSummary() {
     const el = document.getElementById(id);
     if (el.value) bits.push(el.selectedOptions[0].textContent);
   }
-  document.getElementById("history-filter-summary").textContent = bits.join(" · ") || "All prints · all time";
+  document.getElementById("history-filter-summary").textContent = bits.join(" Â· ") || "All prints Â· all time";
   document.getElementById("history-result-count").textContent = `${historyTotal} result${historyTotal === 1 ? "" : "s"}`;
 }
