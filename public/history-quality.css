@@ -28,7 +28,7 @@
 #panel-history .history-filters input, #panel-history .history-filters select { font-size: 13px; }
 #panel-history .history-totals { align-items: center; font-size: 13px; }
 #panel-history .history-unconfirmed-chip, #panel-history .history-chip { padding: 2px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface2); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
-#panel-history .history-unconfirmed-chip { border-color: var(--warning, #f59e0b); }
+#panel-history .history-unconfirmed-chip { border-color: var(--yellow); }
 #panel-history .history-unconfirmed-chip[aria-pressed="true"] { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
 #panel-history .history-chips { display: none; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
 #panel-history .history-outcome-form .history-reasons { margin: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; }

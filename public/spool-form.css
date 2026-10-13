@@ -34,3 +34,7 @@
   color: var(--text); font: inherit; font-size: 14px; text-align: left; text-decoration: none; cursor: pointer; }
 .spool-menu-item:hover, .spool-menu-item:focus-visible { background: var(--surface2); }
 .spool-menu-item.danger { color: var(--red); }
+
+/* Close-out: layout that was inline in the markup */
+.ean-row > .ean-field { flex: 1; }
+.settings-toggle-row .toggle-switch-end { margin-left: auto; }

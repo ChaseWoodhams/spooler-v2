@@ -180,8 +180,8 @@
           <button class="btn btn-secondary btn-sm" type="button" id="btn-arrange" title="Arrange this plate (A); Shift+A arranges every plate onto as few as fit. Pinned objects stay put and plates never mix filaments.">Arrange</button>
         </div>
         <div class="tool-seg" role="group" aria-label="Selection">
-          <button class="btn btn-secondary btn-sm" type="button" id="btn-select-all" title="Select every object on this plate (Ctrl+A). Shift-click adds or removes one.">Select all</button>
-          <button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-select-all" aria-describedby="select-all-hint" title="Select every object on this plate (Ctrl+A). Shift-click adds or removes one.">Select all</button><span class="sr-only" id="select-all-hint">Selects every object on this plate. Ctrl+A does the same; Shift-click adds or removes one object.</span>
+          <button class="btn btn-secondary btn-sm" type="button" id="btn-orient-all" aria-describedby="orient-all-hint" title="Orient every unpinned object on this plate for the least support; Shift for every plate">Orient all</button><span class="sr-only" id="orient-all-hint">Orients every unpinned object on this plate for the least support. Hold Shift to orient every plate.</span>
         </div>
         <div class="tool-seg" role="group" aria-label="View and history">
           <button class="btn btn-secondary btn-sm" type="button" id="btn-undo" title="Undo (Ctrl+Z)">Undo</button>
