@@ -683,6 +683,34 @@ main {
   cursor: pointer;
 }
 .toast-btn:hover { opacity: .85; }
+.toast-btn:focus-visible, .toast-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Toast text never blocks a control underneath (e.g. a dialog button on a phone); its own buttons still work */
+#toast-area, .toast { pointer-events: none; }
+.toast button { pointer-events: auto; }
+.toast.error { display: flex; align-items: flex-start; gap: 12px; }
+.toast .toast-msg { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.toast-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  margin: -2px -6px -2px 0;
+  cursor: pointer;
+  opacity: .7;
+}
+.toast-close:hover { opacity: 1; }
+@media (max-width: 640px) {
+  #toast-area {
+    bottom: calc(72px + env(safe-area-inset-bottom));
+    left: 16px;
+    right: 16px;
+    align-items: flex-end;
+  }
+  .toast, .toast.toast-action { max-width: 100%; }
+}
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -1042,31 +1070,24 @@ body.panel-open { overflow: hidden; }
   background: var(--surface2);
   object-fit: contain;
 }
-.print-opts-filename {
-  font-size: 12px;
-  color: var(--text-muted);
-  text-align: center;
-  word-break: break-all;
-  margin: 0;
-  line-height: 1.4;
-}
-.print-opts-stats {
-  display: flex;
-  justify-content: center;
-  gap: 24px;
+.print-opts-summary {
   background: var(--surface2);
   border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 10px;
-}
-.print-opts-stat {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  padding: 4px 12px;
+  margin: 0 0 10px;
   font-size: 13px;
-  font-weight: 500;
 }
-.print-opts-stat svg { width: 15px; height: 15px; color: var(--accent); flex-shrink: 0; }
+.print-opts-summary > div { display: flex; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--surface3, rgba(255,255,255,0.06)); }
+.print-opts-summary > div:last-child { border-bottom: none; }
+.print-opts-summary dt { flex: 0 0 64px; color: var(--text-muted); }
+.print-opts-summary dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.print-opts-bed {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px;
+  background: var(--surface2); border: 1px solid var(--border);
+}
+.print-opts-bed[data-state=""] { display: none; }
+.print-opts-bed[data-state="blocked"], .print-opts-bed[data-state="error"] { border-color: var(--yellow); }
 .print-opts-group {
   background: var(--surface2);
   border-radius: 8px;
