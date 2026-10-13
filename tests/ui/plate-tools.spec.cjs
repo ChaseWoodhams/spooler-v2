@@ -88,6 +88,8 @@ async function saved(page, server, before) {
 }
 // Select all, the supports choice and the custom gap live in the More menu
 const more = page => page.locator('#prepare-tools .tool-more > summary').click();
+const moreOpen = async page => { if (!(await page.locator('#prepare-tools .tool-more').evaluate(d => d.open))) await more(page); };
+const align = async (page, value) => { await moreOpen(page); await page.locator('#align-menu').selectOption(value); };
 const selectAll = async page => { await more(page); await page.locator('#btn-select-all').click(); };
 const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer-object-select`);
 
@@ -148,16 +150,16 @@ const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer
     {
       const { page, server } = await open(browser);
       await selectAll(page);
-      await page.locator('#align-menu').selectOption('left');
+      await align(page, 'left');
       await saved(page, server, 0);
       assert.deepEqual([1, 2, 3].map(id => positions(server)[id][0]), [50, 50, 50], 'left edges line up on the leftmost');
       assert.deepEqual([1, 2, 3].map(id => positions(server)[id][1]), [50, 50, 150], 'front to back is untouched');
 
-      await page.locator('#align-menu').selectOption('spread-y');
+      await align(page, 'spread-y');
       await saved(page, server, 1);
       assert.deepEqual([1, 2, 3].map(id => positions(server)[id][1]).sort((a, b) => a - b), [50, 100, 150], 'three objects spread with equal gaps');
 
-      await page.locator('#align-menu').selectOption('bed-centre');
+      await align(page, 'bed-centre');
       await saved(page, server, 2);
       const ys = [1, 2, 3].map(id => positions(server)[id][1]);
       assert.equal((Math.min(...ys) - 15 + Math.max(...ys) + 15) / 2, 128, 'the selection as a whole is centred on the bed');
@@ -170,9 +172,9 @@ const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer
     {
       const { page, server } = await open(browser);
       await row(page, 1).click();
-      await page.locator('#align-menu').selectOption('left');
+      await align(page, 'left');
       await page.locator('.toast', { hasText: 'two or more' }).waitFor({ timeout: 3000 });
-      await page.locator('#align-menu').selectOption('bed-left');
+      await align(page, 'bed-left');
       await saved(page, server, 0);
       assert.equal(positions(server)[1][0], 25, 'one object goes to the left edge, 5 mm in');
       console.log('PASS: Line-up needs two objects; one can still go to a bed edge');
@@ -183,7 +185,9 @@ const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer
     {
       const { page } = await open(browser);
       assert.equal(await page.locator('#snap-step').isDisabled(), true);
+      await moreOpen(page);
       await page.locator('#snap-on').check();
+      await moreOpen(page);
       await page.locator('#snap-step').selectOption('5');
       assert.equal(await page.locator('#snap-step').isDisabled(), false);
       await page.reload();
@@ -224,23 +228,28 @@ const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer
       const { page, server } = await open(browser);
       const select = page.locator('#pack-select');
       const lastPack = async n => { for (let i = 0; i < 50 && server.packs.length < n; i++) await page.waitForTimeout(100); return server.packs.at(-1); };
+      await moreOpen(page);
       assert.equal(await select.inputValue(), 'project:normal', 'Normal until something is chosen');
+      await moreOpen(page);
       await select.selectOption('plate:tight');
       await page.waitForFunction(() => document.getElementById('pack-select').value === 'plate:tight');
       assert.deepEqual(await lastPack(1), { plate_id: 1, plate_pack: { preset: 'tight' } });
+      await moreOpen(page);
       await select.selectOption('plate:inherit');
       assert.deepEqual(await lastPack(2), { plate_id: 1, plate_pack: null });
+      await moreOpen(page);
       await select.selectOption('project:roomy');
       await page.waitForFunction(() => document.getElementById('pack-select').value === 'project:roomy');
       assert.deepEqual(await lastPack(3), { pack: { preset: 'roomy' } });
-      await more(page);
+      await moreOpen(page);
       await page.locator('#pack-supports').check();
-      await more(page);
+      await moreOpen(page);
       await page.waitForFunction(() => document.getElementById('pack-supports').checked);
       assert.deepEqual(await lastPack(4), { pack: { preset: 'roomy', tight_supports: true } });
       await page.waitForTimeout(300);   // the page has taken the server's answer before the next choice
+      await moreOpen(page);
       await select.selectOption('project:custom');
-      await more(page);
+      await moreOpen(page);
       await page.locator('#pack-gap-field').waitFor({ state: 'visible' });
       await page.locator('#pack-gap').fill('9');
       await page.locator('#pack-gap').press('Tab');

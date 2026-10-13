@@ -36,6 +36,7 @@ const split = {id:1, source_name:'fixture-small.stl', state:'ready', settings:{s
     });
     await page.goto('http://spooler.test/slicer.html?project=1');
     await page.getByText('fixture-small.stl',{exact:true}).waitFor({timeout:5000}).catch(async e=>{console.error(await page.locator('body').innerText());throw e;});
+    await page.locator('#split-side details').evaluateAll(ds => ds.forEach(d => { d.open = true; }));   // Details and Units sit in folds
     assert.match(await page.locator('#split-side').innerText(),/Original source is retained/);
     assert.match(await page.locator('#split-side').innerText(),/Target bed/);
     assert.match(await page.locator('#split-side').innerText(),/Ready to continue/);
@@ -117,14 +118,22 @@ const split = {id:1, source_name:'fixture-small.stl', state:'ready', settings:{s
     project.data.plates[0].printer_id='p1';project.data.plates[1].printer_id='p2';
     project.slices={'1':{state:'sliced',outdated:false,layers:10,estimate_s:600,estimate_g:5},
       '2':{state:'sliced',outdated:false,layers:20,estimate_s:1200,estimate_g:10}};
+    const sliced={plates:[{id:1,name:'Plate 1',status:'sliced',parts:1,printer_id:'p1',estimate_s:600,estimate_g:5},
+      {id:2,name:'Plate 2',status:'sliced',parts:1,printer_id:'p2',estimate_s:1200,estimate_g:10}],
+      print_order:[1,2], progress:{total:2,printed_ok:0,counts:{unsliced:0,sliced:2,waiting:0,queued:0,printing:0,printed_ok:0,failed:0},filament_g:{total:15,used:0}}};
+    await page.route('**/api/projects/1/status',route=>route.fulfill({json:sliced}));
+    await page.route('**/api/outcome-prompts',route=>route.fulfill({json:{awaiting:[]}}));
     await page.reload();
-    await page.locator('[data-step="queue"]').click();
-    assert.match(await page.locator('#batch-summary').innerText(),/Printer One/);
-    assert.match(await page.locator('#batch-summary').innerText(),/Printer Two/);
-    assert.match(await page.locator('#batch-summary').innerText(),/15 g/);
-    assert.match(await page.locator('#batch-summary').innerText(),/Textured/);
-    await page.locator('[data-send-plate="2"]').uncheck();
-    assert.match(await page.locator('#batch-summary').innerText(),/1 Plate/);
+    await page.locator('[data-step="print"]').click();
+    for(const n of [1,2]) await page.locator(`[data-tick="${n}"]`).setChecked(true);
+    await page.locator('#pp-sendbar details').evaluateAll(ds=>ds.forEach(d=>{d.open=true;}));
+    const where=page.locator('#pp-send-where'),summary=page.locator('#pp-send-summary');
+    assert.match(await where.innerText(),/Printer One/);
+    assert.match(await where.innerText(),/Printer Two/);
+    assert.match(await summary.innerText(),/15 g/);
+    assert.match(await where.innerText(),/Textured/);
+    await page.locator('[data-tick="2"]').focus();await page.keyboard.press('Space');
+    assert.match(await summary.innerText(),/1 Plate/);
     console.log('PASS: Batch summary tracks selected Plates, assignments, bed and filament');
     const progress={plates:[{id:1,name:'Plate 1',status:'queued',parts:1,job_id:1,printer_id:'p1'},
       {id:2,name:'Plate 2',status:'sliced',parts:1,outcome_unknown:true,printer_id:'p2'}],
@@ -134,7 +143,8 @@ const split = {id:1, source_name:'fixture-small.stl', state:'ready', settings:{s
     await page.route('**/api/outcome-prompts',route=>route.fulfill({json:{awaiting:[]}}));
     await page.locator('[data-step="print"]').click();
     await page.getByText(/1 latest Outcome unknown/).waitFor({timeout:5000});
-    const plateChoice=page.getByRole('button',{name:'Plate 2: Sliced, latest Outcome unknown',exact:true});
+    const plateChoice=page.getByRole('button',{name:'Plate 2',exact:true});
+    assert.match(await page.locator('[data-plate-card]').filter({has:plateChoice}).innerText(),/Outcome unknown/);
     await plateChoice.focus();await page.keyboard.press('Enter');
     assert.equal(await plateChoice.getAttribute('aria-pressed'),'true');
     console.log('PASS: Project progress exposes unknown Outcomes and readable keyboard Plate selection');
@@ -180,19 +190,21 @@ const split = {id:1, source_name:'fixture-small.stl', state:'ready', settings:{s
     assert.ok(previewRect.y>=modelRect.y+modelRect.height-1,'Preview details should be below the phone model view');
     await page.getByRole('slider',{name:'Layer',exact:true}).focus();await page.keyboard.press('Home');
     console.log('PASS: Desktop sidebar collapses; phone preview details preserve model view and keyboard layer access');
-    await page.locator('[data-step="queue"]').click();
-    await page.locator('[data-send-plate="1"]').check();await page.locator('[data-send-plate="2"]').check();
-    await page.getByRole('button',{name:'Balance selected Plates by estimated time'}).click();
+    Object.assign(progress.plates[0],{status:'sliced',estimate_s:600,estimate_g:5});Object.assign(progress.plates[1],{estimate_s:1200,estimate_g:10,outcome_unknown:false});progress.progress.outcome_unknown=0;progress.progress.counts.queued=0;progress.progress.counts.sliced=2;
+    await page.locator('[data-step="slice"]').click();await page.locator('[data-step="print"]').click();
+    await page.locator('[data-tick="1"]').setChecked(true);await page.locator('[data-tick="2"]').setChecked(true);
+    await page.locator('#pp-sendbar details').evaluateAll(ds=>ds.forEach(d=>{d.open=true;}));
+    await page.locator('#pp-send-balance').click();
     assert.equal(await page.getByRole('combobox',{name:'Destination printer for Plate 2',exact:true}).inputValue(),'p1');
     assert.equal(await page.getByRole('combobox',{name:'Destination printer for Plate 1',exact:true}).inputValue(),'p2');
     await page.getByRole('combobox',{name:'Destination printer for Plate 1',exact:true}).selectOption('p1');
-    assert.match(await page.locator('#batch-summary').innerText(),/Plate 1 → Printer One/);
+    assert.equal(await page.getByRole('combobox',{name:'Destination printer for Plate 1',exact:true}).inputValue(),'p1');
     console.log('PASS: Balancing suggests destinations before Queueing and the operator can override them');
     progress.plates[0].status='printing';progress.progress.counts.queued=0;progress.progress.counts.printing=1;
     await page.locator('[data-step="print"]').click();
     await page.locator('.pp-progress').getByText(/1 printing/).waitFor({timeout:5000});
     progress.plates[0].status='failed';progress.progress.counts.printing=0;progress.progress.counts.failed=1;
-    await page.locator('[data-step="queue"]').click();await page.locator('[data-step="print"]').click();
+    await page.locator('[data-step="print"]').click();
     await page.locator('.pp-progress').getByText(/1 failed/).waitFor({timeout:5000});
     console.log('PASS: Queued, printing and failed Project states transition without physical printer commands');
     await page.addInitScript(()=>localStorage.setItem('theme','light'));
