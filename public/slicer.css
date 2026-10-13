@@ -608,3 +608,25 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .pp-where { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 12px; max-height: 160px; overflow-y: auto; }
 .pp-sendbar .btn-primary { width: 100%; min-height: 44px; }
 @media (max-width: 900px) { .pp-sendbar { bottom: -10px; margin: 0 -10px -10px; padding: 10px; } }
+
+/* ─── Hit targets (ticket 08): see the matching block at the end of style.css ─── */
+:root { --hit-min: 44px; --hit-fine: 32px; --hit-gap: 8px; }
+.slicer-icon-btn, .slicer-pages button, .scope-toggle button, .preset-btn, .set-reset,
+.slicer-tabs .btn, .pp-fold, .slicer-toolbar .btn, .slicer-toolbar-select { min-height: var(--hit-fine); }
+.slicer-icon-btn { min-width: var(--hit-fine); }
+.set-reset { position: relative; }
+.set-reset::after { content: ""; position: absolute; inset: -8px; }   /* grows the tap area without growing the row */
+.slicer-toolbar, .slicer-tabs, .slicer-pages, .slicer-step-actions { gap: var(--hit-gap); }
+.slicer-plate-row { min-height: var(--hit-fine); }
+.slicer-fold > summary, .slicer-subfold > summary, .tool-more > summary { min-height: var(--hit-fine); align-items: center; }
+.slicer-subfold > summary, .tool-more > summary { display: flex; }
+@media (pointer: coarse), (max-width: 1100px) {
+  .btn, .btn-sm, .slicer-icon-btn, .slicer-pages button, .scope-toggle button, .preset-btn, .slicer-tabs .btn, .pp-fold,
+  .slicer-toolbar .btn, .slicer-toolbar-select, .slicer-step, .slicer-plate-tab, .slicer-plate-row, .slicer-check, .pp-autostart,
+  .slicer-fold > summary, .slicer-subfold > summary, .tool-more > summary, .slicer-project-row > .btn, .slicer-object-select { min-height: var(--hit-min); }
+  .slicer-icon-btn { min-width: var(--hit-min); }
+  .set-reset::after { inset: -14px; }
+  .slicer-plate-row input[type=checkbox], .slicer-check input, .set-fields input[type=checkbox] { width: 20px; height: 20px; }
+  .set-fields label:has(> input[type=checkbox]) { min-height: var(--hit-min); display: inline-flex; align-items: center; gap: 8px; }
+  .slicer-toolbar { flex-wrap: wrap; }
+}
