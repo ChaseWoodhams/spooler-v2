@@ -3,7 +3,9 @@ How a finished split goes together: lettered Sections, numbered steps, and "cann
 
 Public pieces (later tickets build on these)
   SplitModel(result, cuts, preview=None)   what the planner knows about a split; `.fingerprint` identifies its cuts and parts
-  build_plan(model, fallback=None)         PlanResult: `.plan` (Plan) or `.failure` (Failure); `.to_dict()` is the API shape
+  build_plan(model, fallback=None)         PlanResult: `.plan` (Plan) or `.failure` (Failure); `.to_dict()` is the API shape.
+                                           The fallback planner is used when the cut tree can't be rebuilt; `fallback=False` turns it off
+  fallback_plan(model, reason)             the tree-less planner (disassembly over the cut-normal directions); Plan.fallback_reason says why it ran
   validate_step(model, unit, placed, direction)
                                            the single gate for a step: None when allowed, else a typed Failure
   find_direction(model, unit, placed)      the direction a unit must slide in along, or the Failure that stops it
@@ -16,6 +18,12 @@ At every node the children are joined one at a time along the cut normal, away f
 and nothing crosses the plane. A node built from several parts is a Section built apart; the heavier child of a node is
 the spine, so it continues its parent's Section. Sections are lettered in the order they finish (side Sections first,
 Main = A last), which is also their page order.
+
+When the tree can't be rebuilt (no cut history, several input bodies, a joint with several cuts) the fallback takes the
+split apart instead: along each signed cut normal (or rod axis) it removes the smallest group that can leave, meaning no
+rod across the group's boundary is off-axis or on the wrong side and nothing sits in its way, and plans the group itself
+the same way. Each group of several parts removed together is built apart as a Section. A joint with several cuts whose
+rods follow none of them is an anomaly. When no order exists the report names the cheapest set of joints in the way.
 """
 
 import hashlib
@@ -96,6 +104,7 @@ class Section:
 class Plan:
     sections: tuple       # in page order: side Sections first, Main (A) last
     fingerprint: str
+    fallback_reason: str = ""   # why the cut tree was not used (the fallback planner made this plan), else ""
 
     @property
     def code(self) -> str:
@@ -111,7 +120,7 @@ class Plan:
 
     def to_dict(self) -> dict:
         return {"sections": [s.to_dict() for s in self.sections], "summary": self.summary(),
-                "fingerprint": self.fingerprint, "code": self.code}
+                "fingerprint": self.fingerprint, "code": self.code, "fallback_reason": self.fallback_reason}
 
 
 @dataclass(frozen=True)
@@ -209,7 +218,7 @@ class SplitModel:
         extent = (np.max([b[1] for b in boxes], axis=0) - np.min([b[0] for b in boxes], axis=0)) if boxes else np.zeros(3)
         self.reach = float(np.linalg.norm(extent)) * 2 + 10
         self._meshes = preview if (m3d is not None and preview and len(preview) == len(self.numbers)) else None
-        self._manifolds, self._sweeps = {}, {}
+        self._manifolds, self._sweeps, self._hit_cache = {}, {}, {}
 
     def _infer_joints(self) -> None:
         """The engine pairs a joint's parts from one probe point, so a cut face shared by several part pairs can list
@@ -275,7 +284,10 @@ class SplitModel:
             return False
         if self._meshes is None:
             return True
-        return (self._sweep(part, w) ^ self._manifold(other)).volume() > SWEEP_HIT_MM3
+        key = (part, other, tuple(np.round(w, 4) + 0.0))
+        if key not in self._hit_cache:
+            self._hit_cache[key] = (self._sweep(part, w) ^ self._manifold(other)).volume() > SWEEP_HIT_MM3
+        return self._hit_cache[key]
 
 
 # ── The step validator ─────────────────────────────────────────────────────────
@@ -430,6 +442,8 @@ def _tree_problem(model: SplitModel) -> str | None:
             return f"The joint of part {pair[0]} and part {pair[1]} was made by {len(cuts)} cuts, so the order can't be read from the cut tree."
         if cuts[0] not in model.cut_by_id:
             return f"The joint of part {pair[0]} and part {pair[1]} refers to cut {cuts[0]}, which is not in the cut list."
+    if len([r for r in _rebuild_tree(model) if len(r.parts) > 1]) > 1:
+        return "This split was made from several input bodies, each cut on its own, so there is no single cut tree to read the order from."
     return None
 
 
@@ -648,7 +662,10 @@ def _finish(drafts: list) -> tuple:
 
 def build_plan(model: SplitModel, fallback=None) -> PlanResult:
     """The plan for a split, or the typed report of why it cannot be assembled as cut. When the cut tree can't be read
-    (no cut history, a joint with several cuts) `fallback(model, reason)` is asked for a PlanResult instead."""
+    (no cut history, several input bodies, a joint with several cuts) `fallback(model, reason)` is asked for a PlanResult
+    instead: `fallback_plan` by default, or nothing at all with `fallback=False` (the tree planner alone)."""
+    if fallback is None:
+        fallback = fallback_plan
     if not model.numbers:
         return PlanResult(failure=Failure(ANOMALY, (), None, "The split has no parts.", {}, ("Split the model first.",)))
     failure = _check_data(model)
@@ -664,3 +681,265 @@ def build_plan(model: SplitModel, fallback=None) -> PlanResult:
     except _Stop as stop:
         return PlanResult(failure=stop.failure)
     return PlanResult(plan=Plan(sections, fingerprint))
+
+
+# ── The fallback planner: no usable cut tree ───────────────────────────────────
+
+FALLBACK_TRIES = 3         # candidate groups tried per state before giving up on it
+FALLBACK_BUDGET = 400      # states explored before the search stops and the split is reported as stuck
+
+
+def _compatible(model: SplitModel, a: int, b: int, u: np.ndarray) -> bool:
+    """Can part `a` meet part `b` moving along `u`: every rod parallel to u, and `a` moving towards the joint?"""
+    cos_limit = math.cos(math.radians(ROD_TOLERANCE_DEG))
+    for pin in model.pins.get(_pair(a, b), []):
+        axis = _unit_vector(pin["axis"])
+        if abs(float(np.dot(axis, u))) < cos_limit:
+            return False
+        side = 1.0 if np.dot(model.centre(a) - np.asarray(pin["p"], float), axis) >= 0 else -1.0
+        if np.dot(-side * axis, u) < 0:
+            return False
+    return True
+
+
+def _fallback_anomaly(model: SplitModel) -> Failure | None:
+    """A joint made by several cuts has to have its rods along one of them."""
+    cos_limit = math.cos(math.radians(ROD_TOLERANCE_DEG))
+    for pair, joint in sorted(model.joints.items()):
+        cuts = [model.cut_by_id[c] for c in joint.get("cuts") or [] if c in model.cut_by_id]
+        if len(cuts) < 2:
+            continue
+        normals = [_unit_vector(c["normal"]) for c in cuts]
+        for pin in model.pins.get(pair, []):
+            if all(abs(float(np.dot(_unit_vector(pin["axis"]), n))) < cos_limit for n in normals):
+                return _anomaly(pair, f"The joint of part {pair[0]} and part {pair[1]} was made by {len(cuts)} cuts, and its rods run along none of them, "
+                                      f"so the order can't be worked out safely.",
+                                ("Split the model again.", "If it happens again, the cuts may be tilted too far for rods to follow."), model,
+                                {"cuts": [c["id"] for c in cuts]})
+    return None
+
+
+class _Fallback(_Planner):
+    """Assembly by disassembly over the signed cut-normal directions (plus any rod axis no cut explains). Parts come
+    off along one direction at a time. A group leaves together when something in it can't go without the rest (a rod
+    on another axis, or a part in its way); each such group is built apart as a Section and joined whole."""
+
+    def __init__(self, model: SplitModel):
+        super().__init__(model)
+        self.directions = self._directions()
+        self._hits, self._solved, self.tries, self.dead_end = {}, {}, 0, None
+
+    def _directions(self) -> list:
+        axes = [_unit_vector(c["normal"]) for c in self.model.cuts] + [_unit_vector(p["axis"]) for pins in self.model.pins.values() for p in pins]
+        cos_limit = math.cos(math.radians(ROD_TOLERANCE_DEG))
+        keep = []
+        for axis in axes:
+            if not any(abs(float(np.dot(axis, k))) >= cos_limit for k in keep):
+                keep.append(axis)
+        if not keep:
+            keep = [np.eye(3)[i] for i in range(3)]
+        out = [s * k for k in keep for s in (1.0, -1.0)]
+        return sorted(out, key=lambda w: tuple(round(float(x), 6) + 0.0 for x in w))
+
+    def _hit(self, p: int, w: np.ndarray, q: int) -> bool:
+        key = (p, q, tuple(np.round(w, 4) + 0.0))
+        if key not in self._hits:
+            self._hits[key] = self.model.sweep_hits(p, w, q)
+        return self._hits[key]
+
+    def _connected_parts(self, parts) -> bool:
+        parts = set(parts)
+        if len(parts) <= 1:
+            return True
+        seen, todo = set(), [min(parts)]
+        while todo:
+            p = todo.pop()
+            if p not in seen:
+                seen.add(p)
+                todo.extend(q for q in self.model.partners.get(p, ()) if q in parts and q not in seen)
+        return seen == parts
+
+    def _closure(self, seeds, w: np.ndarray, state: frozenset, sweeps: bool = True) -> frozenset:
+        """The parts that must leave with `seeds` along `w`: those a member is rodded to on a way it can't be pulled out
+        of and, with `sweeps`, those in a member's way. The cheap rod pass can be run alone to rank groups."""
+        u = -w
+        group, todo = set(seeds), list(seeds)
+        while todo:
+            p = todo.pop()
+            for q in sorted(state - group):
+                if (q in self.model.partners.get(p, ()) and not _compatible(self.model, p, q, u)) or (sweeps and self._hit(p, w, q)):
+                    group.add(q)
+                    todo.append(q)
+        return frozenset(group)
+
+    def _candidates(self, state: frozenset) -> list:
+        """The (group, assembly direction) pairs that can leave `state`, smallest and lightest group first. Groups are
+        ranked by their rods alone first, and the sweeps (the costly part) only run on the front of that ranking."""
+        ranked = {}
+        for w in self.directions:
+            for seed in sorted(state):
+                group = self._closure([seed], w, state, sweeps=False)
+                if len(group) < len(state):
+                    ranked.setdefault((group, tuple(-w)), (group, -w, w))
+        order = sorted(ranked.values(), key=lambda g: (len(g[0]), min(g[0]), tuple(g[1])))
+        found, best = {}, []
+        for rod_group, u, w in order:
+            if len(best) >= FALLBACK_TRIES and len(rod_group) > best[FALLBACK_TRIES - 1]:
+                break
+            group = self._closure(rod_group, w, state)
+            rest = state - group
+            if not rest or (group, tuple(u)) in found or not self._connected_parts(rest) or not self._connected_parts(group):
+                continue
+            if validate_step(self.model, group, rest, u) is None:
+                found[(group, tuple(u))] = (group, u)
+                best = sorted(len(g) for g, _ in found.values())
+
+        def key(item):
+            group, u = item
+            return (len(group), round(sum(self.model.volume[p] for p in group), 1), round(float(u[2]), 3),
+                    tuple(round(float(x), 3) + 0.0 for x in u), min(group))
+        return sorted(found.values(), key=key)
+
+    def solve(self, state: frozenset):
+        """The removals (group, assembly direction) that take `state` apart down to one part, in removal order, or None.
+        A group of several parts must itself come apart, and what is left must; a few candidates are tried per state."""
+        if len(state) <= 1:
+            return []
+        if state in self._solved:
+            return self._solved[state]
+        self.tries += 1
+        result = None
+        if self.tries <= FALLBACK_BUDGET:
+            candidates = self._candidates(state)
+            if not candidates and (self.dead_end is None or len(state) < len(self.dead_end)):
+                self.dead_end = state
+            for group, u in candidates[:FALLBACK_TRIES]:
+                inside, outside = self.solve(group), self.solve(state - group)
+                if inside is not None and outside is not None:
+                    result = [(group, u)] + outside
+                    break
+        self._solved[state] = result
+        return result
+
+    def stuck(self, state: frozenset) -> Failure:
+        """No order exists: the cheapest set of joints (by rods lost) that keeps some part from leaving, naming the weakest."""
+        model, best = self.model, None
+        state = self.dead_end if self.dead_end is not None else state
+        for w in self.directions:
+            u = -w
+            for p in sorted(state):
+                joints, blockers = [], []
+                for q in sorted(state - {p}):
+                    if q in model.partners.get(p, ()) and not _compatible(model, p, q, u):
+                        joints.append((p, q))
+                    elif self._hit(p, w, q):
+                        blockers.append(q)
+                if not joints and not blockers:
+                    continue
+                cost = sum(len(model.pins.get(_pair(*j), [])) + 0.001 * model.joints[_pair(*j)].get("area_mm2", 0) for j in joints) + 0.5 * len(blockers)
+                key = (round(cost, 3), p, tuple(np.round(u, 3) + 0.0))
+                if best is None or key < best[0]:
+                    best = (key, p, u, joints, blockers)
+        if best is None:
+            a, b = sorted(state)[:2]
+            return Failure(DISCONNECTED, (a, b), model.joint_point(a, b), f"No order works for this split: nothing about part {a} and part {b} lets either come off.",
+                           {"conflict_set": []}, ("Split the model again.",))
+        _, p, u, joints, blockers = best
+        conflict = [list(_pair(*j)) for j in joints] + [list(_pair(p, q)) for q in blockers]
+        if joints:
+            a, b = _blame(model, joints)
+            facts = _joint_facts(model, a, b)
+            return Failure(ROD_DIRECTION, _pair(a, b), model.joint_point(a, b),
+                           f"No order works for this split: part {p} could only go along {axis_words(u)} if the rods of the joint of part {min(a, b)} "
+                           f"and part {max(a, b)} were not there, and every other way round is stuck in the same way.",
+                           {"conflict_set": conflict, "rods": facts["rods"], "area_mm2": facts["area_mm2"], "direction": [round(float(x), 3) for x in u]},
+                           (f"Make the joint of part {min(a, b)} and part {max(a, b)} glue only: that drops {facts['rods']} rods and {facts['area_mm2']} mm2 of keyed bond.",
+                            "Change the cuts so these joints meet along one axis, then split again.",
+                            "Add a cut that separates the parts that lock each other."))
+        q = blockers[0]
+        return Failure(INTERLOCK, _pair(p, q), tuple(round(float(x), 2) for x in (model.centre(p) + model.centre(q)) / 2),
+                       f"No order works for this split: part {min(p, q)} and part {max(p, q)} lock each other in place.",
+                       {"conflict_set": conflict, "direction": [round(float(x), 3) for x in u]},
+                       (f"Move a cut so part {min(p, q)} and part {max(p, q)} no longer overlap, then split again.",
+                        f"Add a cut that separates part {min(p, q)} from part {max(p, q)}.",
+                        f"Make the joint of part {max(p, q)} to the rest glue only, so it can slide in another way."))
+
+    def build(self, parts: frozenset, draft: _Draft) -> None:
+        """Fill `draft` with the base part and the steps that add everything else, in assembly order."""
+        removals = self.solve(parts)
+        base = min(parts - frozenset().union(*[g for g, _ in removals]))
+        draft.parts |= {base}
+        draft.start = base
+        receiver = {base}
+        group, start, group_u = [], None, None
+
+        def flush():
+            nonlocal group, receiver
+            if group:
+                self._make_step(draft, group, start, group_u, "part", None)
+                receiver |= set(group)
+                draft.parts |= set(group)
+                group = []
+        for part_group, u in reversed(removals):
+            if len(part_group) > 1:
+                flush()
+                sub = _Draft()
+                self.build(part_group, sub)
+                self.finished.append(sub)
+                self._check(part_group, receiver, u)
+                self._make_step(draft, part_group, receiver, u, "section", sub)
+                draft.parts |= part_group
+                receiver |= part_group
+                continue
+            x = min(part_group)
+            if group and len(group) < MAX_PARTS_PER_STEP and np.allclose(u, group_u) \
+                    and not any(g in self.model.partners.get(x, ()) for g in group) \
+                    and validate_step(self.model, [x], receiver | set(group), u) is None:
+                group.append(x)
+                continue
+            flush()
+            self._check([x], receiver, u)
+            group, start, group_u = [x], frozenset(receiver), u
+        flush()
+
+    def components(self) -> list:
+        left, out = set(self.model.numbers), []
+        while left:
+            comp, todo = set(), [min(left)]
+            while todo:
+                p = todo.pop()
+                if p not in comp:
+                    comp.add(p)
+                    todo.extend(self.model.partners.get(p, ()))
+            out.append(frozenset(comp))
+            left -= comp
+        return out
+
+    def run(self) -> list:
+        """The drafts in finishing order: nested Sections, then separate bodies, then Main (the heaviest body)."""
+        nodes = [_Node(self.model, c) for c in self.components()]
+        main_node = min(nodes, key=_Node.heavy_key)
+        side, main = [], None
+        for node in sorted(nodes, key=lambda n: (n is main_node, n.first)):
+            if self.solve(node.parts) is None:
+                raise _Stop(self.stuck(node.parts))
+            draft = _Draft(main=node is main_node, disconnected=node is not main_node)
+            self.build(node.parts, draft)
+            if draft.main:
+                main = draft
+            else:
+                side.append(draft)
+        return self.finished + side + [main]
+
+
+def fallback_plan(model: SplitModel, reason: str = "") -> PlanResult:
+    """The plan for a split whose cut tree can't be read: assembly by disassembly over the cut-normal directions.
+    Data anomalies stop it with a typed report; when no order exists the split is flagged "cannot be assembled as cut"."""
+    failure = _fallback_anomaly(model)
+    if failure:
+        return PlanResult(failure=failure)
+    try:
+        sections, fingerprint = _finish(_Fallback(model).run())
+    except _Stop as stop:
+        return PlanResult(failure=stop.failure)
+    return PlanResult(plan=Plan(sections, fingerprint, reason))

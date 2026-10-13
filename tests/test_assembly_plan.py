@@ -191,11 +191,11 @@ class ImpossibleSplitTests(PlanServiceCase):
         self.assertIn("part 1 and part 2", failure["message"].lower())
         self.assertTrue(failure["fixes"])
 
-    def test_a_split_with_no_cut_history_is_reported_until_the_fallback_exists(self):
+    def test_the_tree_planner_alone_reports_a_split_with_no_cut_history(self):
         result, _ = grid_split()
-        plan = splits.assembly_plan(self.make_split(result, []))
-        self.assertFalse(plan["ok"])
-        self.assertEqual(plan["failure"]["kind"], "anomaly")
+        outcome = assembly_plan.build_plan(assembly_plan.SplitModel(result, []), fallback=False)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failure.kind, "anomaly")
 
     @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
     def test_two_bodies_that_trap_each_other_name_the_joint_and_rank_fixes(self):
@@ -288,3 +288,82 @@ class ValidatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def triangle_split():
+    """Three parts that each touch the other two on a different axis: no part can leave along any one direction."""
+    parts = [part(1, (0, 0, 0, 10, 10, 10)), part(2, (10, 0, 0, 20, 10, 10)), part(3, (0, 10, 10, 20, 20, 20))]
+    joints = [joint(1, 2, 1), joint(2, 3, 2), joint(1, 3, 3)]
+    all_pins = pins(1, 2, "x", (10, 3, 5)) + pins(2, 3, "y", (15, 10, 8)) + pins(1, 3, "z", (5, 8, 10))
+    return {"parts": parts, "joints": joints, "pins": all_pins}
+
+
+class FallbackPlannerTests(PlanServiceCase):
+    def assert_steps_valid(self, result, plan):
+        model = assembly_plan.SplitModel(result, [])
+        for section in plan["sections"]:
+            for step in section["steps"]:
+                self.assertIsNone(assembly_plan.validate_step(model, step["parts"], step["receiver"], step["direction"]), step["id"])
+
+    def test_a_split_without_a_cut_tree_still_gets_sections_from_the_groups_removed_together(self):
+        result, _ = grid_split()
+        plan = splits.assembly_plan(self.make_split(result, []))
+        self.assertTrue(plan["ok"])
+        self.assertIn("cut history", plan["fallback_reason"])
+        self.assertEqual(plan["summary"]["parts"], 4)
+        self.assertEqual(sorted(len(s["parts"]) for s in plan["sections"]), [2, 4])   # one pair built apart, then joined whole
+        joins = [st for sec in plan["sections"] for st in sec["steps"] if st["kind"] == "section"]
+        self.assertEqual(len(joins), 1)
+        self.assertEqual(len(joins[0]["parts"]), 2)
+        self.assert_steps_valid(result, plan)
+
+    def test_the_fallback_gives_the_same_plan_every_time(self):
+        result, _ = grid_split()
+        first = splits.assembly_plan(self.make_split(result, []))
+        again = splits.assembly_plan(self.make_split(json.loads(json.dumps(result)), []))
+        self.assertEqual(first, again)
+
+    def test_a_cut_tree_split_does_not_use_the_fallback(self):
+        plan = splits.assembly_plan(self.make_split(*grid_split()))
+        self.assertEqual(plan["fallback_reason"], "")
+
+    def test_a_split_made_from_several_input_bodies_is_planned_body_by_body(self):
+        first, cuts = stack_split(2)
+        second = {"parts": [part(3, (300, 0, 0, 340, 40, 40), 10.0), part(4, (340, 0, 0, 380, 40, 40), 10.0)],
+                  "joints": [joint(3, 4, 2)], "pins": pins(3, 4, "x", (340, 10, 20))}
+        result = {"parts": first["parts"] + second["parts"], "joints": first["joints"] + second["joints"],
+                  "pins": first["pins"] + second["pins"]}
+        plan = splits.assembly_plan(self.make_split(result, cuts + [cut(2, "x", 340.0)]))
+        self.assertTrue(plan["ok"])
+        self.assertIn("bodies", plan["fallback_reason"])
+        self.assertEqual([(s["parts"], s["disconnected"]) for s in plan["sections"]], [([3, 4], True), ([1, 2], False)])
+
+    def test_a_joint_with_several_cuts_whose_rods_follow_none_of_them_is_a_data_problem(self):
+        result, cuts = stack_split(2)
+        result["joints"][0]["cuts"] = [1, 2]
+        for pin in result["pins"]:
+            pin["axis"] = [0.0, 0.0, 1.0]
+        plan = splits.assembly_plan(self.make_split(result, cuts + [cut(2, "y", 20.0)]))
+        self.assertFalse(plan["ok"])
+        self.assertEqual((plan["failure"]["kind"], plan["failure"]["parts"]), ("anomaly", [1, 2]))
+        self.assertTrue(plan["failure"]["fixes"])
+
+    def test_a_joint_with_several_cuts_is_planned_along_the_cut_normals(self):
+        result, cuts = stack_split(2)
+        result["joints"][0]["cuts"] = [1, 2]
+        plan = splits.assembly_plan(self.make_split(result, cuts + [cut(2, "y", 20.0)]))
+        self.assertTrue(plan["ok"])
+        self.assertIn("2 cuts", plan["fallback_reason"])
+
+    def test_with_no_order_the_split_is_flagged_and_the_cheapest_conflict_names_the_joint(self):
+        result = triangle_split()
+        plan = splits.assembly_plan(self.make_split(result, []))
+        self.assertFalse(plan["ok"])
+        self.assertTrue(plan["cannot_be_assembled"])
+        failure = plan["failure"]
+        self.assertEqual(failure["kind"], "rod_direction")
+        self.assertIn(tuple(failure["parts"]), [(1, 2), (2, 3), (1, 3)])
+        self.assertTrue(failure["numbers"]["conflict_set"])
+        self.assertIn(f"part {failure['parts'][0]} and part {failure['parts'][1]}", failure["message"].lower())
+        self.assertGreaterEqual(len(failure["fixes"]), 2)
+        self.assertEqual(len(failure["point"]), 3)
