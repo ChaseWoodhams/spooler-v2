@@ -62,7 +62,7 @@ const viewports = [
         await navMore.focus();
         await page.keyboard.press("Enter");
         menuWorks = menuWorks && await navMore.getAttribute("aria-expanded") === "true"
-          && await page.evaluate(() => document.activeElement.id === "btn-mobile-history");
+          && await page.evaluate(() => document.activeElement.id === "btn-mobile-settings");
         await page.keyboard.press("Escape");
         menuWorks = menuWorks && await navMore.getAttribute("aria-expanded") === "false"
           && await page.evaluate(() => document.activeElement.id === "btn-mobile-more");

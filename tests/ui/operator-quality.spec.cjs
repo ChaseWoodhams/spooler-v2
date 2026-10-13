@@ -604,7 +604,8 @@ async function loadingStates(browser, baseUrl, width, height) {
     fx.dashboard = 'ok'; fx.dashboardGate = null;
     await error.getByRole('button', { name: 'Retry' }).click();
     await page.locator('#dash-projects').getByText('Fixture project').waitFor();
-    assert.equal(await page.locator('#needs-you').isVisible(), false, 'nothing needs you: the section is gone, not blank');
+    assert.match(await page.locator('#needs-you').innerText(), /Nothing needs you/, 'nothing needs you: a slim line says so instead of the section vanishing');
+    assert.equal(await page.locator('#needs-you-status').innerText(), 'Nothing needs you', 'the live region stays in the DOM');
     await fx.context.close();
   }
   // Notification settings: dimmed and inert while loading, the error and Retry on failure, Save stays disabled

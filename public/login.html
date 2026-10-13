@@ -4,11 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Spooler – Sign in</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="/manifest.json" />
   <meta name="theme-color" content="#0d0e12" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
       background: #0d0e12;
       color: #e2e4ea;
       min-height: 100dvh;
@@ -37,7 +39,7 @@
     }
     .logo img { width: 32px; height: 32px; border-radius: 7px; }
     h1 { font-size: 1rem; font-weight: 500; color: #9aa0b8; margin-bottom: 4px; }
-    .subtitle { font-size: 0.82rem; color: #5a5f78; margin-bottom: 24px; }
+    .subtitle { font-size: 0.82rem; color: #8b91a9; margin-bottom: 24px; } /* 5.6:1 on #181921 */
     button, input, select, textarea { font: inherit; }
     label { display: block; margin-bottom: 14px; }
     label span { display: block; font-size: 0.8rem; color: #9aa0b8; margin-bottom: 6px; }
@@ -79,7 +81,12 @@
       font-size: 0.85rem;
       color: #f87171;
     }
-    .hint { font-size: 0.78rem; color: #5a5f78; margin-top: 4px; }
+    .hint { font-size: 0.78rem; color: #8b91a9; margin-top: 4px; }
+    input[aria-invalid="true"] { border-color: #f87171; }
+    label span.pw-wrap { position: relative; display: block; margin: 0; }
+    .pw-wrap input { padding-right: 64px; }
+    .reveal { position: absolute; top: 0; right: 0; bottom: 0; width: 60px; background: none; border: 0; border-radius: 0 8px 8px 0; color: #9aa0b8; font-size: 0.8rem; cursor: pointer; }
+    .reveal:hover { color: #fff; }
   </style>
 </head>
 <body>
@@ -95,18 +102,19 @@
 
     <form id="form">
       <label><span>Username</span>
-        <input id="username" type="text" autocomplete="username" required />
+        <input id="username" type="text" autocomplete="username" required aria-describedby="error" />
       </label>
       <label><span>Password</span>
-        <input id="password" type="password" autocomplete="current-password" required />
+        <span class="pw-wrap"><input id="password" type="password" autocomplete="current-password" required aria-describedby="error" />
+        <button type="button" id="reveal" class="reveal" aria-pressed="false" aria-controls="password" aria-label="Show password">Show</button></span>
       </label>
       <label id="confirm-row" style="display:none"><span>Confirm password</span>
-        <input id="confirm" type="password" autocomplete="new-password" />
-        <p class="hint">Minimum 8 characters.</p>
+        <input id="confirm" type="password" autocomplete="new-password" aria-describedby="pw-hint error" />
+        <p class="hint" id="pw-hint">Minimum 8 characters.</p>
       </label>
       <button type="submit" id="btn">Sign in</button>
     </form>
-    <div class="error" id="error"></div>
+    <div class="error" id="error" role="alert"></div>
   </div>
 
   <script>
@@ -115,7 +123,8 @@
     async function init() {
       try {
         const r = await fetch("/api/auth-status");
-        const { setup_required } = await r.json();
+        const { setup_required, authenticated } = await r.json();
+        if (authenticated && !setup_required) { location.replace("/"); return; }   // already signed in
         setupMode = !!setup_required;
       } catch {
         setupMode = false;
@@ -125,6 +134,7 @@
         document.getElementById("subtitle").textContent = "Create an account to get started.";
         document.getElementById("confirm-row").style.display = "block";
         document.getElementById("password").setAttribute("autocomplete", "new-password");
+        document.getElementById("password").setAttribute("aria-describedby", "pw-hint error");
         document.getElementById("btn").textContent = "Create account";
       } else {
         document.getElementById("heading").textContent = "Sign in to continue";
@@ -143,16 +153,20 @@
       const conf  = document.getElementById("confirm").value;
 
       err.style.display = "none";
+      for (const id of ["username", "password", "confirm"]) document.getElementById(id).removeAttribute("aria-invalid");
+      const fail = (message, ids) => {
+        err.textContent = message;
+        err.style.display = "block";
+        for (const id of ids) document.getElementById(id).setAttribute("aria-invalid", "true");
+      };
 
       if (setupMode) {
         if (pass !== conf) {
-          err.textContent = "Passwords do not match.";
-          err.style.display = "block";
+          fail("Passwords do not match.", ["password", "confirm"]);
           return;
         }
         if (pass.length < 8) {
-          err.textContent = "Password must be at least 8 characters.";
-          err.style.display = "block";
+          fail("Password must be at least 8 characters.", ["password"]);
           return;
         }
       }
@@ -171,17 +185,23 @@
           location.replace("/");
         } else {
           const data = await resp.json().catch(() => ({}));
-          err.textContent = data.error || "Something went wrong.";
-          err.style.display = "block";
+          fail(data.error || "Something went wrong.", setupMode ? ["password"] : ["username", "password"]);
           btn.disabled = false;
           btn.textContent = setupMode ? "Create account" : "Sign in";
         }
       } catch {
-        err.textContent = "Network error – is Spooler running?";
-        err.style.display = "block";
+        fail("Network error – is Spooler running?", []);
         btn.disabled = false;
         btn.textContent = setupMode ? "Create account" : "Sign in";
       }
+    });
+
+    document.getElementById("reveal").addEventListener("click", e => {
+      const field = document.getElementById("password"), show = field.type === "password";
+      field.type = show ? "text" : "password";
+      e.currentTarget.textContent = show ? "Hide" : "Show";
+      e.currentTarget.setAttribute("aria-pressed", String(show));
+      e.currentTarget.setAttribute("aria-label", show ? "Hide password" : "Show password");
     });
 
     init();
