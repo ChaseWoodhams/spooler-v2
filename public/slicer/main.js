@@ -636,6 +636,11 @@ async function setStep(step, { force = false } = {}) {
     await setMode(step === "slice" && sliceEntry()?.state === "sliced" ? "preview" : "prepare");
   }
   renderAll({ geometry: !splitView && !pageView });
+  // The camera follows its target: a different mode or plate than the last fit re-fits (the bed no longer sits small and low after Slice -> Plates)
+  if (!splitView && !pageView && state.mode === "prepare") {
+    const target = `prepare:${state.project.id}:${state.plate}`;
+    if (state.fitTarget !== target) { state.fitTarget = target; state.viewport?.fit(state.viewport.objectsBox()); }
+  }
 }
 
 function renderSteps() {
@@ -2110,6 +2115,7 @@ function drawPreview(fit = false) {
   setLayer();
   if (fit && state.viewport?.printerShown) state.viewport.fitPrinter();
   else if (fit) state.viewport?.fit(state.viewport.toolpathBox(analysis));
+  if (fit) state.fitTarget = `preview:${state.project.id}:${state.plate}`;
   renderPreviewPanel(info);
 }
 
@@ -2418,16 +2424,19 @@ function bindUi() {
     const heading = dialog.querySelector('h3');
     if (heading) { heading.id ||= `${dialog.id}-title`; dialog.setAttribute('aria-labelledby', heading.id); }
   });
-  document.body.classList.add('defer-edit');
-  document.body.dataset.viewportEditable = 'false';
-  state.viewport?.setEditable(false);
-  $('btn-mobile-edit').addEventListener('click', e => {
-    const defer = document.body.classList.toggle('defer-edit');
+  // Phones defer 3D editing (same breakpoint as the CSS); desktop opens editable with the gizmo. Re-evaluated when the width crosses it.
+  const phone = window.matchMedia('(max-width: 640px)');
+  const setDefer = defer => {
+    document.body.classList.toggle('defer-edit', defer);
     document.body.dataset.viewportEditable = String(!defer);
     state.viewport?.setEditable(!defer);
-    e.currentTarget.textContent = defer ? 'Show editing controls' : 'Defer 3D editing';
-    e.currentTarget.setAttribute('aria-expanded', String(!defer));
-  });
+    const toggle = $('btn-mobile-edit');
+    toggle.textContent = defer ? 'Show editing controls' : 'Defer 3D editing';
+    toggle.setAttribute('aria-expanded', String(!defer));
+  };
+  setDefer(phone.matches);
+  phone.addEventListener('change', e => setDefer(e.matches));
+  $('btn-mobile-edit').addEventListener('click', () => setDefer(!document.body.classList.contains('defer-edit')));
   $('btn-sidebar').addEventListener('click', e => {
     const hidden = document.body.classList.toggle('sidebar-collapsed');
     e.currentTarget.textContent = hidden ? 'Show sidebar' : 'Hide sidebar';
