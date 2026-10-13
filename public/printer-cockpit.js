@@ -86,10 +86,11 @@
   const speed = c => `
     <label class="pv-slider">
       <span>Print speed</span><strong id="detail-speed-value">${c.speed}%</strong>
-      <input id="detail-speed-slider" type="range" min="10" max="200" step="5" value="${c.speed}" aria-label="Print speed"
+      <input id="detail-speed-slider" type="range" min="10" max="200" step="5" value="${c.speed}" aria-label="Print speed" aria-describedby="detail-speed-reason"
         oninput="document.getElementById('detail-speed-value').textContent=this.value+'%'"
         onchange="setSpeed('${id(c)}',+this.value)" ${c.printing || c.paused ? "" : "disabled"}>
-    </label>`;
+    </label>
+    <small class="reason-line" id="detail-speed-reason">${c.printing || c.paused ? "Print speed: 10–200%." : "Print speed can only be changed during a Print."}</small>`;
   const light = c => {
     const busy = c.hw?.light?.state === "pending";
     return `<span class="pv-light-ctl">${fb(c, "light")}<button class="detail-toggle ${c.lightOn ? "active" : ""}" id="detail-light-toggle" onclick="printerAction('${id(c)}','${c.lightOn ? "light_off" : "light_on"}')" ${c.connected ? "" : "disabled"} aria-pressed="${c.lightOn}" aria-busy="${busy}" aria-label="Chamber lighting"><span></span></button></span>`;
@@ -139,7 +140,7 @@
         <small>${c.controlsEnabled ? "Ready to move" : c.connected ? `Locked while ${c.status}` : "Printer offline"}</small>${fb(c, "jog")}</div></div>`,
       temps: `<div class="pv-col wide"><small>Nozzle target: 0–300 °C · Bed target: 0–110 °C. Zero turns heating off.</small>${temp(c, "nozzle", "Nozzle", c.nozzle, c.nozzleTarget, 300)}${temp(c, "bed", "Bed", c.bed, c.bedTarget, 110)}${temp(c, "chamber", "Chamber", c.chamber, 0, 0, true)}</div>`,
       air: `<div class="pv-col wide">${fan(c, "model", "Model fan", c.modelFan)}${fan(c, "auxiliary", "Side fan", c.auxiliaryFan)}${fan(c, "chamber", "Chamber fan", c.chamberFan)}${speed(c)}
-        <small>Fans: 0–100%. Print speed: 10–200%, available during a Print.</small><div class="pv-light"><span>Chamber light</span>${light(c)}</div></div>`,
+        <small>Fans: 0–100%.</small><div class="pv-light"><span>Chamber light</span>${light(c)}</div></div>`,
       files: `<div class="pv-col">${browseBtn(c)}<small>Pick a file already on the printer.</small></div>`,
     };
     return `<div class="pv pv-b">

@@ -146,6 +146,14 @@ header {
 .btn:active { transform: scale(.97); }
 .btn svg { width: 15px; height: 15px; flex-shrink: 0; }
 .btn:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+/* Disabled and blocked controls: dimmed, not-allowed, and a visible reason line tied to them with aria-describedby.
+   aria-disabled (not disabled) is for controls that stay focusable so the reason can be reached. */
+.btn[aria-disabled="true"], .btn[aria-disabled="true"]:hover { opacity: .4; cursor: not-allowed; transform: none; }
+:where(input, select, textarea):disabled { opacity: .45; }
+input:disabled, select:disabled, textarea:disabled { cursor: not-allowed; }
+:where([aria-disabled="true"]) { cursor: not-allowed; }
+.reason-line { display: block; margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--text-muted); }
+.qp-action { display: inline-flex; flex-direction: column; align-items: flex-start; vertical-align: top; max-width: 100%; }
 
 .btn-primary  { background: var(--accent-dim); color: #fff; }
 .btn-primary:hover:not(:disabled) { background: var(--accent-dim); }
@@ -1172,7 +1180,8 @@ body.panel-open { overflow: hidden; }
 .spool-pick-item:hover { background: var(--surface2); }
 .spool-pick-item.selected { background: rgba(255,107,43,.1); }
 .spool-pick-item.spool-pick-elsewhere { border-left: 2px solid var(--yellow); }
-.spool-pick-item.spool-pick-blocked { opacity: .55; cursor: not-allowed; }
+.spool-pick-item.spool-pick-blocked { cursor: not-allowed; }
+.spool-pick-item.spool-pick-blocked .spool-dot { opacity: .4; }   /* dim the swatch, never the words */
 .spool-pick-item.spool-pick-blocked:hover { background: none; }
 .spool-pick-badge {
   display: inline-block;

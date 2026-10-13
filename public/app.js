@@ -2706,11 +2706,11 @@ function renderPickerList(printerId) {
         ? `<span class="spool-pick-badge elsewhere">On · ${escHtml(otherPrinter.name)}</span>`
         : "";
     if (inUse) {
-      return `<div class="spool-pick-item spool-pick-blocked" title="Currently loaded on ${escAttr(activePrinter.name)} — unload filament before reassigning">
-        <div class="spool-dot" style="background:${escAttr(spoolColorHex(s))};opacity:.4"></div>
+      return `<div class="spool-pick-item spool-pick-blocked" tabindex="0" aria-disabled="true" aria-describedby="spool-blocked-${escAttr(String(s.id))}">
+        <div class="spool-dot" style="background:${escAttr(spoolColorHex(s))}"></div>
         <div class="spool-pick-info">
-          <div class="spool-pick-name" style="opacity:.5">${escHtml(spoolName(s))}</div>
-          <div class="spool-pick-meta">${escHtml(s.filament?.material || "")} · ${spoolQuantityText(s)} ${badge} · Unload filament before reassigning.</div>
+          <div class="spool-pick-name">${escHtml(spoolName(s))}</div>
+          <div class="spool-pick-meta" id="spool-blocked-${escAttr(String(s.id))}">${escHtml(s.filament?.material || "")} · ${spoolQuantityText(s)} ${badge} · Unload filament before reassigning.</div>
         </div>
       </div>`;
     }

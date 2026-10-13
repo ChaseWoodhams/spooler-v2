@@ -5,7 +5,7 @@
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=3";
-import { projectPage } from "./project-page.js?v=8";
+import { projectPage } from "./project-page.js?v=9";
 import { newProject } from "./new-project.js?v=9";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 
@@ -704,8 +704,8 @@ function renderStepActions() {
   const next = (step, label) => `<button class="btn btn-primary" type="button" data-go="${step}"${stepAvailable(step) ? "" : " disabled"}>${label}</button>`;
   const send = sendThisPlateState();
   el.innerHTML = state.step === "plates" ? next("slice", "Slice →")
-    : state.step === "slice" ? `<button class="btn btn-primary" type="button" data-send-this-plate${send.why ? " disabled" : ""}${send.why ? ` title="${esc(send.why)}"` : ""}>${esc(send.label)}</button>`
-      + (send.why ? `<small class="slicer-muted">${esc(send.why)}</small>` : "") : "";
+    : state.step === "slice" ? `<button class="btn btn-primary" type="button" data-send-this-plate${send.why ? ' aria-disabled="true" aria-describedby="send-this-plate-why"' : ""}>${esc(send.label)}</button>`
+      + (send.why ? `<small class="reason-line" id="send-this-plate-why">${esc(send.why)}</small>` : "") : "";
   $("btn-slice-send").hidden = state.step === "slice";   // the Slice step has its own send in the header
 }
 
@@ -2551,7 +2551,7 @@ function bindUi() {
     const btn = e.target.closest("[data-go]");
     if (btn && !btn.disabled) setStep(btn.dataset.go);
     const send = e.target.closest("[data-send-this-plate]");
-    if (send && !send.disabled) withButton(send, sendThisPlate);
+    if (send && !send.disabled && send.getAttribute("aria-disabled") !== "true") withButton(send, sendThisPlate);
   });
 
   $("project-name").addEventListener("keydown", e => {   // Enter saves (through change), Escape puts the saved name back

@@ -270,12 +270,11 @@ function detail() {
   const editable = ["unsliced", "sliced", "waiting", "queued", "failed"].includes(plate.status);
   const options = ['<option value="">Next free printer</option>', ...printers.map(p =>
     `<option value="${esc(p.id)}"${p.id === plate.printer_id ? " selected" : ""}>${esc(p.name)}${p.connected ? "" : " (offline)"}</option>`)].join("");
-  const btn = (act, label, primary, extra = "") => `<button type="button" class="btn ${primary ? "btn-primary" : "btn-secondary"} btn-sm" data-act="${act}"${extra}>${label}</button>`;
-  const disabled = reason => ` disabled title="${reason}"`;
+  const btn = (act, label, primary, extra = "", why = "") => `<button type="button" class="btn ${primary ? "btn-primary" : "btn-secondary"} btn-sm" data-act="${act}"${why ? ` aria-disabled="true" aria-describedby="pp-why-${plate.id}-${act}"` : ""}${extra}>${label}</button>${why ? `<small class="reason-line" id="pp-why-${plate.id}-${act}">${why}</small>` : ""}`;   // aria-disabled keeps the button focusable so its reason is reachable
   const actions = [];
   if (plate.status === "unsliced") actions.push(btn("slice", slicing ? "Slicing…" : "Slice", true, slicing ? " disabled" : ""));
   if (plate.status === "sliced") {
-    actions.push(btn("send", "Send to printer", true, plate.outdated ? disabled("Changed since slicing: slice it again first") : ""));
+    actions.push(btn("send", "Send to printer", true, "", plate.outdated ? "Changed since slicing: slice it again first" : ""));
     if (plate.outdated) actions.push(btn("slice", slicing ? "Slicing…" : "Slice again", true, slicing ? " disabled" : ""));
   }
   if (plate.status === "queued" || plate.status === "waiting") {
@@ -306,7 +305,7 @@ function detail() {
   const warnBox = warnPanel && job && warnPanel.jobId === job.id ? `<div class="pp-warnbox" role="alert"><b>Preflight warnings</b>
     <ul>${warnPanel.titles.map(t => `<li>${esc(t)}</li>`).join("")}</ul>
     <div class="slicer-muted">${warnPanel.canStart ? "Accept them now and Bed cleared can start this plate without asking again." : "Other checks are failing: open Review &amp; start to see them."}</div>
-    <div class="pp-actions">${btn("accept-warnings", "Accept warnings", true, warnPanel.canStart ? "" : disabled("Fix the failing checks first"))}${btn("dismiss-warnings", "Not now", false)}</div></div>` : "";
+    <div class="pp-actions">${btn("accept-warnings", "Accept warnings", true, "", warnPanel.canStart ? "" : "Fix the failing checks first")}${btn("dismiss-warnings", "Not now", false)}</div></div>` : "";
   const picture = `/api/projects/${host.projectId()}/plates/${plate.id}/preview.png?v=${plate.layout}`;
   return `<div class="pp-card"><div><b>${esc(plate.name)}</b> ${chip(plate.status)}</div>
     ${plate.parts ? `<img class="pp-preview" src="${picture}" alt="${esc(plate.name)} as laid out" width="320" height="240" loading="lazy">` : ""}
@@ -480,7 +479,7 @@ function bind() {
     if (e.target.closest("[data-go-slice]")) { host.onOpenSlice(); return; }
     const cell = e.target.closest("[data-plate]");
     const button = e.target.closest("[data-act]");
-    if (button && !button.disabled) {
+    if (button && !button.disabled && button.getAttribute("aria-disabled") !== "true") {
       button.disabled = true;
       try { await act(button.dataset.act, button); } catch (err) { host.toast(err.message, true); } finally { button.disabled = false; }
     } else if (cell) { selected = Number(cell.dataset.plate); remember(); render(); }
