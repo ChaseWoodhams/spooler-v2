@@ -1172,6 +1172,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
                 self._json(projects.plate_status(project_id))
+            elif len(parts) == 5 and parts[4] == "guides":
+                self._json({"guides": projects.guides(project_id)})
             elif len(parts) == 5 and parts[4] == "intake":
                 self._json(projects.intake(project_id))
             elif len(parts) == 5 and parts[4] == "intake-files":
