@@ -535,6 +535,17 @@ def unplaced_splits(project: dict) -> list:
     return [i for i in project["split_ids"] if i not in placed]
 
 
+def guides(project_id: int) -> list:
+    """What the Print page's Assembly guide action shows: one entry per split of the project (never a combined guide), with
+    the model name, the download name and the split's guide state (none, generating, ready, failed; out_of_date on ready)."""
+    out = []
+    for split_id in get_project(project_id)["split_ids"]:
+        name = Path(splits.get_split(split_id)["source_name"]).stem
+        out.append({"split_id": split_id, "name": name, "download_name": f"{name} - assembly guide.pdf",
+                    "guide": splits.guide_status(split_id)})
+    return out
+
+
 def make_split(project_id: int, model_id: int) -> dict:
     """Turn an imported model (one too big for the bed) into a split of this project: the model is stored as a new split
     model with the model's scale and up axis and analysed again, and the model and its object are removed."""
