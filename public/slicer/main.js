@@ -705,7 +705,7 @@ function renderStepActions() {
   const send = sendThisPlateState();
   el.innerHTML = state.step === "plates" ? next("slice", "Slice →")
     : state.step === "slice" ? `<button class="btn btn-primary" type="button" data-send-this-plate${send.why ? " disabled" : ""}${send.why ? ` title="${esc(send.why)}"` : ""}>${esc(send.label)}</button>`
-      + (send.why ? `<small class="slicer-muted">${esc(send.why)}</small>` : "") : "";
+      + (send.why ? `<small class="slicer-muted" title="${esc(send.why)}">${esc(send.why)}</small>` : "") : "";
   $("btn-slice-send").hidden = state.step === "slice";   // the Slice step has its own send in the header
 }
 
@@ -714,7 +714,8 @@ function renderStepActions() {
 function sendThisPlateState() {
   const plate = currentPlate();
   const printer = state.printers.find(p => p.id === plate?.printer_id);
-  const label = printer ? `Send to ${printer.name}` : "Send to next free printer";
+  const name = plate?.name || "this plate";
+  const label = printer ? `Send ${name} to ${printer.name}` : `Send ${name} to the next free printer`;
   if (!plate) return { label, why: "" };
   const why = !plateObjects().length ? "This plate is empty"
     : plateImporting(plate.id) ? "The models on this plate are still importing"
@@ -1283,16 +1284,19 @@ function renderSlicing() {
   if (!state.project || state.step !== "slice") return;
   const plates = platesWithObjects();
   const todo = plates.filter(p => !isUpToDate(p.id) && !isBusy(p.id) && !plateImporting(p.id));
-  $("slicing-actions").innerHTML = `<button class="btn btn-primary btn-sm" type="button" data-slice-all${todo.length && data().profile.bundle_id ? "" : " disabled"}>
-    ${todo.length === plates.length ? `Slice all ${plural(plates.length, "plate")}` : todo.length ? `Slice ${plural(todo.length, "plate")}` : "All sliced"}</button>`;
+  const noProfile = !data().profile.bundle_id;
+  $("slicing-actions").innerHTML = !plates.length ? "" : !todo.length
+    ? '<span class="slicer-all-sliced" role="status">✓ All plates sliced</span>'
+    : `<button class="btn btn-primary btn-sm" type="button" data-slice-all${noProfile ? " disabled" : ""}${noProfile ? ' aria-describedby="slice-all-why"' : ""}>
+    ${todo.length === plates.length ? `Slice all ${plural(plates.length, "plate")}` : `Slice ${plural(todo.length, "plate")}`}</button>${noProfile ? '<small id="slice-all-why" class="slicer-muted">Choose a slicing profile first</small>' : ""}`;
   $("slicing-list").innerHTML = plates.map(plate => {
     const status = plateStatus(plate.id);
     const again = sliceEntry(plate.id)?.state === "sliced" || sliceEntry(plate.id)?.state === "failed";
     return `<div class="slicer-plate-row${plate.id === state.plate ? " selected" : ""}" data-select-plate="${plate.id}">
       <span class="dot ${plateDot(plate.id)}"></span>
       <div><strong>${esc(plate.name)}</strong> ${plateBadge(plate)}<small class="${status.cls}">${plural(plateObjects(plate.id).length, "object")} · ${esc(status.text)}</small></div>
-      <button class="btn btn-secondary btn-sm" type="button" data-slice-plate="${plate.id}"${isUpToDate(plate.id) || isBusy(plate.id) || plateImporting(plate.id) ? " disabled" : ""}>
-        ${again ? "Slice again" : "Slice"}</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-slice-plate="${plate.id}"${isBusy(plate.id) || plateImporting(plate.id) ? " disabled" : ""}>
+        ${again || isUpToDate(plate.id) ? "Slice again" : "Slice"}</button>
     </div>`;
   }).join("") || '<p class="slicer-muted">No plates with objects.</p>';
   const done = plates.filter(p => isUpToDate(p.id));
@@ -1427,6 +1431,8 @@ function renderObjectPanel() {
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="turn-left" title="Turn 90° anticlockwise (Shift+, )">Turn −90°</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="turn-right" title="Turn 90° clockwise (Shift+. )">Turn +90°</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="reset">Reset rotation</button>
+    </div>
+    <div class="slicer-actions-row">
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="duplicate">Duplicate</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="settings">Settings</button>
     </div>${orientSuggestionHtml(object)}`;
@@ -1443,13 +1449,21 @@ function filamentControls(object) {
   return `
     <label class="slicer-field">Filament <select id="object-filament">
       <option value="">Project default${base ? ` (${esc(base.replace(/ @.*$/, ""))})` : ""}</option>
-      ${list.map(name => `<option value="${esc(name)}"${choice?.preset === name ? " selected" : ""}>${esc(name.replace(/ @.*$/, ""))}</option>`).join("")}
+      ${filamentOptions(list, choice)}
     </select></label>
     <label class="slicer-field"${choice ? "" : " hidden"}>Colour <input type="text" id="object-filament-colour" maxlength="${FILAMENT_COLOUR_MAX}" placeholder="e.g. grey" value="${esc(choice?.colour || "")}"></label>
     <label class="slicer-check" title="The planner, Arrange and Orient leave a pinned object where it is; you can still move it by hand"><input type="checkbox" id="object-pinned"${object.pinned ? " checked" : ""}> Pin</label>
     ${mix ? `<p class="slicer-warn" role="alert">${esc(mix)}. Slicing is refused until each plate holds one filament.</p>` : ""}`;
 }
 const FILAMENT_COLOUR_MAX = 40;
+// Filament presets grouped by brand (the first word of the preset's name), so a long list reads as a few short ones
+function filamentOptions(list, choice) {
+  const option = name => `<option value="${esc(name)}"${choice?.preset === name ? " selected" : ""}>${esc(name.replace(/ @.*$/, ""))}</option>`;
+  const brandOf = name => name.replace(/ @.*$/, "").split(" ")[0] || "Other";
+  const brands = [...new Set(list.map(brandOf))];
+  if (brands.length < 2) return list.map(option).join("");
+  return brands.map(brand => `<optgroup label="${esc(brand)}">${list.filter(name => brandOf(name) === brand).map(option).join("")}</optgroup>`).join("");
+}
 
 function showMessage(text) {
   $("viewport-message").hidden = !text;

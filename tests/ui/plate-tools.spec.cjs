@@ -86,11 +86,11 @@ async function saved(page, server, before) {
   for (let i = 0; i < 40 && server.patches.length === before; i++) await page.waitForTimeout(100);
   assert.ok(server.patches.length > before, 'the change is saved');
 }
-// Select all, the supports choice and the custom gap live in the More menu
+// The supports choice, the custom gap, Align and Snap live in the More menu
 const more = page => page.locator('#prepare-tools .tool-more > summary').click();
 const moreOpen = async page => { if (!(await page.locator('#prepare-tools .tool-more').evaluate(d => d.open))) await more(page); };
 const align = async (page, value) => { await moreOpen(page); await page.locator('#align-menu').selectOption(value); };
-const selectAll = async page => { await more(page); await page.locator('#btn-select-all').click(); };
+const selectAll = async page => { await page.locator('#btn-select-all').click(); };   // Select all sits on the bar, not in More
 const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer-object-select`);
 
 (async () => {

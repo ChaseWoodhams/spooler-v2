@@ -461,7 +461,6 @@ body.embedded .slicer-home { display: none; }
   .slicer-small-screen-note .btn { min-height: 44px; margin-top: 6px; }
   /* Phone defer mode keeps the view tools (Fit view) and hides the editing ones */
   .defer-edit #prepare-tools > :not([aria-label="View and history"]) { display: none; }
-  .defer-edit #btn-undo, .defer-edit #btn-redo { display: none; }
   .defer-edit #object-panel { display: none; }
   .slicer-object-select { min-height: 44px; }
   .slicer-preview-panel { position: relative; top: auto; left: auto; right: auto; width: 100%; max-height: 180px; }
@@ -645,3 +644,47 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
   .set-fields label:has(> input[type=checkbox]) { min-height: var(--hit-min); display: inline-flex; align-items: center; gap: 8px; }
   .slicer-toolbar { flex-wrap: wrap; }
 }
+
+/* ─── Ticket 23: editor layout (PS-42 to PS-48) ─── */
+/* PS-46: the More panel scrolls inside the window instead of running off it */
+.tool-more-panel { max-height: min(70vh, calc(100dvh - 120px)); overflow-y: auto; overscroll-behavior: contain; }
+/* PS-45: an open Print settings fold grows to its content, as a closed one does */
+.slicer-settings, .slicer-settings[open] { flex: none; min-height: 0; }
+/* PS-47: a long object list is capped so the object panel below it stays in reach; the panel's actions are in two groups */
+.slicer-object-list { max-height: clamp(120px, 28vh, 260px); }
+.slicer-object-panel .slicer-actions-row + .slicer-actions-row { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+/* PS-43: phones that defer 3D editing do not add or remove plates; Fit view and Undo stay */
+.defer-edit [data-plate="new"], .defer-edit [data-plate="remove"] { display: none; }
+
+/* The header's two halves behave as one row above 640 px; on phones only the stepper half sticks */
+.slicer-id, .slicer-nav { display: contents; }
+/* PS-44: header zones keep their size from step to step; long status text is cut with an ellipsis (its title has the whole text) */
+@media (max-width: 1100px) {
+  .slicer-slice-state { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: min(320px, 38vw); min-width: 0; }
+  .slicer-top-actions { flex-wrap: nowrap; min-width: 0; }
+  .slicer-step-actions { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+  .slicer-step-actions small { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slicer-steps { flex: none; }
+}
+/* PS-48: a finished state reads as a status, not a disabled button */
+.slicer-all-sliced { color: var(--green); font-size: 13px; font-weight: 600; }
+/* PS-42: phone header is the stepper and its action; the project name scrolls away; the 3D view gets over half the screen */
+@media (max-width: 640px) {
+  .slicer-top { display: contents; }
+  .slicer-id { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px 10px; padding: 8px 12px;
+    background: var(--surface); border-bottom: 1px solid var(--border); }
+  .slicer-id .slicer-home { grid-column: 1; }
+  .slicer-id .slicer-project { grid-column: 2; }
+  .slicer-nav { position: sticky; top: 0; z-index: 20; display: grid; gap: 6px; padding: 6px 12px 8px;
+    background: var(--surface); border-bottom: 1px solid var(--border); }
+  .slicer-small-screen-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 12px; font-size: 13px; line-height: 1.35; }
+  .slicer-small-screen-note .btn { margin-top: 0; flex: none; }
+  .slicer-main { height: auto; }
+  .slicer-main > .slicer-viewport { flex: none; height: clamp(320px, 56svh, 560px); }
+}
+
+/* T15: nothing that carries state is under 12 px in the editor */
+.slicer-step .num, .slicer-new-model h4, .slicer-list-heading, .slicer-tag, .slicer-card-head h4, .slicer-badge, .set-field small, .set-unit,
+.slicer-layer-readout, .slicer-step small, .pack-presets button small, .pack-map-card small, .pp-chip, .slicer-fold > summary > span, .pd-chip,
+.tool-more-head, .split-section h4 { font-size: 12px; }
+.slicer-page small, .slicer-page .preset-btn { font-size: 12px; }
