@@ -453,7 +453,9 @@ body.embedded .slicer-home { display: none; }
   .slicer-sidebar-toggle { display: none; }
   .slicer-small-screen-note { font-size: 14px; line-height: 1.4; }
   .slicer-small-screen-note .btn { min-height: 44px; margin-top: 6px; }
-  .defer-edit #prepare-tools { display: none; }
+  /* Phone defer mode keeps the view tools (Fit view) and hides the editing ones */
+  .defer-edit #prepare-tools > :not([aria-label="View and history"]) { display: none; }
+  .defer-edit #btn-undo, .defer-edit #btn-redo { display: none; }
   .defer-edit #object-panel { display: none; }
   .slicer-object-select { min-height: 44px; }
   .slicer-preview-panel { position: relative; top: auto; left: auto; right: auto; width: 100%; max-height: 180px; }

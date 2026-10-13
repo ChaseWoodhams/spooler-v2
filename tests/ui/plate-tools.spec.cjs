@@ -28,8 +28,8 @@ function boxPreview() {
 const model = id => ({ id, file: `box${id}.stl`, state: 'ready', sha256: `sha${id}`, import: [1, 'z'], size: [40, 30, 20], triangles: 12, volume_cm3: 1, repairs: [] });
 const object = (id, plate, x, y) => ({ id, model: id, plate, name: `box${id}`, position: [x, y], rotation: [0, 0, 0], scale: [1, 1, 1] });
 
-async function open(browser, { tooClose = false } = {}) {
-  const page = await browser.newPage({ viewport: process.env.VIEW ? { width: +process.env.VIEW.split('x')[0], height: +process.env.VIEW.split('x')[1] } : { width: 1400, height: 900 } });
+async function open(browser, { tooClose = false, view = null } = {}) {
+  const page = await browser.newPage({ viewport: view ? view : process.env.VIEW ? { width: +process.env.VIEW.split('x')[0], height: +process.env.VIEW.split('x')[1] } : { width: 1400, height: 900 } });
   const server = { patches: [], packs: [], revision: 1,
     data: { plates: [{ id: 1, name: 'Plate 1' }, { id: 2, name: 'Plate 2' }], bed: 'textured', profile: { bundle_id: null, process: {}, filament: {} },
             objects: [object(1, 1, 50, 50), object(2, 1, 120, 50), object(3, 1, 200, 150), object(4, 2, 128, 128)] } };
@@ -87,13 +87,33 @@ async function saved(page, server, before) {
   assert.ok(server.patches.length > before, 'the change is saved');
 }
 // Select all, the supports choice and the custom gap live in the More menu
-const more = page => page.locator('.tool-more > summary').click();
+const more = page => page.locator('#prepare-tools .tool-more > summary').click();
 const selectAll = async page => { await more(page); await page.locator('#btn-select-all').click(); };
 const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer-object-select`);
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
   try {
+    // Desktop opens editable with the gizmo; a phone defers 3D editing, keeps the toggle and a Fit view control
+    {
+      const { page } = await open(browser, { view: { width: 1098, height: 507 } });
+      assert.equal(await page.evaluate(() => document.body.classList.contains('defer-edit')), false, 'desktop is not deferred');
+      assert.equal(await page.locator('body').getAttribute('data-viewport-editable'), 'true');
+      assert.equal(await page.locator('#prepare-tools [data-tool="translate"]').isDisabled(), false);
+      assert.equal(await page.locator('#prepare-tools [data-tool="translate"]').isVisible(), true);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForFunction(() => document.body.classList.contains('defer-edit'));
+      assert.equal(await page.locator('#btn-mobile-edit').isVisible(), true, 'the toggle shows on a phone');
+      assert.equal(await page.locator('#btn-fit').isVisible(), true, 'Fit view is reachable in defer mode');
+      if (process.env.SHOT_PHONE) await page.screenshot({ path: process.env.SHOT_PHONE });
+      await page.locator('#btn-mobile-edit').click();
+      assert.equal(await page.locator('body').getAttribute('data-viewport-editable'), 'true');
+      await page.setViewportSize({ width: 1098, height: 507 });
+      await page.waitForFunction(() => !document.body.classList.contains('defer-edit'));
+      console.log('PASS: Desktop is editable, a phone defers editing with a toggle and Fit view');
+      await page.close();
+    }
+
     // Shift-click builds a selection; the panel counts it; Ctrl+A and Select all take every object on the plate
     {
       const { page } = await open(browser);
