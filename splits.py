@@ -24,6 +24,7 @@ import threading
 import time
 from pathlib import Path
 
+import assembly_plan as planner
 import database
 import jobs  # used as a module: jobs.JobError, …
 import slicer
@@ -408,6 +409,30 @@ def part_path(split_id: int, number: int) -> tuple:
     if not path or not path.is_file():
         raise jobs.JobError("Part not found", 404)
     return path, f"{Path(record['source_name']).stem}_part{number:02d}.stl"
+
+
+# ── The assembly plan ──────────────────────────────────────────────────────────
+
+_plans: dict = {}   # split id → (files' modification times, plan dict)
+
+
+def assembly_plan(split_id: int) -> dict:
+    """How the split goes together (Sections, steps), or why it cannot be assembled as cut. Read-only and cached."""
+    get_split(split_id)
+    work = work_dir(split_id)
+    result = _read(work, "result.json")
+    if not result:
+        raise jobs.JobError("Split the model first", 409)
+    stamp = tuple((work / name).stat().st_mtime_ns if (work / name).is_file() else 0
+                  for name in ("result.json", "cuts.json", "parts_preview.bin"))
+    cached = _plans.get(split_id)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    cuts = result.get("cuts") or (_read(work, "cuts.json") or {}).get("cuts") or []
+    model = planner.SplitModel(result, cuts, planner.read_preview(work / "parts_preview.bin"))
+    plan = planner.build_plan(model).to_dict()
+    _plans[split_id] = (stamp, plan)
+    return plan
 
 
 # ── Sending parts to the queue ─────────────────────────────────────────────────

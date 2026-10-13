@@ -41,6 +41,8 @@ let pollTimer = null;
 let pendingSave = false; // cuts changed while a check was already running
 let checkDirty = false;  // local cuts differ from the last finished check
 let geometryKey = "";
+let plan = null;         // how the parts go together (Sections, steps) or why they can't, for the current split
+let planKey = "";
 
 function geometryFrom(mesh) {
   return smoothGeometry(mesh.positions, mesh.index);
@@ -213,9 +215,10 @@ class SplitViewer {
     }
   }
 
-  highlight(number) {
+  highlight(numbers) {
+    const wanted = [].concat(numbers ?? []);
     for (const object of this.model.children) {
-      object.material.emissive?.setHex(object.userData.number === number ? 0x333333 : 0x000000);
+      object.material.emissive?.setHex(wanted.includes(object.userData.number) ? 0x333333 : 0x000000);
     }
   }
 
@@ -403,7 +406,54 @@ async function syncViewer() {
 function renderSide() {
   const side = $("split-side");
   if (!current) { side.innerHTML = '<p class="split-note">Loading the model…</p>'; return; }
-  side.innerHTML = view === "model" ? sideModel() : sub === "parts" && current.result ? sideParts() : sideCuts();
+  const parts = view !== "model" && sub === "parts" && current.result;
+  if (parts) loadPlan();
+  side.innerHTML = view === "model" ? sideModel() : parts ? sideParts() : sideCuts();
+}
+
+async function loadPlan() {
+  const id = current.id, key = `${id}:${current.state}:${current.updated_at}:${JSON.stringify(current.result?.summary)}`;
+  if (key === planKey) return;
+  planKey = key;
+  plan = null;
+  try {
+    const loaded = await host.api("GET", `/api/splits/${id}/assembly-plan`);
+    if (!current || current.id !== id || planKey !== key) return;
+    plan = loaded;
+  } catch (err) {
+    if (!current || current.id !== id || planKey !== key) return;
+    plan = { error: err.message };
+  }
+  if (view && sub === "parts") renderSide();
+}
+
+const FAILURE_TITLE = { rod_direction: "Rods point in different directions", rod_side: "Rods meet from opposite sides", blocked: "A part is in the way",
+  disconnected: "A part is not joined to the others", interlock: "Two parts lock each other", anomaly: "The split's data doesn't add up" };
+
+function dirText(d) {
+  const names = ["X", "Y", "Z"], i = d.findIndex(v => Math.abs(v) > 0.999);
+  return i < 0 ? d.map(v => v.toFixed(2)).join(", ") : `${d[i] < 0 ? "-" : "+"}${names[i]}`;
+}
+
+function planBanner() {
+  if (!plan?.failure) return "";
+  const f = plan.failure;
+  return `<section class="split-section split-failed" role="alert"><h4>${esc(plan.headline)}</h4>
+    <p><strong>${esc(FAILURE_TITLE[f.kind] || f.kind)}.</strong> ${esc(f.message)}</p>
+    ${f.fixes.length ? `<ol class="split-fixes">${f.fixes.map(x => `<li>${esc(x)}</li>`).join("")}</ol>` : ""}
+    ${f.parts.length ? `<div class="split-actions-row"><button class="btn btn-secondary btn-sm" data-show-joint="${f.parts.join(",")}">Show joint</button></div>` : ""}
+  </section>`;
+}
+
+function planHtml() {
+  if (!plan) return '<p class="split-muted">Working out the order…</p>';
+  if (plan.error) return `<p class="split-bad">${esc(plan.error)}</p>`;
+  if (!plan.ok) return `<p class="split-bad">${esc(plan.headline)}. See the note above.</p>`;
+  const where = parts => parts.length > 4 ? `the ${parts.length} parts built so far` : listText(parts);
+  return `<ol class="split-assembly">${plan.sections.map(sec => `<li><strong>Section ${sec.letter}</strong>${sec.main ? " (main)" : ""}: ${listText(sec.parts)}
+      ${sec.note ? `<span class="split-warn">${esc(sec.note)}</span>` : ""}
+      <ol>${sec.steps.map(st => `<li>${st.id}: ${st.kind === "section" ? `Join Section ${st.section} (${listText(st.parts)})` : `Add ${listText(st.parts)}`}
+        to ${where(st.receiver)} along ${dirText(st.direction)} — ${st.glue_only ? "glue only" : plural(st.rods, "rod")}.</li>`).join("")}</ol></li>`).join("")}</ol>`;
 }
 
 // Second-level controls sit in folds that stay closed until asked for; which ones are open survives a re-render.
@@ -560,6 +610,7 @@ function sideParts() {
   const s = r.summary;
   const rods = Object.entries(s.rods).map(([label, count]) => `${count} × ${esc(label)}, ${s.rod_lengths_mm[label]} mm long`).join("<br>") || "None";
   return `${viewToggle()}
+  ${planBanner()}
   <section class="split-section"><h4>Summary</h4>
     <dl class="split-facts">
       <dt>Parts</dt><dd>${s.parts} from ${plural(s.cuts, "cut")}</dd>
@@ -582,11 +633,7 @@ function sideParts() {
       </tr>`).join("")}</tbody>
     </table></div>
   </section>
-  ${fold("split-assembly", "Assembly", `${plural(r.assembly.length, "step")}`, `
-    <ol class="split-assembly">${r.assembly.map((a, i) => i === 0 ? `<li>Start with part ${a.part}.</li>`
-      : a.joins.length ? `<li>Add part ${a.part} to ${listText(a.joins)} — ${plural(a.rods, "rod")}.</li>`
-      : `<li>Part ${a.part} doesn't meet the others at a cut.</li>`).join("")}</ol>
-  `)}
+  ${fold("split-assembly", "Assembly", plan?.ok ? `${plural(plan.summary.sections, "Section")}, ${plural(plan.summary.steps, "step")}` : "", planHtml())}
   <div class="split-actions"><button class="btn btn-primary" data-action="layout">Lay out on plates →</button></div>`;
 }
 
@@ -815,6 +862,8 @@ function bindEvents() {
   side.addEventListener('click', e => {
     const button = e.target.closest('[data-part-highlight]');
     if (button) viewer?.highlight(Number(button.dataset.partHighlight));
+    const joint = e.target.closest('[data-show-joint]');
+    if (joint) viewer?.highlight(joint.dataset.showJoint.split(",").map(Number));
   });
   $("split-explode").addEventListener("input", (e) => viewer?.setExplode(Number(e.target.value) / 100));
   $("btn-split-fit").addEventListener("click", () => viewer?.fit());
