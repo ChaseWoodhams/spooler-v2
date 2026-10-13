@@ -276,6 +276,49 @@ async function settings(fixture) {
   console.log(`Settings printer/notification validation PASS ${page.viewportSize().width}`);
 }
 
+const healthStatus = (over = {}) => {
+  const now = Math.floor(Date.now() / 1000);
+  return { generated_at: now,
+    spooler: { started_at: now - 3600, loop_lag_ms: 5, browser_clients: 1 },
+    spoolman: { ok: true, version: '0.22', latency_ms: 12, pending_deductions: 0 },
+    supervisor: { updated_at: now, started_at: now - 3600, stale: false, services: [{ name: 'spooler', restarts: 0 }] },
+    printers: [{ id: printer.id, name: printer.name, connected: true, connected_since: now - 600 }],
+    backups: { running: false, overdue: false, last_error: null, spoolman_db: true, interval_hours: 24, keep: 14, count: 3, dir: 'C:\\backups',
+      latest: { name: 'spooler-backup-1.zip', size: 2048, created_at: now - 60 } },
+    ...over };
+};
+async function healthNextLines(fixture) {
+  const { page } = fixture;
+  const open = page.viewportSize().width < 641 ? null : page.getByRole('button', { name: /System health/ });
+  const send = status => fixture.sockets[0].send(JSON.stringify({ type: 'system_status', status }));
+  const rows = () => page.locator('.health-row');
+  const rowNamed = title => rows().filter({ has: page.locator('.health-row-title', { hasText: new RegExp('^' + title + '$') }) });
+  await page.waitForFunction(() => typeof applySystemStatus === 'function');
+  await page.evaluate(() => document.getElementById('modal-system-health').classList.add('open'));
+  void open;
+  // ok + informational: no Next line anywhere
+  send(healthStatus());
+  await page.waitForFunction(() => document.querySelectorAll('.health-row').length > 5);
+  assert.equal(await page.locator('.health-row-next').count(), 0, 'healthy and informational rows have no Next line');
+  assert.ok(await rowNamed('Location').count() === 1 && await rowNamed('Recovery').count() === 1);
+  // warn: backup stale points at Back up now
+  const now = Math.floor(Date.now() / 1000);
+  send(healthStatus({ backups: { ...healthStatus().backups, overdue: true } }));
+  await page.waitForFunction(() => document.querySelectorAll('.health-row-next').length > 0);
+  await expectText(rowNamed('Latest backup').locator('.health-row-next'), /^Next: Press Back up now./);
+  assert.equal(await page.locator('.health-row-next').count(), 1, 'only the stale backup row has a Next line');
+  // down: Spoolman unreachable names how to start it
+  send(healthStatus({ spoolman: { ok: false, down_since: now - 30, error: 'refused', latency_ms: 0, pending_deductions: 0 } }));
+  await page.waitForFunction(() => /Start Spoolman/.test(document.getElementById('system-health-body').innerText));
+  await expectText(rowNamed('Spoolman').locator('.health-row-next'), /Start Spoolman .*start-local/);
+  // unknown: supervisor missing gives its own reason; Spoolman not checked yet gives another
+  send(healthStatus({ supervisor: null, spoolman: { ok: null, pending_deductions: 0 } }));
+  await page.waitForFunction(() => /start the supervisor/.test(document.getElementById('system-health-body').innerText));
+  await expectText(rowNamed('Supervisor').locator('.health-row-next'), /start the supervisor/);
+  await expectText(rowNamed('Spoolman').locator('.health-row-next'), /first Spoolman check/);
+  assert.doesNotMatch(await page.locator('#system-health-body').innerText(), /No action needed|follow the recovery steps|Wait for the next health update/);
+  console.log(`Health Next lines only on actionable rows PASS ${page.viewportSize().width}`);
+}
 async function pushDeliveryWarning(fixture) {
   const { page } = fixture;
   fixture.notificationSaveOk = true;
@@ -336,7 +379,7 @@ async function notificationRecovery(fixture) {
   const browser = await chromium.launch();
   try {
     for (const width of [320, 390, 430, 768, 1440]) {
-      for (const scenario of [cockpit, inventory, settings, notificationRecovery, pushDeliveryWarning]) {
+      for (const scenario of [cockpit, inventory, settings, notificationRecovery, pushDeliveryWarning, healthNextLines]) {
         const fixture = await fixturePage(browser, `http://127.0.0.1:${server.address().port}`, width);
         try { await scenario(fixture); assertReadOnlyCommands(fixture); } finally { await fixture.context.close(); }
       }

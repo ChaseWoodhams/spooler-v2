@@ -72,15 +72,16 @@ function renderSystemHealth() {
   if (document.getElementById("modal-system-health").classList.contains("open")) renderSystemHealthDetail();
 }
 
-function healthRow(level, title, detail) {
+// `next` is an action the operator can take; pass it only for warn/down rows (and
+// unknown rows with a concrete reason). Healthy and informational rows get no Next line.
+function healthRow(level, title, detail, next) {
   const dot = level ? `<span class="health-dot" data-state="${level}"></span>` : `<span class="health-dot-spacer"></span>`;
-  const next = level === "ok" ? "No action needed while this status is healthy."
-    : level === "unknown" ? "Wait for the next health update, then check again."
-    : `Check ${title} and follow the recovery steps shown here.`;
+  const nextLine = next && level && level !== "ok"
+    ? `<span class="health-row-next">Next: ${escHtml(next)}</span>` : "";
   return `<div class="health-row">${dot}<div class="health-row-main">` +
     `<span class="health-row-title">${escHtml(title)}</span>` +
     `<span class="health-row-detail">${escHtml(detail)}</span>` +
-    `<span class="health-row-next">Next: ${escHtml(next)}</span></div></div>`;
+    `${nextLine}</div></div>`;
 }
 
 function renderSystemHealthDetail() {
@@ -96,7 +97,8 @@ function renderSystemHealthDetail() {
       (age > HEALTH_STALE_MS / 1000 ? " · Out of date; check the dashboard connection and wait for a fresh report." : " · Current");
   }
   const services = [healthRow(_wsConnected ? "ok" : "down", "Dashboard connection",
-    _wsConnected ? "Connected" : `Reconnecting (attempt ${_wsAttempts})`)];
+    _wsConnected ? "Connected" : `Reconnecting (attempt ${_wsAttempts})`,
+    "Check that Spooler is running on its host computer. This page reconnects by itself once it is.")];
   if (!s) {
     body.innerHTML = `<div class="health-section"><h4>Services</h4>${services.join("")}</div>`;
     backupBtn.disabled = true;
@@ -106,7 +108,8 @@ function renderSystemHealthDetail() {
   const sp = s.spooler;
   services.push(healthRow(sp.loop_lag_ms > 500 ? "warn" : "ok", "Spooler",
     `Up ${fmtDuration(_ageOf(sp.started_at))} · event-loop lag ${Math.round(sp.loop_lag_ms)} ms · ` +
-    `${sp.browser_clients} browser${sp.browser_clients === 1 ? "" : "s"}`));
+    `${sp.browser_clients} browser${sp.browser_clients === 1 ? "" : "s"}`,
+    "Let any running slice or upload finish. If it stays slow, restart Spooler."));
 
   const sm = s.spoolman;
   let smDetail = sm.ok === null ? "Not checked yet"
@@ -114,7 +117,10 @@ function renderSystemHealthDetail() {
     : `Unreachable for ${fmtDuration(_ageOf(sm.down_since))} · ${sm.error}`;
   if (sm.pending_deductions) smDetail += ` · ${sm.pending_deductions} deduction(s) waiting to be replayed`;
   services.push(healthRow(sm.ok === null ? "unknown" : sm.ok ? (sm.pending_deductions ? "warn" : "ok") : "down",
-    "Spoolman", smDetail));
+    "Spoolman", smDetail,
+    sm.ok === null ? "Spooler has not finished its first Spoolman check since starting; reopen this panel in a few seconds."
+    : !sm.ok ? "Start Spoolman (or run .\\start-local.ps1) and check SPOOLMAN_URL. Queued deductions replay once it answers."
+    : sm.pending_deductions ? "Open Spoolman and confirm it responds; the queued deductions replay on their own." : ""));
 
   const sup = s.supervisor;
   if (sup) {
@@ -122,9 +128,11 @@ function renderSystemHealthDetail() {
       .map(x => `${x.name}: ${x.restarts} restart${x.restarts === 1 ? "" : "s"}`).join(", ");
     services.push(healthRow(sup.stale ? "warn" : "ok", "Supervisor", sup.stale
       ? `No update for ${fmtDuration(_ageOf(sup.updated_at))}`
-      : `Running for ${fmtDuration(_ageOf(sup.started_at))} · ${restarts}`));
+      : `Running for ${fmtDuration(_ageOf(sup.started_at))} · ${restarts}`,
+    "Check the supervisor window, or run .\\start-local.ps1 to start it again."));
   } else {
-    services.push(healthRow("unknown", "Supervisor", "Not running — services won't restart automatically"));
+    services.push(healthRow("unknown", "Supervisor", "Not running — services won't restart automatically",
+      "Run .\\start-local.ps1 from the Spooler folder to start the supervisor."));
   }
 
   const printerRows = (s.printers || []).map(link => {
@@ -144,7 +152,8 @@ function renderSystemHealthDetail() {
       if (link.reconnect_attempts) detail += ` (attempt ${link.reconnect_attempts})`;
       if (link.last_error) detail += ` · ${link.last_error}`;
     }
-    return healthRow(connected ? "ok" : "warn", live?.name || link.name, detail);
+    return healthRow(connected ? "ok" : "warn", live?.name || link.name, detail,
+      "Check the printer is powered on and on the same network. Spooler keeps retrying on its own.");
   });
 
   const b = s.backups;
@@ -152,12 +161,15 @@ function renderSystemHealthDetail() {
   if (b.running) backupRows.push(healthRow("unknown", "Backup", "Backup in progress…"));
   backupRows.push(b.latest
     ? healthRow(b.last_error || b.overdue ? "warn" : "ok", "Latest backup",
-        `${b.latest.name} · ${formatFileSize(b.latest.size)} · ${fmtDuration(_ageOf(b.latest.created_at))} ago`)
-    : healthRow("warn", "Latest backup", "No backup has been made yet"));
-  if (b.last_error) backupRows.push(healthRow("warn", "Backup problem", b.last_error));
+        `${b.latest.name} · ${formatFileSize(b.latest.size)} · ${fmtDuration(_ageOf(b.latest.created_at))} ago`,
+        "Press Back up now.")
+    : healthRow("warn", "Latest backup", "No backup has been made yet", "Press Back up now."));
+  if (b.last_error) backupRows.push(healthRow("warn", "Backup problem", b.last_error,
+    "Fix the cause (free disk space, backup folder permissions), then press Back up now."));
   backupRows.push(healthRow(b.spoolman_db ? "ok" : "warn", "Coverage",
     (b.spoolman_db ? "Configuration + Spoolman database" : "Configuration only — set SPOOLMAN_DB_FILE to include Spoolman") +
-    ` · every ${b.interval_hours} h · keeping ${b.keep} · ${b.count} stored`));
+    ` · every ${b.interval_hours} h · keeping ${b.keep} · ${b.count} stored`,
+    "Set SPOOLMAN_DB_FILE in the .env file, restart Spooler, then press Back up now."));
   backupRows.push(healthRow(null, "Location", b.dir));
   backupRows.push(healthRow(null, "Recovery", "Keep a verified archive and use the Recovery instructions in the Spooler handoff documentation to restore it."));
 
