@@ -613,6 +613,16 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .pp-sendbar .btn-primary { width: 100%; min-height: 44px; }
 @media (max-width: 900px) { .pp-sendbar { bottom: -10px; margin: 0 -10px -10px; padding: 10px; } }
 
+/* Opening a project: a bounded wait with its own Retry, over the page */
+.slicer-opening { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); z-index: 20; min-width: 240px; max-width: min(460px, 94vw);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.slicer-opening[hidden] { display: none; }
+.slicer-opening .state-block { border: 0; }
+/* The same block over the dark 3D view */
+.slicer-viewport-message .state-block { padding: 0; border: 0; color: #fff; }
+.slicer-viewport-message .state-block p { color: #fff; }
+.slicer-viewport-message .state-spinner { border-color: rgba(255,255,255,.3); border-top-color: #fff; }
+
 /* ─── Hit targets (ticket 08): see the matching block at the end of style.css ─── */
 :root { --hit-min: 44px; --hit-fine: 32px; --hit-gap: 8px; }
 .slicer-icon-btn, .slicer-pages button, .scope-toggle button, .preset-btn, .set-reset,

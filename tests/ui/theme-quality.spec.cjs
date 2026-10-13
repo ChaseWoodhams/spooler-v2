@@ -34,6 +34,7 @@ const fixtures = [0, 3, 15, 6, 9, 14, 0].map((code, i) => ({
    const page = await context.newPage();
    await page.addInitScript(theme => localStorage.setItem('theme', theme), theme);
    await page.routeWebSocket(/.*/, ws => ws.onMessage(message => {
+    if (JSON.parse(message).action === 'list_printers' && state === 'empty') ws.send(JSON.stringify({ type: 'printers_listed' }));
     if (JSON.parse(message).action === 'list_printers' && state === 'connected')
      fixtures.forEach(printer => ws.send(JSON.stringify({ type: 'printer_update', printer })));
    }));

@@ -89,6 +89,7 @@ async def browser_handler(websocket) -> None:
 
     for p in state.printers.values():
         await websocket.send(json.dumps({"type": "printer_update", "printer": p.to_dict()}))
+    await websocket.send(json.dumps({"type": "printers_listed"}))  # the list is complete, even when empty: the page can say "No printers"
     await websocket.send(json.dumps({"type": "tray_map", "tray_map": state.tray_map}))
     await websocket.send(json.dumps({"type": "system_status", "status": health.snapshot()}))
 
@@ -119,6 +120,7 @@ async def handle_browser_message(ws, raw: str) -> None:
     if action == "list_printers":
         for p in state.printers.values():
             await ws.send(json.dumps({"type": "printer_update", "printer": p.to_dict()}))
+        await ws.send(json.dumps({"type": "printers_listed"}))
         return
 
     if action == "discover":
