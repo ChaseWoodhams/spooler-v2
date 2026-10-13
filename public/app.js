@@ -81,7 +81,7 @@ async function loadFilamentMeta({ preserve = true } = {}) {
   status.dataset.state = "loading";
   retry.hidden = true;
   try {
-    const r = await fetch("/api/filament-meta", { signal: AbortSignal.timeout(15000) });
+    const r = await fetchWithTimeout("/api/filament-meta", {}, { timeoutMs: 8000, retries: 1 });
     if (!r.ok) throw new Error(`Catalogue request failed (${r.status})`);
     const data = await r.json();
     if (sequence !== _filamentMetaSequence) return;
@@ -147,8 +147,32 @@ let _wsEverConnected = false;
 let _wsAttempts  = 0;  // consecutive closed/failed connections since the last success
 let _wsRetryAt   = 0;
 
+let _wsReconnectTimer = null;
+let _printersLoaded = false;   // the first printer list has arrived (even an empty one)
+let _printersError = false;    // Spooler did not send it in time, or the connection closed first
+let _printersTimer = null;
+function _printersMarkLoaded() {
+  if (_printersLoaded) return;
+  _printersLoaded = true;
+  _printersError = false;
+  clearTimeout(_printersTimer);
+}
+function retryPrinters() {
+  _printersError = false;
+  clearTimeout(_wsReconnectTimer);
+  if (ws?.readyState === WebSocket.OPEN) send({ action: "list_printers" });
+  else if (!ws || ws.readyState === WebSocket.CLOSED) connect();
+  _watchPrinterList();
+  syncEmptyState();
+}
+function _watchPrinterList() {
+  clearTimeout(_printersTimer);
+  _printersTimer = setTimeout(() => { if (!_printersLoaded) { _printersError = true; syncEmptyState(); } }, 10000);
+}
+
 function connect() {
   ws = new WebSocket(WS_URL);
+  _watchPrinterList();
 
   ws.onopen = () => {
     console.log("[WS] Connected");
@@ -164,6 +188,7 @@ function connect() {
       }
     }
     renderSystemHealth();
+    if (_printersError) { _printersError = false; syncEmptyState(); }
     send({ action: "list_printers" });
     loadHistory();
     loadJobs();
@@ -188,7 +213,8 @@ function connect() {
     _wsRetryAt = Date.now() + delay;
     console.warn(`[WS] Disconnected, retrying in ${delay} ms…`);
     renderSystemHealth();
-    setTimeout(connect, delay);
+    _wsReconnectTimer = setTimeout(connect, delay);
+    if (!_printersLoaded) { _printersError = true; syncEmptyState(); }
   };
 
   ws.onerror = () => ws.close();
@@ -209,7 +235,12 @@ function handleMessage(msg) {
     case "jobs":
       applyJobs(msg.jobs);
       break;
+    case "printers_listed":
+      _printersMarkLoaded();
+      syncEmptyState();
+      break;
     case "printer_update":
+      _printersMarkLoaded();
       const linkChanged = printers[msg.printer.id]?.connected !== msg.printer.connected;
       printers[msg.printer.id] = msg.printer;
       _hwReconcile(msg.printer);
@@ -1196,8 +1227,16 @@ async function setPrinterTemperature(printerId, target, inputId) {
 function syncEmptyState() {
   const empty = document.getElementById("empty-state");
   const grid  = document.getElementById("printer-grid");
+  const state = document.getElementById("printers-state");
   const has   = Object.keys(printers).length > 0;
-  if (_activePrinterId) {
+  const wanted = _printersLoaded || _activePrinterId ? "" : _printersError ? "error" : "loading";
+  if ((state.firstElementChild?.dataset.state || "") !== wanted) {
+    stateBlock(state, wanted || null, wanted === "error" ? "Couldn't reach Spooler to list your printers. Check that Spooler is running." : "Looking for your printers…", retryPrinters, "Retry printers");
+  }
+  if (!_printersLoaded && !_activePrinterId) {   // no verdict yet: neither "No printers connected" nor an empty grid
+    empty.style.display = "none";
+    grid.style.display = "none";
+  } else if (_activePrinterId) {
     empty.style.display = "none";
     grid.style.display = "none";
   } else {
@@ -1709,22 +1748,25 @@ async function _pushWorkerReady() {
 // Notifications sub-page UI
 async function _populateNotifForm() {
   const save = document.getElementById("btn-notif-save");
-  const retry = document.getElementById("btn-notif-load-retry");
+  const state = document.getElementById("notif-state");
+  const list = document.getElementById("notif-list");
   const fields = [..._settingsNotifPage.querySelectorAll("input")];
   save.disabled = true;
   fields.forEach(field => field.disabled = true);
-  retry.hidden = true;
+  list.dataset.gated = "true";   // dimmed and inert: the values below are not the saved ones yet
   _settingsNotifPage.setAttribute("aria-busy", "true");
-  _settingsFeedback("Loading notification settings…", "info");
+  stateBlock(state, "loading", "Loading notification settings…");
+  _settingsFeedback("");
   let s;
   try {
-    const resp = await fetch("/api/notification-settings", { signal: AbortSignal.timeout(15000) });
+    const resp = await fetchWithTimeout("/api/notification-settings", {}, { timeoutMs: 8000, retries: 1 });
     if (!resp.ok) throw new Error(`Request failed (${resp.status})`);
     s = await resp.json();
     if (!s || typeof s !== "object" || Array.isArray(s)) throw new Error("Invalid settings response");
   } catch (error) {
     _settingsFeedback(`Could not load notification settings: ${error.message}. Check the connection and retry before saving.`, "error");
-    retry.hidden = false;
+    stateBlock(state, "error", `Could not load notification settings: ${error.message}. Check the connection and retry before saving.`, _populateNotifForm, "Retry notification settings");
+    _settingsFeedback("");   // the block above the form carries the message
     _settingsNotifPage.setAttribute("aria-busy", "false");
     return;
   }
@@ -1744,10 +1786,11 @@ async function _populateNotifForm() {
   _syncNotifParams();
   save.disabled = false;
   fields.forEach(field => field.disabled = false);
+  delete list.dataset.gated;
+  stateBlock(state);
   _settingsNotifPage.setAttribute("aria-busy", "false");
   _settingsFeedback("Notification settings loaded.", "info");
 }
-document.getElementById("btn-notif-load-retry")?.addEventListener("click", _populateNotifForm);
 
 function _syncNotifParams() {
   const show = (paramId, checkId) => {
@@ -2538,7 +2581,7 @@ async function fetchSpools() {
   renderSpoolPanel();
   if (document.getElementById("modal-spool-picker").classList.contains("open")) renderPickerList(currentPickerPrinterId);
   try {
-    const r = await fetch(`${SPOOLMAN_URL}/spool`, { signal: AbortSignal.timeout(15000) });
+    const r = await fetchWithTimeout(`${SPOOLMAN_URL}/spool`, {}, { timeoutMs: 8000, retries: 1 });
     if (!r.ok) throw new Error(`Spoolman returned ${r.status}`);
     const inventory = await r.json();
     if (!Array.isArray(inventory)) throw new Error("Invalid inventory response");
@@ -2557,7 +2600,6 @@ async function fetchSpools() {
   return _spoolLoadState === "ready";
 }
 
-document.getElementById("btn-spools-retry").addEventListener("click", fetchSpools);
 
 function renderSpoolPanel() {
   const list  = document.getElementById("spools-list");
@@ -2565,8 +2607,8 @@ function renderSpoolPanel() {
   const status = document.getElementById("spools-status");
   status.hidden = false;
   status.dataset.state = _spoolLoadState;
-  status.textContent = _spoolLoadMessage;
-  document.getElementById("btn-spools-retry").hidden = _spoolLoadState !== "error";
+  if (_spoolLoadState === "ready") status.textContent = _spoolLoadMessage;
+  else stateBlock(status, _spoolLoadState, _spoolLoadMessage, fetchSpools, "Retry inventory");
   if (!spools.length) {
     list.innerHTML = "";
     empty.style.display = _spoolLoadState === "ready" ? "" : "none";
@@ -3204,6 +3246,7 @@ fetch("/api/auth-status")
   })
   .catch(() => {});
 loadChangelog();
+syncEmptyState();   // "Looking for your printers…" until the first list arrives
 connect();
 
 // On startup: if notifications are enabled but the subscription was cleared by the

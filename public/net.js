@@ -26,6 +26,61 @@
     }
   };
 
+  // Bounded wait: fetchWithTimeout(url, opts, { timeoutMs, retries }). Each attempt is cut off after timeoutMs (a stalled
+  // loopback or a busy Spooler never leaves a panel waiting for ever); only reads (GET/HEAD) are retried, writes never.
+  // A timeout rejects with name "TimeoutError" and a plain-language message.
+  window.fetchWithTimeout = async function (url, opts = {}, { timeoutMs = 15000, retries = 0 } = {}) {
+    const method = (opts.method || "GET").toUpperCase();
+    const attempts = (method === "GET" || method === "HEAD" ? retries : 0) + 1;
+    for (let attempt = 1; ; attempt++) {
+      const timer = AbortSignal.timeout(timeoutMs);
+      const signal = opts.signal ? AbortSignal.any([opts.signal, timer]) : timer;
+      try {
+        return await window.fetch(url, { ...opts, signal });
+      } catch (err) {
+        if (opts.signal?.aborted) throw err;
+        if (attempt >= attempts) {
+          if (!timer.aborted) throw err;
+          const error = new Error("Spooler did not answer in time");
+          error.name = "TimeoutError";
+          throw error;
+        }
+      }
+    }
+  };
+
+  // One loading / error / empty block for every panel: spinner or message, plain copy, and an in-place Retry.
+  // stateBlock(container, "loading"|"error"|"empty", "Plain copy", onRetry?, retryLabel?) replaces the container's content;
+  // stateBlock(container) with no kind clears it. Loading fades in after a beat so a quick answer never flashes it.
+  window.stateBlock = function (container, kind, message, onRetry, retryLabel = "Retry") {
+    if (!container) return null;
+    container.textContent = "";
+    if (!kind) return null;
+    const block = document.createElement("div");
+    block.className = "state-block";
+    block.dataset.state = kind;
+    block.setAttribute("role", kind === "error" ? "alert" : "status");
+    if (kind === "loading") {
+      const spinner = document.createElement("span");
+      spinner.className = "state-spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      block.appendChild(spinner);
+    }
+    const text = document.createElement("p");
+    text.textContent = message || "";
+    block.appendChild(text);
+    if (kind === "error" && onRetry) {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "btn btn-secondary btn-sm state-retry";
+      retry.textContent = retryLabel;
+      retry.addEventListener("click", onRetry);
+      block.appendChild(retry);
+    }
+    container.appendChild(block);
+    return block;
+  };
+
   // ── UI updates (app shell only; an embedded Projects page is reloaded with it) ──
   if (window.self !== window.top) return;
   const CHECK_EVERY_MS = 30000;

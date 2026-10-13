@@ -17,12 +17,12 @@ const PROJECTS = [
   { id: 9, name: 'Bracket set', plates: 1, objects: 12, models: 3, sliced: 0, slicing: 1, queued: 0, printing: 0, busy: true, split_id: null, updated_at: 1_800_000_100, created_at: 1 },
   { id: 10, name: 'Fresh start', plates: 1, objects: 0, models: 0, sliced: 0, slicing: 0, queued: 0, printing: 0, busy: false, split_id: null, updated_at: 1_800_000_000, created_at: 1 },
 ];
-const project = id => ({ id, name: PROJECTS.find(p => p.id === id).name, revision: 1, split_id: null, split_ids: [], models: [], slices: {}, server_time: Date.now() / 1000,
+const project = (id, models = []) => ({ id, name: PROJECTS.find(p => p.id === id).name, revision: 1, split_id: null, split_ids: [], models, slices: {}, server_time: Date.now() / 1000,
   data: { plates: [{ id: 1, name: 'Plate 1' }], objects: [], bed: 'textured', profile: { bundle_id: null, process: {}, filament: {} } } });
 
-async function open(browser, { projects = PROJECTS, search = '' } = {}) {
+async function open(browser, { projects = PROJECTS, search = '', setup } = {}) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-  const server = { calls: [], projects: [...projects] };
+  const server = { calls: [], projects: [...projects], listFail: false, projectDelay: 0, previewGate: null, models: [] };
   await page.addInitScript(() => { try { localStorage.setItem('slicer.project', '7'); } catch (_) { /* storage blocked */ } });   // a last-open project must not be reopened by itself
   await page.route('http://spooler.test/**', route => {
     const file = path.join(root, new URL(route.request().url()).pathname);
@@ -34,18 +34,24 @@ async function open(browser, { projects = PROJECTS, search = '' } = {}) {
     const request = route.request(), method = request.method(), p = new URL(request.url()).pathname;
     if (method !== 'GET') server.calls.push({ method, path: p });
     let m;
-    if (p === '/api/projects' && method === 'GET') return route.fulfill({ json: { projects: server.projects } });
+    if (p === '/api/projects' && method === 'GET') return server.listFail ? route.fulfill({ status: 503, json: { error: 'Fixture list unavailable' } }) : route.fulfill({ json: { projects: server.projects } });
+    if (/\/models\/\d+\/preview$/.test(p)) {   // a model's mesh: held back until the test releases it; the fixture has no real mesh
+      if (server.previewGate) await server.previewGate;
+      return route.fulfill({ status: 404, json: { error: 'Fixture has no mesh' } });
+    }
+    if (/^\/api\/projects\/\d+$/.test(p) && method === 'GET' && server.projectDelay) await new Promise(resolve => setTimeout(resolve, server.projectDelay));
     if ((m = p.match(/^\/api\/projects\/(\d+)$/)) && method === 'DELETE') {
       server.projects = server.projects.filter(x => x.id !== Number(m[1]));
       return route.fulfill({ json: { ok: true } });
     }
-    if ((m = p.match(/^\/api\/projects\/(\d+)$/))) return route.fulfill({ json: project(Number(m[1])) });
+    if ((m = p.match(/^\/api\/projects\/(\d+)$/))) return route.fulfill({ json: project(Number(m[1]), server.models) });
     return route.fulfill({ json: p === '/api/splits' ? { splits: [{ id: 3, project_id: 8 }, { id: 4, project_id: null, source_name: 'loose.stl', parts: 6, state: 'split' }] }
       : p.endsWith('/status') ? { plates: [], progress: { counts: {}, filament_g: {} } }
       : p.endsWith('/jobs') ? { jobs: [] } : p === '/api/printers' ? []
       : p === '/api/defaults' ? { defaults: { options: {} } } : p === '/api/slicer/spools' ? { spools: [] }
       : p === '/api/slicer/presets' ? { machines: [], processes: {}, filaments: {} } : {} });
   });
+  setup?.(server);
   await page.goto(`http://spooler.test/slicer.html${search}`);
   return { page, server };
 }
@@ -132,6 +138,58 @@ async function open(browser, { projects = PROJECTS, search = '' } = {}) {
       await empty.getByRole('button', { name: 'New project' }).click();
       await page.locator('#dlg-projects').waitFor({ state: 'visible' });
       console.log('PASS: An empty Projects page says what to do next with one button');
+      await page.close();
+    }
+
+    // Loading, failing and recovering: a loading block, then an error with an in-place Retry, never a blank or a bare error line
+    {
+      const { page, server } = await open(browser, { setup: s => { s.listFail = true; } });
+      const error = page.locator('#project-list .state-block[data-state="error"]');
+      await error.waitFor({ timeout: 8000 });
+      assert.match(await error.innerText(), /Couldn't load your projects: Fixture list unavailable/);
+      server.listFail = false;
+      await error.getByRole('button', { name: 'Retry projects' }).click();
+      await page.locator('#project-list').getByText('Garden chair').waitFor({ timeout: 8000 });
+      assert.equal(await page.locator('#project-list .state-block').count(), 0, 'the error is gone after Retry');
+      console.log('PASS: A failed project list shows an error with Retry, and Retry recovers');
+      await page.close();
+    }
+
+    // Opening a project shows the steps and sidebar at once; the 3D models load behind a loading block, with Retry when they fail
+    {
+      let release;
+      const { page } = await open(browser, { search: '?project=7', setup: s => {
+        s.models = [{ id: 1, state: 'ready', sha256: 'a', name: 'chair.stl' }];
+        s.previewGate = new Promise(resolve => { release = resolve; });
+      } });
+      await page.locator('#step-bar button, #step-bar a').first().waitFor({ timeout: 8000 });
+      assert.equal(await page.locator('#project-sidebar').isVisible(), true, 'sidebar shows while the models still load');
+      assert.equal(await page.locator('#project-opening').isVisible(), false, 'the opening notice is gone once the project is in');
+      const viewport = await page.evaluate(() => !!document.getElementById('viewport')?.querySelector('canvas'));
+      if (viewport) {
+        const loading = page.locator('#viewport-message .state-block[data-state="loading"]');
+        await loading.waitFor({ timeout: 8000 });
+        release();
+        const error = page.locator('#viewport-message .state-block[data-state="error"]');
+        await error.waitFor({ timeout: 8000 });
+        assert.match(await error.innerText(), /1 model didn't load/);
+        await error.getByRole('button', { name: 'Retry models' }).waitFor();
+        console.log('PASS: Models load behind a loading block, a failure offers Retry');
+      } else {
+        release();
+        console.log('SKIP: no WebGL here, so the model loading block is not exercised');
+      }
+      await page.close();
+    }
+
+    // A slow project fetch shows "Opening project…", a failed one an error with Retry in place
+    {
+      const { page, server } = await open(browser, { search: '?project=7', setup: s => { s.projectDelay = 600; } });
+      await page.locator('#project-opening .state-block[data-state="loading"]').waitFor({ timeout: 8000 });
+      assert.match(await page.locator('#project-opening').innerText(), /Opening project/);
+      await page.locator('#step-bar button, #step-bar a').first().waitFor({ timeout: 8000 });
+      assert.equal(await page.locator('#project-opening').isVisible(), false);
+      console.log('PASS: Opening a project shows a bounded loading notice');
       await page.close();
     }
 
