@@ -42,6 +42,19 @@ class MoveTests(GuideCase):
             for step in section["steps"]:
                 self.assertIsNone(assembly_plan.validate_step(model, step["parts"], step["receiver"], step["direction"]))
 
+    def test_an_edited_plan_still_carries_its_warnings(self):
+        result, cuts = stack_split(4)
+        for p in result["parts"]:
+            p["volume_cm3"] = 6000.0
+        split_id = self.make_split(result, cuts)
+        self.assertTrue(splits.assembly_plan(split_id)["warnings"])
+        splits.edit_plan(split_id, move([1], [2]))
+        plan = splits.assembly_plan(split_id)
+        self.assertEqual(plan["edits"]["state"], "applied")
+        self.assertTrue([w for w in plan["warnings"] if w["kind"] == "heavy_join"])
+        steps = [st for s in plan["sections"] for st in s["steps"]]
+        self.assertTrue(any(st["warnings"] for st in steps))
+
     def test_moving_a_part_back_makes_the_section_vanish(self):
         split_id = self.make_split(*stack_split(4))
         splits.edit_plan(split_id, move([1], [2]))

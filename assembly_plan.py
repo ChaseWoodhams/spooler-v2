@@ -30,7 +30,7 @@ import hashlib
 import json
 import math
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -48,6 +48,8 @@ TOUCH_MM = 0.01          # boxes that overlap by less than this only touch
 SWEEP_WIDTH_MM = 0.0004  # cross-section of the segment a part is swept with
 SWEEP_HIT_MM3 = 2.0      # a sweep must cut this much volume out of a placed part to count as a hit
 MESH_MAGIC = b"SPV1"
+FILAMENT_G_PER_CM3, FILL_FRACTION = 1.24, 0.35   # estimated weight of a printed part: volume x density x fill
+HEAVY_KG, HEAVY_MM = 2.0, 400.0                  # default warning thresholds (the split's "guide" settings override)
 
 
 # ── Reports ────────────────────────────────────────────────────────────────────
@@ -78,11 +80,13 @@ class Step:
     connectors: dict
     glue_only: bool
     section: str | None    # the letter of the Section joined, for kind "section"
+    warnings: tuple = ()   # typed notes that do not block: see step_warnings()
 
     def to_dict(self) -> dict:
         return {"id": self.id, "kind": self.kind, "parts": list(self.parts), "receiver": list(self.receiver),
                 "direction": list(self.direction), "rods": self.rods, "connectors": self.connectors,
-                "glue_only": self.glue_only, "section": self.section}
+                "glue_only": self.glue_only, "section": self.section,
+                "warnings": [dict(w) for w in self.warnings]}
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,7 @@ class Plan:
     sections: tuple       # in page order: side Sections first, Main (A) last
     fingerprint: str
     fallback_reason: str = ""   # why the cut tree was not used (the fallback planner made this plan), else ""
+    unlabelled: tuple = ()      # parts the engine left without a printed number
 
     @property
     def code(self) -> str:
@@ -120,7 +125,8 @@ class Plan:
 
     def to_dict(self) -> dict:
         return {"sections": [s.to_dict() for s in self.sections], "summary": self.summary(),
-                "fingerprint": self.fingerprint, "code": self.code, "fallback_reason": self.fallback_reason}
+                "fingerprint": self.fingerprint, "code": self.code, "fallback_reason": self.fallback_reason,
+                "unlabelled": list(self.unlabelled), "warnings": plan_warnings(self)}
 
 
 @dataclass(frozen=True)
@@ -204,6 +210,7 @@ class SplitModel:
         parts = sorted(result.get("parts") or [], key=lambda p: p["number"])
         self.numbers = [p["number"] for p in parts]
         self.volume = {p["number"]: float(p["volume_cm3"]) for p in parts}
+        self.unlabelled = tuple(sorted(n for n in result.get("unlabelled") or [] if n in self.volume))
         self.box = {p["number"]: np.asarray(p["bbox"], float).reshape(2, 3) for p in parts}
         self.joints = {_pair(*j["parts"]): j for j in result.get("joints") or []}
         self.pins = {}
@@ -660,10 +667,15 @@ def _finish(drafts: list) -> tuple:
     return tuple(sections), hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
 
-def build_plan(model: SplitModel, fallback=None) -> PlanResult:
+def build_plan(model: SplitModel, fallback=None, heavy_kg: float = HEAVY_KG, heavy_mm: float = HEAVY_MM) -> PlanResult:
     """The plan for a split, or the typed report of why it cannot be assembled as cut. When the cut tree can't be read
     (no cut history, several input bodies, a joint with several cuts) `fallback(model, reason)` is asked for a PlanResult
-    instead: `fallback_plan` by default, or nothing at all with `fallback=False` (the tree planner alone)."""
+    instead: `fallback_plan` by default, or nothing at all with `fallback=False` (the tree planner alone).
+    `heavy_kg` / `heavy_mm` are the heavy-join warning thresholds."""
+    return add_warnings(model, _build(model, fallback), heavy_kg, heavy_mm)
+
+
+def _build(model: SplitModel, fallback) -> PlanResult:
     if fallback is None:
         fallback = fallback_plan
     if not model.numbers:
@@ -943,3 +955,64 @@ def fallback_plan(model: SplitModel, reason: str = "") -> PlanResult:
     except _Stop as stop:
         return PlanResult(failure=stop.failure)
     return PlanResult(plan=Plan(sections, fingerprint, reason))
+
+
+# ── Warnings: notes on the plan that never block it ────────────────────────────
+
+HEAVY_JOIN = "heavy_join"
+
+
+def unit_estimate(model: SplitModel, parts) -> tuple:
+    """(estimated weight in kg, longest edge in mm) of the unit made of `parts`, as printed."""
+    parts = [p for p in parts if p in model.box]
+    if not parts:
+        return 0.0, 0.0
+    grams = sum(model.volume[p] for p in parts) * FILAMENT_G_PER_CM3 * FILL_FRACTION
+    low = np.min([model.box[p][0] for p in parts], axis=0)
+    high = np.max([model.box[p][1] for p in parts], axis=0)
+    return grams / 1000.0, float(np.max(high - low))
+
+
+def step_warnings(model: SplitModel, parts, heavy_kg: float = HEAVY_KG, heavy_mm: float = HEAVY_MM) -> tuple:
+    """The warnings for a step that moves the unit `parts` (a Section's parts for a Section step). The step-page code
+    reads them from Step.warnings; each warning is {"kind", "message", ...figures}."""
+    kg, mm = unit_estimate(model, parts)
+    if kg > heavy_kg or mm > heavy_mm:
+        return ({"kind": HEAVY_JOIN, "message": "Heavy join: get a helper or support it.",
+                 "weight_kg": round(kg, 2), "longest_mm": round(mm), "heavy_kg": heavy_kg, "heavy_mm": heavy_mm},)
+    return ()
+
+
+def add_warnings(model: SplitModel, result: PlanResult, heavy_kg: float = HEAVY_KG, heavy_mm: float = HEAVY_MM) -> PlanResult:
+    """The same result with each step's warnings and the plan's unlabelled parts filled in. Warnings are not part of the plan code."""
+    if not result.plan:
+        return result
+    by_letter = {s.letter: s for s in result.plan.sections}
+    sections = []
+    for section in result.plan.sections:
+        steps = tuple(replace(st, warnings=step_warnings(
+            model, by_letter[st.section].parts if st.kind == "section" and st.section in by_letter else st.parts, heavy_kg, heavy_mm))
+            for st in section.steps)
+        sections.append(replace(section, steps=steps))
+    return PlanResult(plan=replace(result.plan, sections=tuple(sections), unlabelled=model.unlabelled))
+
+
+def unlabelled_text(parts) -> str:
+    parts = list(parts)
+    if not parts:
+        return ""
+    who = f"Part {parts[0]} has" if len(parts) == 1 else "Parts " + ", ".join(str(p) for p in parts) + " have"
+    return f"{who} no number printed on them: tell them apart by size and shape."
+
+
+def plan_warnings(plan: Plan) -> list:
+    """Every warning in reading order, flat: disconnected parts and heavy joins by Section, then unlabelled parts."""
+    out = []
+    for section in plan.sections:
+        if section.disconnected and section.note:
+            out.append({"kind": DISCONNECTED, "section": section.letter, "message": section.note})
+        for step in section.steps:
+            out += [{**w, "step": step.id, "section": section.letter} for w in step.warnings]
+    if plan.unlabelled:
+        out.append({"kind": "unlabelled", "parts": list(plan.unlabelled), "message": unlabelled_text(plan.unlabelled)})
+    return out
