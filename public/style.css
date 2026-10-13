@@ -670,6 +670,9 @@ main {
 }
 .toast-btn:hover { opacity: .85; }
 .toast-btn:focus-visible, .toast-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Toast text never blocks a control underneath (e.g. a dialog button on a phone); its own buttons still work */
+#toast-area, .toast { pointer-events: none; }
+.toast button { pointer-events: auto; }
 .toast.error { display: flex; align-items: flex-start; gap: 12px; }
 .toast .toast-msg { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .toast-close {
