@@ -137,8 +137,10 @@ function jobProgress(job) {
 function renderQueue() {
   const openCount = queueJobs.filter(j => JOB_OPEN_STATES.includes(j.state)).length;
   const badge = document.getElementById("queue-count");
-  badge.hidden = !openCount;
+  badge.hidden = false;
   badge.textContent = openCount;
+  badge.classList.toggle("is-zero", !openCount);
+  badge.title = openCount ? `${openCount} waiting` : "Nothing waiting";
 
   const body = document.getElementById("queue-body");
   if (!document.getElementById("panel-queue").classList.contains("open")) return;

@@ -531,16 +531,10 @@ function renderPrinter(printer) {
     grid.appendChild(card);
   }
   card.classList.add("printer-card-interactive");
-  card.tabIndex = 0;
-  card.setAttribute("aria-label", `${printer.name}, ${printer.connected ? "Connected" : "Offline"}. Open printer controls`);
+  card.removeAttribute("tabindex");   // the card title is the one keyboard control; the rest of the card is a mouse convenience
+  card.removeAttribute("aria-label");
   card.onclick = (event) => {
-    if (!event.target.closest("button, input, select, a, label")) openPrinterDashboard(printer.id);
-  };
-  card.onkeydown = (event) => {
-    if ((event.key === "Enter" || event.key === " ") && event.target === card) {
-      event.preventDefault();
-      openPrinterDashboard(printer.id);
-    }
+    if (event.target.closest(".card-title-btn") || !event.target.closest("button, input, select, a, label")) openPrinterDashboard(printer.id);
   };
 
   const status   = getPrintStatus(printer);
@@ -579,7 +573,7 @@ function renderPrinter(printer) {
     <div class="card-header">
       <div class="status-dot ${sc}"></div>
       <div class="card-header-info">
-        <div class="card-title">${escHtml(printer.name)}</div>
+        <div class="card-title"><button type="button" class="card-title-btn" aria-label="${escAttr(`${printer.name}, ${printer.connected ? "Connected" : "Offline"}. Open printer controls`)}">${escHtml(printer.name)}</button></div>
         <div class="card-subtitle">${escHtml(printer.ip)}${printer.attrs?.FirmwareVersion ? ` · fw ${escHtml(printer.attrs.FirmwareVersion)}` : ""}</div>
       </div>
       <span class="status-badge ${sc}">${status}</span>
@@ -746,16 +740,18 @@ function renderPrinter(printer) {
       <button class="btn btn-secondary btn-sm" onclick="QuickPrint.pick({ printerId: '${escAttr(printer.id)}' })"
               title="Pick a model or G-code file and print it on ${escAttr(printer.name)} without making a Project" aria-label="Quick print on ${escAttr(printer.name)}" ${!connected ? "disabled" : ""}>Quick print here</button>
       <div class="controls-spacer"></div>
-      <button class="btn btn-sm ${lightOn ? "btn-primary" : "btn-secondary"}"
+      <button class="btn btn-sm btn-toggle card-light-toggle ${lightOn ? "is-on" : ""}"
               onclick="printerAction('${escAttr(printer.id)}','${lightOn ? "light_off" : "light_on"}')"
               title="${lightOn ? "Turn chamber light off" : "Turn chamber light on"}"
               aria-label="${escAttr(`${lightOn ? "Turn chamber light off" : "Turn chamber light on"} – ${printer.name}`)}"
               aria-pressed="${lightOn}"
               ${!connected ? "disabled" : ""}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="5"/>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <circle cx="12" cy="12" r="5"${lightOn ? ' fill="currentColor"' : ""}/>
           <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+          ${lightOn ? "" : '<path d="M3 3l18 18"/>'}
         </svg>
+        <span class="toggle-state" aria-hidden="true">${lightOn ? "On" : "Off"}</span>
       </button>
       ${(printing || paused) ? (() => {
         const sf = printer.printer_type === "cc2"
@@ -1413,9 +1409,35 @@ const sidePanelFocus = new WeakMap();
 let activeSidePanel = null;
 const sidePanelFocusable = 'button:not([disabled]), a[href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+// History, Spools and Queue are routes too (#history, #spools, #queue): Back closes the open panel and a link to one opens it.
+// The hash is only touched from the bare dashboard or from another panel, never while a printer or Project page is showing.
+const PANEL_ROUTES = { "panel-history": "#history", "panel-spools": "#spools", "panel-queue": "#queue" };
+const PANEL_OPENERS = { "#history": "btn-history", "#spools": "btn-spools", "#queue": "btn-queue" };
+const PANEL_CLOSERS = { "panel-history": "btn-history-close", "panel-spools": "btn-spools-close", "panel-queue": "btn-queue-close" };
+function _routePanelOpen(panel) {
+  const route = PANEL_ROUTES[panel.id];
+  if (!route || location.hash === route) return;
+  if (location.hash === "") location.hash = route;
+  else if (PANEL_OPENERS[location.hash]) history.replaceState(null, "", route);
+}
+function _routePanelClose(panel) {
+  const route = PANEL_ROUTES[panel.id];
+  if (!route || location.hash !== route) return;
+  history.replaceState(null, "", location.pathname + location.search);   // in place: a Back would land after whatever the click that closed it goes on to do
+}
+window.addEventListener("hashchange", () => {
+  const wanted = PANEL_OPENERS[location.hash];
+  const open = document.querySelector(".side-panel.open");
+  if (wanted) {
+    const panelId = Object.keys(PANEL_ROUTES).find(id => PANEL_ROUTES[id] === location.hash);
+    if (!document.getElementById(panelId)?.classList.contains("open")) document.getElementById(wanted)?.click();
+  } else if (open && PANEL_ROUTES[open.id]) document.getElementById(PANEL_CLOSERS[open.id])?.click();   // its own close handler also clears the nav item
+});
+document.addEventListener("DOMContentLoaded", () => { const id = PANEL_OPENERS[location.hash]; if (id) document.getElementById(id)?.click(); });
+
 window.openSidePanel = function openSidePanel(panel, opener = document.activeElement) {
   if (!panel) return;
-  if (activeSidePanel && activeSidePanel !== panel) window.closeSidePanel(activeSidePanel, false);
+  if (activeSidePanel && activeSidePanel !== panel) window.closeSidePanel(activeSidePanel, false, false);
   sidePanelFocus.set(panel, opener instanceof HTMLElement ? opener : null);
   panel.inert = false;
   panel.setAttribute("aria-hidden", "false");
@@ -1423,6 +1445,7 @@ window.openSidePanel = function openSidePanel(panel, opener = document.activeEle
   document.getElementById("panel-backdrop")?.classList.add("open");
   document.body.classList.add("panel-open");
   activeSidePanel = panel;
+  _routePanelOpen(panel);
   requestAnimationFrame(() => {
     if (panel.classList.contains("open") && !panel.contains(document.activeElement) && !document.querySelector(".modal.open")) {
       panel.querySelector(sidePanelFocusable)?.focus();
@@ -1430,8 +1453,9 @@ window.openSidePanel = function openSidePanel(panel, opener = document.activeEle
   });
 };
 
-window.closeSidePanel = function closeSidePanel(panel, restoreFocus = true) {
+window.closeSidePanel = function closeSidePanel(panel, restoreFocus = true, route = true) {
   if (!panel) return;
+  if (route) _routePanelClose(panel);
   panel.classList.remove("open");
   panel.setAttribute("aria-hidden", "true");
   panel.inert = true;
