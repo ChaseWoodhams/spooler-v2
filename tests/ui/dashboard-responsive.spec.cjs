@@ -207,6 +207,28 @@ const viewports = [
       && !await page.locator("#spools-empty").isVisible();
     console.log(`Spool dependency failure ${inventoryFailureClear ? "PASS" : "FAIL"}`);
     if (!inventoryFailureClear) process.exitCode = 1;
+
+    // Toasts: announced, clear of the bottom nav, errors persist and can be dismissed, action slot works
+    await page.evaluate(() => { window.__undone = 0; toast("Saved fixture"); toast("Fixture failed to save", true); toastAction("Removed fixture", "Undo", () => window.__undone++); });
+    await page.waitForTimeout(400);  // let the entrance animation finish
+    const toastBox = await page.locator("#toast-area").evaluate(area => {
+      const nav = document.querySelector(".sidenav").getBoundingClientRect();
+      const boxes = [...area.querySelectorAll(".toast")].map(t => t.getBoundingClientRect());
+      return { live: area.getAttribute("role") === "status" && area.getAttribute("aria-live") === "polite",
+        clear: boxes.length >= 3 && boxes.every(b => b.bottom <= nav.top && b.left >= 0 && b.right <= innerWidth) };
+    });
+    await page.locator(".toast-btn", { hasText: "Undo" }).focus();
+    await page.keyboard.press("Enter");
+    const undone = await page.evaluate(() => window.__undone === 1 && !document.querySelector(".toast-action"));
+    await page.waitForTimeout(5000);
+    const successGone = await page.locator(".toast", { hasText: "Saved fixture" }).count() === 0;
+    const errorToast = page.locator(".toast.error");
+    const errorPersists = await errorToast.count() === 1 && await errorToast.getAttribute("role") === "alert";
+    await errorToast.getByRole("button", { name: "Dismiss" }).click();
+    const errorDismissed = await errorToast.count() === 0;
+    const toastPass = toastBox.live && toastBox.clear && undone && successGone && errorPersists && errorDismissed;
+    console.log(`Toasts ${toastPass ? "PASS" : "FAIL"}`, JSON.stringify({ toastBox, undone, successGone, errorPersists, errorDismissed }));
+    if (!toastPass) process.exitCode = 1;
     await page.close();
   } finally {
     if (browser) await browser.close();
