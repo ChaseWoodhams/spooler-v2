@@ -89,6 +89,43 @@ const fixtures = [0, 3, 15, 6, 9, 14, 0].map((code, i) => ({
    if(hovered.ratio < hovered.required)failures.push({theme,state,...hovered});
    console.log(`${theme}/${state} focus ${JSON.stringify(measurements.focus)}`);
    if(!measurements.focus.focusVisible || measurements.focus.style==='none' || measurements.focus.width < 2 || measurements.focus.ratio < 3) failures.push({theme,state,...measurements.focus});
+   if (state === 'connected') {
+    // Text painted on the accent: every site that fills with --accent-fill must keep white text at >= 4.5:1.
+    await page.addStyleTag({ url: `http://127.0.0.1:${server.address().port}/slicer.css` });
+    await page.evaluate(() => openPrinterDashboard('theme-1'));
+    await page.waitForFunction(() => typeof window.cockpitPrinterHtml === 'function');
+    await page.evaluate(() => renderPrinterDetail(printers['theme-1']));
+    await page.locator('.pv-chip.on').waitFor();
+    const accent = await page.evaluate(() => {
+     const parse = color => color.match(/[\d.]+/g).slice(0, 3).map(Number);
+     const luminance = color => { const c = parse(color).map(v => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return c[0] * .2126 + c[1] * .7152 + c[2] * .0722; };
+     const contrast = (a, b) => { const x = luminance(a), y = luminance(b); return (Math.max(x, y) + .05) / (Math.min(x, y) + .05); };
+     const probe = (html, selector) => { const host = document.createElement('div'); host.innerHTML = html; document.body.appendChild(host); return host.querySelector(selector); };
+     const targets = {
+      '--accent-fill token': probe('<span style="background:var(--accent-fill);color:#fff">x</span>', 'span'),
+      '.toast-btn': probe('<button class="toast-btn">Undo</button>', 'button'),
+      '.sidenav-badge': probe('<span class="sidenav-badge">3</span>', 'span'),
+      '.needs-count': probe('<span class="needs-count">3</span>', 'span'),
+      '.review-view-toggle .btn.active': probe('<div class="review-view-toggle"><button class="btn active">3D</button></div>', 'button'),
+      '.slicer-step.active .num': probe('<div class="slicer-step active"><span class="num">1</span></div>', '.num'),
+      '.slicer-mode .btn.active': probe('<div class="slicer-mode"><button class="btn active">Plan</button></div>', 'button'),
+      '.slicer-tabs .btn.active': probe('<div class="slicer-tabs"><button class="btn active">Quality</button></div>', 'button'),
+      '.slicer-toolbar .btn.active': probe('<div class="slicer-toolbar"><button class="btn active">Move</button></div>', 'button'),
+      '.scope-toggle button.active': probe('<div class="scope-toggle"><button class="active">Plate</button></div>', 'button'),
+      '.pv-chip.on': document.querySelector('.pv-chip.on'),
+     };
+     const rows = Object.entries(targets).map(([selector, el]) => { const style = getComputedStyle(el); if (!el || !style.backgroundColor.startsWith('rgb')) throw new Error(selector + ' bg=' + (el && style.backgroundColor));  if (!/^rgb/.test(style.color)) throw new Error(selector + ' color=' + style.color); return { selector, color: style.color, background: style.backgroundColor, ratio: contrast(style.color, style.backgroundColor), required: 4.5 }; });
+     const chip = document.querySelector('.pv-chip.on'), idle = document.querySelector('.pv-chip:not(.on)');
+     const cue = { weight: parseInt(getComputedStyle(chip).fontWeight, 10), idleWeight: parseInt(getComputedStyle(idle).fontWeight, 10), mark: getComputedStyle(chip, '::before').content };
+     return { rows, cue };
+    });
+    for (const row of accent.rows) {
+     console.log(`${theme} accent-fill ${row.selector} ${row.color} on ${row.background} = ${row.ratio.toFixed(2)}:1`);
+     if (row.ratio < row.required) failures.push({ theme, state, ...row });
+    }
+    console.log(`${theme} selected jog chip cue ${JSON.stringify(accent.cue)}`);
+    if (!(accent.cue.weight > accent.cue.idleWeight) || !/2713|✓/.test(accent.cue.mark)) failures.push({ theme, state, selector: '.pv-chip.on non-colour cue', ...accent.cue });
+   }
    for(const item of measurements.motion) if(item.animation > .01 || item.transition > .01 || (item.animation > 0 && item.iterations==='infinite')) failures.push({theme,state,motion:item});
    await context.close();
   }
