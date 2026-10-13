@@ -937,124 +937,15 @@ function renderPrinterDetail(printer) {
   const cameraUrl = connected && printer.camera_url ? `/api/camera/${encodeURIComponent(printer.id)}` : null;
   const disableMotion = controlsEnabled ? "" : "disabled";
   const disableConnected = connected && printer.printer_type === "cc1" ? "" : "disabled";
-  const stepButton = value => `<button class="detail-step ${_detailJogStep === value ? "active" : ""}" aria-pressed="${_detailJogStep === value}" onclick="setJogStep(${value})">${value} mm</button>`;
-  const fanControl = (key, label, value) => `
-    <div class="detail-control-row">
-      <div class="detail-control-label"><span>${label}</span><strong id="detail-${key}-value">${value}%</strong></div>
-      <input class="detail-slider" type="range" min="0" max="100" step="5" value="${value}" aria-label="${label}"
-             oninput="document.getElementById('detail-${key}-value').textContent=this.value+'%'"
-             onchange="setPrinterFan('${escAttr(printer.id)}','${key}',+this.value)" ${disableConnected}>
-    </div>`;
 
-  // Cockpit layout lives in printer-cockpit.js; the original markup below is the fallback if it fails to load.
+  // Cockpit layout lives in printer-cockpit.js, which index.html always loads.
   const cockpitHtml = window.cockpitPrinterHtml?.({
     printer, status, sc, connected, controlsEnabled, coords, nozzle, nozzleTarget, bed, bedTarget, chamber,
     modelFan, auxiliaryFan, chamberFan, lightOn, printing, paused, detailProgress, detailFilename,
     detailRemaining, speed, cameraUrl, disableMotion, disableConnected, jogStep: _detailJogStep,
     hw: _hwView(printer.id), jogBusy: _hwBusy(printer.id, "jog"),
   });
-  detail.innerHTML = cockpitHtml ?? `
-    <div class="detail-nav">
-      <button class="detail-back" onclick="returnToPrinterGrid()" aria-label="Back to all printers">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
-        All printers
-      </button>
-      <div class="detail-nav-title">
-        <div class="status-dot ${sc}"></div>
-        <div><h1>${escHtml(printer.name)}</h1><p>${escHtml(printer.ip)}${printer.attrs?.FirmwareVersion ? ` · firmware ${escHtml(printer.attrs.FirmwareVersion)}` : ""}</p></div>
-      </div>
-      <span class="status-badge ${sc}">${status}</span>
-    </div>
-
-    <div class="detail-layout">
-      <div class="detail-column">
-        <section class="detail-panel detail-motion-panel">
-          <div class="detail-panel-heading"><div><span class="detail-eyebrow">Motion</span><h2>Printer control</h2></div><span class="detail-safety ${controlsEnabled ? "ready" : ""}">${controlsEnabled ? "Ready to move" : connected ? `Locked while ${status}` : "Printer offline"}</span></div>
-          <div class="detail-coordinates">
-            <div><span>X</span><strong>${_coordText(coords.x)}</strong><small>mm</small></div>
-            <div><span>Y</span><strong>${_coordText(coords.y)}</strong><small>mm</small></div>
-            <div><span>Z</span><strong>${_coordText(coords.z)}</strong><small>mm</small></div>
-          </div>
-          <div class="detail-step-picker" role="group" aria-label="Jog distance">${[0.1, 1, 10].map(stepButton).join("")}</div>
-          <div class="motion-layout">
-            <div class="z-jog">
-              <button onclick="jogPrinter('${escAttr(printer.id)}','Z',1)" ${disableMotion} title="Move Z positive">Z+</button>
-              <button class="motion-home" onclick="homePrinter('${escAttr(printer.id)}','Z')" ${disableMotion} title="Home Z" aria-label="Home Z axis">⌂</button>
-              <button onclick="jogPrinter('${escAttr(printer.id)}','Z',-1)" ${disableMotion} title="Move Z negative">Z−</button>
-            </div>
-            <div class="xy-jog" role="group" aria-label="X and Y movement controls">
-              <button class="jog-y-plus" onclick="jogPrinter('${escAttr(printer.id)}','Y',1)" ${disableMotion} title="Move Y positive">Y+</button>
-              <button class="jog-x-minus" onclick="jogPrinter('${escAttr(printer.id)}','X',-1)" ${disableMotion} title="Move X negative">X−</button>
-              <button class="motion-home jog-home" onclick="homePrinter('${escAttr(printer.id)}','XY')" ${disableMotion} title="Home X and Y" aria-label="Home X and Y axes">⌂</button>
-              <button class="jog-x-plus" onclick="jogPrinter('${escAttr(printer.id)}','X',1)" ${disableMotion} title="Move X positive">X+</button>
-              <button class="jog-y-minus" onclick="jogPrinter('${escAttr(printer.id)}','Y',-1)" ${disableMotion} title="Move Y negative">Y−</button>
-            </div>
-            <div class="home-stack">
-              <button onclick="homePrinter('${escAttr(printer.id)}','X')" ${disableMotion}>Home X</button>
-              <button onclick="homePrinter('${escAttr(printer.id)}','Y')" ${disableMotion}>Home Y</button>
-              <button class="home-all" onclick="homePrinter('${escAttr(printer.id)}','XYZ')" ${disableMotion}>Home all</button>
-            </div>
-          </div>
-          <p class="detail-help">Motion controls are locked whenever a print is active. Start with 0.1 mm or 1 mm and keep the chamber clear.</p>
-        </section>
-
-        <section class="detail-panel detail-environment-panel">
-          <div class="detail-panel-heading"><div><span class="detail-eyebrow">Airflow & light</span><h2>Environment</h2></div></div>
-          <div class="fan-grid">
-            ${fanControl("model", "Model fan", modelFan)}
-            ${fanControl("auxiliary", "Side fan", auxiliaryFan)}
-            ${fanControl("chamber", "Chamber fan", chamberFan)}
-            <div class="detail-light-control">
-              <span>Chamber lighting</span>
-              <button class="detail-toggle ${lightOn ? "active" : ""}" onclick="printerAction('${escAttr(printer.id)}','${lightOn ? "light_off" : "light_on"}')" ${connected ? "" : "disabled"} aria-pressed="${lightOn}" aria-label="Chamber lighting"><span></span></button>
-            </div>
-          </div>
-          <div class="detail-speed-row">
-            <div class="detail-control-label"><span>Print speed</span><strong id="detail-speed-value">${speed}%</strong></div>
-            <input class="detail-slider" type="range" min="10" max="200" step="5" value="${speed}" aria-label="Print speed"
-                   ${printing || paused ? "" : 'title="Available while a print is running"'}
-                   oninput="document.getElementById('detail-speed-value').textContent=this.value+'%'"
-                   onchange="setSpeed('${escAttr(printer.id)}',+this.value)" ${printing || paused ? "" : "disabled"}>
-          </div>
-        </section>
-
-      </div>
-
-      <div class="detail-column detail-column-monitor">
-        <section class="detail-panel detail-camera-panel">
-          <div class="detail-panel-heading"><div><span class="detail-eyebrow">Live view</span><h2>Monitoring</h2></div><span class="live-chip${cameraUrl ? "" : " offline"}" id="detail-live-chip">${cameraUrl ? "● Live" : "○ No signal"}</span></div>
-          <div class="detail-camera"><div class="camera-placeholder" style="display:flex"><span>${connected ? "Camera unavailable" : "Printer offline"}</span></div></div>
-        </section>
-
-        <section class="detail-panel detail-temperature-panel">
-          <div class="detail-panel-heading"><div><span class="detail-eyebrow">Thermal</span><h2>Temperature</h2></div></div>
-          <div class="detail-temperature-list">
-            <div class="detail-temperature-row"><div><span>Nozzle</span><strong class="${tempColor(nozzle)}">${nozzle.toFixed(1)} °C</strong></div><div class="temperature-target"><input id="detail-nozzle-target" type="number" min="0" max="300" value="${Math.round(nozzleTarget)}" aria-label="Nozzle target temperature (°C)" ${disableConnected}><span>°C</span><button onclick="setPrinterTemperature('${escAttr(printer.id)}','nozzle','detail-nozzle-target')" aria-label="Apply nozzle target" ${disableConnected}>Apply</button></div></div>
-            <div class="detail-temperature-row"><div><span>Heated bed</span><strong class="${tempColor(bed)}">${bed.toFixed(1)} °C</strong></div><div class="temperature-target"><input id="detail-bed-target" type="number" min="0" max="110" value="${Math.round(bedTarget)}" aria-label="Heated bed target temperature (°C)" ${disableConnected}><span>°C</span><button onclick="setPrinterTemperature('${escAttr(printer.id)}','bed','detail-bed-target')" aria-label="Apply heated bed target" ${disableConnected}>Apply</button></div></div>
-            <div class="detail-temperature-row"><div><span>Chamber</span><strong class="${tempColor(chamber)}">${chamber.toFixed(1)} °C</strong></div><span class="temperature-readonly">Sensor only</span></div>
-          </div>
-          <p class="detail-help">Set a target to 0 °C to turn that heater off.</p>
-        </section>
-
-        <section class="detail-panel detail-files-panel">
-          <div class="detail-panel-heading"><div><span class="detail-eyebrow">Jobs</span><h2>Printer files</h2></div><button class="btn btn-primary" onclick="openFileBrowser('${escAttr(printer.id)}')">Browse & start print</button></div>
-          <p class="detail-help">Select a file already on this printer, review its print options, and start it from the existing protected workflow.</p>
-          ${(printing || paused) ? `
-            <div class="detail-active-job">
-              <div class="detail-active-job-heading">
-                <div><span class="detail-job-label">Current print</span><strong title="${escAttr(detailFilename)}">${escHtml(detailFilename || "Print in progress")}</strong></div>
-                <span class="detail-job-state ${paused ? "paused" : "printing"}">${paused ? "Paused" : "Printing"}</span>
-              </div>
-              <div class="detail-job-progress" role="progressbar" aria-label="Print progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${detailProgress ?? 0}"><span style="width:${detailProgress ?? 0}%"></span></div>
-              <div class="detail-job-meta"><span>${detailProgress == null ? "Progress unavailable" : `${detailProgress}% complete`}</span><span>${detailRemaining > 0 ? `${formatTime(detailRemaining)} remaining` : "Time remaining unavailable"}</span></div>
-            </div>
-            <div class="detail-job-actions">
-              ${printing ? `<button class="btn btn-secondary detail-job-primary" onclick="printerAction('${escAttr(printer.id)}','pause')">Pause print</button>` : `<button class="btn btn-primary detail-job-primary" onclick="printerAction('${escAttr(printer.id)}','resume')">Resume print</button>`}
-              <button class="btn btn-danger detail-job-stop" onclick="confirmStop('${escAttr(printer.id)}')">Stop print</button>
-            </div>` : ""}
-        </section>
-      </div>
-    </div>`;
+  detail.innerHTML = cockpitHtml ?? "";
 
   const camera = detail.querySelector(".detail-camera");
   const placeholder = camera.querySelector(".camera-placeholder");
@@ -1303,56 +1194,6 @@ async function confirmStop(id) {
     confirmLabel: "Stop print",
     danger: true,
   })) send({ action: "stop", printer_id: id });
-}
-
-async function removePrinter(id) {
-  if (await confirmDialog({
-    title: `Remove ${printers[id]?.name || "this printer"}?`,
-    body: "This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.",
-    confirmLabel: "Remove printer",
-    danger: true,
-  })) send({ action: "remove_printer", printer_id: id });
-}
-
-function openPrinterSettings(id) {
-  const p = printers[id];
-  if (!p) return;
-  _editingPrinterId = id;
-
-  document.getElementById("input-name").value = p.name || "";
-  document.getElementById("input-ip").value = p.ip || "";
-  document.getElementById("input-ip").required = true;
-  document.getElementById("input-name").required = true;
-  inputType.value = p.printer_type || "cc1";
-  inputType.style.display = "none";
-  document.getElementById("input-type-readonly").style.display = "";
-  const typeLabels = {
-    cc1:       "CC1 – Centauri Carbon 1 (WebSocket/SDCP)",
-    cc2:       "CC2 – Centauri Carbon 2 (MQTT)",
-    prusa:     "Prusa – PrusaLink HTTP API",
-    moonraker: "Klipper – Moonraker HTTP API",
-  };
-  document.getElementById("input-type-readonly").textContent = typeLabels[p.printer_type] || typeLabels.cc1;
-  const needsKey = p.printer_type === "cc2" || p.printer_type === "prusa" || p.printer_type === "moonraker";
-  const keyLabel = _printerCredentialLabel(p.printer_type);
-  const keyHint  = p.printer_type === "moonraker"
-    ? "API key (optional)"
-    : p.printer_type === "prusa" ? "API key from PrusaLink settings" : "12345";
-  inputAccessCode.value = "";
-  inputAccessCode.placeholder = p.has_access_code ? "Leave blank to keep current" : keyHint;
-  inputAccessCode.required = ["cc2", "prusa"].includes(p.printer_type) && !p.has_access_code;
-  document.getElementById("label-access-code-text").textContent = keyLabel;
-  labelAccessCode.style.display = needsKey ? "flex" : "none";
-
-  document.getElementById("printer-panel-title").textContent = p.name || "Edit Printer";
-  document.getElementById("printer-discover-section").style.display = "none";
-  document.getElementById("printer-panel-divider").style.display = "none";
-  document.getElementById("printer-form-label").textContent = "Printer details";
-  document.getElementById("btn-modal-confirm").innerHTML = "Save Changes";
-  showDangerZone("btn-remove-printer", true);
-
-  openPrinters();
-  document.getElementById("input-name").focus();
 }
 
 // ─── Sign out ─────────────────────────────────────────────────────────────────
@@ -2160,8 +2001,6 @@ const inputType       = document.getElementById("input-type");
 const labelAccessCode = document.getElementById("label-access-code");
 const inputAccessCode = document.getElementById("input-access-code");
 
-let _editingPrinterId = null;
-
 function _printerCredentialLabel(type) {
   if (type === "cc2") return "MQTT Password (required)";
   if (type === "prusa") return "PrusaLink API Key (required)";
@@ -2170,7 +2009,6 @@ function _printerCredentialLabel(type) {
 
 
 function resetPrinterForm() {
-  _editingPrinterId = null;
   document.getElementById("input-ip").value = "";
   document.getElementById("input-ip").required = true;
   document.getElementById("input-ip").removeAttribute("aria-invalid");
@@ -2178,23 +2016,12 @@ function resetPrinterForm() {
   document.getElementById("input-name").value = "";
   document.getElementById("input-name").required = false;
   inputType.value = "cc1";
-  inputType.style.display = "";
-  document.getElementById("input-type-readonly").style.display = "none";
   inputAccessCode.value = "";
   inputAccessCode.required = false;
   inputAccessCode.removeAttribute("aria-invalid");
   document.getElementById("input-access-code-error").hidden = true;
   inputAccessCode.placeholder = "12345";
   labelAccessCode.style.display = "none";
-
-  document.getElementById("printer-panel-title").textContent = "Add Printer";
-  document.getElementById("printer-discover-section").style.display = "";
-  document.getElementById("printer-panel-divider").style.display = "";
-  document.getElementById("printer-form-label").textContent = "Add manually";
-  document.getElementById("btn-modal-confirm").innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-    <path d="M12 5v14M5 12h14"/>
-  </svg> Add Printer`;
-  showDangerZone("btn-remove-printer", false);
 }
 
 inputType.addEventListener("change", () => {
@@ -2206,7 +2033,7 @@ inputType.addEventListener("change", () => {
   document.getElementById("input-access-code").placeholder =
     inputType.value === "moonraker" ? "API key (optional)"
     : inputType.value === "prusa" ? "API key from PrusaLink settings" : "12345";
-  inputAccessCode.required = ["cc2", "prusa"].includes(inputType.value) && !_editingPrinterId;
+  inputAccessCode.required = ["cc2", "prusa"].includes(inputType.value);
 });
 document.getElementById("input-ip")?.addEventListener("input", event => {
   if (!event.target.value.trim()) return;
@@ -2333,35 +2160,11 @@ document.getElementById("btn-modal-confirm").addEventListener("click", () => {
   const name        = document.getElementById("input-name").value.trim();
   const access_code = inputAccessCode.value.trim();
   const ipError = document.getElementById("input-ip-error");
-  const credentialRequired = ["cc2", "prusa"].includes(inputType.value) && !_editingPrinterId;
+  const credentialRequired = ["cc2", "prusa"].includes(inputType.value);
   const credentialError = document.getElementById("input-access-code-error");
   if (!_validatePrinterFields({ ipInput, ipError, credentialInput: inputAccessCode, credentialError, credentialRequired })) return;
-  if (_editingPrinterId) {
-    if (!name) {
-      document.getElementById("input-name").setAttribute("aria-invalid", "true");
-      toast("Enter a printer name", true);
-      document.getElementById("input-name").focus();
-      return;
-    }
-    send({ action: "update_printer", printer_id: _editingPrinterId, name, ip, access_code });
-  } else {
-    send({ action: "add_printer", ip, name: name || undefined, printer_type: inputType.value, access_code });
-  }
+  send({ action: "add_printer", ip, name: name || undefined, printer_type: inputType.value, access_code });
   closePrinters();
-});
-
-document.getElementById("btn-remove-printer").addEventListener("click", async () => {
-  if (!_editingPrinterId) return;
-  const name = printers[_editingPrinterId]?.name || "this printer";
-  if (await confirmDialog({
-    title: `Remove ${name}?`,
-    body: "This disconnects it and removes its saved printer settings. Existing Jobs and Prints are kept.",
-    confirmLabel: "Remove printer",
-    danger: true,
-  }) && _editingPrinterId) {
-    send({ action: "remove_printer", printer_id: _editingPrinterId });
-    closePrinters();
-  }
 });
 
 // ─── File browser ─────────────────────────────────────────────────────────────
