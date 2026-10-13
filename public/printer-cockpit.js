@@ -86,13 +86,13 @@
       <div class="pv-xy">
         <i></i><button onclick="jogPrinter('${id(c)}','Y',1)" ${c.disableMotion}>Y+</button><i></i>
         <button onclick="jogPrinter('${id(c)}','X',-1)" ${c.disableMotion}>X−</button>
-        <button class="home" onclick="homePrinter('${id(c)}','XY')" ${c.disableMotion} aria-label="Home X and Y axes">⌂</button>
+        <button class="home" onclick="homePrinter('${id(c)}','XY')" ${c.disableMotion} aria-label="Home XY">⌂</button>
         <button onclick="jogPrinter('${id(c)}','X',1)" ${c.disableMotion}>X+</button>
         <i></i><button onclick="jogPrinter('${id(c)}','Y',-1)" ${c.disableMotion}>Y−</button><i></i>
       </div>
       <div class="pv-z">
         <button onclick="jogPrinter('${id(c)}','Z',1)" ${c.disableMotion}>Z+</button>
-        <button class="home" onclick="homePrinter('${id(c)}','Z')" ${c.disableMotion} aria-label="Home Z axis">⌂</button>
+        <button class="home" onclick="homePrinter('${id(c)}','Z')" ${c.disableMotion} aria-label="Home Z">⌂</button>
         <button onclick="jogPrinter('${id(c)}','Z',-1)" ${c.disableMotion}>Z−</button>
       </div>
     </div>`;

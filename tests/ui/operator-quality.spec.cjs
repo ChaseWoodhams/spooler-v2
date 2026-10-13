@@ -236,13 +236,13 @@ async function settings(fixture) {
   await expectText(page.locator('#settings-printer-edit'), /experimental.*API address.*credentials/s);
   assert.equal(fixture.commands.some(command => ['add_printer', 'update_printer'].includes(command.action)), false);
   await page.locator('#btn-settings-back-printer-edit').click();
-  await page.locator('#settings-printer-list').getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.locator('#settings-printer-list').getByRole('button', { name: /^Edit / }).click();
   await page.locator('#settings-edit-ip').fill('');
   await page.locator('#btn-settings-printer-save').click();
   assert.equal(await page.locator('#settings-edit-ip').evaluate(el => document.activeElement === el), true);
   assert.equal(fixture.commands.some(command => ['add_printer', 'update_printer'].includes(command.action)), false);
   await page.locator('#btn-settings-back-printer-edit').click();
-  await page.locator('#settings-printer-list').getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.locator('#settings-printer-list').getByRole('button', { name: /^Edit / }).click();
   await page.locator('#btn-settings-printer-remove').click();
   const removal = page.getByRole('dialog', { name: 'Remove Operator fixture printer?' });
   await removal.waitFor();
