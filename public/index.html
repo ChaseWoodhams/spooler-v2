@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=70" />
+  <link rel="stylesheet" href="style.css?v=71" />
   <link rel="stylesheet" href="history-quality.css?v=3" />
   <link rel="stylesheet" href="spool-form.css?v=2" />
   <script src="net.js?v=2"></script>
@@ -202,7 +202,6 @@
             <option value="prusa">PrusaLink (Experimental) – HTTP API</option>
             <option value="moonraker">Klipper (Experimental) – Moonraker HTTP API</option>
           </select>
-          <span id="input-type-readonly" class="settings-readonly" style="display:none"></span>
         </label>
         <p class="input-hint">PrusaLink and Klipper support is experimental. Confirm the API is enabled and reachable before adding the printer.</p>
         <label id="label-access-code" style="display:none">
@@ -218,9 +217,6 @@
             </svg>
             Add Printer
           </button>
-        </div>
-        <div class="danger-zone" style="display:none">
-          <button id="btn-remove-printer" class="btn btn-danger-quiet">Remove printer</button>
         </div>
       </div>
     </div>
@@ -884,12 +880,12 @@
   <script src="preview.js?v=5"></script>
   <script src="history.js?v=11"></script>
   <script src="outcome-prompt.js?v=6"></script>
-  <script src="app.js?v=77"></script>
+  <script src="app.js?v=78"></script>
   <script src="quick-print.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
   <script src="import.js?v=7"></script>
   <script src="dashboard.js?v=11"></script>
-  <script src="printer-cockpit.js?v=9"></script>
+  <script src="printer-cockpit.js?v=10"></script>
   <script>
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});

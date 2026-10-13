@@ -1,7 +1,7 @@
 /* Printer detail page — "Cockpit" layout: the camera is the page, HUD overlay, controls in tabs underneath.
  * Promoted from the printer-variants prototype (layouts A/C/D and the switcher were dropped).
- * app.js calls window.cockpitPrinterHtml(ctx) from renderPrinterDetail; if this file is missing it falls back
- * to the original markup. Same handlers as before — nothing new is mutated on the printer.
+ * app.js calls window.cockpitPrinterHtml(ctx) from renderPrinterDetail. Same handlers as before — nothing new is
+ * mutated on the printer.
  *
  * Full screen: the #printer-detail container is what goes fullscreen (not the camera node), because
  * renderPrinterDetail replaces its innerHTML on every status update and that would otherwise exit fullscreen.
