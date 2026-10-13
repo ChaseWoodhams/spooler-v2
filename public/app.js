@@ -2132,6 +2132,8 @@ let _printOptsFile = null;
 let _printOptsName = null;
 
 let _printOptsFilename = null; // bare filename used as key for file_info matching
+let _printOptsMeta = {};       // estimate fields from the file list / file_info
+let _printOptsBedSeq = 0;      // discards a bed check that returns after the dialog moved on
 
 function _applyFileInfo(msg) {
   // Only update if the modal is still open for the same printer+file
@@ -2149,17 +2151,107 @@ function _applyFileInfo(msg) {
     thumbWrap.style.display = "";
   }
 
-  // Stats (fill in if present and currently showing --)
-  const statsEl = document.getElementById("print-opts-stats");
-  if (msg.print_time || msg.layers || msg.filament_g) {
-    statsEl.style.display = "";
-    if (msg.print_time)
-      document.getElementById("print-opts-stat-time-val").textContent = formatTimeLong(msg.print_time);
-    if (msg.filament_g != null)
-      document.getElementById("print-opts-stat-filament-val").textContent =
-        `${parseFloat(msg.filament_g).toFixed(2)}g`;
-    if (msg.layers != null)
-      document.getElementById("print-opts-stat-layers-val").textContent = msg.layers;
+  // Estimate
+  _printOptsMeta = { ..._printOptsMeta };
+  for (const k of ["print_time", "layers", "filament_g"]) if (msg[k] != null && msg[k] !== 0) _printOptsMeta[k] = msg[k];
+  _renderPrintSummary();
+}
+
+// Last-used options are remembered per printer (a convenience only: storage may be unavailable).
+function _printOptsStoreKey(printerId) { return `printOpts:${printerId}`; }
+function _loadPrintOpts(printerId) {
+  try {
+    const o = JSON.parse(localStorage.getItem(_printOptsStoreKey(printerId)) || "null");
+    if (o && typeof o === "object") return { timelapse: !!o.timelapse, leveling: !!o.leveling, smooth_plate: !!o.smooth_plate };
+  } catch (e) { /* storage blocked or corrupt: fall back to defaults */ }
+  return { timelapse: false, leveling: false, smooth_plate: false };
+}
+function _savePrintOpts(printerId, opts) {
+  try { localStorage.setItem(_printOptsStoreKey(printerId), JSON.stringify(opts)); } catch (e) { /* ignore */ }
+}
+
+function _currentPrintOpts() {
+  return {
+    timelapse:    document.getElementById("print-opt-timelapse").checked,
+    leveling:     document.getElementById("print-opt-leveling").checked,
+    smooth_plate: document.getElementById("print-plate-smooth").dataset.selected === "1",
+  };
+}
+
+// The summary block: what is about to start, and where.
+function _renderPrintSummary() {
+  const pr = printers[_currentFilePrinterId];
+  const isHttp = pr?.printer_type === "prusa" || pr?.printer_type === "moonraker";
+  const meta = _printOptsMeta || {};
+  document.getElementById("print-opts-printer").textContent = pr?.name || _currentFilePrinterId || "";
+  document.getElementById("print-opts-filename").textContent = _printOptsName || "";
+  document.getElementById("print-opts-plate-row").style.display = isHttp ? "none" : "";
+  document.getElementById("print-opts-options-row").style.display = isHttp ? "none" : "";
+  if (!isHttp) {
+    const o = _currentPrintOpts();
+    document.getElementById("print-opts-plate").textContent = o.smooth_plate ? "Smooth (Side B)" : "Textured (Side A)";
+    const on = [o.timelapse && "Time-lapse", o.leveling && "Heated bed leveling"].filter(Boolean);
+    document.getElementById("print-opts-options").textContent = on.length ? on.join(", ") : "None";
+  }
+  const parts = [];
+  if (meta.print_time) parts.push(formatTimeLong(meta.print_time));
+  if (meta.filament_g != null) parts.push(`${parseFloat(meta.filament_g).toFixed(2)}g`);
+  else if (meta.filament_mm != null) parts.push(`${Math.round(meta.filament_mm)}mm`);
+  if (meta.layers != null) parts.push(`${meta.layers} layers`);
+  document.getElementById("print-opts-estimate").textContent = parts.length ? parts.join(" · ") : "Estimate unavailable";
+  document.getElementById("btn-print-opts-send").textContent = `Start print on ${pr?.name || "printer"}`;
+}
+
+// Same Bed cleared rule the queue uses (GET /api/printers/<id>/bed-cleared); nothing is decided client-side.
+function _setPrintBed(state, text, actionLabel) {
+  const box = document.getElementById("print-opts-bed");
+  const btn = document.getElementById("btn-print-opts-bed");
+  box.dataset.state = state;
+  document.getElementById("print-opts-bed-text").textContent = text;
+  btn.style.display = actionLabel ? "" : "none";
+  btn.textContent = actionLabel || "";
+  btn.disabled = false;
+  document.getElementById("btn-print-opts-send").disabled = state !== "clear";
+}
+
+async function _checkPrintBed() {
+  const printerId = _currentFilePrinterId;
+  const seq = ++_printOptsBedSeq;
+  _setPrintBed("checking", "Checking that the bed is clear…");
+  try {
+    const resp = await fetch(`/api/printers/${encodeURIComponent(printerId)}/bed-cleared`);
+    const status = await resp.json();
+    if (seq !== _printOptsBedSeq) return;
+    if (!resp.ok) throw new Error(status.error || "Bed check failed");
+    if (status.valid) _setPrintBed("clear", "Bed confirmed clear.");
+    else _setPrintBed("blocked", "The bed is not confirmed clear. Remove the last print, then confirm.", "Bed cleared");
+  } catch (e) {
+    if (seq !== _printOptsBedSeq) return;
+    _setPrintBed("error", "Could not check the bed. Try again before starting.", "Check again");
+  }
+}
+
+async function _confirmPrintBed() {
+  const printerId = _currentFilePrinterId;
+  const btn = document.getElementById("btn-print-opts-bed");
+  if (document.getElementById("print-opts-bed").dataset.state === "error") { _checkPrintBed(); return; }
+  btn.disabled = true;
+  try {
+    const resp = await fetch(`/api/printers/${encodeURIComponent(printerId)}/bed-cleared`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    const result = await resp.json();
+    if (printerId !== _currentFilePrinterId || !_printOptsFile) return;
+    if (!resp.ok) { toast(result.error || "Could not confirm", true); btn.disabled = false; return; }
+    if (result.started) {   // auto-start released a queued Job onto this printer: nothing left to start here
+      toast(`Bed cleared. Starting ${result.started.file_name}`);
+      closePrintOpts();
+      return;
+    }
+    _checkPrintBed();
+  } catch (e) {
+    toast("Could not confirm Bed cleared", true);
+    btn.disabled = false;
   }
 }
 
@@ -2167,36 +2259,18 @@ function openPrintOpts(filePath, fileName, meta = {}) {
   _printOptsFile = filePath;
   _printOptsName = fileName;
   _printOptsFilename = fileName; // used for file_info matching
+  _printOptsMeta = { ...meta };
   const printerType  = printers[_currentFilePrinterId]?.printer_type;
   const isCC2        = printerType === "cc2";
   const isPrusa      = printerType === "prusa";
   const isMoonraker  = printerType === "moonraker";
   const isHttpPrinter = isPrusa || isMoonraker;
 
-  // Stats bar
-  const statsEl = document.getElementById("print-opts-stats");
-  const hasStats = meta.print_time || meta.layers || meta.filament_g || meta.filament_mm;
-  statsEl.style.display = hasStats ? "" : "none";
-  if (hasStats) {
-    document.getElementById("print-opts-stat-time-val").textContent =
-      meta.print_time ? formatTimeLong(meta.print_time) : "--";
-
-    let filamentText = "--";
-    if (meta.filament_g != null)
-      filamentText = `${parseFloat(meta.filament_g).toFixed(2)}g`;
-    else if (meta.filament_mm != null)
-      filamentText = `${Math.round(meta.filament_mm)}mm`;
-    document.getElementById("print-opts-stat-filament-val").textContent = filamentText;
-
-    document.getElementById("print-opts-stat-layers-val").textContent =
-      meta.layers != null ? meta.layers : "--";
-  }
-
-  document.getElementById("print-opts-filename").textContent = fileName;
-  document.getElementById("print-opt-timelapse").checked = false;
-  document.getElementById("print-opt-leveling").checked  = false;
-  _setPrintPlate(0);
-
+  const saved = _loadPrintOpts(_currentFilePrinterId);
+  document.getElementById("print-opt-timelapse").checked = saved.timelapse;
+  document.getElementById("print-opt-leveling").checked  = saved.leveling;
+  _setPrintPlate(saved.smooth_plate ? 1 : 0);
+  _renderPrintSummary();
 
   // CC1 and CC2 support leveling/timelapse/plate; Prusa/Moonraker handle these natively
   document.getElementById("print-opts-cc1-only").style.display = isHttpPrinter ? "none" : "";
@@ -2221,12 +2295,15 @@ function openPrintOpts(filePath, fileName, meta = {}) {
   }
 
   openModal(document.getElementById("modal-print-opts"), { opener: document.activeElement, onClose: _afterPrintOptsClose });
+  _checkPrintBed();
 }
 
 function _afterPrintOptsClose() {
   _printOptsFile = null;
   _printOptsName = null;
   _printOptsFilename = null;
+  _printOptsMeta = {};
+  _printOptsBedSeq++;
 }
 function closePrintOpts() { closeModal(document.getElementById("modal-print-opts")); }
 
@@ -2239,10 +2316,14 @@ function _setPrintPlate(plateId) {
   document.getElementById("print-plate-smooth").dataset.selected   = plateId === 1 ? "1" : "";
   document.getElementById("print-plate-textured").setAttribute("aria-pressed", String(plateId === 0));
   document.getElementById("print-plate-smooth").setAttribute("aria-pressed", String(plateId === 1));
+  if (_printOptsFile) _renderPrintSummary();
 }
 
 document.getElementById("print-plate-textured").addEventListener("click", () => _setPrintPlate(0));
 document.getElementById("print-plate-smooth").addEventListener("click",   () => _setPrintPlate(1));
+document.getElementById("print-opt-timelapse").addEventListener("change", _renderPrintSummary);
+document.getElementById("print-opt-leveling").addEventListener("change", _renderPrintSummary);
+document.getElementById("btn-print-opts-bed").addEventListener("click", _confirmPrintBed);
 
 document.getElementById("btn-print-opts-cancel").addEventListener("click", closePrintOpts);
 document.getElementById("modal-print-opts").addEventListener("click", e => {
@@ -2251,20 +2332,20 @@ document.getElementById("modal-print-opts").addEventListener("click", e => {
 
 document.getElementById("btn-print-opts-send").addEventListener("click", () => {
   if (!_printOptsFile) return;
-  const opts = {
-    timelapse:    document.getElementById("print-opt-timelapse").checked,
-    leveling:     document.getElementById("print-opt-leveling").checked,
-    smooth_plate: document.getElementById("print-plate-smooth").dataset.selected === "1",
-  };
+  if (document.getElementById("print-opts-bed").dataset.state !== "clear") return;
+  const opts = _currentPrintOpts();
+  _savePrintOpts(_currentFilePrinterId, opts);
+  const name = printers[_currentFilePrinterId]?.name || "printer";
   send({
     action:     "start_print",
     printer_id: _currentFilePrinterId,
     filename:   _printOptsFile,
     print_opts: opts,
   });
+  const started = _printOptsName;
   closePrintOpts();
   closeFileBrowser();
-  toast(`Starting: ${_printOptsName}`);
+  toast(`Starting ${started} on ${name}`);
 });
 
 document.getElementById("btn-files-close").addEventListener("click", closeFileBrowser);
