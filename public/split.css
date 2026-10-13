@@ -54,4 +54,6 @@
 .split-table td:last-child { text-align: right; }
 .split-table tbody tr:hover td { background: rgba(255, 255, 255, .04); }
 .split-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+.split-assembly ol { padding-left: 18px; margin-top: 2px; }
+.split-fixes { padding-left: 18px; font-size: 13px; margin: 4px 0; }
 .split-assembly { padding-left: 18px; font-size: 13px; display: flex; flex-direction: column; gap: 3px; }

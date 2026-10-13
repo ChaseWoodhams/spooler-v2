@@ -1094,6 +1094,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json(splits.get_split(split_id, detail=True))
             elif len(parts) == 5 and parts[4] in ("preview", "parts-preview"):
                 self._send_file(splits.file_path(split_id, parts[4]), "application/octet-stream")
+            elif len(parts) == 5 and parts[4] == "assembly-plan":
+                self._json(splits.assembly_plan(split_id))
             elif len(parts) == 6 and parts[4] == "parts" and parts[5].endswith(".stl") and parts[5][:-4].isdigit():
                 path, name = splits.part_path(split_id, int(parts[5][:-4]))
                 self._send_file(path, "model/stl", download_name=name)

@@ -1043,6 +1043,7 @@ def split(work: Path) -> None:
     result = {
         "parts":    result_parts,
         "joints":   joint_list,
+        "cuts":     cuts,   # the cuts these parts were made with: the assembly plan replays them
         "assembly": assembly,
         "pins":     [{k: pin[k] for k in ("p", "axis", "connector", "diameter", "hole_diameter", "depth", "parts")} for pin in pins],
         "summary": {
