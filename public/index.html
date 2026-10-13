@@ -11,7 +11,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="stylesheet" href="style.css?v=67" />
+  <link rel="stylesheet" href="style.css?v=68" />
   <link rel="stylesheet" href="history-quality.css?v=2" />
   <link rel="stylesheet" href="spool-form.css?v=1" />
   <script src="net.js?v=2"></script>
@@ -526,16 +526,16 @@
             <span>About and release notes <small id="settings-about-version" class="settings-item-note"></small></span>
             <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
           </button>
-          <div class="settings-menu-item settings-toggle-row">
+          <label class="settings-menu-item settings-toggle-row" for="toggle-light-mode">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
             </svg>
-            <span>Light mode</span>
-            <label class="toggle-switch" style="margin-left:auto">
-              <input type="checkbox" id="toggle-light-mode" role="switch" aria-label="Light mode" />
+            <span class="settings-toggle-text"><span>Light mode</span> <small class="settings-item-note" id="light-mode-note">Saved on this device</small></span>
+            <span class="toggle-switch" style="margin-left:auto">
+              <input type="checkbox" id="toggle-light-mode" role="switch" aria-describedby="light-mode-note" />
               <span class="toggle-slider"></span>
-            </label>
-          </div>
+            </span>
+          </label>
         </div>
         <div class="modal-actions">
           <button id="btn-app-settings-cancel" class="btn btn-secondary">Close</button>
@@ -652,7 +652,9 @@
             </label>
           </div>
           <div class="notif-param" id="notif-layer-param" style="display:none">
-            <label>Notify at layer<input type="number" id="notif-layer-number" value="1" min="1" /></label>
+            <label>Notify at layer<input type="number" id="notif-layer-number" value="1" min="1" aria-describedby="notif-layer-number-hint notif-layer-number-error" /></label>
+            <small class="input-hint" id="notif-layer-number-hint">Whole layer number, 1 or more. Empty keeps 1.</small>
+            <small class="field-error" id="notif-layer-number-error" hidden></small>
           </div>
 
           <div class="notif-row">
@@ -666,7 +668,9 @@
             </label>
           </div>
           <div class="notif-param" id="notif-nozzle-idle-param" style="display:none">
-            <label>Temperature (°C)<input type="number" id="notif-nozzle-idle-threshold" value="50" min="1" max="400" /></label>
+            <label>Temperature (°C)<input type="number" id="notif-nozzle-idle-threshold" value="50" min="1" max="400" aria-describedby="notif-nozzle-idle-threshold-hint notif-nozzle-idle-threshold-error" /></label>
+            <small class="input-hint" id="notif-nozzle-idle-threshold-hint">1–400 °C. Empty keeps 50.</small>
+            <small class="field-error" id="notif-nozzle-idle-threshold-error" hidden></small>
           </div>
 
           <div class="notif-row">
@@ -680,7 +684,9 @@
             </label>
           </div>
           <div class="notif-param" id="notif-nozzle-printing-param" style="display:none">
-            <label>Temperature (°C)<input type="number" id="notif-nozzle-printing-threshold" value="260" min="1" max="400" /></label>
+            <label>Temperature (°C)<input type="number" id="notif-nozzle-printing-threshold" value="260" min="1" max="400" aria-describedby="notif-nozzle-printing-threshold-hint notif-nozzle-printing-threshold-error" /></label>
+            <small class="input-hint" id="notif-nozzle-printing-threshold-hint">1–400 °C. Empty keeps 260.</small>
+            <small class="field-error" id="notif-nozzle-printing-threshold-error" hidden></small>
           </div>
 
           <div class="notif-row">
@@ -694,7 +700,9 @@
             </label>
           </div>
           <div class="notif-param" id="notif-spool-low-param" style="display:none">
-            <label>Remaining (g)<input type="number" id="notif-spool-low-threshold" value="100" min="1" max="5000" /></label>
+            <label>Remaining (g)<input type="number" id="notif-spool-low-threshold" value="100" min="1" max="5000" aria-describedby="notif-spool-low-threshold-hint notif-spool-low-threshold-error" /></label>
+            <small class="input-hint" id="notif-spool-low-threshold-hint">1–5000 g. Empty keeps 100.</small>
+            <small class="field-error" id="notif-spool-low-threshold-error" hidden></small>
           </div>
 
         </div>
@@ -876,7 +884,7 @@
   <script src="preview.js?v=3"></script>
   <script src="history.js?v=10"></script>
   <script src="outcome-prompt.js?v=6"></script>
-  <script src="app.js?v=74"></script>
+  <script src="app.js?v=75"></script>
   <script src="quick-print.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
   <script src="import.js?v=7"></script>
