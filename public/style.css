@@ -25,6 +25,9 @@
   --radius:      12px;
   --radius-sm:   8px;
   --shadow:      0 4px 24px rgba(0,0,0,.5);
+  --hit-min:     44px;  /* touch target floor: coarse pointers and widths up to 1100px */
+  --hit-fine:    32px;  /* fine-pointer desktop floor, with --hit-gap between neighbours */
+  --hit-gap:     8px;
 }
 
 body.light-mode {
@@ -2185,3 +2188,25 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
 .outcome-prompt .outcome-check input { width: auto; accent-color: var(--accent); }
 .outcome-prompt textarea { width: 100%; }
 .outcome-prompt .modal-actions .btn-primary { flex: 1; }
+
+/* ─── Hit targets (ticket 08) ─────────────────────────────────────────────────
+   Fine-pointer desktop: every control is at least --hit-fine (32px) with --hit-gap (8px) between neighbours.
+   Coarse pointers and anything up to 1100px wide (tablets, touch laptops): --hit-min (44px). The phone
+   breakpoints above already do this; this block carries it up to 1100px and to the small controls they miss. */
+.btn-sm, .card-settings-btn, .card-remove-btn, .card-files-btn, .settings-back-btn,
+.footer-version, .history-events summary, .detail-step, .sidenav-item { min-height: var(--hit-fine); }
+.card-settings-btn, .card-remove-btn, .card-files-btn { min-width: var(--hit-fine); align-items: center; justify-content: center; }
+.settings-back-btn { width: var(--hit-fine); height: var(--hit-fine); }
+.history-events summary { display: flex; align-items: center; }
+.file-actions, .settings-printer-row { gap: var(--hit-gap); }
+.detail-step-picker { gap: var(--hit-gap); }
+@media (pointer: coarse), (max-width: 1100px) {
+  .btn, .btn-sm, .sidenav-item, .detail-step, .footer-version, .history-events summary,
+  .home-stack button, .temperature-target input, .temperature-target button { min-height: var(--hit-min); }
+  .card-settings-btn, .card-remove-btn, .card-files-btn { min-width: var(--hit-min); min-height: var(--hit-min); }
+  .settings-back-btn { width: var(--hit-min); height: var(--hit-min); }
+  .footer-version { min-width: var(--hit-min); }
+  label:has(> input[type="checkbox"]), label:has(> input[type="radio"]) { min-height: var(--hit-min); display: flex; align-items: center; gap: 8px; }
+  input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; }
+  .file-actions { flex-wrap: wrap; }
+}
