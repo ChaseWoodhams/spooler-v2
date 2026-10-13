@@ -70,8 +70,7 @@ function renderNeedsYou() {
   const box = document.getElementById("needs-you");
   if (_dashLoad !== "ready") return dashStateBlock(box, "Checking what needs you…", "Couldn't check what needs you. Check that Spooler is running, then retry.");
   const { printers: waiting, prints } = _dashboard.needs_you;
-  box.hidden = !waiting.length && !prints.length;
-  if (box.hidden) { box.innerHTML = ""; return; }
+  box.hidden = false;
   const rows = waiting.map(item => {
     const pid = escAttr(item.printer_id);
     const print = item.print;
@@ -80,7 +79,7 @@ function renderNeedsYou() {
         <div class="needs-text"><strong>${escHtml(item.printer_name)}</strong> is ready
           <span class="needs-sub">Bed cleared. Next up: ${escHtml(item.next_job.file_name || "queued job")}</span></div>
         <div class="needs-actions">
-          <button class="btn btn-primary" onclick="dashReviewStart(${item.next_job.id})">Review &amp; start</button>
+          <button class="btn btn-primary" data-focus-key="review-${item.next_job.id}" onclick="dashReviewStart(${item.next_job.id})">Review &amp; start</button>
         </div></div>`;
     }
     const ok = print.outcome === "completed";
@@ -89,9 +88,9 @@ function renderNeedsYou() {
       <div class="needs-text"><strong>${escHtml(item.printer_name)}</strong>: ${escHtml(print.file_name || "print")} ${_outcomeWord(print)}
         <span class="needs-sub">${ok ? "Check it printed fine, then clear the bed to continue." : "Check the print, then clear the bed."}${next}</span></div>
       <div class="needs-actions">
-        <button class="btn btn-primary" onclick="confirmBedCleared('${pid}')">${ok ? "Printed OK · Bed cleared" : "Bed cleared"}</button>
-        ${ok ? "" : `<button class="btn btn-secondary" onclick="dashOpenUnconfirmed()">Set outcome</button>`}
-        <button class="btn btn-secondary" onclick="openPrinterDashboard('${pid}')">Printer</button>
+        <button class="btn btn-primary" data-focus-key="bed-${pid}" onclick="confirmBedCleared('${pid}')">${ok ? "Printed OK · Bed cleared" : "Bed cleared"}</button>
+        ${ok ? "" : `<button class="btn btn-secondary" data-focus-key="outcome-${pid}" onclick="dashOpenUnconfirmed()">Set outcome</button>`}
+        <button class="btn btn-secondary" data-focus-key="printer-${pid}" onclick="openPrinterDashboard('${pid}')">Printer</button>
       </div></div>`;
   });
   for (const print of prints) {
@@ -100,11 +99,26 @@ function renderNeedsYou() {
       <div class="needs-text"><strong>${escHtml(print.printer_name || "Printer")}</strong>: ${escHtml(print.file_name || "print")}
         <span class="needs-sub">The printer reported ${escHtml(print.outcome)}. Confirm the outcome.</span></div>
       <div class="needs-actions">
-        ${ok ? `<button class="btn btn-primary" onclick="dashConfirmPrint(${print.id})">Confirm completed</button>` : ""}
-        <button class="btn btn-secondary" onclick="dashOpenUnconfirmed()">${ok ? "Correct" : "Set outcome"}</button>
+        ${ok ? `<button class="btn btn-primary" data-focus-key="confirm-${print.id}" onclick="dashConfirmPrint(${print.id})">Confirm completed</button>` : ""}
+        <button class="btn btn-secondary" data-focus-key="correct-${print.id}" onclick="dashOpenUnconfirmed()">${ok ? "Correct" : "Set outcome"}</button>
       </div></div>`);
   }
-  box.innerHTML = `<h2>Needs you <span class="needs-count">${rows.length}</span></h2>${rows.join("")}`;
+  const html = rows.length
+    ? `<h2>Needs you <span class="needs-count">${rows.length}</span></h2>${rows.join("")}`
+    : `<p class="needs-empty"><strong>Needs you</strong> <span>Nothing needs you right now.</span></p>`;
+  box.classList.toggle("needs-you-empty", !rows.length);
+  setNeedsStatus(rows.length ? `${rows.length} ${rows.length === 1 ? "item needs" : "items need"} you` : "Nothing needs you");
+  if (box.dataset.sig === html) return;   // the 5 s poll found the same answer: leave the rows (and the focus in them) alone
+  const focusKey = box.contains(document.activeElement) ? document.activeElement.dataset.focusKey : "";
+  box.dataset.sig = html;
+  box.innerHTML = html;
+  if (focusKey) box.querySelector(`[data-focus-key="${CSS.escape(focusKey)}"]`)?.focus();
+}
+
+// The count is announced from a status region that stays in the DOM, so it is heard when rows appear or go.
+function setNeedsStatus(text) {
+  const status = document.getElementById("needs-you-status");
+  if (status && status.textContent !== text) status.textContent = text;
 }
 
 function renderDashProjects() {
@@ -222,3 +236,15 @@ function syncNavCurrent() {
 }
 new MutationObserver(syncNavCurrent).observe(document.querySelector("nav.sidenav"), { subtree: true, attributes: true, attributeFilter: ["class"] });
 syncNavCurrent();
+
+// ─── Phone bottom bar: More looks active while its menu or Settings (reached through it) is open ─────
+function syncMoreActive() {
+  const more = document.getElementById("btn-mobile-more");
+  if (!more) return;
+  const open = more.getAttribute("aria-expanded") === "true" || !!document.querySelector("#modal-app-settings.open");
+  more.classList.toggle("active", open);
+}
+const _moreBtn = document.getElementById("btn-mobile-more"), _settingsModalEl = document.getElementById("modal-app-settings");
+if (_moreBtn) new MutationObserver(syncMoreActive).observe(_moreBtn, { attributes: true, attributeFilter: ["aria-expanded"] });
+if (_settingsModalEl) new MutationObserver(syncMoreActive).observe(_settingsModalEl, { attributes: true, attributeFilter: ["class"] });
+syncMoreActive();

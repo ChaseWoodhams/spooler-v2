@@ -608,6 +608,7 @@ class SPHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/auth-status":
             resp = {"setup_required": not _has_password()}
             if _auth_ok(self):
+                resp["authenticated"] = True
                 resp["spoolman_url"] = "/spoolman/" if PROXY_SPOOLMAN else get_spoolman_url() + "/"
             self._json(resp)
             return

@@ -260,7 +260,11 @@ function handleMessage(msg) {
       syncEmptyState();
       break;
     case "info":
+      if (_scanning && /^(Scanning network|Found \d+ device)/.test(msg.message || "")) break;   // the Discover panel reports the scan itself
       toast(msg.message);
+      break;
+    case "discovery_done":
+      _discoveryDone(msg);
       break;
     case "error":
       if (_currentFilePrinterId && /file list/i.test(msg.message || "")) renderFileList([], msg.message);
@@ -291,6 +295,7 @@ function handleMessage(msg) {
       Object.values(printers).forEach(p => renderPrinter(p));
       break;
     case "cc2_discovered":
+      if (_scanning) break;   // listed in the Discover panel when the scan completes
       for (const ip of (msg.ips || [])) {
         toastAction(`CC2 found at ${ip} — enter access code to add`, "Add", () => {
           resetPrinterForm();
@@ -493,6 +498,23 @@ setInterval(() => {
 }, CAMERA_CHECK_MS);
 
 // ─── Rendering ─────────────────────────────────────────────────────────────────
+// Card buttons carry no ids, so the focused control is found again by what it says: an id, a data-focus-key, its onclick or its label.
+function _focusSignature(el) {
+  return el.id || el.dataset.focusKey || el.getAttribute("onclick") || el.getAttribute("aria-label") || el.getAttribute("title") || el.textContent.trim();
+}
+function _cardFocusKey(card) {
+  const el = document.activeElement;
+  if (!el || el === card || !card.contains(el)) return null;
+  const sig = _focusSignature(el);
+  const same = [...card.querySelectorAll(el.tagName)].filter(x => _focusSignature(x) === sig);
+  return { tag: el.tagName, sig, nth: same.indexOf(el) };
+}
+function _restoreCardFocus(card, key) {
+  if (!key) return;
+  const same = [...card.querySelectorAll(key.tag)].filter(x => _focusSignature(x) === key.sig);
+  const target = same[key.nth] || same[0];
+  if (target && target !== document.activeElement) target.focus({ preventScroll: true });
+}
 function renderPrinter(printer) {
   const grid = document.getElementById("printer-grid");
   const cardId = `card-${printer.id}`;
@@ -547,6 +569,7 @@ function renderPrinter(printer) {
   const prevCameraImg = card.querySelector('.card-camera img');
   const cameraExpanded = _cameraPreferences.get(String(printer.id)) ?? window.innerWidth > 640;
 
+  const focusKey = _cardFocusKey(card);   // a printer_update redraws the card: put the focus back where it was
   card.innerHTML = `
     <!-- Header -->
     <div class="card-header">
@@ -744,6 +767,7 @@ function renderPrinter(printer) {
       })() : ""}
     </div>
   `;
+  _restoreCardFocus(card, focusKey);
 
   const cameraDiv = card.querySelector('.card-camera');
   const placeholder = cameraDiv.querySelector('.camera-placeholder');
@@ -1363,17 +1387,16 @@ mobileMoreMenu?.addEventListener("keydown", event => {
   }
 });
 document.getElementById("btn-printers-nav")?.addEventListener("click", returnToPrinterGrid);
-document.getElementById("btn-mobile-history")?.addEventListener("click", () => {
-  closeMobileMore();
-  mobileMoreButton?.focus();
-  document.getElementById("btn-history")?.click();
-});
 document.getElementById("btn-mobile-settings")?.addEventListener("click", () => {
   closeMobileMore();
   mobileMoreButton?.focus();
   document.getElementById("btn-app-settings")?.click();
 });
-document.getElementById("btn-mobile-signout")?.addEventListener("click", signOut);
+document.getElementById("btn-mobile-signout")?.addEventListener("click", async () => {
+  closeMobileMore();
+  const ok = await confirmDialog({ title: "Sign out of Spooler?", body: "You will need to sign in again on this device. Prints and the queue keep running.", confirmLabel: "Sign out", opener: mobileMoreButton });
+  if (ok) signOut(); else mobileMoreButton?.focus();
+});
 document.addEventListener("click", event => {
   if (!mobileMoreMenu?.hidden && !mobileMoreMenu.contains(event.target) && event.target !== mobileMoreButton) closeMobileMore();
 });
@@ -2015,25 +2038,64 @@ document.addEventListener("click", event => {
 });
 document.getElementById("btn-printers-close").addEventListener("click", closePrinters);
 
-function _triggerDiscover(btn) {
-  send({ action: "discover" });
-  btn.disabled = true;
-  btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-  </svg> Scanning…`;
-  setTimeout(() => {
-    btn.disabled = false;
-    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-    </svg> Scan for Printers`;
-  }, 7000);
+// One scan state for the header and the panel button. The scan ends when the server says it is done (discovery_done);
+// the timer only covers a server that never answers.
+const DISCOVER_GIVE_UP_MS = 30000;
+let _scanning = false, _scanTimer = null;
+function _setScanning(on) {
+  _scanning = on;
+  clearTimeout(_scanTimer);
+  if (on) _scanTimer = setTimeout(() => _discoveryDone(null), DISCOVER_GIVE_UP_MS);
+  for (const [id, idle] of [["btn-discover", "Discover"], ["btn-discover-panel", "Scan for Printers"]]) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    btn.disabled = on;
+    btn.setAttribute("aria-busy", String(on));
+    const label = btn.querySelector(".scan-label");
+    if (label) label.textContent = on ? "Scanning…" : idle;
+  }
 }
-document.getElementById("btn-discover")?.addEventListener("click", e => {
+function _triggerDiscover() {
+  if (_scanning) return;
+  _setScanning(true);
+  const box = document.getElementById("discover-results");
+  if (box) box.innerHTML = `<p class="discover-empty">Scanning your network…</p>`;
+  send({ action: "discover" });
+}
+function _prefillCc2(ip) {
+  resetPrinterForm();
+  document.getElementById("input-ip").value = ip;
+  document.getElementById("input-name").value = `CC2 (${ip})`;
+  inputType.value = "cc2";
+  labelAccessCode.style.display = "flex";
   openPrinters();
-  _triggerDiscover(e.currentTarget);
+  inputAccessCode.focus();
+}
+function _discoveryDone(msg) {
+  _setScanning(false);
+  const box = document.getElementById("discover-results");
+  if (!box) return;
+  if (!msg) { box.innerHTML = `<p class="discover-empty">The scan did not finish. Try again, or add the printer by IP below.</p>`; return; }
+  const added = msg.added || [], cc2 = msg.cc2 || [], known = msg.known || 0;
+  if (!added.length && !cc2.length) {
+    box.innerHTML = known
+      ? `<p class="discover-empty">No new printers. ${known === 1 ? "The one printer" : `All ${known} printers`} found ${known === 1 ? "is" : "are"} already added.</p>`
+      : `<p class="discover-empty">No printers found. Check that the printer is on and on this network, or add one by IP below.</p>`;
+    return;
+  }
+  box.innerHTML = `<ul class="discover-list">${added.map(p => `<li><strong>${escHtml(p.name || "Printer")}</strong> <span>${escHtml(p.ip || "")}</span> <span class="discover-note">Added</span></li>`).join("")}${
+    cc2.map(ip => `<li><strong>Centauri Carbon 2</strong> <span>${escHtml(ip)}</span> <button type="button" class="btn btn-secondary btn-sm" data-cc2-ip="${escAttr(ip)}" aria-label="Add ${escAttr(ip)}">Add</button></li>`).join("")}</ul>`;
+}
+document.getElementById("discover-results")?.addEventListener("click", e => {
+  const btn = e.target.closest("[data-cc2-ip]");
+  if (btn) _prefillCc2(btn.dataset.cc2Ip);
+});
+document.getElementById("btn-discover")?.addEventListener("click", () => {
+  openPrinters();
+  _triggerDiscover();
 });
 
-document.getElementById("btn-discover-panel")?.addEventListener("click", e => _triggerDiscover(e.currentTarget));
+document.getElementById("btn-discover-panel")?.addEventListener("click", _triggerDiscover);
 
 document.getElementById("btn-modal-confirm").addEventListener("click", () => {
   const ipInput = document.getElementById("input-ip");
@@ -3214,6 +3276,8 @@ async function loadChangelog() {
     _changelog = data;
     const badge = document.getElementById("version-badge");
     if (badge) badge.textContent = "v" + _changelog[0].version;
+    const about = document.getElementById("settings-about-version");
+    if (about) about.textContent = "v" + _changelog[0].version;
   } catch (_) {}
 }
 
@@ -3223,8 +3287,8 @@ function openChangelog() {
   body.innerHTML = _changelog.map(entry => `
     <div class="cl-entry">
       <div class="cl-entry-header">
-        <span class="cl-version">v${entry.version}</span>
-        <span class="cl-date">${entry.date}</span>
+        <span class="cl-version">v${escHtml(entry.version)}</span>
+        <span class="cl-date">${escHtml(entry.date)}</span>
       </div>
       <ul class="cl-list">
         ${entry.changes.map(c => `<li>${escHtml(c)}</li>`).join("")}
@@ -3235,6 +3299,7 @@ function openChangelog() {
 }
 
 document.getElementById("version-badge")?.addEventListener("click", openChangelog);
+document.getElementById("btn-settings-goto-about")?.addEventListener("click", openChangelog);   // the footer badge is hidden on a phone
 document.getElementById("btn-changelog-close")?.addEventListener("click", () =>
   closeModal(document.getElementById("modal-changelog")));
 document.getElementById("modal-changelog")?.addEventListener("click", e => {

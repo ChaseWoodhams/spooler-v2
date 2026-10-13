@@ -2312,3 +2312,39 @@ body.light-mode { --st-completed: #0f766e; --st-failed: #be123c; --st-cancelled:
 .toggle-switch input:checked + .toggle-slider, .detail-toggle.active { background: var(--toggle-on); }
 .toggle-switch input:checked + .toggle-slider::after { content: ""; position: absolute; left: 9px; top: 6px; width: 5px; height: 9px; border: solid var(--toggle-tick, #0b1220); border-width: 0 2px 2px 0; transform: rotate(45deg); }
 .detail-toggle.active span { background: #fff; }
+
+/* ─── Shell P2 (ticket 18) ──────────────────────────────────────────────────── */
+/* PS-07: on a narrow phone the header labels get the room the icons took */
+@media (max-width: 400px) {
+  .header-actions > #btn-quick-print svg, .header-actions > #btn-new-project svg { display: none; }
+  .header-actions > .btn { padding-inline: 10px; }
+}
+/* PS-09: Needs you stays as one slim line when nothing is waiting */
+.needs-you.needs-you-empty { padding: 8px 14px; border-color: var(--border); background: transparent; }
+.needs-empty { margin: 0; color: var(--text-muted); font-size: 13px; }
+.needs-empty strong { color: var(--text); margin-right: 6px; }
+/* PS-10: the side nav keeps its labels between 641 and 1100 px */
+@media (min-width: 641px) and (max-width: 1100px) {
+  .sidenav { width: 76px; }
+  .logo { width: 76px; }
+  .sidenav-item { flex-direction: column; gap: 4px; padding: 10px 4px; font-size: 12px; line-height: 1.15; text-align: center; }
+  .sidenav-item span { display: block; }
+}
+/* PS-11: Discover results in the panel */
+.discover-results { margin-top: 10px; }
+.discover-empty { margin: 0; color: var(--text-muted); font-size: 13px; }
+.discover-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.discover-list li { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface2); font-size: 13px; }
+.discover-list li > span:not(.discover-note) { color: var(--text-muted); }
+.discover-note { margin-left: auto; color: var(--green); font-size: 12px; }
+/* PS-12: phone More menu */
+.mobile-more-menu button { display: flex; align-items: center; gap: 10px; }
+.mobile-more-menu button svg { width: 18px; height: 18px; flex: none; }
+.mobile-more-sep { height: 1px; margin: 6px 2px; background: var(--border); }
+@media (max-width: 640px) { .sidenav-item { font-size: 12px; } .sidenav > #btn-history { display: flex; } }
+/* PS-13: the About row in Settings */
+.settings-item-note { margin-left: 6px; color: var(--text-muted); font-size: 12px; }
+/* T15: shell text floor */
+.temp-label, .temp-target, .status-badge, .sidenav-badge, #btn-header-more { font-size: 12px; }
+@media (max-width: 400px) { .more-extra { display: none; } }
+@media (max-width: 340px) { .header-actions > #btn-quick-print, .header-actions > #btn-new-project { font-size: 12px; padding-inline: 8px; } }

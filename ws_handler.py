@@ -134,6 +134,7 @@ async def handle_browser_message(ws, raw: str) -> None:
         )
 
         new_count = 0
+        added, known = [], 0
         for dev in cc1_found:
             pid = dev.get("MainboardID") or dev.get("SerialNumber") or dev.get("_ip")
             ip = dev.get("MainboardIP") or dev.get("_ip")
@@ -143,6 +144,9 @@ async def handle_browser_message(ws, raw: str) -> None:
                 state.printers[pid] = pc
                 pc._task = asyncio.create_task(pc.start())
                 new_count += 1
+                added.append({"id": pid, "name": name, "ip": ip})
+            else:
+                known += 1
         if new_count:
             await loop.run_in_executor(None, save_printers, state.printers)
 
@@ -150,6 +154,8 @@ async def handle_browser_message(ws, raw: str) -> None:
         await ws.send(json.dumps({"type": "info", "message": f"Found {total} device(s)"}))
         if cc2_ips:
             await ws.send(json.dumps({"type": "cc2_discovered", "ips": cc2_ips}))
+        # The scan is over: the page ends its Scanning state and lists what was found.
+        await ws.send(json.dumps({"type": "discovery_done", "added": added, "known": known, "cc2": cc2_ips}))
         return
 
     if action == "add_printer":
