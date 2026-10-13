@@ -154,7 +154,7 @@ async function sideNav(browser, base) {
   for (const width of [768, 1024]) {
     const fx = await open(browser, base, { width });
     await fx.page.locator('#card-shell-fixture').waitFor();
-    const labels = await fx.page.evaluate(() => [...document.querySelectorAll('nav.sidenav .sidenav-item span')].filter(e => e.closest('.sidenav-item').getClientRects().length && !e.closest('.mobile-only')).map(e => ({ text: e.textContent.trim(), shown: e.getClientRects().length > 0, size: parseFloat(getComputedStyle(e).fontSize) })));
+    const labels = await fx.page.evaluate(() => [...document.querySelectorAll('nav.sidenav .sidenav-item span:not(.sidenav-badge):not(.sr-only)')].filter(e => e.closest('.sidenav-item').getClientRects().length && !e.closest('.mobile-only')).map(e => ({ text: e.textContent.trim(), shown: e.getClientRects().length > 0, size: parseFloat(getComputedStyle(e).fontSize) })));
     assert.ok(labels.length >= 4 && labels.every(l => l.shown && l.size >= 12), `side nav labels are visible and >=12px at ${width}px: ${JSON.stringify(labels)}`);
     await fx.context.close();
   }
