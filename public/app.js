@@ -212,6 +212,7 @@ function handleMessage(msg) {
     case "printer_update":
       const linkChanged = printers[msg.printer.id]?.connected !== msg.printer.connected;
       printers[msg.printer.id] = msg.printer;
+      _hwReconcile(msg.printer);
       if (linkChanged) renderSystemHealth();
       refreshQueueSoon();  // live progress and start availability in the queue panel
       renderPrinter(msg.printer);
@@ -232,6 +233,7 @@ function handleMessage(msg) {
       break;
     case "error":
       if (_currentFilePrinterId && /file list/i.test(msg.message || "")) renderFileList([], msg.message);
+      _hwFailSent(msg.message || "The printer refused the command.");
       toast(msg.message, true);
       break;
     case "print_recorded":
@@ -891,6 +893,7 @@ function renderPrinterDetail(printer) {
     printer, status, sc, connected, controlsEnabled, coords, nozzle, nozzleTarget, bed, bedTarget, chamber,
     modelFan, auxiliaryFan, chamberFan, lightOn, printing, paused, detailProgress, detailFilename,
     detailRemaining, speed, cameraUrl, disableMotion, disableConnected, jogStep: _detailJogStep,
+    hw: _hwView(printer.id), jogBusy: _hwBusy(printer.id, "jog"),
   });
   detail.innerHTML = cockpitHtml ?? `
     <div class="detail-nav">
@@ -1032,6 +1035,89 @@ function renderPrinterDetail(printer) {
   }
 }
 
+// ─── Hardware control feedback (fan / jog / light) ────────────────────────────
+// Each control goes pending -> confirmed (the printer's own report) or error. State lives here because the
+// cockpit re-renders on every status update; printer-cockpit.js only draws what it is given.
+const _HW = { debounce: 400, confirm: 8000, jog: 2500, flash: 2500 };
+const _hw = {};                                         // printerId -> key -> { state, value, text, ... }
+const _hwTimers = {};                                   // `${printerId}|${key}|${name}` -> timeout id
+const _HW_FAN_KEY = { model: "ModelFan", auxiliary: "AuxiliaryFan", chamber: "BoxFan" };
+
+function _hwGet(printerId, key) { return _hw[printerId]?.[key]; }
+function _hwBusy(printerId, key) { return _hwGet(printerId, key)?.state === "pending"; }
+function _hwTimer(printerId, key, name, ms, fn) {
+  const id = `${printerId}|${key}|${name}`;
+  clearTimeout(_hwTimers[id]);
+  _hwTimers[id] = setTimeout(() => { delete _hwTimers[id]; fn(); }, ms);
+}
+function _hwCancel(printerId, key) {
+  for (const name of ["debounce", "timeout", "flash"]) {
+    const id = `${printerId}|${key}|${name}`;
+    clearTimeout(_hwTimers[id]); delete _hwTimers[id];
+  }
+}
+function _hwRender(printerId) {
+  if (_activePrinterId === printerId && printers[printerId]) renderPrinterDetail(printers[printerId]);
+}
+function _hwArmTimeout(printerId, key) {
+  const entry = _hwGet(printerId, key);
+  _hwTimer(printerId, key, "timeout", entry?.settle ?? _HW.confirm, () => {
+    const e = _hwGet(printerId, key);
+    if (!e || e.state !== "pending") return;
+    if (e.settle) _hwDone(printerId, key);              // a clamped move leaves the coordinates alone: treat as sent
+    else _hwFail(printerId, key, `${e.failure}. The printer did not report the change.`);
+  });
+}
+function _hwStart(printerId, key, entry) {
+  _hwCancel(printerId, key);
+  (_hw[printerId] ??= {})[key] = { state: "pending", ...entry };
+  if (!entry.deferred) _hwArmTimeout(printerId, key);
+  _hwRender(printerId);
+}
+function _hwDone(printerId, key) {
+  const entry = _hwGet(printerId, key);
+  if (!entry) return;
+  entry.state = "ok";
+  _hwCancel(printerId, key);
+  _hwTimer(printerId, key, "flash", _HW.flash, () => {
+    if (_hwGet(printerId, key)?.state === "ok") { delete _hw[printerId][key]; _hwRender(printerId); }
+  });
+  _hwRender(printerId);
+}
+function _hwFail(printerId, key, message, quiet) {
+  const entry = _hwGet(printerId, key);
+  if (!entry) return;
+  entry.state = "error";
+  entry.error = message;
+  _hwCancel(printerId, key);
+  if (!quiet) toast(message, true);
+  _hwRender(printerId);
+}
+// The server answers a refused command with an uncorrelated error (already toasted): fail whatever was sent and waits.
+function _hwFailSent(message) {
+  for (const [printerId, controls] of Object.entries(_hw))
+    for (const [key, e] of Object.entries(controls))
+      if (e.state === "pending" && !e.deferred) _hwFail(printerId, key, `${e.failure}. ${message}`, true);
+}
+function _hwReconcile(printer) {
+  const controls = _hw[printer.id];
+  if (!controls) return;
+  for (const [key, e] of Object.entries(controls)) {
+    if (e.state !== "pending") continue;
+    if (!printer.connected) { _hwFail(printer.id, key, `${e.failure}. Printer went offline.`); continue; }
+    if (e.deferred) continue;
+    if (key === "light") { if (getLightOn(printer) === e.value) _hwDone(printer.id, key); }
+    else if (key === "jog") { const c = _printerCoords(printer); if (`${c.x},${c.y},${c.z}` !== e.snap) _hwDone(printer.id, key); }
+    else if (key.startsWith("fan_") && _fanSpeed(printer, _HW_FAN_KEY[key.slice(4)]) === e.value) _hwDone(printer.id, key);
+  }
+}
+function _hwView(printerId) {
+  const out = {};
+  for (const [key, e] of Object.entries(_hw[printerId] || {}))
+    out[key] = { state: e.state, value: e.value, text: e.state === "pending" ? e.text : e.state === "ok" ? e.done : e.error };
+  return out;
+}
+
 const _cockpitDraftValues = new Map();
 document.addEventListener("input", event => {
   if (event.target.matches('#printer-detail input[type="range"]')) {
@@ -1049,17 +1135,33 @@ function setJogStep(step) {
 }
 
 function jogPrinter(printerId, axis, direction) {
+  if (_hwBusy(printerId, "jog")) return;               // a move is still in flight; ignore double taps
+  const c = _printerCoords(printers[printerId] || { status: {} });
+  _hwStart(printerId, "jog", { text: "Moving…", done: "Moved", failure: "Move not confirmed", snap: `${c.x},${c.y},${c.z}`,
+    settle: _HW.jog });
   send({ action: "move_axis", printer_id: printerId, axis, step: _detailJogStep * direction });
 }
 
 function homePrinter(printerId, axis) {
+  if (_hwBusy(printerId, "jog")) return;
   const label = axis === "XYZ" ? "all axes" : axis === "XY" ? "the X and Y axes" : `the ${axis} axis`;
   if (!confirm(`Home ${label}? Make sure the build chamber is clear before continuing.`)) return;
   send({ action: "home_axes", printer_id: printerId, axis });
 }
 
 function setPrinterFan(printerId, fan, speed) {
-  send({ action: "set_fan", printer_id: printerId, fan, speed });
+  // Pending shows at once; one command goes out after the slider has been idle (arrow keys fire a change per press).
+  const key = `fan_${fan}`;
+  _hwStart(printerId, key, { value: speed, text: `Setting ${speed}%…`, done: `Set to ${speed}%`, failure: "Fan did not change",
+    deferred: true });
+  _hwTimer(printerId, key, "debounce", _HW.debounce, () => {
+    const entry = _hwGet(printerId, key);
+    if (!entry || entry.state !== "pending") return;
+    entry.deferred = false;
+    send({ action: "set_fan", printer_id: printerId, fan, speed: entry.value });
+    _hwArmTimeout(printerId, key);
+    _hwRender(printerId);
+  });
 }
 
 function setPrinterTemperature(printerId, target, inputId) {
@@ -1088,19 +1190,16 @@ function syncEmptyState() {
 }
 
 // ─── User actions ──────────────────────────────────────────────────────────────
-const _lightPending = {}; // printerId → { on: bool, until: ms timestamp }
-
 function getLightOn(printer) {
-  const p = _lightPending[printer.id];
-  if (p && Date.now() < p.until) return p.on;
-  return !!printer.status?.LightStatus?.SecondLight;
+  return !!printer.status?.LightStatus?.SecondLight;   // the printer's report is the only source of truth
 }
 
 function printerAction(id, action) {
   if (action === "light_on" || action === "light_off") {
-    _lightPending[id] = { on: action === "light_on", until: Date.now() + 3000 };
-    if (printers[id]) renderPrinter(printers[id]);
-    if (_activePrinterId === id && printers[id]) renderPrinterDetail(printers[id]);
+    const on = action === "light_on";
+    if (_hwBusy(id, "light")) return;                  // one command in flight; a second tap would just repeat it
+    _hwStart(id, "light", { value: on, text: on ? "Turning on…" : "Turning off…", done: on ? "Light on" : "Light off",
+      failure: "Light did not change" });
   }
   send({ action, printer_id: id });
 }

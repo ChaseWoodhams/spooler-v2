@@ -129,6 +129,83 @@ async function cockpit(fixture) {
   assertReadOnlyCommands(fixture);
   console.log(`Cockpit idle/printing/offline PASS ${page.viewportSize().width}`);
 }
+// Fan / jog / light feedback. Sends go only to the fixture socket (never a real printer); counts commands per interaction.
+async function hardwareFeedback(fixture) {
+  const { page } = fixture;
+  const count = action => fixture.commands.filter(command => command.action === action).length;
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const fb = key => page.locator(`[data-fb="${key}"]`);
+  const expectFb = async (locator, pattern) => { const deadline = Date.now() + 5000; let text = ""; while (Date.now() < deadline) { text = await locator.innerText(); if (pattern.test(text)) return; await sleep(30); } assert.match(text, pattern); };
+  await page.evaluate(() => { _HW.debounce = 250; _HW.confirm = 700; _HW.jog = 600; _HW.flash = 400; });
+  await page.locator('#card-operator-fixture').focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('tab', { name: 'Air & light', exact: true }).click();
+
+  // Fan: three arrow presses settle into ONE command; pending, then confirmed from the printer report
+  const fan = page.getByRole('slider', { name: 'Model fan', exact: true });
+  await fan.focus();
+  for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowRight');
+  await expectFb(fb('fan_model'), /Setting 15%/);
+  assert.equal(await page.locator('#detail-model-value').innerText(), '15%', 'requested value is kept while pending');
+  assert.equal(count('set_fan'), 0, 'nothing is sent while the slider is still being adjusted');
+  await waitForFixture(() => count('set_fan') > 0, 'set_fan');
+  await sleep(400);
+  assert.equal(count('set_fan'), 1, 'one command per settle');
+  assert.equal(fixture.commands.find(command => command.action === 'set_fan').speed, 15);
+  assert.equal(await fan.evaluate(el => document.activeElement === el), true, 'focus stays on the slider');
+  await fixture.updatePrinter({ status: { ...printer.status, CurrentFanSpeed: { ModelFan: 15 } } });
+  await expectFb(fb('fan_model'), /Set to 15%/);
+  await page.waitForFunction(() => !document.querySelector('[data-fb="fan_model"]').textContent);
+
+  // Fan: a refused command shows an error beside the slider and in the error toast
+  await page.keyboard.press('ArrowRight');
+  await waitForFixture(() => count('set_fan') === 2, 'second set_fan');
+  for (const socket of fixture.sockets) socket.send(JSON.stringify({ type: 'error', message: 'Printer did not accept the fan command' }));
+  await expectFb(fb('fan_model'), /Fan did not change/);
+  assert.equal(await page.locator('.toast.error').count(), 1);
+
+  // Fan: never confirmed -> error after the timeout
+  await page.keyboard.press('ArrowRight');
+  await expectFb(fb('fan_model'), /did not report the change/);
+
+  // Light: one command per tap, pending until the printer reports it
+  const light = page.getByRole('button', { name: 'Chamber lighting', exact: true });
+  await light.click();
+  await light.click();
+  assert.equal(count('light_on'), 1, 'a second tap while pending sends nothing');
+  assert.equal(await light.getAttribute('aria-busy'), 'true');
+  assert.equal(await light.getAttribute('aria-pressed'), 'false', 'state follows the printer report, not the tap');
+  await expectFb(fb('light'), /Turning on/);
+  await fixture.updatePrinter({ status: { ...printer.status, LightStatus: { SecondLight: true } } });
+  await expectFb(fb('light'), /Light on/);
+  assert.equal(await light.getAttribute('aria-pressed'), 'true');
+  await sleep(3200);
+  assert.equal(await light.getAttribute('aria-pressed'), 'true', 'no 3 s revert while the printer still reports on');
+  await page.getByRole('button', { name: 'Chamber lighting', exact: true }).click();
+  await expectFb(fb('light'), /did not report the change/);
+
+  // Jog: a second tap while the move is in flight does not move again; focus stays; confirmed from coordinates
+  await page.getByRole('tab', { name: 'Motion', exact: true }).click();
+  const xPlus = page.getByRole('button', { name: 'X+', exact: true });
+  await xPlus.focus();
+  await xPlus.click();
+  await xPlus.click({ force: true });
+  await page.keyboard.press('Enter');
+  assert.equal(count('move_axis'), 1, 'taps during a move are ignored');
+  assert.equal(await xPlus.getAttribute('aria-disabled'), 'true');
+  await expectFb(fb('jog'), /Moving/);
+  assert.equal(await xPlus.evaluate(el => document.activeElement === el), true);
+  await fixture.updatePrinter({ status: { ...printer.status, CurrentCoord: '1.00,0.00,0.00' } });
+  await expectFb(fb('jog'), /Moved/);
+  assert.equal(await xPlus.getAttribute('aria-disabled'), null);
+  await xPlus.click();
+  assert.equal(count('move_axis'), 2, 'next move works once the first settled');
+  // A refused jog reports the error and frees the buttons
+  for (const socket of fixture.sockets) socket.send(JSON.stringify({ type: 'error', message: 'Printer did not accept the motion command' }));
+  await expectFb(fb('jog'), /Move not confirmed/);
+  assert.equal(await xPlus.getAttribute('aria-disabled'), null);
+  console.log(`Hardware feedback PASS ${page.viewportSize().width}x${page.viewportSize().height}`);
+}
 async function inventory(fixture) {
   const { page } = fixture;
   fixture.inventoryMode = 'loading';
@@ -475,6 +552,8 @@ async function dialogs(fixture) {
     for (const [width, height] of [[390, 844], [1098, 507]]) {
       const fixture = await fixturePage(browser, `http://127.0.0.1:${server.address().port}`, width, height);
       try { await dialogs(fixture); assertReadOnlyCommands(fixture); } finally { await fixture.context.close(); }
+      const hardware = await fixturePage(browser, `http://127.0.0.1:${server.address().port}`, width, height);
+      try { await hardwareFeedback(hardware); } finally { await hardware.context.close(); }
     }
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
