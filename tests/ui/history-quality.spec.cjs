@@ -77,15 +77,15 @@ const records = ['completed', 'cancelled', 'failed', 'unknown'].map((outcome, i)
       assert.equal(await page.locator('#panel-history').evaluate(el => el.scrollWidth <= el.clientWidth), true);
       await page.getByRole('textbox', { name: 'Notes', exact: true }).fill('Retain my notes');
       await page.getByRole('button', { name: 'Save notes', exact: true }).click();
-      await page.getByRole('status').filter({ hasText: 'Fixture save unavailable' }).waitFor();
+      await page.locator('[role=status]:not(#toast-area)').filter({ hasText: 'Fixture save unavailable' }).waitFor();
       assert.equal(await page.getByRole('textbox', { name: 'Notes', exact: true }).inputValue(), 'Retain my notes');
       await page.getByRole('button', { name: 'Save notes', exact: true }).click();
-      await page.getByRole('status').filter({ hasText: 'Notes saved.' }).waitFor();
+      await page.locator('[role=status]:not(#toast-area)').filter({ hasText: 'Notes saved.' }).waitFor();
       assert.equal(await page.getByRole('button', { name: 'Save notes', exact: true }).evaluate(el => el === document.activeElement), true);
       await page.locator('[data-history-outcome="1"]').selectOption('failed');
       await page.getByLabel('Poor adhesion').check();
       await page.getByRole('button', { name: 'Save outcome', exact: true }).click();
-      await page.getByRole('status').filter({ hasText: 'Outcome saved and confirmed' }).waitFor();
+      await page.locator('[role=status]:not(#toast-area)').filter({ hasText: 'Outcome saved and confirmed' }).waitFor();
       assert.equal(await page.getByRole('button', { name: 'Save outcome', exact: true }).evaluate(el => el === document.activeElement), true);
       await page.getByRole('searchbox', { name: 'Search history' }).fill('same-file');
       await page.locator('#history-printer').selectOption('p1');
@@ -103,7 +103,7 @@ const records = ['completed', 'cancelled', 'failed', 'unknown'].map((outcome, i)
       assert.equal(await page.getByRole('searchbox', { name: 'Search history' }).isVisible(), true);
       failNextSearch = true;
       await page.locator('#history-range').selectOption('7');
-      await page.getByRole('status').filter({ hasText: 'History unavailable' }).waitFor();
+      await page.locator('[role=status]:not(#toast-area)').filter({ hasText: 'History unavailable' }).waitFor();
       await page.getByRole('button', { name: 'Retry history' }).click();
       await page.waitForFunction(() => document.getElementById('history-result-count').textContent === '4 results');
       assert.match(lastFilters, /since=/);
