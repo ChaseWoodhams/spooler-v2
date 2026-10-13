@@ -53,6 +53,7 @@ class GuideData:
     plan: dict                 # splits.assembly_plan(): sections, summary, code
     paper: str                 # "a4" or "letter"
     plan_line: str = "Automatic plan"
+    bom: object = None         # assembly_bom.Bom, or None when the split needs no rods (then there is no rod page)
 
 
 def safe_area(paper: str) -> Rect:
@@ -196,7 +197,7 @@ def step_text(step: dict) -> str:
     action = f"Join Section {step['section']} ({parts_text(step['parts'])})" if step["kind"] == "section" else f"Add {parts_text(step['parts'])}"
     receiver = step["receiver"]
     where = f"the {len(receiver)} parts built so far" if len(receiver) > 4 else parts_text(receiver)
-    how = "glue only" if step["glue_only"] else plural(step["rods"], "rod")
+    how = "glue the face, no rods" if step["glue_only"] else plural(step["rods"], "rod")
     return f"{step['id']}: {action} to {where} along {direction_text(step['direction'])}, {how}."
 
 
@@ -216,7 +217,7 @@ def _cover(flow: PageFlow, data: GuideData) -> None:
     c.setFont(FONT, MIN_FONT)
     c.drawString(area.left, area.top - 110 * MM, f"Split {data.split_id}. Compare the plan code on two printed copies to see that they are the same plan.")
     if not summary["rods"]:
-        c.drawString(area.left, area.top - 118 * MM, "No rods needed: glue the faces.")
+        c.drawString(area.left, area.top - 118 * MM, "Glue the faces: no rods needed.")
     flow.y = area.bottom   # the cover is a page of its own
 
 
@@ -250,6 +251,10 @@ def render_guide(path, data: GuideData, progress=None) -> int:
     canvas.setCreator("Spooler")
     flow = PageFlow(canvas, data.paper)
     _cover(flow, data)
+    if data.bom:
+        import assembly_rod_page
+        canvas.setViewerPreference("PrintScaling", "None")   # the rod page is true size: ask viewers not to scale
+        assembly_rod_page.draw_rod_page(flow, data.bom)
     _steps(flow, data, progress)
     progress("Saving the PDF", 95)
     canvas.showPage()
