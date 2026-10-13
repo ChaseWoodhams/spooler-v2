@@ -200,6 +200,18 @@ def step_text(step: dict) -> str:
     return f"{step['id']}: {action} to {where} along {direction_text(step['direction'])}, {how}."
 
 
+# ── Warnings: the step-page code calls these ───────────────────────────────────
+
+def step_warning_lines(step: dict) -> list:
+    """The warnings for one step as printable lines (a heavy join etc.). Empty when there are none."""
+    return [w["message"] for w in step.get("warnings") or []]
+
+
+def plan_note_lines(plan: dict) -> list:
+    """Plan-level notes for the front of the step list, e.g. parts with no number printed on them."""
+    return [w["message"] for w in plan.get("warnings") or [] if w["kind"] == "unlabelled"]
+
+
 def _cover(flow: PageFlow, data: GuideData) -> None:
     c, area, summary = flow.canvas, flow.area, data.plan["summary"]
     c.setFont(BOLD, 30)
@@ -223,6 +235,8 @@ def _cover(flow: PageFlow, data: GuideData) -> None:
 def _steps(flow: PageFlow, data: GuideData, progress) -> None:
     sections, total, done = data.plan["sections"], max(data.plan["summary"]["steps"], 1), 0
     flow.new_page()
+    for line in plan_note_lines(data.plan):
+        flow.paragraph(f"Note: {line}", FONT, 10, gap=2)
     for index, section in enumerate(sections):
         flow.y -= 4 * MM if index else 0
         title = f"Section {section['letter']}" + (" (main)" if section["main"] else "")
@@ -232,6 +246,8 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
             flow.paragraph(section["note"], FONT, 10, gap=2)
         for step in section["steps"]:
             flow.paragraph(step_text(step), FONT, 10, indent=6 * MM, gap=1.5 * MM)
+            for line in step_warning_lines(step):
+                flow.paragraph(f"Warning: {line}", BOLD, 10, indent=10 * MM, gap=1.5 * MM)
             done += 1
             progress(f"Writing steps ({done} of {total})", 20 + 70 * done // total)
         if not section["main"]:

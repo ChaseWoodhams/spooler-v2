@@ -458,7 +458,7 @@ function guidePanel() {
   const why = !info.available ? info.hint : g.blocked;
   const disabled = working || !!why;
   const summary = plan?.ok ? `<p class="split-hint">${plural(plan.summary.parts, "part")}, ${plural(plan.summary.sections, "Section")}, ${plural(plan.summary.steps, "step")}, ${plural(plan.summary.rods, "rod")}. Plan code <strong>${esc(plan.code)}</strong>.</p>` : "";
-  const warnings = plan?.ok ? plan.sections.filter(sec => sec.note).map(sec => `<p class="split-warn">Section ${esc(sec.letter)}: ${esc(sec.note)}</p>`).join("") : "";
+  const warnings = plan?.ok ? (plan.warnings || []).map(w => `<p class="split-warn">${w.step ? `Step ${esc(w.step)}: ` : w.section ? `Section ${esc(w.section)}: ` : ""}${esc(w.message)}</p>`).join("") : "";
   const pdf = g.has_pdf
     ? `<p>${g.out_of_date ? '<span class="split-warn">Out of date: regenerate.</span> ' : ""}PDF made ${esc(new Date(g.generated_at * 1000).toLocaleString())}, plan code ${esc(g.plan_code)}, ${g.paper === "letter" ? "Letter" : "A4"}.
          <a class="btn btn-secondary btn-sm" href="/api/splits/${current.id}/guide.pdf" download>Download PDF</a></p>`
@@ -512,7 +512,7 @@ function planHtml() {
   return `<ol class="split-assembly">${plan.sections.map(sec => `<li><strong>Section ${sec.letter}</strong>${sec.main ? " (main)" : ""}: ${listText(sec.parts)}
       ${sec.note ? `<span class="split-warn">${esc(sec.note)}</span>` : ""}
       <ol>${sec.steps.map(st => `<li>${st.id}: ${st.kind === "section" ? `Join Section ${st.section} (${listText(st.parts)})` : `Add ${listText(st.parts)}`}
-        to ${where(st.receiver)} along ${dirText(st.direction)} — ${st.glue_only ? "glue only" : plural(st.rods, "rod")}.</li>`).join("")}</ol></li>`).join("")}</ol>`;
+        to ${where(st.receiver)} along ${dirText(st.direction)} — ${st.glue_only ? "glue only" : plural(st.rods, "rod")}.${(st.warnings || []).map(w => ` <span class="split-warn">${esc(w.message)}</span>`).join("")}</li>`).join("")}</ol></li>`).join("")}</ol>`;
 }
 
 // Second-level controls sit in folds that stay closed until asked for; which ones are open survives a re-render.

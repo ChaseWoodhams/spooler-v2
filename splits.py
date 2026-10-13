@@ -58,6 +58,7 @@ DEFAULT_SETTINGS = {
     "connectors": {"kind": "rod", "diameter": 2.0, "fallback_diameter": 1.0, "clearance": 0.15, "depth": 6.5,
                    "spacing": 100.0, "max_per_joint": 8},
     "labels":     {"enabled": True},      # Part numbers debossed into each part
+    "guide":      {"heavy_kg": 2.0, "heavy_mm": 400.0},   # Assembly guide: warn when a join moves more than this weight or length
 }
 
 _data_dir: Path = DATA_DIR
@@ -142,6 +143,7 @@ def normalize_settings(raw: dict | None, base: dict | None = None) -> dict:
         raise jobs.JobError("Settings must be an object")
     out = base
     out.setdefault("labels", dict(DEFAULT_SETTINGS["labels"]))   # splits saved before part numbers existed
+    out.setdefault("guide", dict(DEFAULT_SETTINGS["guide"]))     # ... or before the guide's warnings
     if "scale" in raw:
         out["scale"] = _number(raw["scale"], "Scale", 1e-4, 1e5)
     if "up" in raw:
@@ -182,6 +184,11 @@ def normalize_settings(raw: dict | None, base: dict | None = None) -> dict:
         if not isinstance(labels["enabled"], bool):
             raise jobs.JobError("Part numbers must be on or off")
         out["labels"]["enabled"] = labels["enabled"]
+    guide = raw.get("guide") or {}
+    if "heavy_kg" in guide:
+        out["guide"]["heavy_kg"] = _number(guide["heavy_kg"], "Heavy join weight", 0.1, 1000)
+    if "heavy_mm" in guide:
+        out["guide"]["heavy_mm"] = _number(guide["heavy_mm"], "Heavy join length", 10, 10000)
     return out
 
 
@@ -446,14 +453,15 @@ def assembly_plan(split_id: int) -> dict:
     result = _read(work, "result.json")
     if not result:
         raise jobs.JobError("Split the model first", 409)
-    stamp = tuple((work / name).stat().st_mtime_ns if (work / name).is_file() else 0
-                  for name in ("result.json", "cuts.json", "parts_preview.bin"))
+    limits = {**DEFAULT_SETTINGS["guide"], **(get_split(split_id)["settings"].get("guide") or {})}
+    stamp = (limits["heavy_kg"], limits["heavy_mm"]) + tuple((work / name).stat().st_mtime_ns if (work / name).is_file() else 0
+                                                              for name in ("result.json", "cuts.json", "parts_preview.bin"))
     cached = _plans.get(split_id)
     if cached and cached[0] == stamp:
         return cached[1]
     cuts = result.get("cuts") or (_read(work, "cuts.json") or {}).get("cuts") or []
     model = planner.SplitModel(result, cuts, planner.read_preview(work / "parts_preview.bin"))
-    plan = planner.build_plan(model).to_dict()
+    plan = planner.build_plan(model, heavy_kg=limits["heavy_kg"], heavy_mm=limits["heavy_mm"]).to_dict()
     _plans[split_id] = (stamp, plan)
     return plan
 
