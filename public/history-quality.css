@@ -17,3 +17,41 @@
 #panel-history .history-filters[hidden] { display: none; }
 #panel-history .history-filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; }
 #history-filter-summary { flex-basis: 100%; overflow-wrap: anywhere; color: var(--text-muted); }
+
+/* Ticket 20 · History rows, chips and form (PS-30..34, T15) */
+#panel-history .history-row { grid-template-columns: 112px minmax(0, 1fr) 120px max-content minmax(150px, 210px); }
+#panel-history .history-badges { display: flex; flex-wrap: nowrap; gap: 4px; justify-self: start; }
+#panel-history .history-badges .status-badge { white-space: nowrap; }
+#panel-history .history-stats { font-size: 12px; }
+#panel-history .history-facts, #panel-history .history-spools, #panel-history .history-events { font-size: 13px; }
+#panel-history .history-notes { font-size: 13px; }
+#panel-history .history-filters input, #panel-history .history-filters select { font-size: 13px; }
+#panel-history .history-totals { align-items: center; font-size: 13px; }
+#panel-history .history-unconfirmed-chip, #panel-history .history-chip { padding: 2px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface2); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
+#panel-history .history-unconfirmed-chip { border-color: var(--warning, #f59e0b); }
+#panel-history .history-unconfirmed-chip[aria-pressed="true"] { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
+#panel-history .history-chips { display: none; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
+#panel-history .history-outcome-form .history-reasons { margin: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; }
+#panel-history .history-outcome-form .history-reasons legend { padding: 0 4px; font-size: 13px; color: var(--text-muted); }
+#panel-history .history-outcome-form .history-reasons[hidden] { display: none; }
+#panel-history .history-readback { margin: 4px 0; font-size: 13px; color: var(--text-muted); overflow-wrap: anywhere; }
+#panel-history .history-outcome-form legend { font-size: 13px; }
+@media (max-width: 640px) {
+  /* Three lines: file; date + badges; printer + figures. The filter summary text is kept for screen readers; chips replace it. */
+  #panel-history .history-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "file file" "date badges" "printer stats"; gap: 2px 8px; padding: 10px 12px; align-items: center; }
+  #panel-history .history-file { grid-area: file; grid-column: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #panel-history .history-date { grid-area: date; grid-column: auto; }
+  #panel-history .history-badges { grid-area: badges; justify-self: end; }
+  #panel-history .history-printer { grid-area: printer; grid-column: auto; }
+  #panel-history .history-stats { grid-area: stats; grid-column: auto; text-align: right; }
+  #panel-history #history-filter-summary { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  #panel-history .history-chips { display: flex; }
+  #panel-history .history-chip, #panel-history .history-unconfirmed-chip { min-height: 44px; }
+}
+/* The unconfirmed count must stay visible when the side nav is icon-only, and sit inline inside the phone More menu. */
+#btn-history { position: relative; }
+@media (min-width: 641px) and (max-width: 1100px) {
+  #history-unconfirmed-count:not([hidden]) { display: block; position: absolute; top: 2px; right: 2px; margin: 0; padding: 0 5px; }
+}
+#history-unconfirmed-count-mobile { position: static; display: inline-block; margin-left: 8px; }
+#history-unconfirmed-count-mobile[hidden], #history-unconfirmed-count[hidden] { display: none; }

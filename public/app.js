@@ -2801,15 +2801,22 @@ function renderPickerList(printerId) {
     return spoolRow(s, click, isSelected);
   });
 
-  list.innerHTML = `
-    ${_spoolLoadState === "error" ? '<button class="btn btn-secondary" onclick="fetchSpools()">Retry inventory</button>' : ""}
-    <button type="button" aria-pressed="${noneSelected}" class="spool-pick-item${noneSelected ? " selected" : ""}" ${_spoolLoadState !== "ready" ? "disabled" : ""} onclick="${noneClick}">
+  const emptyInventory = _spoolLoadState === "ready" && spools.length === 0;
+  // "None – unassign" only means something when a Spool is assigned; with nothing to unassign it is just noise.
+  const noneRow = noneSelected ? "" : `<button type="button" aria-pressed="false" class="spool-pick-item" ${_spoolLoadState !== "ready" ? "disabled" : ""} onclick="${noneClick}">
       <div class="spool-dot" style="background:var(--border)"></div>
       <div class="spool-pick-info"><div class="spool-pick-name">${noneLabel}</div></div>
-      ${noneSelected ? '<span class="spool-check">✓</span>' : ""}
-    </button>
+    </button>`;
+  list.innerHTML = `
+    ${_spoolLoadState === "error" ? '<button class="btn btn-secondary" onclick="fetchSpools()">Retry inventory</button>' : ""}
+    ${emptyInventory ? `<div class="spool-pick-empty"><p><strong>No spools in inventory</strong></p><p class="input-hint">Add a spool first, then assign it here.</p>
+      <button type="button" class="btn btn-primary" id="btn-picker-add-spool">Add a spool</button></div>` : noneRow}
     ${rows.join("")}
   `;
+  document.getElementById("btn-picker-add-spool")?.addEventListener("click", () => {
+    closeOperatorDialog(document.getElementById("modal-spool-picker"));
+    document.getElementById("btn-add-spool").click();
+  });
 }
 
 async function assignSpool(printerId, spoolId) {
@@ -2963,9 +2970,49 @@ document.getElementById("spool-input-material").addEventListener("change", (e) =
   const density = _materialDensityMap[e.target.value];
   if (density) document.getElementById("spool-input-density").value = density;
 });
-document.getElementById("spool-input-hex").addEventListener("input", e => {
-  document.getElementById("spool-color-hex-value").textContent = `Hex color ${e.target.value.toUpperCase()}`;
-});
+// The colour is optional: until someone picks one (or an EAN lookup supplies one) the Spool is saved without a colour,
+// rather than silently saving the grey the picker starts on.
+let _spoolHexSet = false;
+function showSpoolHex(hex) {
+  _spoolHexSet = !!hex;
+  document.getElementById("spool-colour-pick").dataset.set = String(_spoolHexSet);
+  document.getElementById("spool-color-hex-value").textContent = hex ? `Colour ${hex.toUpperCase()}` : "No colour chosen. The Spool is saved without one.";
+}
+document.getElementById("spool-input-hex").addEventListener("input", e => showSpoolHex(e.target.value));
+
+// Fields the person has typed in themselves; an EAN lookup must not overwrite these without saying so.
+for (const id of ["spool-input-brand", "spool-input-brand-other", "spool-input-material", "spool-input-material-other", "spool-input-color", "spool-input-hex", "spool-input-weight"]) {
+  const el = document.getElementById(id);
+  const mark = ev => { if (ev.isTrusted) el.dataset.userEdited = "1"; };
+  el.addEventListener("input", mark);
+  el.addEventListener("change", mark);
+}
+
+// Inline field errors: text under the field, linked by aria-describedby, with aria-invalid on the field.
+function setSpoolFieldError(el, message) {
+  const id = `${el.id}-error`;
+  let error = document.getElementById(id);
+  if (!message) {
+    el.removeAttribute("aria-invalid");
+    if (error) error.hidden = true;
+    return;
+  }
+  if (!error) {
+    error = document.createElement("span");
+    error.id = id;
+    error.className = "field-error";
+    (el.closest("label") || el).after(error);
+    el.setAttribute("aria-describedby", [el.getAttribute("aria-describedby"), id].filter(Boolean).join(" "));
+  }
+  error.textContent = message;
+  error.hidden = false;
+  el.setAttribute("aria-invalid", "true");
+}
+function clearSpoolFieldErrors() {
+  for (const el of document.querySelectorAll("#form-add-spool [aria-invalid]")) setSpoolFieldError(el, "");
+}
+document.getElementById("form-add-spool").addEventListener("input", e => { if (e.target.hasAttribute?.("aria-invalid")) setSpoolFieldError(e.target, ""); });
+document.getElementById("form-add-spool").addEventListener("change", e => { if (e.target.hasAttribute?.("aria-invalid")) setSpoolFieldError(e.target, ""); });
 
 function getSpoolSelectValue(selectId, otherId) {
   const sel = document.getElementById(selectId).value;
@@ -2985,7 +3032,8 @@ addSpoolModal.addEventListener("click", (e) => {
   if (e.target === addSpoolModal) closeOperatorDialog(addSpoolModal);
 });
 
-document.getElementById("btn-add-spool-confirm").addEventListener("click", async () => {
+document.getElementById("form-add-spool").addEventListener("submit", async (event) => {
+  event.preventDefault();
   const brand    = getSpoolSelectValue("spool-input-brand", "spool-input-brand-other");
   const material = getSpoolSelectValue("spool-input-material", "spool-input-material-other");
   const color    = document.getElementById("spool-input-color").value.trim();
@@ -2995,26 +3043,22 @@ document.getElementById("btn-add-spool-confirm").addEventListener("click", async
   const density  = parseFloat(document.getElementById("spool-input-density").value);
   const feedback = document.getElementById("spool-form-feedback");
 
+  clearSpoolFieldErrors();
+  const problems = [];   // [field, message]
   if (!material) {
-    feedback.hidden = false;
-    feedback.dataset.state = "error";
-    feedback.textContent = "Choose a material or enter one under Other.";
-    (document.getElementById("spool-input-material").value === "__other__"
-      ? document.getElementById("spool-input-material-other") : document.getElementById("spool-input-material")).focus();
-    return;
+    problems.push([document.getElementById("spool-input-material").value === "__other__"
+      ? document.getElementById("spool-input-material-other") : document.getElementById("spool-input-material"), "Choose a material or enter one under Other."]);
   }
-  if (!Number.isFinite(weight) || weight < 1) {
+  if (!Number.isFinite(weight) || weight < 1) problems.push([document.getElementById("spool-input-weight"), "Enter a total weight of at least 1 g."]);
+  if (!Number.isFinite(diameter) || diameter <= 0) problems.push([document.getElementById("spool-input-diameter"), "Diameter must be greater than zero."]);
+  if (!Number.isFinite(density) || density <= 0) problems.push([document.getElementById("spool-input-density"), "Density must be greater than zero."]);
+  if (problems.length) {
+    for (const [field, message] of problems) setSpoolFieldError(field, message);
+    if (problems.some(([field]) => field.closest("#spool-advanced"))) document.getElementById("spool-advanced").open = true;
     feedback.hidden = false;
     feedback.dataset.state = "error";
-    feedback.textContent = "Enter a total weight of at least 1 g.";
-    document.getElementById("spool-input-weight").focus();
-    return;
-  }
-  if (!Number.isFinite(diameter) || diameter <= 0 || !Number.isFinite(density) || density <= 0) {
-    feedback.hidden = false;
-    feedback.dataset.state = "error";
-    feedback.textContent = "Diameter and density must both be greater than zero.";
-    (!Number.isFinite(diameter) || diameter <= 0 ? document.getElementById("spool-input-diameter") : document.getElementById("spool-input-density")).focus();
+    feedback.textContent = problems.length === 1 ? "One field needs attention." : `${problems.length} fields need attention.`;
+    problems[0][0].focus();
     return;
   }
   feedback.hidden = true;
@@ -3040,7 +3084,8 @@ document.getElementById("btn-add-spool-confirm").addEventListener("click", async
     }
 
     // Step 2: create filament
-    const filamentBody = { material, weight, color_hex: hex, density, diameter };
+    const filamentBody = { material, weight, density, diameter };
+    if (_spoolHexSet) filamentBody.color_hex = hex;
     if (color) filamentBody.name = color;
     if (vendorId) filamentBody.vendor_id = vendorId;
     const fr = await fetch(`${SPOOLMAN_URL}/filament`, {
@@ -3073,7 +3118,10 @@ document.getElementById("btn-add-spool-confirm").addEventListener("click", async
     document.getElementById("spool-input-weight").value = "1000";
     document.getElementById("spool-input-diameter").value = "1.75";
     document.getElementById("spool-input-density").value = "1.24";
-    document.getElementById("spool-color-hex-value").textContent = "Hex color #888888";
+    showSpoolHex(null);
+    for (const el of document.querySelectorAll("#form-add-spool [data-user-edited]")) delete el.dataset.userEdited;
+    setEanStatus();
+    document.getElementById("spool-advanced").open = false;
     feedback.hidden = true;
     await fetchSpools();
     toast("Spool added");
@@ -3087,52 +3135,79 @@ document.getElementById("btn-add-spool-confirm").addEventListener("click", async
 
 // ─── EAN lookup + barcode scanner ─────────────────────────────────────────────
 
+const EAN_STATUS_IDLE = "Type or paste an EAN to fill in the details. Scanning asks permission to use this device’s camera.";
+function setEanStatus(text = EAN_STATUS_IDLE, state = "idle") {
+  const status = document.getElementById("spool-ean-status");
+  status.textContent = text;
+  status.dataset.state = state;
+}
+
+// Looks the EAN up and says so under the field. Fields the person already filled in are left alone, and the status line names them.
 async function lookupEan(ean) {
   if (!ean) return;
   document.getElementById("spool-input-ean").value = ean;
+  setEanStatus(`Looking up ${ean}…`, "loading");
   try {
     const r = await fetch(`/api/lookup-ean?ean=${encodeURIComponent(ean)}`);
-    if (r.status === 404) { toast(`EAN ${ean} not found in database`, true); return; }
-    if (!r.ok) throw new Error(await r.text());
+    if (r.status === 404) { setEanStatus(`EAN ${ean} isn’t in the database. Fill the details in yourself.`, "error"); return; }
+    if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
     const d = await r.json();
 
     const brand    = d.manufacturer || "";
     const material = d.material     || "";
     const color    = d.color_name   || "";
-    const hex      = d.color_hex ? "#" + d.color_hex.replace(/^#/, "") : "#888888";
-    const weight   = d.weight ?? 1000;
+    const hex      = d.color_hex ? "#" + d.color_hex.replace(/^#/, "") : "";
+    const weight   = d.weight ?? null;
+    const filled = [], kept = [];
+    const byUser = id => document.getElementById(id).dataset.userEdited === "1";
 
     // Brand dropdown
-    const bSel = document.getElementById("spool-input-brand");
-    const bOther = document.getElementById("spool-input-brand-other");
-    if ([...bSel.options].some(o => o.value === brand)) {
-      bSel.value = brand; bOther.style.display = "none";
-    } else if (brand) {
-      bSel.value = "__other__"; bOther.value = brand; bOther.style.display = "";
+    if (brand) {
+      if (byUser("spool-input-brand") || byUser("spool-input-brand-other")) kept.push("brand");
+      else {
+        const bSel = document.getElementById("spool-input-brand");
+        const bOther = document.getElementById("spool-input-brand-other");
+        if ([...bSel.options].some(o => o.value === brand)) { bSel.value = brand; bOther.style.display = "none"; }
+        else { bSel.value = "__other__"; bOther.value = brand; bOther.style.display = ""; }
+        filled.push("brand");
+      }
     }
 
     // Material dropdown
-    const mSel = document.getElementById("spool-input-material");
-    const mOther = document.getElementById("spool-input-material-other");
-    if ([...mSel.options].some(o => o.value === material)) {
-      mSel.value = material; mOther.style.display = "none";
-    } else if (material) {
-      mSel.value = "__other__"; mOther.value = material; mOther.style.display = "";
+    if (material) {
+      if (byUser("spool-input-material") || byUser("spool-input-material-other")) kept.push("material");
+      else {
+        const mSel = document.getElementById("spool-input-material");
+        const mOther = document.getElementById("spool-input-material-other");
+        if ([...mSel.options].some(o => o.value === material)) { mSel.value = material; mOther.style.display = "none"; }
+        else { mSel.value = "__other__"; mOther.value = material; mOther.style.display = ""; }
+        filled.push("material");
+      }
     }
 
-    document.getElementById("spool-input-color").value  = color;
-    document.getElementById("spool-input-hex").value    = hex;
-    document.getElementById("spool-input-weight").value = weight;
+    if (color) {
+      if (byUser("spool-input-color")) kept.push("colour name");
+      else { document.getElementById("spool-input-color").value = color; filled.push("colour name"); }
+    }
+    if (hex) {
+      if (byUser("spool-input-hex")) kept.push("colour");
+      else { document.getElementById("spool-input-hex").value = hex; showSpoolHex(hex); filled.push("colour"); }
+    }
+    if (weight != null) {
+      if (byUser("spool-input-weight")) kept.push("weight");
+      else { document.getElementById("spool-input-weight").value = weight; filled.push("weight"); }
+    }
 
-    toast(`Found: ${d.name || [brand, material, color].filter(Boolean).join(" ")}`);
+    const name = d.name || [brand, material, color].filter(Boolean).join(" ") || ean;
+    setEanStatus(`Found ${name}. ${filled.length ? `Filled in: ${filled.join(", ")}.` : "Nothing needed filling in."}${kept.length ? ` Kept what you typed: ${kept.join(", ")}.` : ""}`, "ok");
   } catch (e) {
-    toast("Lookup failed: " + e.message, true);
+    setEanStatus(`Lookup failed: ${e.message}. You can fill the details in yourself.`, "error");
   }
 }
 
 // EAN field: lookup on Enter
 document.getElementById("spool-input-ean").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") lookupEan(e.target.value.trim());
+  if (e.key === "Enter") { e.preventDefault(); lookupEan(e.target.value.trim()); }   // Enter looks up; it must not also submit the form
 });
 // Lookup on paste after short delay (scanner keyboards send paste then Enter)
 document.getElementById("spool-input-ean").addEventListener("input", (e) => {
@@ -3154,6 +3229,7 @@ function _setScannerError(msg, opts = {}) {
   if (sub !== undefined) document.getElementById("scanner-error-sub").textContent = sub;
   document.getElementById("scanner-error").style.display = "flex";
   document.getElementById("btn-scanner-photo").style.display = photo ? "" : "none";
+  document.getElementById("btn-scanner-manual").style.display = "";
 }
 
 function _resetScannerError() {
@@ -3162,10 +3238,11 @@ function _resetScannerError() {
   document.getElementById("scanner-error").style.display = "none";
   document.getElementById("scanner-error-sub").textContent = "Enter the EAN code manually instead.";
   document.getElementById("btn-scanner-photo").style.display = "none";
+  document.getElementById("btn-scanner-manual").style.display = "none";
 }
 
-// The barcode library comes from a CDN. It loads when the scanner is first used, never at startup, so a slow or
-// blocked CDN only affects barcode scanning.
+// The barcode library comes from a CDN (vendoring it under public/vendor/ is still to do). It loads when the scanner is
+// first used, never at startup, so a slow or blocked CDN only affects barcode scanning.
 let _qrLibPromise = null;
 function loadQrLib() {
   if (window.Html5Qrcode) return Promise.resolve();
@@ -3173,9 +3250,10 @@ function loadQrLib() {
     _qrLibPromise = new Promise((resolve, reject) => {
       const script = document.createElement("script");
       script.src = "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js";
-      const timer = setTimeout(() => reject(new Error("The barcode scanner couldn't be loaded")), 8000);
+      const libError = () => Object.assign(new Error("The barcode scanner couldn't be loaded"), { name: "ScannerLibraryError" });
+      const timer = setTimeout(() => reject(libError()), 8000);
       script.onload = () => { clearTimeout(timer); resolve(); };
-      script.onerror = () => { clearTimeout(timer); reject(new Error("The barcode scanner couldn't be loaded")); };
+      script.onerror = () => { clearTimeout(timer); reject(libError()); };
       document.head.appendChild(script);
     }).catch(err => { _qrLibPromise = null; throw err; });
   }
@@ -3199,8 +3277,8 @@ async function openScanner() {
   const giveUpTimer = setTimeout(() => {
     timedOut = true;
     _stopScanner();
-    _setScannerError("No camera found on this device");
-  }, 5000);
+    _setScannerError(...scannerErrorFor({ name: "Timeout" }));
+  }, 10000);
 
   try {
     await loadQrLib();
@@ -3216,8 +3294,19 @@ async function openScanner() {
     clearTimeout(giveUpTimer);
     if (timedOut) return;
     _stopScanner();
-    _setScannerError(e.name === "NotFoundError" ? "No camera found on this device" : "Camera not available");
+    _setScannerError(...scannerErrorFor(e));
   }
+}
+
+// One message per cause, so the person knows what to fix. Manual EAN entry is always offered.
+function scannerErrorFor(e) {
+  const name = e?.name || "";
+  if (name === "ScannerLibraryError") return ["Barcode scanning isn’t available", { sub: "The scanner library didn’t load, so the network may be blocking it or you’re offline. Type the EAN instead." }];
+  if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") return ["Camera permission was denied", { sub: "Allow camera access for this site in your browser settings and try again, or type the EAN instead." }];
+  if (name === "NotFoundError" || name === "DevicesNotFoundError" || name === "OverconstrainedError") return ["No camera found on this device", { sub: "Type the EAN instead." }];
+  if (name === "NotReadableError" || name === "TrackStartError") return ["The camera is in use by another app", { sub: "Close the other app and try again, or type the EAN instead." }];
+  if (name === "Timeout") return ["The camera didn’t start", { sub: "Check that a camera is connected and that you allowed access, or type the EAN instead." }];
+  return ["The camera couldn’t be started", { sub: `${e?.message ? e.message + ". " : ""}Type the EAN instead.` }];
 }
 
 function closeScanner() { closeModal(document.getElementById("modal-scanner")); }
@@ -3248,6 +3337,10 @@ document.getElementById("barcode-file-input").addEventListener("change", async (
 
 document.getElementById("btn-scan-ean").addEventListener("click", openScanner);
 document.getElementById("btn-scanner-cancel").addEventListener("click", closeScanner);
+document.getElementById("btn-scanner-manual").addEventListener("click", () => {
+  closeScanner();
+  document.getElementById("spool-input-ean").focus();
+});
 document.getElementById("btn-scanner-photo").addEventListener("click", () => {
   closeScanner();
   document.getElementById("barcode-file-input").click();

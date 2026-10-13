@@ -12,7 +12,8 @@
   <meta name="apple-mobile-web-app-title" content="Spooler" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="stylesheet" href="style.css?v=66" />
-  <link rel="stylesheet" href="history-quality.css?v=1" />
+  <link rel="stylesheet" href="history-quality.css?v=2" />
+  <link rel="stylesheet" href="spool-form.css?v=1" />
   <script src="net.js?v=2"></script>
   <script src="modal.js?v=1"></script>
   <script src="confirm-dialog.js?v=1"></script>
@@ -87,6 +88,7 @@
         <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
       </svg>
       <span>History</span>
+      <span id="history-unconfirmed-count" class="sidenav-badge" hidden></span>
     </button>
     <button id="btn-spools" class="sidenav-item" title="Filament spools (Reel)" aria-label="Spools">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -410,6 +412,7 @@
         <p id="scanner-error-sub" class="scanner-error-sub">Enter the EAN code manually instead.</p>
       </div>
       <div class="modal-actions">
+        <button id="btn-scanner-manual" class="btn btn-secondary" type="button" style="display:none">Type the EAN</button>
         <button id="btn-scanner-photo" class="btn btn-primary" style="display:none">Take Photo</button>
         <button id="btn-scanner-cancel" class="btn btn-secondary">Close</button>
       </div>
@@ -424,11 +427,12 @@
   <div id="modal-add-spool" class="modal operator-dialog" role="dialog" aria-modal="true" aria-labelledby="add-spool-title">
     <div class="modal-box">
       <h3 id="add-spool-title">Add Spool</h3>
+      <form id="form-add-spool" novalidate>
       <div class="ean-row">
-        <label style="flex:1">EAN (optional)
-          <input id="spool-input-ean" type="text" placeholder="Enter EAN manually or scan" inputmode="numeric" autocomplete="off" />
+        <label style="flex:1">EAN <span class="field-mark optional">Optional</span>
+          <input id="spool-input-ean" type="text" placeholder="EAN number" inputmode="numeric" autocomplete="off" aria-describedby="spool-ean-status" />
         </label>
-        <button id="btn-scan-ean" class="btn btn-secondary" type="button" title="Scan with camera" aria-label="Scan EAN with camera">
+        <button id="btn-scan-ean" class="btn btn-secondary" type="button" aria-label="Scan EAN with camera">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M3 9V5a2 2 0 0 1 2-2h4M3 15v4a2 2 0 0 0 2 2h4M21 9V5a2 2 0 0 0-2-2h-4M21 15v4a2 2 0 0 1-2 2h-4"/>
             <line x1="8" y1="12" x2="8" y2="12"/><line x1="12" y1="12" x2="16" y2="12"/>
@@ -436,35 +440,45 @@
           Scan
         </button>
       </div>
-      <p class="input-hint">Camera scanning asks permission to use this device’s camera. Manual EAN entry is always available.</p>
+      <p id="spool-ean-status" class="spool-ean-status" role="status" aria-live="polite" data-state="idle">Type or paste an EAN to fill in the details. Scanning asks permission to use this device’s camera.</p>
       <p id="spool-catalogue-status" class="spool-catalogue-status" role="status" aria-live="polite" data-state="loading">Loading brand and material catalogue…</p>
       <button id="btn-spool-catalogue-retry" class="btn btn-secondary btn-sm" type="button" hidden>Retry catalogue</button>
-      <label>Brand (optional)
+      <label>Brand <span class="field-mark optional">Optional</span>
         <select id="spool-input-brand">
           <option value="">– Loading… –</option>
           <option value="__other__">Other…</option>
         </select>
         <input id="spool-input-brand-other" type="text" aria-label="Brand name" placeholder="Brand name" style="display:none;margin-top:6px" />
       </label>
-      <label>Material (required)
+      <label>Material <span class="field-mark required">Required</span>
         <select id="spool-input-material" required>
           <option value="">– Loading… –</option>
           <option value="__other__">Other…</option>
         </select>
         <input id="spool-input-material-other" type="text" aria-label="Material name" placeholder="Material name" style="display:none;margin-top:6px" />
       </label>
-      <label>Color<input id="spool-input-color" type="text" placeholder="White" /></label>
-      <label>Color (hex)<input id="spool-input-hex" type="color" value="#888888" aria-describedby="spool-color-hex-value" /><span id="spool-color-hex-value" class="input-hint" role="status" aria-live="polite">Hex color #888888</span></label>
-      <label>Total weight (g) (required)<input id="spool-input-weight" type="number" placeholder="1000" value="1000" min="1" step="1" required /></label>
-      <div class="form-row-2">
-        <label>Diameter (mm)<input id="spool-input-diameter" type="number" placeholder="1.75" step="0.01" min="0.1" value="1.75" /></label>
-        <label>Density (g/cm³)<input id="spool-input-density" type="number" placeholder="1.24" step="0.01" min="0.1" value="1.24" /></label>
+      <label>Colour name <span class="field-mark optional">Optional</span><input id="spool-input-color" type="text" placeholder="White" /></label>
+      <div class="colour-field">
+        <label for="spool-input-hex">Colour <span class="field-mark optional">Optional</span></label>
+        <div class="colour-pick" id="spool-colour-pick" data-set="false">
+          <input id="spool-input-hex" type="color" value="#888888" aria-describedby="spool-color-hex-value" />
+          <span id="spool-color-hex-value" class="input-hint" role="status" aria-live="polite">No colour chosen. The Spool is saved without one.</span>
+        </div>
       </div>
+      <label>Total weight (g) <span class="field-mark required">Required</span><input id="spool-input-weight" type="number" placeholder="1000" value="1000" min="1" step="1" required /></label>
+      <details id="spool-advanced" class="spool-advanced">
+        <summary>Advanced: diameter and density</summary>
+        <div class="form-row-2">
+          <label>Diameter (mm) <span class="field-mark optional">Optional</span><input id="spool-input-diameter" type="number" placeholder="1.75" step="0.01" min="0.1" value="1.75" /></label>
+          <label>Density (g/cm³) <span class="field-mark optional">Optional</span><input id="spool-input-density" type="number" placeholder="1.24" step="0.01" min="0.1" value="1.24" /></label>
+        </div>
+      </details>
       <p id="spool-form-feedback" class="spool-form-feedback" role="status" aria-live="polite" hidden></p>
       <div class="modal-actions">
-        <button id="btn-add-spool-cancel" class="btn btn-secondary">Cancel</button>
-        <button id="btn-add-spool-confirm" class="btn btn-primary">Add</button>
+        <button id="btn-add-spool-cancel" class="btn btn-secondary" type="button">Cancel</button>
+        <button id="btn-add-spool-confirm" class="btn btn-primary" type="submit">Add</button>
       </div>
+      </form>
     </div>
   </div>
 

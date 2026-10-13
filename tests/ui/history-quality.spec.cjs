@@ -87,6 +87,10 @@ const records = ['completed', 'cancelled', 'failed', 'unknown'].map((outcome, i)
       await page.getByRole('button', { name: 'Save outcome', exact: true }).click();
       await page.locator('[role=status]:not(#toast-area)').filter({ hasText: 'Outcome saved and confirmed' }).waitFor();
       assert.equal(await page.getByRole('button', { name: 'Save outcome', exact: true }).evaluate(el => el === document.activeElement), true);
+      if (width <= 640) {   // phones start with the filters collapsed
+        assert.equal(await page.getByRole('searchbox', { name: 'Search history' }).isVisible(), false, 'Filters start collapsed on a phone');
+        await page.getByRole('button', { name: 'Show filters' }).click();
+      }
       await page.getByRole('searchbox', { name: 'Search history' }).fill('same-file');
       await page.locator('#history-printer').selectOption('p1');
       await page.locator('#history-outcome').selectOption('unconfirmed');
