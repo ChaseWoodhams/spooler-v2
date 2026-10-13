@@ -5,7 +5,7 @@
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=3";
-import { projectPage } from "./project-page.js?v=9";
+import { projectPage } from "./project-page.js?v=10";
 import { newProject } from "./new-project.js?v=10";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 
@@ -649,8 +649,8 @@ function defaultStep() {
   if (isGcodeProject()) return "print";
   if (unplacedSplitIds(state.project).length || splitIdsOf(state.project).length && !data().objects.length) return splitStep.split?.result ? "split" : "model";
   if (!data().objects.length) return "plates";
-  if (state.jobs.some(j => OPEN_JOB_STATES.has(j.state))) return "print";
-  return platesWithObjects().every(p => isUpToDate(p.id)) ? "slice" : "plates";
+  if (state.jobs.length) return "print";   // something was sent: the Project page is where it stands
+  return platesWithObjects().every(p => isUpToDate(p.id)) ? "print" : "plates";   // every Plate sliced: the next thing to do is send them, not slice again
 }
 
 async function setStep(step, { force = false } = {}) {
