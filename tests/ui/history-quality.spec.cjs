@@ -11,6 +11,8 @@ const records = ['completed', 'cancelled', 'failed', 'unknown'].map((outcome, i)
   filament_g: i === 0 ? 0 : null, filament_mm: null, cost: i === 0 ? 0 : null,
   estimate_s: i === 0 ? 0 : 120, estimate_g: 10, notes: '',
 }));
+// The detail is grouped, with the unrecorded rows folded away: open the unrecorded fold, then read the whole thing
+const detailText = async page => { await page.locator('.history-detail details.history-missing').evaluateAll(ds => ds.forEach(d => { d.open = true; })); return page.locator('.history-detail').innerText(); };
 (async () => {
   const server = http.createServer(async (req, res) => {
     try {
@@ -59,7 +61,7 @@ const records = ['completed', 'cancelled', 'failed', 'unknown'].map((outcome, i)
       await page.locator('.history-row').first().focus();
       await page.keyboard.press('Enter');
       await page.locator('.history-events').waitFor();
-      const facts = await page.locator('.history-facts').innerText();
+      const facts = await detailText(page);
       assert.match(facts, /0 g/);
       const summaryText = (await page.locator('#history-filter-summary').textContent()).trim();
       assert.equal(summaryText, 'All prints · all time', `Filter summary text at ${width}`);
@@ -113,8 +115,9 @@ const records = ['completed', 'cancelled', 'failed', 'unknown'].map((outcome, i)
       assert.match(lastFilters, /since=/);
       assert.match(lastFilters, /q=same-file/);
       await page.locator('.history-row').nth(1).click();
-      assert.match(await page.locator('.history-facts').innerText(), /Not recorded/);
-      assert.match(await page.locator('.history-facts').innerText(), /End/);
+      const older = await detailText(page);   // the unrecorded rows sit in a fold, which detailText opens
+      assert.match(older, /Not recorded/);
+      assert.match(older, /End/);
       await page.close();
     }
     console.log('History context and telemetry PASS');

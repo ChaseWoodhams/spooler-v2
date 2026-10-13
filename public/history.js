@@ -94,9 +94,12 @@ async function loadHistory(append = false) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
     if (request !== _historyRequest) return; // superseded by a newer search
+    const firstNew = append ? historyPrints.length : -1;
     historyPrints = append ? historyPrints.concat(data.prints) : data.prints;
     historyTotal = data.total;
     renderHistory(data.summary);
+    // Load more: the button can disappear (all loaded) and focus would fall to the page, so land on the first new row
+    if (append && data.prints.length) document.querySelector(`[data-history-toggle="${historyPrints[firstNew].id}"]`)?.focus();
   } catch (err) {
     if (request === _historyRequest && document.getElementById("panel-history").classList.contains("open")) {
       results.textContent = `Could not load history: ${err.message}. Previous results may be out of date.`;
@@ -198,21 +201,29 @@ function historyDetail(p) {
   const detail = _historyDetails[p.id];
   const at = ts => ts != null ? new Date(ts * 1000).toLocaleString() : "—";
   const facts = [
-    ["Started", at(p.started_at)],
-    ["Ended", p.ended_at != null ? at(p.ended_at) : p.outcome ? "End time not recorded" : "Still printing"],
-    ["Observed duration", p.duration_s != null ? (p.duration_s === 0 ? '0s' : formatTime(p.duration_s)) : "Not recorded"],
-    ["Slicer estimate · duration", p.estimate_s != null ? (p.estimate_s === 0 ? '0s' : formatTime(p.estimate_s)) : "Not available"],
-    ["Layers", p.total_layers != null ? `${p.layer != null ? p.layer : "Not recorded"} of ${p.total_layers}` : "Not recorded"],
-    ["Observed filament", (p.filament_g != null ? `${p.filament_g} g` : "Weight not recorded") +
+    ["Timing", "Started", at(p.started_at)],
+    ["Timing", "Ended", p.ended_at != null ? at(p.ended_at) : p.outcome ? "End time not recorded" : "Still printing"],
+    ["Timing", "Observed duration", p.duration_s != null ? (p.duration_s === 0 ? '0s' : formatTime(p.duration_s)) : "Not recorded"],
+    ["Timing", "Slicer estimate · duration", p.estimate_s != null ? (p.estimate_s === 0 ? '0s' : formatTime(p.estimate_s)) : "Not available"],
+    ["Timing", "Layers", p.total_layers != null ? `${p.layer != null ? p.layer : "Not recorded"} of ${p.total_layers}` : "Not recorded"],
+    ["Filament", "Observed filament", (p.filament_g != null ? `${p.filament_g} g` : "Weight not recorded") +
       " · " + (p.filament_mm != null ? `${(p.filament_mm / 1000).toFixed(2)} m` : "Length not recorded")],
-    ["Slicer estimate · filament", p.estimate_g != null ? `${p.estimate_g} g` : "Not available"],
-    ["Material", [p.vendor, p.material, p.filament_name].filter(Boolean).join(" ") || "—"],
-    ["Cost", p.cost != null ? formatCost(p.cost) : "—"],
-    ["Queue job", p.job_id ? `#${p.job_id}${detail?.job ? ` · ${detail.job.name}` : ""}` : "Started outside the queue"],
+    ["Filament", "Slicer estimate · filament", p.estimate_g != null ? `${p.estimate_g} g` : "Not available"],
+    ["Filament", "Material", [p.vendor, p.material, p.filament_name].filter(Boolean).join(" ") || "—"],
+    ["Filament", "Cost", p.cost != null ? formatCost(p.cost) : "—"],
+    ["Job", "Queue job", p.job_id ? `#${p.job_id}${detail?.job ? ` · ${detail.job.name}` : ""}` : "Started outside the queue"],
   ];
-  if (p.failure_reasons?.length) facts.push(["Failure reasons", p.failure_reasons.map(failureReasonLabel).join(", ")]);
-  if (p.detail) facts.push(["Details", p.detail]);
-  if (p.source === "imported") facts.push(["Source", "Imported from the previous history log"]);
+  if (p.failure_reasons?.length) facts.push(["Job", "Failure reasons", p.failure_reasons.map(failureReasonLabel).join(", ")]);
+  if (p.detail) facts.push(["Job", "Details", p.detail]);
+  if (p.source === "imported") facts.push(["Job", "Source", "Imported from the previous history log"]);
+
+  // Older records lack many of these: fold the empty rows into one line instead of a wall of "Not recorded"
+  const missing = ([, , v]) => /^(not recorded|not available|—|end time not recorded)$/i.test(v) || /^weight not recorded · length not recorded$/i.test(v);
+  const factRows = list => list.map(([, k, v]) => `<dt>${escHtml(k)}</dt><dd>${escHtml(v)}</dd>`).join("");
+  const groups = ["Timing", "Filament", "Job"].map(g => [g, facts.filter(f => f[0] === g && !missing(f))]).filter(([, rows]) => rows.length)
+    .map(([g, rows]) => `<section class="history-group" aria-labelledby="history-group-${p.id}-${g}"><h4 id="history-group-${p.id}-${g}">${g}</h4><dl class="history-facts">${factRows(rows)}</dl></section>`).join("");
+  const notRecorded = facts.filter(missing);
+  const folded = notRecorded.length ? `<details class="history-missing"><summary>${notRecorded.length} detail${notRecorded.length === 1 ? "" : "s"} not recorded</summary><dl class="history-facts">${factRows(notRecorded)}</dl></details>` : "";
 
   const spools = (p.spools || []).map(s =>
     `<li><span class="history-swatch" style="background:#${_safeColor(s.color_hex)}"></span>` +
@@ -227,8 +238,8 @@ function historyDetail(p) {
     : "";
 
   return `<div class="history-detail" id="history-detail-${p.id}" role="region" aria-label="Details for Print ${p.id}">
-    <dl class="history-facts">${facts.map(([k, v]) => `<dt>${escHtml(k)}</dt><dd>${escHtml(v)}</dd>`).join("")}</dl>
-    ${spools ? `<ul class="history-spools">${spools}</ul>` : ""}
+    ${groups}${folded}
+    ${spools ? `<section class="history-group" aria-labelledby="history-spools-${p.id}"><h4 id="history-spools-${p.id}">Spools used</h4><ul class="history-spools">${spools}</ul></section>` : ""}
     ${events}
     ${p.outcome ? historyOutcomeForm(p) : ""}
     <label class="history-notes">
@@ -511,7 +522,8 @@ function updateHistoryFilterSummary() {
     const el = document.getElementById(id);
     if (el.value) addChip(el.selectedOptions[0].textContent, () => { el.value = ""; });
   }
-  document.getElementById("history-result-count").textContent = `${historyTotal} result${historyTotal === 1 ? "" : "s"}`;
+  document.getElementById("history-result-count").textContent = historyPrints.length < historyTotal
+    ? `Showing ${historyPrints.length} of ${historyTotal}` : `${historyTotal} result${historyTotal === 1 ? "" : "s"}`;
 }
 
 // The count on the History entry is wanted before the panel is ever opened.

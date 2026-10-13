@@ -55,3 +55,13 @@
 }
 #history-unconfirmed-count-mobile { position: static; display: inline-block; margin-left: 8px; }
 #history-unconfirmed-count-mobile[hidden], #history-unconfirmed-count[hidden] { display: none; }
+
+/* Ticket 26 · History detail: grouped facts at 13-14 px, a heading over the spools, empty rows folded away (PS-60) */
+#panel-history .history-group { display: flex; flex-direction: column; gap: 6px; }
+#panel-history .history-group h4 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-muted); }
+#panel-history .history-facts dd { font-size: 14px; }
+#panel-history .history-facts dt { font-size: 13px; }
+#panel-history .history-spools { font-size: 14px; }
+#panel-history .history-missing { font-size: 13px; color: var(--text-muted); }
+#panel-history .history-missing summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; }
+#panel-history .history-missing .history-facts { margin-top: 4px; }
