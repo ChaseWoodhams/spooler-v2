@@ -961,7 +961,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             else:
                 result = fn()
         except jobs.JobError as e:
-            self._json({"error": str(e)}, e.status)
+            self._json({"error": str(e), **({"issues": e.issues} if getattr(e, "issues", None) else {})}, e.status)
             return
         if broadcast and not coroutine:
             jobs.broadcast_threadsafe()

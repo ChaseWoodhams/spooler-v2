@@ -85,6 +85,116 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
         await self.run_worker()
         return projects.get_project(project["id"])
 
+    async def test_invalid_project_edit_reports_the_field_and_keeps_saved_settings(self):
+        project = await self.project_with_cube()
+        for key, value in (("outer_wall_line_width", "100%%"), ("wall_loops", "2.5"),
+                           ("layer_height", "NaN"), ("enable_support", "maybe"),
+                           ("bottom_surface_pattern", "invented"), ("layer_height", "1_0")):
+            with self.subTest(key=key), self.assertRaises(jobs.JobError) as rejected:
+                self.edit(project, profile={**project["data"]["profile"], "process": {key: value}})
+            self.assertEqual(rejected.exception.issues[0]["key"], key)
+            self.assertEqual(projects.get_project(project["id"])["data"], project["data"])
+
+    async def test_legacy_setting_issues_survive_review_and_an_unrelated_save(self):
+        project = await self.project_with_cube()
+        # A historical persisted Project is the input fixture, never the assertion seam.
+        legacy = json.loads(json.dumps(project["data"]))
+        legacy["profile"]["process"] = {"wall_loops": "2.5", "unknown_old_setting": "kept"}
+        with database.transaction() as conn:
+            conn.execute("UPDATE projects SET data = ? WHERE id = ?", (json.dumps(legacy), project["id"]))
+        project = projects.get_project(project["id"])
+        review = projects.effective_settings(project["id"], 1)
+        self.assertEqual({i["key"] for i in review["issues"]}, {"wall_loops", "unknown_old_setting"})
+        saved = self.edit(project, plates=[{**project["data"]["plates"][0], "name": "Renamed"}])
+        self.assertEqual(saved["data"]["profile"]["process"], legacy["profile"]["process"])
+        with self.assertRaises(jobs.JobError):
+            self.edit(saved, profile={**saved["data"]["profile"], "process": {"unknown_old_setting": "new"}})
+
+    async def test_line_width_uses_nozzle_context_and_accepts_automatic_zero(self):
+        project = await self.project_with_cube()
+        for value in ("0", "150%"):
+            project = self.edit(project, profile={**project["data"]["profile"],
+                "process": {"outer_wall_line_width": value}})
+            self.assertEqual(projects.effective_settings(project["id"], 1)["process"]["outer_wall_line_width"], value)
+        for value in ("-1%", "10000%", "11"):
+            with self.subTest(value=value):
+                with self.assertRaises(jobs.JobError):
+                    self.edit(project, profile={**project["data"]["profile"],
+                        "process": {"outer_wall_line_width": value}})
+
+    async def test_coupled_scarf_settings_require_an_explicit_correction(self):
+        project = await self.project_with_cube()
+        with self.assertRaises(jobs.JobError) as rejected:
+            self.edit(project, profile={**project["data"]["profile"], "process": {
+                "seam_slope_type": "external", "seam_slope_start_height": "100%"}})
+        self.assertEqual(rejected.exception.issues[0]["key"], "seam_slope_start_height")
+        self.assertIn("suggested_correction", rejected.exception.issues[0])
+        self.assertEqual(projects.get_project(project["id"])["data"], project["data"])
+
+    async def test_inherited_unknown_setting_is_inspectable_but_not_newly_editable(self):
+        preset = next((self.dir / "tools").rglob("fdm_process_common.json"))
+        raw = json.loads(preset.read_text())
+        raw["unknown_inherited"] = "opaque legacy value"
+        preset.write_text(json.dumps(raw))
+        slicer.configure(self.dir, orca_path=next((self.dir / "tools").rglob("orca-slicer.exe")))
+        bundle = slicer.create_bundle("Elegoo Centauri Carbon 0.4 nozzle", "0.20mm Standard @Elegoo CC 0.4 nozzle", "Elegoo PLA @ECC")
+        project = await self.project_with_cube()
+        project = self.edit(project, profile={**project["data"]["profile"], "bundle_id": bundle["id"]})
+        before = projects.get_project(project["id"])
+        review = projects.effective_settings(project["id"], 1)
+        issue = next(i for i in review["issues"] if i["key"] == "unknown_inherited")
+        self.assertEqual(issue["scope"], "preset")
+        self.assertEqual(issue["value"], "opaque legacy value")
+        self.assertEqual(projects.get_project(project["id"])["data"], before["data"])
+        with self.assertRaises(jobs.JobError):
+            self.edit(project, profile={**project["data"]["profile"], "process": {"unknown_inherited": "new edit"}})
+
+    async def test_temperature_edits_obey_pinned_source_constant_bounds(self):
+        project = await self.project_with_cube()
+        with self.assertRaises(jobs.JobError) as rejected:
+            self.edit(project, profile={**project["data"]["profile"], "filament": {"nozzle_temperature": ["1501"]}})
+        self.assertEqual(rejected.exception.issues[0]["key"], "nozzle_temperature")
+        self.assertEqual(projects.get_project(project["id"])["data"], project["data"])
+
+    async def test_infill_lock_constraint_is_active_only_for_lockedzag(self):
+        project = await self.project_with_cube()
+        project = self.edit(project, profile={**project["data"]["profile"], "process": {
+            "sparse_infill_pattern": "gyroid", "skin_infill_depth": "0.2", "infill_lock_depth": "0.3"}})
+        self.assertEqual(project["data"]["profile"]["process"]["infill_lock_depth"], "0.3")
+        with self.assertRaises(jobs.JobError) as rejected:
+            self.edit(project, profile={**project["data"]["profile"], "process": {
+                **project["data"]["profile"]["process"], "sparse_infill_pattern": "lockedzag"}})
+        self.assertEqual(rejected.exception.issues[0]["key"], "infill_lock_depth")
+        self.assertEqual(rejected.exception.issues[0]["suggested_correction"], {"infill_lock_depth": "0.1"})
+
+    async def test_filament_temperature_range_requires_ordered_limits(self):
+        project = await self.project_with_cube()
+        with self.assertRaises(jobs.JobError) as rejected:
+            self.edit(project, profile={**project["data"]["profile"], "filament": {
+                "nozzle_temperature_range_low": ["280"], "nozzle_temperature_range_high": ["250"]}})
+        self.assertEqual(rejected.exception.issues[0]["key"], "nozzle_temperature_range_low")
+        self.assertIn("suggested_correction", rejected.exception.issues[0])
+
+    async def test_plate_coupled_constraints_use_the_projects_effective_height(self):
+        project = await self.project_with_cube()
+        project = self.edit(project, profile={**project["data"]["profile"], "process": {
+            "layer_height": "0.3", "seam_slope_type": "external"}},
+            plates=[{**project["data"]["plates"][0], "overrides": {"seam_slope_start_height": "0.25"}}])
+        with self.assertRaises(jobs.JobError) as rejected:
+            self.edit(project, profile={**project["data"]["profile"], "process": {
+                "layer_height": "0.2", "seam_slope_type": "external"}})
+        self.assertEqual(rejected.exception.issues[0]["key"], "seam_slope_start_height")
+        self.assertEqual(rejected.exception.issues[0]["scope"], "plate")
+
+    async def test_zero_height_and_flow_cannot_create_invalid_cli_inputs(self):
+        project = await self.project_with_cube()
+        for kind, key, value in (("process", "layer_height", "0"), ("process", "bridge_flow", "0"),
+                                  ("filament", "filament_flow_ratio", ["0"])):
+            with self.subTest(key=key):
+                with self.assertRaises(jobs.JobError) as rejected:
+                    self.edit(project, profile={**project["data"]["profile"], kind: {key: value}})
+                self.assertEqual(rejected.exception.issues[0]["key"], key)
+
     def edit(self, project, **changes):
         data = json.loads(json.dumps(project["data"]))
         for key, value in changes.items():
@@ -516,6 +626,15 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
 class ProjectApiTests(unittest.TestCase):
+    def test_invalid_settings_http_response_identifies_fields_without_overwriting_project(self):
+        project = self.call("POST", "/api/projects", {"name": "Validation"})[1]
+        data = json.loads(json.dumps(project["data"]))
+        data["profile"]["process"] = {"outer_wall_line_width": "100%%"}
+        status, response = self.call("PATCH", f"/api/projects/{project['id']}", {"data": data, "revision": project["revision"]})
+        self.assertEqual(status, 400)
+        self.assertEqual(response["issues"][0]["key"], "outer_wall_line_width")
+        self.assertEqual(self.call("GET", f"/api/projects/{project['id']}")[1]["data"], project["data"])
+
     def test_effective_settings_http_review_is_revision_bound_and_read_only(self):
         project = self.call("POST", "/api/projects", {"name": "Settings review"})[1]
         pid = project["id"]

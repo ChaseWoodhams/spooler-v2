@@ -54,14 +54,28 @@ def text_field(body: str, name: str) -> str | None:
     return unescape("".join(parts)) if parts else None
 
 
-def number_field(body: str, name: str):
-    match = re.search(r"def->" + name + r"\s*=\s*(-?\d+(?:\.\d*)?)", body)
-    return float(match.group(1)) if match else None
+def number_field(body: str, name: str, constants=None, references=None):
+    match = re.search(r"def->" + name + r"\s*=\s*([^;]+);", body)
+    if not match:
+        return None
+    expression = match.group(1).strip()
+    literal = re.fullmatch(r"(-?\d+(?:\.\d*)?)(?:[fF])?", expression)
+    if literal:
+        return float(literal.group(1))
+    sign, key = (-1, expression[1:]) if expression.startswith('-') else (1, expression)
+    if key in (constants or {}):
+        return sign * constants[key]
+    copied = re.fullmatch(r"(\w+)->(min|max|max_literal)", expression)
+    return (references or {}).get(copied.group(1), {}).get(copied.group(2)) if copied else None
 
 
 def parse_options(source: str) -> dict:
+    # CLI/SLA sections may reuse FFF names; only the FFF definition is authoritative.
+    source = source[:source.find("void PrintConfigDef::init_sla") if "void PrintConfigDef::init_sla" in source else len(source)]
     matches = list(DEFINITION.finditer(source))
     options = {}
+    references = {}
+    constants = {name: float(value) for name, value in re.findall(r"\bconst(?:expr)?\s+(?:int|float|double)\s+(\w+)\s*=\s*(-?\d+(?:\.\d*)?)[fF]?\s*;", source)}
     for index, match in enumerate(matches):
         key, co_type = match.group(1), match.group(2)
         end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
@@ -79,15 +93,27 @@ def parse_options(source: str) -> dict:
             "category": text_field(body, "category"),
             "tooltip": text_field(body, "tooltip"),
             "sidetext": text_field(body, "sidetext"),
-            "min": number_field(body, "min"),
-            "max": number_field(body, "max"),
+            "min": number_field(body, "min", constants, references),
+            "max": number_field(body, "max", constants, references),
             "mode": (mode.group(1).lower() if mode else "simple"),
             "readonly": bool(re.search(r"def->readonly\s*=\s*true", body)),
+            "nullable": "add_nullable" in match.group(0) or bool(re.search(r"def->nullable\s*=\s*true", body)),
+            "ratio_over": text_field(body, "ratio_over"),
+            "max_literal": number_field(body, "max_literal", constants, references),
         }
+        copied = re.search(r"def->enum_values\s*=\s*(\w+)->enum_values", body)
+        if copied and copied.group(1) in references:
+            option["enum"] = references[copied.group(1)].get("enum", [])
         if values:
             option["enum"] = [[value, labels[i] if i < len(labels) else value] for i, value in enumerate(values)]
         # keep 0 limits (0 == False in Python), drop only missing values and false flags
         options[key] = {k: v for k, v in option.items() if k == "vector" or (v is not None and v is not False)}
+        prefix = source[source.rfind("\n", 0, match.start()):match.start()]
+        named = re.search(r"auto\s+(\w+)\s*=\s*$", prefix)
+        if named:
+            references[named.group(1)] = options[key]
+        for ref in re.findall(r"(?:auto\s*\*?|ConfigOptionDef\s*\*?)\s*(\w+)\s*=\s*def\s*;", body):
+            references[ref] = options[key]
     return options
 
 
@@ -145,7 +171,11 @@ def main(argv=None) -> int:
         "source": f"https://github.com/OrcaSlicer/OrcaSlicer/tree/{args.tag} — PrintConfig.cpp and Tab.cpp (AGPL-3.0)",
         "tabs": tabs,
         "options": {key: options[key] for key in sorted(used) if key in options},
+        "definitions": {key: options[key] for key in sorted(options)},
     }
+    for key, meta in schema["options"].items():
+        meta["scopes"] = [kind for kind, pages in tabs.items()
+                          if any(key in row["options"] for page in pages for group in page["groups"] for row in group["rows"])]
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(schema, indent=1, ensure_ascii=False), encoding="utf-8")

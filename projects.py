@@ -649,7 +649,8 @@ def validate_data(raw, record: dict) -> dict:
     changes = {"process": profile_raw.get("process") or {}, "filament": profile_raw.get("filament") or {}}
     if base is None and (changes["process"] or changes["filament"]):
         raise jobs.JobError("Choose a profile before changing settings")
-    normalized = slicer.normalize_overrides(changes, base) if base else {}
+    previous = (record.get("data") or {}).get("profile") or {}
+    normalized = slicer.normalize_overrides(changes, base, previous={k: previous.get(k, {}) for k in ("process", "filament")}, check_coupled=False) if base else {}
     profile = {"bundle_id": bundle_id, "process": normalized.get("process", {}), "filament": normalized.get("filament", {}),
                "bricklayers": brick_post.validate(profile_raw.get("bricklayers")), "spool_id": _spool_id(profile_raw.get("spool_id"))}
 
@@ -669,7 +670,7 @@ def validate_data(raw, record: dict) -> dict:
         if overrides and base is None:
             raise jobs.JobError("Choose a profile before changing a plate's settings")
         plates.append({"id": plate_id, "name": _clean_name(plate.get("name")) or f"Plate {plate_id}",
-                       "overrides": slicer.normalize_overrides({"process": overrides}, base).get("process", {}) if overrides else {},
+                       "overrides": slicer.normalize_overrides({"process": overrides}, base, previous={"process": next((p.get("overrides", {}) for p in (record.get("data") or {}).get("plates", []) if p["id"] == plate_id), {})}, check_coupled=False).get("process", {}) if overrides else {},
                        "bricklayers": brick_post.validate(plate.get("bricklayers")),
                        "printer_id": plate.get("printer_id") if plate.get("printer_id") in state.printers else None,
                        **({"pack": chosen} if (chosen := _clean_pack(plate.get("pack"), project=False)) else {})})
@@ -703,7 +704,7 @@ def validate_data(raw, record: dict) -> dict:
             "position": _numbers(obj.get("position", [128, 128]), 2, "Position", -1000, 3000),
             "rotation": [round(r % 360, 4) for r in rotation],
             "scale": _numbers(obj.get("scale", [1, 1, 1]), 3, "Scale", 0.01, 100),
-            "overrides": slicer.normalize_overrides({"process": overrides}, base).get("process", {}) if overrides else {},
+            "overrides": slicer.normalize_overrides({"process": overrides}, base, previous={"process": next((o.get("overrides", {}) for o in (record.get("data") or {}).get("objects", []) if o["id"] == object_id), {})}, check_coupled=False).get("process", {}) if overrides else {},
         })
     out = {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
     filaments = _filament_choices(raw.get("filaments"), model_ids)
@@ -718,7 +719,36 @@ def validate_data(raw, record: dict) -> dict:
     for key in ("orientation", "orientations", "split_copies"):    # one orientation per split once a project has turned several; Copies a split was made with
         if (record.get("data") or {}).get(key):
             out[key] = record["data"][key]
+    if base:
+        old_data = record.get("data") or {}
+        old_bundle_id = (old_data.get("profile") or {}).get("bundle_id")
+        old_base = slicer.bundle_settings(old_bundle_id) if old_bundle_id else base
+        old_issues = _coupled_setting_issues(old_data, old_base)
+        issues = [i for i in _coupled_setting_issues(out, base) if i not in old_issues]
+        if issues:
+            error = jobs.JobError(issues[0]["message"])
+            error.issues = issues
+            raise error
     return out
+
+
+def _coupled_setting_issues(data, base):
+    profile = data.get("profile") or {}
+    common = {**base.get("machine", {}), **base.get("process", {}), **profile.get("process", {}),
+              **base.get("filament", {}), **profile.get("filament", {})}
+    issues = []
+    for plate in data.get("plates", []):
+        effective = {**common, **plate.get("overrides", {})}
+        for issue in slicer.configuration_issues(effective):
+            scope = "plate" if issue["key"] in plate.get("overrides", {}) else "project"
+            issues.append({**issue, "kind": "filament" if issue["key"] in profile.get("filament", {}) else "process",
+                           "scope": scope, "plate_id": plate["id"], **({"affected_id": plate["id"]} if scope == "plate" else {})})
+        for obj in data.get("objects", []):
+            if obj["plate"] == plate["id"] and obj.get("overrides"):
+                for issue in slicer.configuration_issues({**effective, **obj["overrides"]}):
+                    if issue not in slicer.configuration_issues(effective):
+                        issues.append({**issue, "kind": "process", "scope": "object", "plate_id": plate["id"], "affected_id": obj["id"]})
+    return issues
 
 
 def update_project(project_id: int, body: dict) -> dict:
@@ -3095,6 +3125,15 @@ def effective_settings(project_id: int, plate_id: int, revision=None, *, record=
         if alternate.get("type") != "filament" or not slicer._compatible(alternate, machine):
             raise jobs.JobError(f"“{chosen['preset']}” isn't a filament preset for {machine}")
     result = plate_settings.resolve(record, plate, settings, slicer.BED_TYPES[data["bed"]], alternate, issues)
+    for kind in ("process", "filament"):
+        result["issues"].extend(slicer.setting_issues(data["profile"].get(kind) or {}, settings, kind, "project"))
+    result["issues"].extend(slicer.setting_issues(plate.get("overrides") or {}, settings, "process", "plate", plate_id))
+    for obj in result["objects"]:
+        result["issues"].extend(slicer.setting_issues(obj.get("overrides") or {}, settings, "process", "object", obj["id"]))
+    for kind in ("process", "filament"):
+        result["issues"].extend(slicer.setting_issues(settings[kind], settings, kind, "preset", inherited=True))
+    result["issues"].extend(i for i in _coupled_setting_issues(data, settings)
+                            if i["plate_id"] == plate_id)
     result["filament_choice"] = chosen
     return result
 

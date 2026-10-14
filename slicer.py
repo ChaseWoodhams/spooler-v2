@@ -316,7 +316,8 @@ def save_user_preset(kind: str, name: str, base: str, changes: dict | None = Non
         raise jobs.JobError(f"“{base}” is not a {kind} preset")
     if name in chain:
         raise jobs.JobError("A preset can't be based on itself")
-    changes = normalize_overrides({kind: changes or {}}, {kind: flat}).get(kind, {})
+    previous = _user_presets(kind).get(name, {})
+    changes = normalize_overrides({kind: changes or {}}, {kind: flat}, previous={kind: previous}).get(kind, {})
     delta = {k: v for k, v in changes.items() if flat.get(k) != v}  # the parent supplies everything else
     record = {"name": name, "type": kind, "from": "User", "instantiation": "true", "inherits": base,
               "version": flat.get("version", ""), **delta}
@@ -362,6 +363,8 @@ def import_user_preset(raw, name: str | None = None) -> dict:
                 raise jobs.JobError("blocked")
             valid.update(normalize_overrides({kind: {key: value}}, {kind: flat}).get(kind, {}))
         except jobs.JobError:
+            if key in _tab_keys(kind) and key in settings_schema().get("options", {}) and not key.endswith("_gcode"):
+                raise
             dropped.append(key)
     record = save_user_preset(kind, name or raw.get("name") or "Imported preset", base, valid)
     return {"preset": record["name"], "type": kind, "based_on": base, "dropped": sorted(dropped)}
@@ -405,26 +408,30 @@ def _check_value(key: str, value, meta: dict | None) -> str:
             return "0"
         raise jobs.JobError(f"{label} must be on or off")
     if kind in ("int", "float", "percent", "float_or_percent"):
+        if isinstance(value, (bool, dict, list)):
+            raise jobs.JobError(f"{label} must be a number")
         percent = text.endswith("%")
         if percent and kind in ("int", "float"):
             raise jobs.JobError(f"{label} can't be a percentage")
+        if not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?%?", text):
+            raise jobs.JobError(f"{label} must be a number with at most one trailing percent sign")
         try:
-            number = float(text.rstrip("%").strip())
+            number = float((text[:-1] if percent else text).strip())
         except ValueError:
             raise jobs.JobError(f"{label} must be a number")
         if number != number or abs(number) == float("inf") or (kind == "int" and number != int(number)):
             raise jobs.JobError(f"{label} must be a {'whole ' if kind == 'int' else ''}number")
-        if not percent or kind == "percent":
-            low, high = meta.get("min"), meta.get("max")
-            if (low is not None and number < low) or (high is not None and number > high):
-                bounds = f"at least {low:g}" if high is None else f"at most {high:g}" if low is None else f"between {low:g} and {high:g}"
-                raise jobs.JobError(f"{label} must be {bounds}")
+        # Orca validates the numeric token against this field's bounds, including relative tokens.
+        low, high = meta.get("min"), meta.get("max")
+        if (low is not None and number < low) or (high is not None and number > high):
+            bounds = f"at least {low:g}" if high is None else f"at most {high:g}" if low is None else f"between {low:g} and {high:g}"
+            raise jobs.JobError(f"{label} must be {bounds}")
         if kind == "int":
             return str(int(number))
         return text
     if kind == "enum":
         choices = [choice for choice, _ in meta.get("enum", [])]
-        if choices and text not in choices:
+        if not choices or text not in choices:
             raise jobs.JobError(f"“{text}” isn't a valid choice for {label}")
     return text
 
@@ -440,34 +447,151 @@ def _structured(overrides) -> dict:
     return {"process": overrides}
 
 
-def normalize_overrides(overrides, base: dict) -> dict:
+def normalize_overrides(overrides, base: dict, *, previous=None, check_coupled=True) -> dict:
     """Validate process and filament overrides against the flattened presets in `base` and OrcaSlicer's
     setting definitions. Returns {"process": {…}, "filament": {…}} with normalised string values."""
     options = settings_schema().get("options", {})
     out = {}
+    previous = _structured(previous)
     for kind, values in _structured(overrides).items():
         preset = base.get(kind) or {}
         allowed = _tab_keys(kind)
         clean = {}
         for key, value in values.items():
-            if key in BLOCKED_SETTINGS or key.endswith("_gcode"):
-                raise jobs.JobError(f"“{key}” can't be overridden in a locked profile")
-            if key not in preset and key not in allowed:
-                raise jobs.JobError(f"“{key}” isn't a {kind} setting")
-            meta = options.get(key)
-            vector = isinstance(preset.get(key), list) if key in preset else bool((meta or {}).get("vector"))
-            if vector:
-                items = value if isinstance(value, list) else [value]
-                if not 1 <= len(items) <= 16:
-                    raise jobs.JobError(f"“{key}” needs between 1 and 16 values")
-                clean[key] = [_check_value(key, item, meta) for item in items]
-            else:
-                if isinstance(value, (list, dict)):
-                    raise jobs.JobError(f"“{key}” takes a single value")
-                clean[key] = _check_value(key, value, meta)
+            if key in previous.get(kind, {}) and json.dumps(value, sort_keys=True) == json.dumps(previous[kind][key], sort_keys=True):
+                clean[key] = value
+                continue
+            try:
+                clean[key] = _normalize_setting(key, value, kind, preset, allowed, options)
+                _check_context(key, clean[key], {**base.get("machine", {}), **preset, **values}, options.get(key, {}))
+            except jobs.JobError as error:
+                error.issues = [{"code": "invalid-setting", "key": key, "kind": kind,
+                                 "severity": "error", "message": str(error), "resolution_required": True}]
+                raise
         if clean:
             out[kind] = dict(sorted(clean.items()))
+        before = {**base.get("machine", {}), **preset, **previous.get(kind, {})}
+        after = {**base.get("machine", {}), **preset, **clean}
+        old_issues = configuration_issues(before)
+        new_issues = [issue for issue in configuration_issues(after) if issue not in old_issues]
+        if check_coupled and new_issues:
+            error = jobs.JobError(new_issues[0]["message"])
+            error.issues = [{**issue, "kind": kind} for issue in new_issues]
+            raise error
     return out
+
+
+def _normalize_setting(key, value, kind, preset, allowed, options):
+    if key in BLOCKED_SETTINGS or key.endswith("_gcode"):
+        raise jobs.JobError(f"“{key}” can't be overridden in a locked profile")
+    meta = options.get(key)
+    if key not in allowed or not meta or meta.get("mode") == "develop" or meta.get("readonly") or meta.get("type") not in {"int", "float", "percent", "float_or_percent", "bool", "enum", "string"}:
+        raise jobs.JobError(f"“{key}” isn't a {kind} setting")
+    vector = bool(meta.get("vector"))
+    if vector:
+        items = value if isinstance(value, list) else [value]
+        if not 1 <= len(items) <= 16:
+            raise jobs.JobError(f"“{key}” needs between 1 and 16 values")
+        return [_check_value(key, item, meta) for item in items]
+    else:
+        if isinstance(value, (list, dict)):
+            raise jobs.JobError(f"“{key}” takes a single value")
+        return _check_value(key, value, meta)
+
+def setting_issues(values, base, kind, scope, affected_id=None, *, inherited=False):
+    """Inspect old edits and typed inherited values without normalising or erasing them.
+
+    Untyped inherited Orca fields are locked pass-through, not newly editable controls.
+    """
+    options = settings_schema().get("definitions", settings_schema().get("options", {}))
+    issues = []
+    for key, value in values.items():
+        if inherited and (key in BLOCKED_SETTINGS or key.endswith("_gcode")):
+            continue
+        try:
+            if inherited:
+                meta = options.get(key)
+                if not meta:
+                    raise jobs.JobError(f"{key}: inherited setting has no pinned definition; resolve it before using new output")
+                if meta.get("type") in ("point", "none", "unknown"):
+                    continue
+                items = value if isinstance(value, list) else [value]
+                for item in items:
+                    _check_value(key, item, meta)
+            else:
+                normalize_overrides({kind: {key: value}}, base, check_coupled=False)
+        except jobs.JobError as error:
+            detail = getattr(error, "issues", [{"code": "unresolved-inherited-setting" if inherited else "invalid-setting", "key": key, "kind": kind,
+                                               "severity": "error", "message": str(error), "resolution_required": True}])[0]
+            issues.append({**detail, "scope": scope, "value": value,
+                           **({"affected_id": affected_id} if affected_id is not None else {})})
+    return issues
+
+
+def _check_context(key, value, effective, meta):
+    # PrintConfig.cpp validate() and libslic3r.h, pinned v2.4.2.
+    if meta.get("ratio_over") != "nozzle_diameter" or not key.endswith("line_width"):
+        return
+    diameters = effective.get("nozzle_diameter")
+    if not isinstance(diameters, list) or not diameters:
+        return  # Standalone user presets acquire nozzle context when selected in a Project.
+    try:
+        nozzles = [float(n) for n in diameters]
+        text = str(value)
+        width = float(text[:-1]) * max(nozzles) / 100 if text.endswith("%") else float(text)
+        limit = min(nozzles) if key == "bridge_line_width" else 5 * max(nozzles)
+    except (ValueError, TypeError):
+        raise jobs.JobError(f"{key}: resolve the nozzle diameter before editing width")
+    if width < 0 or width > limit:
+        raise jobs.JobError(f"{key}: effective width must be between 0 and {limit:g} mm for this nozzle")
+
+
+def configuration_issues(values):
+    """Pinned Orca invariants; return corrections for review, never apply them.
+
+    PrintConfig.cpp validate and ConfigManipulation.cpp update_print_fff_config,
+    v2.4.2. Missing/invalid legacy values have their own typed issues.
+    """
+    def text(key):
+        value = values.get(key)
+        return str(value[0] if isinstance(value, list) and value else value)
+
+    def number(key, ratio=None):
+        try:
+            value = text(key)
+            return float(value[:-1]) * ratio / 100 if value.endswith("%") and ratio is not None else float(value.removesuffix("%"))
+        except (ValueError, TypeError):
+            return None
+
+    issues = []
+    def add(key, message, correction):
+        issues.append({"code": "coupled-setting", "key": key, "severity": "error", "message": message,
+                       "suggested_correction": correction, "resolution_required": True})
+
+    for key, suggested in (("layer_height", "0.2"), ("initial_layer_print_height", "0.2"),
+                           ("bridge_flow", "1"), ("internal_bridge_flow", "1"), ("filament_flow_ratio", "1")):
+        actual = number(key)
+        if actual is not None and actual <= 0:
+            add(key, f"{key} must be greater than zero", {key: suggested})
+
+    height = number("layer_height")
+    start = number("seam_slope_start_height", height)
+    if text("seam_slope_type") not in ("None", "none") and height is not None and start is not None and start >= height:
+        add("seam_slope_start_height", "Scarf start height must be smaller than layer height", {"seam_slope_start_height": "0"})
+    skin, lock = number("skin_infill_depth"), number("infill_lock_depth")
+    if text("sparse_infill_pattern") == "lockedzag" and skin is not None and lock is not None and lock > skin:
+        add("infill_lock_depth", "Infill lock depth must not exceed skin depth", {"infill_lock_depth": str(skin / 2)})
+    if text("spiral_mode") in ("1", "true", "True"):
+        for key, expected in (("wall_loops", 1), ("top_shell_layers", 0), ("sparse_infill_density", 0), ("enable_support", 0), ("enforce_support_layers", 0)):
+            actual = number(key)
+            if actual is not None and actual != expected:
+                add(key, f"{key} must be {expected} when spiral vase mode is enabled", {key: str(expected)})
+    low, high = number("nozzle_temperature_range_low"), number("nozzle_temperature_range_high")
+    if low is not None and high is not None and low > high:
+        add("nozzle_temperature_range_low", "Recommended minimum temperature must not exceed the maximum", {"nozzle_temperature_range_low": text("nozzle_temperature_range_high")})
+    if text("use_firmware_retraction") in ("1", "true", "True") and text("filament_wipe" if "filament_wipe" in values else "wipe") in ("1", "true", "True"):
+        add("filament_wipe" if "filament_wipe" in values else "wipe", "Firmware retraction is not compatible with wipe", {"filament_wipe" if "filament_wipe" in values else "wipe": "0"})
+    return issues
 
 
 def create_bundle(machine: str, process: str, filament: str, label: str | None = None, overrides: dict | None = None) -> dict:

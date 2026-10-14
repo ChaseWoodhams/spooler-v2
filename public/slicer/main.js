@@ -32,6 +32,7 @@ const state = {
   saveTimer: null,
   saving: false,
   pendingSave: false,
+  saveError: null,
   poller: null,
   preview: null,        // { key, analysis, buffer }
   playing: null,        // { frame } while the preview plays the print
@@ -67,6 +68,7 @@ async function api(method, path, body) {
   if (!response.ok) {
     const error = new Error(data.error || `Request failed (HTTP ${response.status})`);
     error.status = response.status;
+    error.issues = data.issues || [];
     throw error;
   }
   return data;
@@ -685,6 +687,10 @@ const editLog = { undo: [], redo: [], current: null, at: 0 };
 const EDIT_LIMIT = 60;
 
 function resetEdits() {
+  state.saveError = null;
+  state.settings?.pending.clear();
+  state.settings?.localIssues.clear();
+  state.settings?.setIssues([]);
   editLog.undo = [];
   editLog.redo = [];
   editLog.current = state.project ? JSON.stringify(data()) : null;
@@ -753,16 +759,16 @@ async function save() {
     const project = await api("PATCH", `/api/projects/${state.project.id}`, { data: sent, revision: state.project.revision });
     const localChangedMeanwhile = JSON.stringify(sent) !== JSON.stringify(data());
     applyProject(project, { keepLocalData: localChangedMeanwhile });
+    state.saveError = null;
+    state.settings.setIssues([]);
     if (localChangedMeanwhile) state.project.revision = project.revision;
     $("save-state").textContent = "Saved";
     loadProblems();
   } catch (err) {
+    state.saveError = err;
+    state.settings.setIssues(err.issues);
     $("save-state").textContent = "Not saved";
     toast(err.message, true);
-    if (err.status === 409 || err.status === 400) {
-      state.project = await api("GET", `/api/projects/${state.project.id}`);
-      renderAll();
-    }
   } finally {
     state.saving = false;
     if (state.pendingSave) {
@@ -781,6 +787,8 @@ async function flushSave() {
     await save();
   }
   while (state.saving) await new Promise(resolve => setTimeout(resolve, 50));
+  if (state.saveError) throw state.saveError;
+  if (state.settings.pending.size) throw new Error('Correct the invalid setting values before continuing');
 }
 
 // The elapsed time of a running slice counts up between polls
@@ -815,7 +823,7 @@ async function refreshProject() {
   const before = state.project;
   const newModels = fresh.models.filter(m => m.state === "ready" && before.models.find(b => b.id === m.id)?.state !== "ready");
   const sliceChanged = JSON.stringify(fresh.slices) !== JSON.stringify(before.slices);
-  const layoutChanged = !state.saving && !state.saveTimer && fresh.revision !== before.revision;
+  const layoutChanged = !state.saving && !state.saveTimer && !state.saveError && !state.settings.pending.size && fresh.revision !== before.revision;
   state.project = { ...before, models: fresh.models, slices: fresh.slices };
   if (layoutChanged) applyProject(fresh);
   if (newModels.length || fresh.models.some((m, i) => m.state !== before.models[i]?.state)) loadProblems();   // a model failed or finished
@@ -856,7 +864,7 @@ function refreshWhenShown() {
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshWhenShown(); });
 // The app shell asks before reloading for an update (net.js), and refreshes this page when Projects is shown again.
-window.spoolerBusy = () => !!(state.saving || state.saveTimer || state.pendingSave || document.querySelector("dialog[open]"));
+window.spoolerBusy = () => !!(state.saving || state.saveTimer || state.pendingSave || state.saveError || state.settings?.pending.size || document.querySelector("dialog[open]"));
 window.spoolerRefresh = refreshWhenShown;
 window.spoolerHome = showProjectsPage;   // the shell's Projects button: back to the page that lists them
 

@@ -189,6 +189,22 @@ class ProfileTests(SlicerTestCase):
 class UserPresetTests(SlicerTestCase):
     PROCESS = "0.20mm Standard @Elegoo CC 0.4 nozzle"
 
+    def test_import_refuses_invalid_typed_values_instead_of_dropping_them(self):
+        with self.assertRaises(JobError) as rejected:
+            slicer.import_user_preset({"type": "process", "name": "Invalid import", "inherits": self.PROCESS,
+                "wall_loops": "2.5"})
+        self.assertEqual(rejected.exception.issues[0]["key"], "wall_loops")
+        self.assertNotIn("Invalid import", slicer.stock_presets()["user"]["process"])
+
+    def test_saving_an_unchanged_legacy_preset_value_preserves_it(self):
+        slicer.save_user_preset("process", "Old preset", self.PROCESS, {"wall_loops": "4"})
+        source = next((self.dir / "presets" / "process").glob("*.json"))
+        record = json.loads(source.read_text())
+        record["wall_loops"] = "2.5"
+        source.write_text(json.dumps(record))
+        saved = slicer.save_user_preset("process", "Old preset", self.PROCESS, {"wall_loops": "2.5", "layer_height": "0.3"})
+        self.assertEqual(saved["wall_loops"], "2.5")
+
     def test_saved_preset_stores_only_its_changes_and_flattens_over_its_parent(self):
         record = slicer.save_user_preset("process", "Strong walls", self.PROCESS, {"wall_loops": "5", "layer_height": "0.2"})
 
