@@ -183,3 +183,26 @@ removes again on import for an instance that lies inside its own Plate cell.
 Native check: `SPOOLER_ORCA=<exe> python -m unittest tests.test_project_export_native` exports a disposable three-Plate PETG
 Project (one Object override, a no-op Plate override, a Plate-id gap), slices the 3MF with a direct Orca command given no
 Spooler settings, and compares Inner-wall deposition commands and footer values with Spooler's own Slices.
+
+## Explicit lossy whole-Project export (ticket 13)
+
+`projects.export_plan()` adds a `lossy` section (`export_lossy.py`, report version 1) beside the faithful plan. It is `available`
+only when the Project cannot be written faithfully and nothing blocks it (`reason` is `faithful-available` or `blocked` otherwise;
+blockers such as a Model still importing, unresolved settings or a missing Orca stay blockers, never substitutions). The file is the
+same single Orca project 3MF, written with the configuration of the first nonempty Plate (`basis`) for every Plate. The report lists:
+per-Plate `material` against `written_as` (`material_changed`), `differences` per scope (`category`: material, bed, plate-settings,
+machine) with each Plate's value and whether it is `kept`, Object overrides still carried (compared with the basis), inherited
+locked-preset values Spooler cannot validate (carried unchanged), accepted import losses from the Project's import records
+(`features`; nothing is preserved or re-enabled), and the BrickLayers limitation (Orca configuration and geometry cannot reproduce
+the transformed G-code; the Plate's Slice G-code is the separate existing download).
+
+`projects.export_lossy(project, acknowledgement)` / `POST /api/projects/{id}/export-lossy` generates only for
+`{representation: "lossy-3mf", revision, fingerprint, report_version, report_fingerprint, acknowledged: true}` matching the current
+plan and report: 409 `export-acknowledgement-stale` (revision, plan fingerprint, report version or report changed),
+`export-acknowledgement-required`, `export-representation-mismatch`, `export-lossy-unavailable`, or the plan's blockers. The response
+is `model/3mf` named `<Project> (lossy).3mf`. `GET .../export.3mf` (direct or with revision/fingerprint) never returns it: it keeps
+answering `export-review-required`.
+
+Native check: `SPOOLER_ORCA=<exe> python -m unittest tests.test_project_export_lossy_native` exports a disposable PETG Plate plus ASA
+Plate (different wall count); direct Orca on the acknowledged file slices both as PETG with the first Plate's walls, while Spooler's
+own Slice of the ASA Plate keeps ASA and its walls.
