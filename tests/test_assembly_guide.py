@@ -231,7 +231,7 @@ class ContentTests(GuideCase):
             self.assertIn(code, text)
             self.assertIn("model", text)
             self.assertIn(f"Split {split_id}", text)
-            if "Rods to cut" not in text:   # the rod page belongs to no Section
+            if "Rods to cut" not in text and not text.startswith("Parts inventory"):   # the rod page and inventory belong to no Section
                 self.assertRegex(text, r"Sections? [A-Z]")
 
     def test_the_guide_lists_every_section_and_step_in_plan_order(self):

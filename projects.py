@@ -535,6 +535,27 @@ def unplaced_splits(project: dict) -> list:
     return [i for i in project["split_ids"] if i not in placed]
 
 
+def part_plates(split_id: int) -> dict:
+    """Part number -> plate name for the parts of a split that sit on plates of the project that owns it; a part on several
+    plates (copies) lists them all. Parts not on a plate yet are left out."""
+    with database.transaction() as conn:
+        row = conn.execute("SELECT id FROM projects WHERE split_id = ? UNION SELECT project_id FROM project_splits WHERE split_id = ? LIMIT 1",
+                           (split_id, split_id)).fetchone()
+    if row is None:
+        return {}
+    record = get_project(row[0])
+    names = {p["id"]: p.get("name") or f"Plate {p['id']}" for p in record["data"].get("plates", [])}
+    part_of = {m["id"]: m["split"]["part"] for m in record["models"] if (m.get("split") or {}).get("id") == split_id and m["split"]["part"]}
+    out = {}
+    for obj in record["data"].get("objects", []):
+        part = part_of.get(obj["model"])
+        if part and obj.get("plate") in names:
+            found = out.setdefault(part, [])
+            if names[obj["plate"]] not in found:
+                found.append(names[obj["plate"]])
+    return {part: ", ".join(found) for part, found in out.items()}
+
+
 def guides(project_id: int) -> list:
     """What the Print page's Assembly guide action shows: one entry per split of the project (never a combined guide), with
     the model name, the download name and the split's guide state (none, generating, ready, failed; out_of_date on ready)."""
