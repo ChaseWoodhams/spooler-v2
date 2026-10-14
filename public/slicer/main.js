@@ -8,6 +8,7 @@ import { splitStep } from "./split-step.js?v=3";
 import { projectPage } from "./project-page.js?v=7";
 import { newProject } from "./new-project.js?v=9";
 import { Viewport, featureColor } from "./viewport.js?v=5";
+import { reviewHtml, reviewTitle, blockers, acknowledgements } from "./review.js?v=1";
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -398,23 +399,71 @@ async function chooseSpool(value) {
     renderAll();
     return;
   }
+  renderFarm();   // the selector keeps showing the saved spool until the review is applied
+  await openReview({ source: "spool", spool_id: id });
+}
+
+// ── Reviewed preset and spool changes ─────────────────────────────────────────────
+// A newer preset or a Spoolman spool only reaches the Project through a server-side preview and an explicit,
+// revision-checked apply; cancelling leaves everything as it was.
+const review = { body: null, preview: null };
+
+async function openReview(body) {
+  if (!state.project) return;
   try {
-    let match = await api("POST", "/api/slicer/spool-match", { spool_id: id, bundle_id: profile.bundle_id, bed: data().bed });
-    if (match.preset && match.preset !== match.current_preset) {
-      await choosePreset("filament", match.preset);
-      if (currentPresets()?.filament !== match.preset) { renderFarm(); return; }   // switching was declined or failed
-      match = await api("POST", "/api/slicer/spool-match", { spool_id: id, bundle_id: data().profile.bundle_id, bed: data().bed });
-    }
-    for (const key of SPOOL_KEYS) delete data().profile.filament[key];
-    Object.assign(data().profile.filament, match.changes);
-    data().profile.spool_id = id;
-    rememberDefaults({ spool: id, profile: data().profile.bundle_id });
-    changed();
-    renderAll();
-    toast(`Using ${match.spool.name}` + (match.preset ? "" : " — no stock preset for this material, so the preset's other settings are kept"));
+    await flushSave();   // review the saved Project, never half-typed edits
+    review.body = body;
+    review.preview = await api("POST", `/api/projects/${state.project.id}/settings/review`, body);
   } catch (err) {
     toast(err.message, true);
     renderFarm();
+    return;
+  }
+  renderReview();
+  if (!$("dlg-review").open) $("dlg-review").showModal();
+}
+
+function renderReview(error = null) {
+  const preview = review.preview;
+  $("review-title").textContent = reviewTitle(preview);
+  $("review-body").innerHTML = reviewHtml(preview, { error });
+  updateReviewApply();
+}
+
+function updateReviewApply() {
+  const preview = review.preview;
+  const accepted = [...$("review-body").querySelectorAll("[data-accept]")].every(box => box.checked);
+  $("btn-review-apply").disabled = preview.unchanged || blockers(preview).length > 0 || !accepted;
+}
+
+async function applyReview() {
+  const preview = review.preview;
+  const accept = {};
+  for (const issue of acknowledgements(preview)) accept["accept_" + issue.code.replace(/-/g, "_")] = true;
+  $("btn-review-apply").disabled = true;
+  try {
+    const project = await api("POST", `/api/projects/${state.project.id}/settings/adopt`,
+      { ...review.body, revision: preview.revision, token: preview.token, ...accept });
+    const before = editLog.current;
+    applyProject(project);
+    await loadBundles();
+    await bundleSettings(data().profile.bundle_id);
+    if (before && before !== JSON.stringify(data())) { editLog.undo.push(before); editLog.redo = []; }   // one ordinary, undoable edit
+    editLog.current = JSON.stringify(data());
+    if (review.body.source === "spool") rememberDefaults({ spool: review.body.spool_id, profile: data().profile.bundle_id });
+    $("dlg-review").close();
+    $("save-state").textContent = "Saved";
+    renderAll();
+    toast(review.body.source === "spool" ? "Spool properties applied" : "Preset update applied");
+  } catch (err) {
+    if (err.status === 409 && !err.issues.length) {   // the Project or the source changed since the preview: show the new one
+      try {
+        review.preview = await api("POST", `/api/projects/${state.project.id}/settings/review`, review.body);
+        renderReview(`${err.message}. The review below is current.`);
+        return;
+      } catch (again) { err = again; }
+    }
+    renderReview(err.message);
   }
 }
 
@@ -1515,6 +1564,7 @@ function filamentControls(object) {
       ${list.map(name => `<option value="${esc(name)}"${choice?.preset === name ? " selected" : ""}>${esc(name.replace(/ @.*$/, ""))}</option>`).join("")}
     </select></label>
     ${choice ? `<p class="slicer-muted">${choice.snapshot ? `Saved material: ${esc(choice.snapshot.material.join(", "))}.` : "Material snapshot pending verification; save and review before slicing."} Shared by every Copy of this Model. Project default Filament changes and Spoolman tuning do not apply.</p>` : ""}
+    ${choice ? `<button type="button" class="btn btn-secondary btn-sm" id="object-filament-refresh" data-model="${object.model}" title="Review the catalogue's current version of this preset before this Model uses it">Review preset update</button>` : ""}
     <label class="slicer-field"${choice ? "" : " hidden"}>Colour label only <input type="text" id="object-filament-colour" maxlength="${FILAMENT_COLOUR_MAX}" placeholder="e.g. grey" value="${esc(choice?.colour || "")}"></label>
     <label class="slicer-check" title="The planner, Arrange and Orient leave a pinned object where it is; you can still move it by hand"><input type="checkbox" id="object-pinned"${object.pinned ? " checked" : ""}> Pin</label>
     ${mix ? `<p class="slicer-warn" role="alert">${esc(mix)}. Slicing is refused until each plate holds one filament.</p>` : ""}`;
@@ -2694,6 +2744,10 @@ function bindUi() {
   $("bed-select").addEventListener("change", e => { data().bed = e.target.value; rememberDefaults({ plate_side: data().bed }); changed(); renderViewport(); });
 
   $("btn-save-profile-confirm").addEventListener("click", savePreset);
+  $("btn-refresh-filament").addEventListener("click", () => openReview({ source: "preset", target: { kind: "default" } }));
+  $("btn-review-apply").addEventListener("click", applyReview);
+  $("review-body").addEventListener("change", updateReviewApply);
+  $("dlg-review").addEventListener("close", () => { review.preview = null; renderFarm(); });
 
   $("btn-add-model").addEventListener("click", () => $("model-input").click());
   $("model-input").addEventListener("change", e => { chooseImport([...e.target.files]); e.target.value = ""; });
@@ -2870,6 +2924,8 @@ function bindUi() {
   $("object-panel").addEventListener("click", async e => {
     if (e.target.closest("[data-orient-accept]")) return acceptOrientation();
     if (e.target.closest("[data-orient-ignore]")) { state.orientSuggestion = null; return renderObjectPanel(); }
+    const refresh = e.target.closest("#object-filament-refresh");
+    if (refresh) return openReview({ source: "preset", target: { kind: "model", model_id: Number(refresh.dataset.model) } });
     const action = e.target.closest("[data-object-action]")?.dataset.objectAction;
     const object = selectedObject();
     if (!action || !object) return;

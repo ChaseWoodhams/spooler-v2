@@ -28,6 +28,7 @@ import preflight
 import remembered_defaults
 import print_history
 import projects
+import settings_review
 import slicer
 import splits
 import state
@@ -1225,6 +1226,13 @@ class SPHandler(SimpleHTTPRequestHandler):
                 projects.discard_draft(self._job_id())
                 return {"ok": True}
             self._jobs_call(discard, broadcast=False)
+            return
+        if len(parts) == 6 and parts[4] == "settings" and parts[5] in ("review", "adopt"):
+            def review_setting_change():   # preview or apply a preset refresh / Spoolman adoption (revision- and token-checked)
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                return (settings_review.preview if parts[5] == "review" else settings_review.apply)(self._job_id(), body)
+            self._jobs_call(review_setting_change, broadcast=False)
             return
         if len(parts) == 6 and parts[4:6] == ["settings", "resolve"]:
             def resolve_setting():

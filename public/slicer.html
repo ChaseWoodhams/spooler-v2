@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="style.css?v=60" />
   <script src="/net.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=3" />
-  <link rel="stylesheet" href="slicer.css?v=50" />
+  <link rel="stylesheet" href="slicer.css?v=51" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -105,6 +105,7 @@
           <select id="preset-machine-select"></select></div>
         <div class="preset-row"><label for="preset-filament-select">Filament</label>
           <select id="preset-filament-select"></select>
+          <button id="btn-refresh-filament" class="preset-btn" type="button" title="Review the preset catalogue's current version of this Filament before the Project uses it">Review update</button>
           <button id="btn-save-filament" class="preset-btn" type="button" title="Save the filament changes as a preset" hidden>Save</button>
           <button id="btn-delete-filament" class="preset-btn" type="button" title="Delete this saved preset" hidden>Delete</button></div>
         <div class="preset-row"><label for="preset-process-select">Process</label>
@@ -120,7 +121,7 @@
         <details class="slicer-subfold" id="fold-material-more">
           <summary>Spool and preset import</summary>
           <div class="preset-row"><label for="spool-select">Spool</label>
-            <select id="spool-select" title="Use a Spoolman spool: its density, temperatures and cost are applied as filament settings"></select></div>
+            <select id="spool-select" title="Review a Spoolman spool's density, temperatures and cost before they are applied to the Project default Filament"></select></div>
           <p id="spool-note" class="slicer-muted" hidden></p>
           <div class="preset-row"><label for="btn-import-preset">Import</label>
             <button id="btn-import-preset" class="btn btn-secondary btn-sm" type="button" title="Import an OrcaSlicer process or filament preset (.json)">Orca preset…</button>
@@ -350,6 +351,15 @@
     <div class="slicer-dialog-actions"><button class="btn btn-secondary" type="button" data-close>Close</button></div>
   </dialog>
 
+  <dialog id="dlg-review" class="slicer-dialog slicer-dialog-wide" aria-labelledby="review-title">
+    <h3 id="review-title">Review changes</h3>
+    <div id="review-body"></div>
+    <div class="slicer-dialog-actions">
+      <button class="btn btn-secondary" type="button" data-close id="btn-review-cancel">Cancel</button>
+      <button id="btn-review-apply" class="btn btn-primary" type="button">Apply to Project</button>
+    </div>
+  </dialog>
+
   <dialog id="dlg-save-profile" class="slicer-dialog">
     <h3 id="save-profile-title">Save as a preset</h3>
     <p id="save-profile-summary" class="slicer-muted"></p>
@@ -363,6 +373,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=54"></script>
+  <script type="module" src="slicer/main.js?v=55"></script>
 </body>
 </html>

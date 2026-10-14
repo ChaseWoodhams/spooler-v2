@@ -758,7 +758,7 @@ def validate_data(raw, record: dict) -> dict:
     return out
 
 
-def _coupled_setting_issues(data, base):
+def _coupled_setting_issues(data, base, staged=None):
     profile = data.get("profile") or {}
     common = {**base.get("machine", {}), **base.get("process", {}), **profile.get("process", {})}
     issues = []
@@ -768,7 +768,9 @@ def _coupled_setting_issues(data, base):
         filament = {**base.get("filament", {}), **profile.get("filament", {})}
         if alternate:
             try:
-                _, filament = slicer.filament_snapshot(alternate.get("snapshot"), base["machine"])
+                # `staged` holds proposed snapshots a review has not stored yet, keyed by hash
+                staged_values = (staged or {}).get((alternate.get("snapshot") or {}).get("sha256"))
+                filament = staged_values or slicer.filament_snapshot(alternate.get("snapshot"), base["machine"])[1]
             except jobs.JobError:
                 filament = {}  # the material issue itself blocks this Plate
         effective = {**common, **plate.get("overrides", {}), **filament}

@@ -656,6 +656,14 @@ def create_bundle(machine: str, process: str, filament: str, label: str | None =
                            "sha256": hashlib.sha256(contents[kind]).hexdigest()} for kind in PRESET_KINDS},
         "overrides":  overrides,
     }
+    store_bundle(bundle_id, contents, manifest)
+    print(f"[Slicer] Locked profile {bundle_id}: {manifest['label']}")
+    return manifest
+
+
+def store_bundle(bundle_id: str, contents: dict, manifest: dict) -> None:
+    """Write a content-addressed bundle folder atomically; an identical existing bundle is left as it is."""
+    target = profiles_dir() / bundle_id
     profiles_dir().mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".profile-", dir=profiles_dir()))
     try:
@@ -665,9 +673,56 @@ def create_bundle(machine: str, process: str, filament: str, label: str | None =
         os.replace(staging, target)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
-        raise
-    print(f"[Slicer] Locked profile {bundle_id}: {manifest['label']}")
-    return manifest
+        if not (target / "bundle.json").is_file():
+            raise
+
+
+def propose_bundle_refresh(bundle_id: str) -> dict:
+    """What re-reading the Project default's Filament preset from the catalogue would lock, without storing it.
+    The machine and process stay the saved bytes; only the Filament (and the overrides baked into the profile) change.
+    Returns {"bundle_id", "manifest", "contents", "settings", "reference"}; `issue` carries why it cannot be adopted."""
+    current = bundle_settings(bundle_id)
+    verify_bundle(current["bundle"])
+    folder = profiles_dir() / bundle_id
+    contents = {kind: (folder / f"{kind}.json").read_bytes() for kind in ("machine", "process")}
+    name = current["bundle"]["presets"]["filament"]["name"]
+    result = {"current": current, "name": name, "issue": None, "bundle_id": None, "manifest": None,
+              "contents": None, "settings": None, "reference": None}
+    try:
+        reference, values, _ = propose_filament(name, current["machine"], verify=False)
+    except jobs.JobError as exc:
+        result["issue"] = {"code": "preset-unavailable", "message": f"“{name}” is no longer in the preset catalogue: {exc}"}
+        return result
+    result["reference"] = reference
+    try:
+        filament_compatibility(values, current["machine"])
+    except jobs.JobError as exc:
+        result["issue"] = {"code": "incompatible-filament", "message": str(exc)}
+        result["settings"] = {"machine": current["machine"], "process": current["process"], "filament": values}
+        return result
+    overrides = _structured(current["bundle"].get("overrides")).get("filament") or {}
+    if overrides:
+        values.update(normalize_overrides({"filament": overrides}, {**current, "filament": values}).get("filament", {}))
+    contents["filament"] = json.dumps(values, indent=1, sort_keys=True).encode()
+    bundle = hashlib.sha256(b"\n".join(contents[k] for k in PRESET_KINDS)).hexdigest()[:12]
+    manifest = {**current["bundle"], "id": bundle, "created_at": time.time(), "refreshed_from": bundle_id,
+                "vendor_profile_version": vendor_profile_version(require_orca()),
+                "presets": {**current["bundle"]["presets"],
+                            "filament": {**current["bundle"]["presets"]["filament"],
+                                         "chain": reference["source_chain"], "name": values["name"],
+                                         "sha256": hashlib.sha256(contents["filament"]).hexdigest()}}}
+    result.update(bundle_id=bundle, manifest=manifest, contents=contents,
+                  settings={"machine": current["machine"], "process": current["process"], "filament": values})
+    return result
+
+
+def commit_bundle_refresh(proposal: dict) -> dict:
+    """Store a proposed refresh (immutable and content-addressed), or reuse it when it already exists."""
+    if proposal["manifest"] is None:
+        raise jobs.JobError(proposal["issue"]["message"], 409)
+    if not (profiles_dir() / proposal["bundle_id"] / "bundle.json").is_file():
+        store_bundle(proposal["bundle_id"], proposal["contents"], proposal["manifest"])
+    return load_bundle(proposal["bundle_id"])
 
 
 def derive_bundle(bundle_id: str, overrides: dict | None, label: str | None = None) -> dict:
@@ -699,16 +754,30 @@ def filament_compatibility(values: dict, machine: dict) -> None:
         raise jobs.JobError("This Filament uses a compatibility condition that cannot be verified — choose an explicitly compatible preset", 409)
 
 
-def lock_filament(name: str, machine: dict) -> dict:
-    """Freeze an alternate in the existing content-addressed profile store."""
+def propose_filament(name: str, machine: dict, *, verify: bool = True) -> tuple:
+    """What freezing the catalogue's current `name` would store: (reference, flattened values, content bytes).
+    Writes nothing, so a review can show it and be cancelled."""
     orca = require_orca()
     values, chain = flatten_preset(_presets("filament", orca), name)
-    filament_compatibility(values, machine)
+    if verify:
+        filament_compatibility(values, machine)
     content = json.dumps(values, indent=1, sort_keys=True).encode()
     digest = hashlib.sha256(content).hexdigest()
-    reference = {"version": 1, "sha256": digest, "name": values["name"], "material": values["filament_type"],
+    reference = {"version": 1, "sha256": digest, "name": values["name"], "material": values.get("filament_type"),
                  "source_chain": chain, "schema": "OrcaSlicer 2.4.2", "slicer_folder": orca.parent.name,
                  "vendor_profile_version": vendor_profile_version(orca)}
+    return reference, values, content
+
+
+def lock_filament(name: str, machine: dict) -> dict:
+    """Freeze an alternate in the existing content-addressed profile store."""
+    reference, values, content = propose_filament(name, machine)
+    return store_filament(reference, content, machine)
+
+
+def store_filament(reference: dict, content: bytes, machine: dict) -> dict:
+    """Store proposed Filament content exactly as reviewed and return its verified saved reference."""
+    digest = reference["sha256"]
     root = profiles_dir() / "filaments"
     root.mkdir(parents=True, exist_ok=True)
     target = root / digest
