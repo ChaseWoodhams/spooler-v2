@@ -8,9 +8,11 @@ lines stay vectors and are drawn straight onto the PDF in points.
 The API, in the order a guide uses it (assembly_pdf.py does this per step)
 
     scene = Scene.from_split(result, preview)        parts' meshes in the assembled pose, decimated to 0.25 mm, plus pins
-    camera = choose_camera(scene, step, previous)    the first-fit camera for a step (EXTENSION POINT for camera quality:
-                                                     a later rule can score candidates using the scene; the signature stays)
+    camera = choose_camera(scene, step, previous)    the camera for a step: first fit, reuse, scored fallback (the camera
+                                                     quality section below); choose_view() also says if a close-up is needed
     art = prepare_step(scene, step, camera)          all the heavy work: line runs for both frames. No PDF involved
+                                                     (close_up=True adds the close-up frame; an upward join is drawn turned
+                                                     over, with a cue in frame 2)
     frame1, frame2 = layout_frames(art, width)       the two frame rectangles for a step drawn `width` points wide
     draw_step(canvas, art, left, top, width)         draws both frames, returns the height used (callers put the step
                                                      number above and the caption below)
@@ -144,11 +146,10 @@ def camera_candidates() -> list:
     return [unit([sx, sy, 0.8 * sz]) for sz in (1, -1) for sx in (1, -1) for sy in (1, -1)]
 
 
-def choose_camera(scene, step: dict, previous) -> np.ndarray:
-    """The first-fit camera: keep the previous camera while it still sees the receiving face (dot with the face normal
-    above 0.3), else the first of the 8 diagonal views that sees it (above 0.05), preferring from above, then the angle
-    closest to 55 degrees to the insertion axis. `scene` is unused for now; a quality rule can score views with it."""
-    u = unit(step["direction"])
+def _first_fit(u: np.ndarray, previous) -> np.ndarray:
+    """Keep the previous camera while it still sees the receiving face (dot with the face normal above 0.3), else the first
+    of the 8 diagonal views that sees it (above 0.05), preferring from above, then the angle closest to 55 degrees to the
+    insertion axis."""
     if previous is not None and float(np.dot(previous, -u)) > 0.3:
         return np.asarray(previous, float)
     best, best_key = None, None
@@ -157,6 +158,12 @@ def choose_camera(scene, step: dict, previous) -> np.ndarray:
         if best is None or key > best_key:
             best, best_key = camera, key
     return best
+
+
+def choose_camera(scene, step: dict, previous) -> np.ndarray:
+    """The camera for a step, in the step's pose (see `pose_for`: an upward join is drawn turned, so the camera is above
+    the turned model). Without a `scene` this is the first-fit rule alone; with one the quality rule below applies."""
+    return choose_view(scene, step, previous).camera
 
 
 # ── The depth-buffer renderer ──────────────────────────────────────────────────
@@ -383,8 +390,8 @@ def _points_in_triangles(points: np.ndarray, tris: np.ndarray) -> np.ndarray:
     return inside
 
 
-def prepare_step(scene: Scene, step: dict, camera) -> StepArt:
-    """Work out both frames of a step: the line runs seen from `camera`, shared by the two frames."""
+def _prepare_posed_step(scene: Scene, step: dict, camera) -> StepArt:
+    """Work out both frames of a step already in its pose: the line runs seen from `camera`, shared by the two frames."""
     u = unit(step["direction"])
     receiver, mover = tuple(step["receiver"]), tuple(step["parts"])
     touching = tuple(p for p in receiver if scene.touches(p, mover))
@@ -403,6 +410,185 @@ def prepare_step(scene: Scene, step: dict, camera) -> StepArt:
                    face=contact_face(scene, mover, touching, u), label=step.get("section") or "")
 
 
+# ── Camera quality: pose, scored fallback, close-up ────────────────────────────
+
+CLEAR_SHARE = 0.85            # a camera showing this much of the join face and of the rod tips is kept
+CLOSE_UP_BELOW = 0.70         # when even the best candidate scores under this, the step gets a close-up frame
+CLOSE_UP_ZOOM = 3.0
+CLOSE_UP_PX = 800
+QUALITY_PX = 500              # width of the low-resolution depth buffer the candidates are scored on
+FACE_SAMPLES = 300
+CUE_MM = 12.0                 # the "turn it over" cue
+
+
+def rotation_between(a, b) -> np.ndarray:
+    """The smallest rotation turning direction `a` onto direction `b`."""
+    a, b = unit(a), unit(b)
+    c = float(a @ b)
+    if c > 0.9999:
+        return np.eye(3)
+    if c < -0.9999:
+        return np.diag([1.0, -1.0, -1.0])      # half a turn about x
+    v = np.cross(a, b)
+    k = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + k + k @ k / (1 + c)
+
+
+def pose_for(step: dict) -> "np.ndarray | None":
+    """The rotation that turns the model over for a step, or None to draw it in the finished pose. A join that goes upward
+    (no view from above sees its receiving face) is drawn with the model turned so the join goes down."""
+    u = unit(step["direction"])
+    if any(float(camera @ -u) > 0.05 for camera in camera_candidates() if camera[2] > 0):
+        return None
+    return rotation_between(u, -UP)
+
+
+def posed(scene: "Scene | None", step: dict) -> tuple:
+    """(scene, step, turn) as the step is drawn: the receiver, the moving unit and their rods rotated by `turn`. In the
+    finished pose `turn` is None and nothing is copied (the scene may be None then or when only the step is wanted)."""
+    turn = pose_for(step)
+    if turn is None:
+        return scene, step, None
+    turned_step = dict(step, direction=tuple(turn @ unit(step["direction"])))
+    if scene is None:
+        return None, turned_step, turn
+    parts = set(step["receiver"]) | set(step["parts"])
+    meshes = {p: trimesh.Trimesh(scene.meshes[p].vertices @ turn.T, scene.meshes[p].faces, process=False) for p in parts}
+    pins = [dict(pin, p=(turn @ np.array(pin["p"], float)).tolist(), axis=(turn @ np.array(pin["axis"], float)).tolist())
+            for pin in scene.pins if pin["parts"][0] in parts and pin["parts"][1] in parts]
+    return Scene(meshes, pins, scene.touching), turned_step, turn
+
+
+def _face_samples(face: "ContactFace | None") -> np.ndarray:
+    """World points spread over the real join face (where both faces overlap), at most FACE_SAMPLES of them."""
+    if face is None or not len(face.receiver):
+        return np.zeros((0, 3))
+    both = face.receiver.reshape(-1, 2)
+    lo, hi = both.min(axis=0), both.max(axis=0)
+    area = max(float(np.prod(hi - lo)), 1e-6)
+    spacing = float(np.sqrt(area / (FACE_SAMPLES * 4)))
+    gx, gy = np.meshgrid(np.arange(lo[0] + spacing / 2, hi[0], spacing), np.arange(lo[1] + spacing / 2, hi[1], spacing))
+    dots = np.c_[gx.ravel(), gy.ravel()]
+    keep = _points_in_triangles(dots, face.receiver)
+    if len(face.mover):
+        keep &= _points_in_triangles(dots, face.mover)
+    dots = dots[keep]
+    if len(dots) > FACE_SAMPLES:
+        dots = dots[np.linspace(0, len(dots) - 1, FACE_SAMPLES).astype(int)]
+    u = np.cross(face.e1, face.e2)
+    return face.plane * u + dots[:, :1] * face.e1 + dots[:, 1:] * face.e2
+
+
+class _StepProbe:
+    """What it takes to ask "how much of this join does a camera show": the receiver and the exploded moving unit as depth
+    items, sample points over the join face and the tips of the rods. `scene` and `step` are already in the step's pose."""
+
+    def __init__(self, scene: Scene, step: dict):
+        u = unit(step["direction"])
+        receiver, mover = tuple(step["receiver"]), tuple(step["parts"])
+        touching = tuple(p for p in receiver if scene.touches(p, mover))
+        mover_points = np.vstack([scene.corners(p) for p in mover])
+        extent = float((mover_points @ u).max() - (mover_points @ u).min())
+        offset = -u * (0.3 * extent + 22.0)
+        self.scene, self.u = scene, u
+        self.items = [(p, np.zeros(3)) for p in receiver] + [(p, offset) for p in mover]
+        self.fit = np.vstack([scene.corners(p, o) for p, o in self.items])
+        self.face = _face_samples(contact_face(scene, mover, touching, u))
+        self.tips = np.array([np.array(pin["p"], float) - u * max(pin["depth"] - 0.5, 1.0) for pin in scene.pins_between(mover, receiver)])
+
+    def quality(self, camera) -> dict:
+        view = View(camera, self.fit, width=QUALITY_PX)
+        depth = np.full((view.H, view.W), -np.inf, np.float32)
+        for part, offset in self.items:
+            mesh = self.scene.meshes[part]
+            raster_depth(view.project(mesh.vertices + offset), mesh.faces, view.W, view.H, depth)
+
+        def seen(points) -> float:
+            if not len(points):
+                return 1.0
+            q = view.project(points)
+            xi, yi = np.floor(q[:, 0]).astype(int), np.floor(q[:, 1]).astype(int)
+            inside = (xi >= 0) & (xi < view.W) & (yi >= 0) & (yi < view.H)
+            return float(np.mean(inside & (q[:, 2] >= depth[yi.clip(0, view.H - 1), xi.clip(0, view.W - 1)] - view.bias)))
+
+        face, rods = seen(self.face), seen(self.tips)
+        facing = max(float(np.dot(camera, -self.u)), 0.0)
+        above = bool(camera[2] > 0)
+        score = 0.5 * face + 0.3 * rods + 0.2 * min(facing / 0.5, 1.0) + (0.03 if above else 0.0)
+        return {"score": score, "face": face, "rods": rods, "facing": facing, "above": above}
+
+
+def scoring_candidates(u: np.ndarray) -> list:
+    """The 10 cameras of the fallback: the 8 diagonal views, then 2 obliques looking at the face (-u raised half a unit
+    and shifted half a unit to either side). `u` is the insertion direction in the step's pose."""
+    ref = UP if abs(float(u @ UP)) < 0.9 else np.array([1.0, 0, 0])
+    side = unit(np.cross(ref, u))
+    return camera_candidates() + [unit(-u + 0.5 * ref + 0.5 * s * side) for s in (1, -1)]
+
+
+@dataclass
+class CameraChoice:
+    camera: np.ndarray           # in the pose of the step
+    quality: "dict | None"       # face / rods / score of the camera, None when it was not measured (no scene)
+    scored: bool = False         # the first-fit camera was not good enough and 10 candidates were scored
+    close_up: bool = False       # even the best candidate scores under CLOSE_UP_BELOW: add a close-up frame
+
+
+def choose_view(scene, step: dict, previous) -> CameraChoice:
+    """The camera rule. First fit (or the previous camera while it still sees the face); keep it when it shows at least 85%
+    of the join face and of the rod tips; else score 10 candidates and take the best (ties to the lower index); when even
+    that scores under 70% the step also gets a close-up. Deterministic. Without a `scene` it stops at the first fit."""
+    pose_scene, pose_step, _turn = posed(scene, step)
+    u = unit(pose_step["direction"])
+    first = _first_fit(u, previous)
+    if scene is None:
+        return CameraChoice(first, None)
+    probe = _StepProbe(pose_scene, pose_step)
+    quality = probe.quality(first)
+    if quality["face"] >= CLEAR_SHARE and quality["rods"] >= CLEAR_SHARE:
+        return CameraChoice(first, quality)
+    candidates = scoring_candidates(u)
+    results = [probe.quality(camera) for camera in candidates]
+    best = int(np.argmax([r["score"] for r in results]))      # the first of equal scores
+    return CameraChoice(candidates[best], results[best], scored=True, close_up=results[best]["score"] < CLOSE_UP_BELOW)
+
+
+@dataclass
+class CloseUp:
+    view: View
+    runs: dict                   # {("r", part): runs} of the receiver
+    zoom: float
+
+
+def _close_up(scene: Scene, art: StepArt, camera) -> CloseUp:
+    """The join region about 3x larger than frame 1 shows it: the receiver, the stippled face and the rods."""
+    if art.face is not None:
+        centre = art.face.centre
+    elif art.pins:
+        centre = np.mean([p["p"] for p in art.pins], axis=0)
+    else:
+        centre = np.mean(np.vstack([scene.corners(p) for p in art.receiver]), axis=0)
+    main = art.view
+    half = main.W / main.scale / CLOSE_UP_ZOOM / 2          # mm
+    corners = np.array([centre + sx * half * main.R[0] + sy * half * main.R[1] for sx in (-1, 1) for sy in (-1, 1)])
+    view = View(camera, corners, width=CLOSE_UP_PX, margin=0.0, aspect=(1.0, 1.0))
+    return CloseUp(view, view.render(scene, [(("r", p), p, np.zeros(3)) for p in art.receiver]), CLOSE_UP_ZOOM)
+
+
+def prepare_step(scene: Scene, step: dict, camera, close_up: bool = False) -> StepArt:
+    """Both frames of a step from `camera` (as `choose_camera` gives it), in the step's pose: turned over when the join goes
+    upward (`art.extras["turn"]` is then the rotation, and frame 2 carries the "turn it over" cue). `close_up` adds the
+    close-up frame (`art.extras["close_up"]`) that `choose_view` asks for when no camera shows the join well."""
+    pose_scene, pose_step, turn = posed(scene, step)
+    art = _prepare_posed_step(pose_scene, pose_step, camera)
+    art.step = step
+    if turn is not None:
+        art.extras["turn"] = turn
+    if close_up:
+        art.extras["close_up"] = _close_up(pose_scene, art, camera)
+    return art
+
+
 # ── Drawing ────────────────────────────────────────────────────────────────────
 
 FRAME_GAP = 4 * MM
@@ -418,7 +604,9 @@ def layout_frames(art: StepArt, width: float) -> tuple:
 
 
 def step_height(art: StepArt, width: float) -> float:
-    return layout_frames(art, width)[0][3]
+    """Height of the frames of a step, including the close-up frame under frame 1 when it has one (that step then takes a
+    whole page)."""
+    return layout_frames(art, width)[0][3] + close_up_height(art, width)
 
 
 def stroke_runs(canvas, runs, box: Box, grey: float, weight: float) -> None:
@@ -643,6 +831,8 @@ def draw_frame_two(canvas, art: StepArt, frame) -> None:
             _place_bubble(canvas, box, frame, mover_runs.get(("m", part), []), str(part), "tl", True, slot)
     for slot, part in enumerate(art.touching):
         _place_bubble(canvas, box, frame, art.runs_two.get(("t", part), []), str(part), "tr", False, slot)
+    if "turn" in art.extras:
+        draw_turn_cue(canvas, frame)
     _frame_badge(canvas, frame, 2)
 
 
@@ -661,7 +851,72 @@ def draw_step(canvas, art: StepArt, left: float, top: float, width: float) -> fl
         canvas.setStrokeGray(0.82)
         canvas.setLineWidth(0.5)
         canvas.rect(*placed)
+    if "close_up" in art.extras:
+        height += draw_close_up(canvas, art, left, top - height, width)
     return height
+
+
+# ── Close-up frame and the "turn it over" cue ──────────────────────────────────
+
+CLOSE_UP_MAX_H = 100 * MM
+
+
+def close_up_height(art: StepArt, width: float) -> float:
+    """Room under frame 1 for the close-up frame (a gap and a frame as wide as frame 1); 0 when the step has none."""
+    if "close_up" not in art.extras:
+        return 0.0
+    return FRAME_GAP + min((width - FRAME_GAP) / 2, CLOSE_UP_MAX_H)
+
+
+def draw_close_up(canvas, art: StepArt, left: float, top: float, width: float) -> float:
+    """Frame 3: the join region at about 3x, under frame 1 (the receiver, the stippled face, the rods). Returns the height used."""
+    close = art.extras["close_up"]
+    side = (width - FRAME_GAP) / 2
+    h = min(side, CLOSE_UP_MAX_H)
+    frame = (left, top - FRAME_GAP - h, side, h)
+    canvas.saveState()
+    path = canvas.beginPath()
+    path.rect(*frame)
+    canvas.clipPath(path, stroke=0, fill=0)
+    box = Box(frame, close.view)
+    for runs in close.runs.values():
+        stroke_runs(canvas, runs, box, *RECEIVER)
+    _stipple_face(canvas, box, art.face)
+    _draw_rods(canvas, box, _rods(art, box))
+    canvas.setFillGray(0)
+    canvas.setFont("Helvetica-Bold", MIN_FONT)
+    canvas.drawRightString(frame[0] + frame[2] - 4, frame[1] + 4, f"Close-up, about {close.zoom:g}x")
+    _frame_badge(canvas, frame, 3)
+    canvas.restoreState()
+    canvas.setStrokeGray(0.82)
+    canvas.setLineWidth(0.5)
+    canvas.rect(*frame)
+    return FRAME_GAP + h
+
+
+def draw_turn_cue(canvas, frame) -> None:
+    """A curved arrow about 12 mm across with "Turn it over" beside it, in the top right corner of the frame."""
+    r = CUE_MM * MM / 2
+    text = "Turn it over"
+    text_w = canvas.stringWidth(text, "Helvetica-Bold", MIN_FONT)
+    cx, cy = frame[0] + frame[2] - 6 - r, frame[1] + frame[3] - 6 - r
+    canvas.setFillGray(1)
+    canvas.rect(cx - r - 6 - text_w - 3, cy - r - 3, text_w + 2 * r + 12, 2 * r + 6, stroke=0, fill=1)
+    angles = np.radians(np.linspace(30, 300, 28))
+    pts = np.c_[cx + r * 0.8 * np.cos(angles), cy + r * 0.8 * np.sin(angles)]
+    canvas.setStrokeGray(0)
+    canvas.setLineWidth(1.6)
+    canvas.setLineCap(1)
+    path = canvas.beginPath()
+    path.moveTo(*pts[0])
+    for pt in pts[1:]:
+        path.lineTo(*pt)
+    canvas.drawPath(path, stroke=1, fill=0)
+    tangent = pts[-1] - pts[-2]
+    _arrow(canvas, pts[-1] - tangent / np.linalg.norm(tangent) * 6, pts[-1] + tangent / np.linalg.norm(tangent) * 1.5, weight=1.6, head=7)
+    canvas.setFillGray(0)
+    canvas.setFont("Helvetica-Bold", MIN_FONT)
+    canvas.drawRightString(cx - r - 4, cy - 3, text)
 
 
 # ── Pictures of finished parts (Section headers) ───────────────────────────────
