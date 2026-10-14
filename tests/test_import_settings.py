@@ -248,6 +248,38 @@ class AppendSettingsTests(SettingsCase):
             self.resolve(resolved, {"material": {"choice": "imported"}})
 
 
+class DifferencesAreNotDroppedQuietly(SettingsCase):
+    async def test_a_file_material_without_a_preset_keeps_its_filament_values_when_appended(self):
+        project = await self.project_with_cube()
+        unnamed = {**PROJECT, "filament_settings_id": ["Brand House PLA"], "filament_type": ["PLA"], "nozzle_diameter": ["0.4"],
+                   "nozzle_temperature": ["233"]}
+        done = self.confirm(self.prepare(archive(project=unnamed, **CUBES), "house.3mf", target=project["id"]))
+        choice = next(iter(done["data"]["filaments"].values()))
+        machine = slicer.bundle_settings(done["data"]["profile"]["bundle_id"])["machine"]
+        _, values = slicer.filament_snapshot(choice["snapshot"], machine)
+        self.assertEqual(values["nozzle_temperature"], ["233"], "the file's own temperatures are carried, not dropped")
+        self.assertEqual(done["data"]["profile"], projects.get_project(project["id"])["data"]["profile"])
+
+    async def test_settings_the_import_cannot_carry_need_acknowledgement_and_a_direct_upload_refuses_them(self):
+        project = await self.project_with_cube()
+        for label, extra in (("blocked", {"post_process": ["rm -rf x"]}), ("invalid", {"wall_loops": "banana"}),
+                             ("uncompared", {"sparse_infill_density": "25%"})):
+            with self.subTest(label):
+                data = archive(project={**PROJECT, "nozzle_diameter": ["0.4"], **extra}, **CUBES)
+                review = self.prepare(data, "x.3mf", target=project["id"])
+                self.assertTrue(review["required"], "differences that are left out are shown and acknowledged")
+                with self.assertRaises(jobs.JobError) as caught:
+                    projects.confirm_import(review["token"], review["binding"])
+                self.assertEqual(caught.exception.issues[0]["code"], "import-review-required")
+                projects.cancel_import(review["token"])
+                before = self.snapshot(project["id"])
+                with self.assertRaises(jobs.JobError) as direct:
+                    projects.import_model(project["id"], io.BytesIO(data), len(data), "x.3mf")
+                self.assertEqual((direct.exception.status, direct.exception.issues[0]["code"]), (409, "import-review-required"))
+                self.assertTrue(direct.exception.issues[0]["differences"])
+                self.assertEqual(self.snapshot(project["id"]), before)
+
+
 class ResolveApiTests(base.ImportReviewApiTests):
     def setUp(self):
         super().setUp()

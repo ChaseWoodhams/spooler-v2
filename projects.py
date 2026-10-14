@@ -1211,14 +1211,13 @@ def _append_material(project: dict, record: dict, base: dict, ctx: dict, notes: 
     profile = record["data"]["profile"]
     target = base["bundle"]["presets"]["filament"]["name"]
     available = stock["filaments"][machine["name"]]
-    values = None
+    values = unmatched = None
     if name in available:
         preset = name
     elif kind and kind == _first(base["filament"].get("filament_type")):
-        notes.append(f"The file's material “{name}” has no preset; it is the same material as the Project's “{target}”, which is kept")
-        ctx["differences"].append({"scope": "project", "code": "material-name-unmatched", "key": "filament_settings_id",
-                                   "reason": f"“{name}” has no preset; the Project's {target} was kept"})
-        return None
+        # Same material, no preset of that name: the file's own filament values are compared with the Project's preset and
+        # carried as a snapshot when they differ, never dropped.
+        preset, unmatched = target, name
     else:
         chosen = _material_choice(project, stock, machine["name"], machine, ctx)
         if chosen is None:
@@ -1237,11 +1236,17 @@ def _append_material(project: dict, record: dict, base: dict, ctx: dict, notes: 
             except jobs.JobError as error:
                 ctx["differences"].append({"scope": "project", "code": "invalid-setting", "key": key, "reason": str(error)})
         if preset == target and deltas == (profile.get("filament") or {}):
+            if unmatched:
+                notes.append(f"The file's material “{unmatched}” has no preset; it is the same material as the Project's “{target}”, which is kept")
+                ctx["differences"].append({"scope": "project", "code": "material-name-unmatched", "key": "filament_settings_id",
+                                           "reason": f"“{unmatched}” has no preset; its settings match the Project's {target}, which was kept"})
             return None
         if not deltas:
             reference = slicer.lock_filament(preset, machine)
             return {"preset": reference["name"], "colour": "", "snapshot": reference}
-        values = {**flat, **deltas, "name": f"{preset} (imported)"}
+        values = {**flat, **deltas, "name": f"{unmatched or preset} (imported)"}
+        if unmatched:
+            notes.append(f"The file's material “{unmatched}” has no preset; its own settings are kept as a saved Filament choice")
     reference, content = slicer.snapshot_proposal(values, machine)
     reference = slicer.store_filament(reference, content, machine)
     return {"preset": reference["name"], "colour": "", "snapshot": reference}
@@ -1454,8 +1459,17 @@ def _run_staging(kind: str, path: Path, folder: Path, record: dict | None, filen
     return conversion, notes, blockers, differences, ctx["applied"]
 
 
+# Differences that are settings of the file which would not reach the Project; the person acknowledges them like losses.
+# The rest record choices already made (a mapped printer, a convert, a kept material) and need no acknowledgement.
+UNCARRIED_DIFFERENCES = ("invalid-setting", "uncompared-settings", "blocked-setting")
+
+
+def _uncarried(report: dict) -> list:
+    return [d for d in report.get("differences") or [] if d.get("code") in UNCARRIED_DIFFERENCES]
+
+
 def _needs_acknowledgement(report: dict) -> bool:
-    return bool(report["losses"]) or bool((report.get("resolution") or {}).get("material", {}).get("material_change"))
+    return bool(report["losses"]) or bool(_uncarried(report)) or bool((report.get("resolution") or {}).get("material", {}).get("material_change"))
 
 
 def prepare_import(stream, length: int, filename: str, target: int | None = None, scale=1.0, up="z", plate=None, quick: bool = False) -> dict:
@@ -1588,7 +1602,8 @@ def _import_directly(target, stream, length: int, filename: str, **options) -> d
         cancel_import(review["token"])
         raise _review_error("This 3MF has features Spooler can't keep or settings it can't match. Add it from a Project's New project or Add models "
                             "page to review it first", 409,
-                            "import-review-required", losses=review["report"]["losses"], blockers=review["report"]["blockers"])
+                            "import-review-required", losses=review["report"]["losses"], blockers=review["report"]["blockers"],
+                            differences=_uncarried(review["report"]))
     return confirm_import(review["token"], review["binding"])
 
 
@@ -1610,7 +1625,8 @@ def confirm_import(token: str, confirmation: dict) -> dict:
         raise _review_error("This import can't continue until its blocking problems are resolved", 409, "import-blocked",
                             blockers=report["blockers"])
     if _needs_acknowledgement(report) and confirmation.get("acknowledged") is not True:
-        raise _review_error("Review the losses and choose Continue with losses", 409, "import-review-required", losses=report["losses"])
+        raise _review_error("Review the losses and differences and choose Continue", 409, "import-review-required", losses=report["losses"],
+                            differences=_uncarried(report))
     try:
         if _file_digest(folder / "source.3mf") != review["content_hash"]:
             raise _review_error("The staged file changed. Choose the file again", 409, "import-review-stale")
@@ -1653,7 +1669,7 @@ def _retain_import(project_id: int, review: dict, folder: Path, summary: dict) -
     report = review["report"]
     (keep / "record.json").write_text(json.dumps({
         "id": review["token"], "kind": review["kind"], "filename": review["filename"], "content_hash": review["content_hash"],
-        "size": review["size"], "accepted_at": time.time(), "acknowledged": bool(report["losses"]), "report_version": report["version"],
+        "size": review["size"], "accepted_at": time.time(), "acknowledged": _needs_acknowledgement(report), "report_version": report["version"],
         "losses": report["losses"], "differences": report.get("differences", []),
         "resolution": report.get("resolution", {}), "objects": report["objects"], "plates": report["plates"], "notes": review["notes"], **summary}), encoding="utf-8")
     return keep

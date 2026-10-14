@@ -141,6 +141,47 @@ class FaithfulExportTests(ExportCase):
                 projects.export_project(project["id"], plan["revision"], plan["fingerprint"])
         self.assertEqual((refused.exception.status, refused.exception.issues[0]["code"]), (409, "export-template-unavailable"))
 
+    def stock_machine_value(self, key, value):
+        path = next(self.dir.glob("tools/*/resources/profiles/Elegoo/machine/ECC/Elegoo Centauri Carbon 0.4 nozzle.json"))
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record[key] = value
+        path.write_text(json.dumps(record), encoding="utf-8")
+        slicer._preset_cache.clear()
+
+    def scalar_template(self, key):
+        """A template runner whose Orca writes `key` as a single value, as an Orca that has no vector for it would."""
+        inner = template_runner()
+
+        def run(args, timeout):
+            code, text = inner(args, timeout)
+            out = Path(args[args.index("--export-3mf") + 1])
+            with zipfile.ZipFile(out) as archive:
+                config = json.loads(archive.read("Metadata/project_settings.config"))
+            config[key] = "1"
+            with zipfile.ZipFile(out, "w") as archive:
+                archive.writestr("Metadata/project_settings.config", json.dumps(config))
+            return code, text
+        return run
+
+    async def test_a_vector_with_several_entries_is_never_truncated_to_fit_a_single_value_slot(self):
+        self.stock_machine_value("retract_length_toolchange", ["1", "2"])
+        project = await self.two_plate_project()
+        plan = projects.export_plan(project["id"])
+        with mock.patch.object(slicer, "runner", self.scalar_template("retract_length_toolchange")):
+            with self.assertRaises(jobs.JobError) as refused:
+                projects.export_project(project["id"], plan["revision"], plan["fingerprint"])
+        issue = refused.exception.issues[0]
+        self.assertEqual((refused.exception.status, issue["code"]), (409, "export-template-incomplete"))
+        self.assertIn("retract_length_toolchange", issue["keys"])
+
+    async def test_a_uniform_vector_still_fits_a_single_value_slot(self):
+        self.stock_machine_value("retract_length_toolchange", ["1", "1"])
+        project = await self.two_plate_project()
+        plan = projects.export_plan(project["id"])
+        with mock.patch.object(slicer, "runner", self.scalar_template("retract_length_toolchange")):
+            artifact = projects.export_project(project["id"], plan["revision"], plan["fingerprint"])
+        self.assertEqual(orca_3mf.parse(io.BytesIO(artifact["body"]))["project"]["retract_length_toolchange"], "1")
+
     async def test_object_metadata_serializes_typed_values_the_way_orca_reads_them(self):
         settings = {"wall_loops": 4, "flag": True, "off": False, "list": ["1", "2"], "empty": None, "pct": "15%"}
         data = orca_3mf.build([{"name": "A", "verts": np.zeros((3, 3)), "tris": np.array([[0, 1, 2]]), "matrix": np.eye(3),
