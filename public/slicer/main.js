@@ -8,6 +8,7 @@ import { splitStep } from "./split-step.js?v=3";
 import { projectPage } from "./project-page.js?v=7";
 import { newProject } from "./new-project.js?v=10";
 import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
+import { showExport } from "./export-plan.js?v=1";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 import { reviewHtml, reviewTitle, blockers, acknowledgements } from "./review.js?v=1";
 
@@ -3262,14 +3263,7 @@ async function exportProject() {
   const button = $("btn-export-3mf");
   button.disabled = true;
   try {
-    await flushSave();
-    const response = await fetch(`/api/projects/${state.project.id}/export.3mf`);
-    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "The export failed");
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(await response.blob());
-    link.download = `${state.project.name.replace(/[^\w .-]+/g, "_").trim() || "project"}.3mf`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+    await showExport({ api, toast, save: flushSave }, state.project.id);
   } catch (err) {
     toast(err.message, true);
   } finally {

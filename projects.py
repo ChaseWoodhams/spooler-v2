@@ -55,6 +55,7 @@ from xml.sax.saxutils import escape
 import brick_post
 import database
 import effective_settings as plate_settings
+import export_plan as export_planner
 import gcode_analysis
 import holds
 import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
@@ -1777,72 +1778,136 @@ def import_source(project_id: int, record_id: str) -> tuple:
     return project_dir(project_id) / "imports" / record_id / "source.3mf", record["filename"]
 
 
-def export_orca_project(project_id: int) -> bytes:
-    """The whole project as an OrcaSlicer project 3MF: every plate, each object's placement and settings, the profile with
-    the project's changes. OrcaSlicer's own command line supplies the complete settings file the desktop app expects."""
-    import numpy as np
-    record = get_project(project_id)
+def _export_error(code: str, message: str, status: int = 409, **extra) -> jobs.JobError:
+    error = jobs.JobError(message, status)
+    error.issues = [{"code": code, "message": message, **extra}]
+    return error
+
+
+def export_plan(project_id: int, *, record: dict | None = None) -> dict:
+    """What a faithful Orca export of the Project can represent, bound to the revision it was computed from. Read-only; it
+    resolves every nonempty Plate with `effective_settings`, the calculation a Slice uses (see export_plan.py)."""
+    record = record if record is not None else get_project(project_id)
     data = record["data"]
     models = {m["id"]: m for m in record["models"]}
-    if not data["objects"]:
-        raise jobs.JobError("The project has no objects to export", 409)
+    entries, unavailable = [], []
+    for plate in data["plates"]:
+        if not any(o["plate"] == plate["id"] for o in data["objects"]):
+            continue
+        try:
+            entries.append((plate, effective_settings(record["id"], plate["id"], record=record)))
+        except jobs.JobError as exc:
+            unavailable.append({"code": "settings-unavailable", "message": str(exc), "plate_id": plate["id"]})
     waiting = [o["name"] for o in data["objects"] if models.get(o["model"], {}).get("state") != READY]
-    if waiting:
-        raise jobs.JobError(f"Still importing: {', '.join(waiting)}", 409)
-    _require_resolved_settings(record, {o["plate"] for o in data["objects"]})
+    return export_planner.plan(record, entries, unavailable, waiting, slicer.orca_executable() is not None)
+
+
+def _export_template(project_id: int, review: dict) -> dict:
+    """Orca's complete project configuration for the effective machine/process/filament: what OrcaSlicer itself writes when it
+    exports a 3MF with these inputs. Isolated data directory; an unreadable result is an error, never a thinner file."""
+    orca = slicer.orca_executable()
+    problem = "OrcaSlicer could not write the project configuration"
+    if orca is None:
+        raise _export_error("export-template-unavailable", "OrcaSlicer is needed to write the project configuration, and it was not found")
+    with tempfile.TemporaryDirectory(prefix=".export-", dir=project_dir(project_id)) as tmp:
+        tmp = Path(tmp)
+        for kind in export_planner.KINDS:
+            (tmp / f"{kind}.json").write_text(json.dumps(review[kind], sort_keys=True), encoding="utf-8")
+        corners = [(x, y, z) for x in (0, 10) for y in (0, 10) for z in (0, 10)]
+        faces = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1), (2, 3, 7), (2, 7, 6), (0, 2, 6), (0, 6, 4), (1, 5, 7), (1, 7, 3)]
+        # ASCII: Orca's STL reader refuses the binary files write_stl makes, and a bare tetrahedron
+        (tmp / "template.stl").write_text("solid template\n" + "".join(
+            "facet normal 0 0 0\n outer loop\n" + "".join(f"  vertex {x} {y} {z}\n" for x, y, z in (corners[i] for i in face)) + " endloop\nendfacet\n"
+            for face in faces) + "endsolid template\n", encoding="ascii")
+        out = tmp / "template.3mf"
+        code, text = slicer.runner([str(orca), "--datadir", str(_data_dir / "slicer-data-export"), "--arrange", "0",
+                                    "--load-settings", f"{tmp / 'machine.json'};{tmp / 'process.json'}",
+                                    "--load-filaments", str(tmp / "filament.json"), "--export-3mf", str(out), str(tmp / "template.stl")], 120)
+        try:
+            with zipfile.ZipFile(out) as archive:
+                template = json.loads(archive.read("Metadata/project_settings.config").decode("utf-8"))
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+            raise _export_error("export-template-unavailable", f"{problem} (exit code {code - (1 << 32) if code >= (1 << 31) else code})", log=(text or "")[-1500:]) from None
+    if not isinstance(template, dict):
+        raise _export_error("export-template-unavailable", problem)
+    return template
+
+
+def _authored_keys(record: dict, entries: list) -> set:
+    profile = record["data"]["profile"]
+    keys = set(profile.get("process") or {}) | set(profile.get("filament") or {})
+    for obj in record["data"]["objects"]:
+        keys |= set(obj.get("overrides") or {})
+    for plate in record["data"]["plates"]:
+        keys |= set(plate.get("overrides") or {})
+    return keys
+
+
+def _single_file(project_id: int, record: dict, plan: dict) -> bytes:
+    import numpy as np
+    data = record["data"]
+    entries = [(p, effective_settings(record["id"], p["id"], record=record)) for p in data["plates"]
+               if any(o["plate"] == p["id"] for o in data["objects"])]
+    review = entries[0][1]
+    config, dropped = export_planner.project_config(review, _export_template(project_id, review), _authored_keys(record, entries))
+    if dropped:
+        raise _export_error("export-template-incomplete", "Orca has no place for these saved settings, so a faithful file is not possible: " + ", ".join(dropped), keys=dropped)
+    overrides = {}
+    for _, result in entries:
+        for obj in result["objects"]:
+            overrides[obj["id"]] = {k: v for k, v in sorted((obj.get("overrides") or {}).items()) if result["process"].get(k) != v}
+    # Orca numbers Plates 1..n and keeps each at its own place in a grid, so a Plate's Objects stand at that Plate's origin.
+    numbers = {p["id"]: n for n, p in enumerate(data["plates"], start=1)}
+    limits = machine_limits(review["machine"])
+    width, depth = limits["bed"][2] - limits["bed"][0], limits["bed"][3] - limits["bed"][1]
     objects = []
     for obj in data["objects"]:
         verts, tris = load_mesh(project_id, obj["model"])
         centre = (verts.min(axis=0) + verts.max(axis=0)) / 2
         turn = rotation_matrix(obj["rotation"]) @ np.diag(np.asarray(obj["scale"], float))
         matrix = turn.T                                  # 3MF's row-vector form
-        shift = place(verts, obj)[0] - (verts[0] - centre) @ matrix
+        shift = place(verts, obj)[0] - (verts[0] - centre) @ matrix       # the placement a Slice sends, as a transform
+        shift = shift + [*orca_3mf.plate_origin(numbers[obj["plate"]], len(numbers), width, depth), 0.0]
         objects.append({"name": obj["name"], "verts": verts - centre, "tris": tris, "matrix": matrix, "shift": shift,
-                        "plate": obj["plate"], "settings": obj.get("overrides") or {}})
-    config = {}
-    bundle_id = data["profile"].get("bundle_id")
-    if bundle_id:
-        settings = slicer.bundle_settings(bundle_id)
-        config = _orca_project_config(project_id, settings)
-        for kind in ("process", "filament"):
-            for key, value in (data["profile"].get(kind) or {}).items():
-                config[key] = value
-        config["curr_bed_type"] = slicer.BED_TYPES[data["bed"]]
-    return orca_3mf.build(objects, data["plates"], config)
+                        "plate": numbers[obj["plate"]], "settings": overrides.get(obj["id"], {})})
+    return orca_3mf.build(objects, [{**p, "id": numbers[p["id"]]} for p in data["plates"]], config)
 
 
-_IDENTITY_KEYS = {"name", "from", "instantiation", "type", "inherits", "setting_id", "compatible_printers", "filament_id"}
+def _review_required(plan: dict) -> jobs.JobError:
+    if plan["blockers"]:
+        error = jobs.JobError(plan["blockers"][0]["message"], 409)
+        error.issues = plan["blockers"]
+        return error
+    names = sorted({d["key"] for d in plan["differences"]})
+    message = ("A single Orca file cannot keep this Project's settings: Plates differ in " + ", ".join(names[:6])
+               + (" and more" if len(names) > 6 else "") + ". Review the export plan and choose another way to export")
+    return _export_error("export-review-required", message, differences=plan["differences"], revision=plan["revision"],
+                         fingerprint=plan["fingerprint"])
 
 
-def _orca_project_config(project_id: int, settings: dict) -> dict:
-    """A complete project_settings.config for a locked profile: what OrcaSlicer writes itself when it exports a 3MF with these
-    presets (639 settings), falling back to the presets' own settings when OrcaSlicer isn't available."""
-    merged = {}
-    for kind in slicer.PRESET_KINDS:
-        merged.update({k: v for k, v in settings[kind].items() if k not in _IDENTITY_KEYS})
-    names = {kind: settings[kind]["name"] for kind in slicer.PRESET_KINDS}
-    identity = {"from": "project", "name": "project_settings", "printer_settings_id": names["machine"],
-                "print_settings_id": names["process"], "filament_settings_id": [names["filament"]]}
-    import numpy as np
-    orca = slicer.orca_executable()
-    if orca is None:
-        return {**merged, **identity}
-    with tempfile.TemporaryDirectory(prefix=".export-", dir=project_dir(project_id)) as tmp:
-        tmp = Path(tmp)
-        for kind in slicer.PRESET_KINDS:
-            (tmp / f"{kind}.json").write_text(json.dumps(settings[kind]), encoding="utf-8")
-        write_stl(tmp / "template.stl", np.array([[0, 0, 0], [10, 0, 0], [0, 10, 0], [0, 0, 10]], float),
-                  np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]))
-        out = tmp / "template.3mf"
-        code, _ = slicer.runner([str(orca), "--datadir", str(_data_dir / "slicer-data"), "--arrange", "0",
-                                 "--load-settings", f"{tmp / 'machine.json'};{tmp / 'process.json'}",
-                                 "--load-filaments", str(tmp / "filament.json"), "--export-3mf", str(out), str(tmp / "template.stl")], 120)
-        try:
-            with zipfile.ZipFile(out) as archive:
-                template = json.loads(archive.read("Metadata/project_settings.config").decode("utf-8", "replace"))
-        except (OSError, KeyError, ValueError, zipfile.BadZipFile):
-            return {**merged, **identity}
-    return {**template, **{k: v for k, v in merged.items() if k in template}, **identity}
+def export_project(project_id: int, revision, fingerprint) -> dict:
+    """The faithful single-file export for a plan the caller reviewed: {"body", "filename", "content_type", "plan"}. Refused
+    when the Project changed since that plan or when the plan offers no faithful file."""
+    record = get_project(project_id)
+    plan = export_plan(project_id, record=record)
+    try:
+        current = int(revision) == record["revision"]
+    except (TypeError, ValueError):
+        current = False
+    if not current or fingerprint != plan["fingerprint"]:
+        raise _export_error("export-plan-stale", "The Project changed since this export was planned — plan the export again",
+                            revision=record["revision"], fingerprint=plan["fingerprint"])
+    if not plan["faithful"]:
+        raise _review_required(plan)
+    return {"body": _single_file(project_id, record, plan), "filename": plan["filename"], "content_type": plan["content_type"], "plan": plan}
+
+
+def export_orca_project(project_id: int) -> bytes:
+    """The legacy direct export: the single faithful file for the Project as it is now, or a review-required conflict. It never
+    falls back to a thinner file or another file type."""
+    record = get_project(project_id)
+    plan = export_plan(project_id, record=record)
+    return export_project(project_id, plan["revision"], plan["fingerprint"])["body"]
 
 
 def add_split_parts(project_id: int, split_id: int, numbers=None) -> dict:

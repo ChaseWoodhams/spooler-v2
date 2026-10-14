@@ -22,6 +22,26 @@ import state
 from tests.test_jobs import FakePrinter
 from tests.test_slicer import SLICED_GCODE, cube_stl, fake_runner, make_fake_orca
 
+TEMPLATE_EXTRAS = {"brim_width": "5", "enable_prime_tower": "0", "wipe_tower_x": "165"}
+
+
+def template_runner(code=0, extras=None):
+    """Writes a 3MF whose project_settings.config is every loaded preset value plus Orca defaults for everything else."""
+    def run(args, timeout):
+        run.calls.append(args)
+        if code:
+            return code, ""
+        loaded = {}
+        for item in args[args.index("--load-settings") + 1].split(";") + [args[args.index("--load-filaments") + 1]]:
+            loaded.update(json.loads(Path(item).read_text(encoding="utf-8")))
+        out = Path(args[args.index("--export-3mf") + 1])
+        with zipfile.ZipFile(out, "w") as archive:
+            archive.writestr("Metadata/project_settings.config", json.dumps({**TEMPLATE_EXTRAS, **(extras or {}), **loaded}))
+        return 0, ""
+    run.calls = []
+    return run
+
+
 GEOMETRY = not splits.missing_modules()
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -526,7 +546,7 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
         created = projects.create_project_from_upload(io.BytesIO(data), len(data), "Bench set.3mf")
         await self.run_worker()
 
-        with mock.patch.object(slicer, "runner", arrange_runner([(0, 0, 0)])):
+        with mock.patch.object(slicer, "runner", template_runner()):
             exported = projects.export_orca_project(created["id"])
         parsed = orca_3mf.parse(io.BytesIO(exported))
 

@@ -484,7 +484,49 @@ def parse(source) -> dict:
                 warnings.append("The project's settings couldn't be read")
         if not objects:
             raise ThreeMFError("The 3MF has nothing to print")
+        _remove_plate_origins(list(objects.values()), plates, project)
     return {"objects": list(objects.values()), "plates": plates, "project": project, "warnings": warnings}
+
+
+def plate_origin(number: int, count: int, width: float, depth: float) -> tuple:
+    """Where Orca puts Plate `number` (1-based) of `count` in its Plate grid: columns grow to the square root of the count and
+    the Plates are a fifth of a bed apart (PartPlateList::compute_origin)."""
+    root = count ** 0.5
+    columns = round(root) + (1 if root > round(root) else 0)
+    row, column = divmod(number - 1, columns)
+    return (column * width * 1.2, -row * depth * 1.2)
+
+
+def _bed_size(project) -> tuple:
+    points = []
+    for item in (project or {}).get("printable_area") or []:
+        try:
+            x, y = str(item).lower().split("x")
+            points.append((float(x), float(y)))
+        except ValueError:
+            continue
+    if not points:
+        return 256.0, 256.0
+    return max(p[0] for p in points) - min(p[0] for p in points), max(p[1] for p in points) - min(p[1] for p in points)
+
+
+def _remove_plate_origins(objects: list, plates: list, project) -> None:
+    """Orca stores every Object where its Plate stands in the Plate grid; Spooler places Objects on the bed. An instance that
+    lies inside its own Plate's cell (other than the first, which sits at the origin) is moved back onto the bed. One placed
+    elsewhere, such as in a file Spooler wrote before this, is left where it is."""
+    width, depth = _bed_size(project)
+    numbers = {p["id"]: n for n, p in enumerate(sorted(plates, key=lambda p: p["id"] if isinstance(p["id"], int) else 0), start=1)}
+    for obj in objects:
+        for instance in obj["instances"]:
+            number = instance["plate"] if isinstance(instance["plate"], int) else numbers.get(instance["plate"], 1)
+            if number < 2:
+                continue
+            x, y = plate_origin(number, len(plates), width, depth)
+            world = obj["verts"] @ instance["matrix"] + instance["shift"]
+            low, high = world.min(axis=0), world.max(axis=0)
+            centre = ((low[0] + high[0]) / 2, (low[1] + high[1]) / 2)
+            if x <= centre[0] <= x + width and y <= centre[1] <= y + depth:
+                instance["shift"] = instance["shift"] - np.array([x, y, 0.0])
 
 
 def pose(verts: np.ndarray, matrix: np.ndarray, shift: np.ndarray) -> dict:
@@ -568,12 +610,33 @@ def _attr(value) -> str:
     return '"' + escape(str(value), {'"': "&quot;"}) + '"'
 
 
+def scalar(value) -> str:
+    """One typed setting value as Orca writes it: booleans 1/0, a nullable's null as nil, numbers without float noise."""
+    if value is None:
+        return "nil"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, float):
+        return f"{value:.15g}"
+    return str(value)
+
+
+def metadata_value(value) -> str:
+    """A setting in Object metadata: a vector is its elements joined by ';'."""
+    return ";".join(scalar(v) for v in value) if isinstance(value, (list, tuple)) else scalar(value)
+
+
+def config_value(value):
+    """A setting in project_settings.config (JSON): vectors stay lists, every element a canonical string."""
+    return [config_value(v) for v in value] if isinstance(value, (list, tuple)) else scalar(value)
+
+
 def _numbers(values) -> str:
-    return " ".join(f"{v:.9g}" for v in values)
+    return " ".join(f"{v:.12g}" for v in values)
 
 
 def _mesh_xml(verts: np.ndarray, tris: np.ndarray) -> str:
-    vertices = "".join(f'<vertex x="{x:.6g}" y="{y:.6g}" z="{z:.6g}"/>' for x, y, z in verts)
+    vertices = "".join(f'<vertex x="{x:.9g}" y="{y:.9g}" z="{z:.9g}"/>' for x, y, z in verts)
     triangles = "".join(f'<triangle v1="{a}" v2="{b}" v3="{c}"/>' for a, b, c in tris)
     return f"<mesh><vertices>{vertices}</vertices><triangles>{triangles}</triangles></mesh>"
 
@@ -603,7 +666,7 @@ def build(objects: list, plates: list, project_config: dict, app_version: str = 
             build_items.append(f'  <item objectid="{top_id}" transform="{transform}" printable="1"/>\n')
             config.append(f'  <object id="{top_id}">\n    <metadata key="name" value={_attr(obj["name"])}/>\n    <metadata key="extruder" value="1"/>\n')
             for key, value in sorted((obj.get("settings") or {}).items()):
-                config.append(f'    <metadata key={_attr(key)} value={_attr(value)}/>\n')
+                config.append(f'    <metadata key={_attr(key)} value={_attr(metadata_value(value))}/>\n')
             config.append(f'    <part id="{mesh_id}" subtype="normal_part">\n      <metadata key="name" value={_attr(obj["name"])}/>\n'
                           '      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n    </part>\n  </object>\n')
         for plate in plates:
