@@ -55,6 +55,8 @@ class GuideData:
     plan_line: str = "Automatic plan"
     bom: object = None         # assembly_bom.Bom, or None when the split needs no rods (then there is no rod page)
     scene: object = None       # assembly_render.Scene: the parts' meshes and rods the step drawings come from
+    labels: dict = None        # part number -> the saved label record (result.json parts[i]["label"]) or None
+    plates: dict = None        # part number -> name of the plate it is on; a part not on a plate is left out
 
 
 def safe_area(paper: str) -> Rect:
@@ -231,6 +233,9 @@ def _cover(flow: PageFlow, data: GuideData) -> None:
     c.drawString(area.left, area.top - 110 * MM, f"Split {data.split_id}. Compare the plan code on two printed copies to see that they are the same plan.")
     if not summary["rods"]:
         c.drawString(area.left, area.top - 118 * MM, "Glue the faces: no rods needed.")
+    if data.scene is not None:
+        import assembly_inventory
+        assembly_inventory.draw_overview(c, data.scene, (area.left, area.bottom + 5 * MM, area.width, area.height - 125 * MM))
     flow.y = area.bottom   # the cover is a page of its own
 
 
@@ -376,7 +381,12 @@ def render_guide(path, data: GuideData, progress=None) -> int:
         import assembly_rod_page
         canvas.setViewerPreference("PrintScaling", "None")   # the rod page is true size: ask viewers not to scale
         assembly_rod_page.draw_rod_page(flow, data.bom)
+    if data.scene is not None:
+        import assembly_inventory
+        assembly_inventory.draw_inventory(flow, data)
     _steps(flow, data, progress)
+    if data.scene is not None:
+        assembly_inventory.draw_last_page(flow, data)
     progress("Saving the PDF", 95)
     canvas.showPage()
     canvas.save()

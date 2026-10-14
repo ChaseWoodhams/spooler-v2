@@ -656,6 +656,15 @@ def guide_path(split_id: int) -> tuple:
     return path, f"{name} - assembly guide.pdf"
 
 
+def _part_plates(split_id: int) -> dict:
+    """Part number -> plate name for the parts of this split already laid out on plates (the guide's inventory shows a dash for the rest)."""
+    import projects   # projects imports this module
+    try:
+        return projects.part_plates(split_id)
+    except Exception:   # a plate lookup is never worth failing the guide for
+        return {}
+
+
 def _make_guide(split_id: int) -> None:
     """Build the guide PDF for a split whose guide.json says generating. Blocking."""
     import assembly_bom
@@ -677,7 +686,9 @@ def _make_guide(split_id: int) -> None:
     scene = assembly_render.Scene.from_split(result, planner.read_preview(work / "parts_preview.bin"))
     bom = assembly_bom.build_bom(result.get("pins") or [], plan)   # refuses when counts disagree
     data = assembly_pdf.GuideData(model_name=Path(get_split(split_id)["source_name"]).stem, split_id=split_id,
-                                  plan=plan, paper=paper, bom=bom, plan_line=edits.plan_line(plan.get("edits")), scene=scene)
+                                  plan=plan, paper=paper, bom=bom, plan_line=edits.plan_line(plan.get("edits")), scene=scene,
+                                  labels={p["number"]: p.get("label") for p in result.get("parts") or []},
+                                  plates=_part_plates(split_id))
     tmp = work / "guide.pdf.tmp"
     pages = assembly_pdf.render_guide(tmp, data, progress)
     os.replace(tmp, work / "guide.pdf")
