@@ -1226,6 +1226,13 @@ class SPHandler(SimpleHTTPRequestHandler):
                 return {"ok": True}
             self._jobs_call(discard, broadcast=False)
             return
+        if len(parts) == 6 and parts[4:6] == ["settings", "resolve"]:
+            def resolve_setting():
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                return projects.resolve_setting(self._job_id(), body)
+            self._jobs_call(resolve_setting, broadcast=False)
+            return
         def split_of(body):   # which of a project's splits the call is about; none = the first (Quick print has one)
             try:
                 return int(body["split_id"]) if body.get("split_id") not in (None, "") else None

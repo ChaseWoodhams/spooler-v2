@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 RAW = "https://raw.githubusercontent.com/OrcaSlicer/OrcaSlicer/{tag}/{path}"
-SOURCES = {"config": "src/libslic3r/PrintConfig.cpp", "tabs": "src/slic3r/GUI/Tab.cpp"}
+SOURCES = {"config": "src/libslic3r/PrintConfig.cpp", "tabs": "src/slic3r/GUI/Tab.cpp", "scope": "src/libslic3r/PrintConfig.hpp"}
 TAB_FUNCTIONS = {"process": "void TabPrint::build()", "filament": "void TabFilament::build()", "machine": "void TabPrinter::build_fff()"}
 TYPES = {
     "coFloat": ("float", False), "coFloats": ("float", True), "coInt": ("int", False), "coInts": ("int", True),
@@ -214,6 +214,25 @@ def filament_dependencies(options):
         if meta.get("vector"):
             meta.update(vector_shape="preserve-existing", edit_index=0)
 
+def no_comments(source: str) -> str:
+    """Keep literals and line positions while removing C++ comments."""
+    pattern = r'"(?:\\.|[^"\\])*"|/\*[\s\S]*?\*/|//[^\n]*'
+    return re.sub(pattern, lambda m: m[0] if m[0].startswith('"') else re.sub(r'[^\n]', ' ', m[0]), source)
+
+
+def object_scope(source: str) -> list[str]:
+    source = no_comments(source)
+    macros = list(re.finditer(r'^PRINT_CONFIG_CLASS_(?:DEFINE|DERIVED_DEFINE[01]?)\(\s*(\w+)', source, re.M))
+    keys = set()
+    for index, match in enumerate(macros):
+        if match[1] not in ("PrintObjectConfig", "PrintRegionConfig"):
+            continue
+        end = macros[index + 1].start() if index + 1 < len(macros) else len(source)
+        keys.update(re.findall(r'\(\(\s*ConfigOption[^,]+,\s*(\w+)\s*\)\)', source[match.end():end]))
+    if not keys:
+        raise ValueError("Pinned Object/Region definitions were not found")
+    return sorted(keys)
+
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -231,6 +250,7 @@ def main(argv=None) -> int:
         "orca_version": args.tag.lstrip("v"),
         "source": f"https://github.com/OrcaSlicer/OrcaSlicer/tree/{args.tag} — PrintConfig.cpp and Tab.cpp (AGPL-3.0)",
         "tabs": tabs,
+        "object_scope": object_scope(fetch(args.tag, SOURCES["scope"], cache)),
         "options": {key: options[key] for key in sorted(used) if key in options},
         "definitions": {key: options[key] for key in sorted(options)},
     }

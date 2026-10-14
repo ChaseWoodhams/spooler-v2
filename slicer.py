@@ -453,7 +453,7 @@ def _structured(overrides) -> dict:
     return {"process": overrides}
 
 
-def normalize_overrides(overrides, base: dict, *, previous=None, check_coupled=True) -> dict:
+def normalize_overrides(overrides, base: dict, *, previous=None, check_coupled=True, scope=None, affected_id=None) -> dict:
     """Validate process and filament overrides against the flattened presets in `base` and OrcaSlicer's
     setting definitions. Returns {"process": {…}, "filament": {…}} with normalised string values."""
     options = settings_schema().get("options", {})
@@ -468,11 +468,19 @@ def normalize_overrides(overrides, base: dict, *, previous=None, check_coupled=T
                 clean[key] = value
                 continue
             try:
+                if scope == "object" and key not in settings_schema().get("object_scope", []):
+                    raise jobs.JobError(f"{key} belongs at Project or Plate scope, not Object scope" if key in allowed else f"{key} is not a recognized editable setting; remove this saved override")
                 clean[key] = _normalize_setting(key, value, kind, preset, allowed, options, previous.get(kind, {}))
                 _check_context(key, clean[key], {**base.get("machine", {}), **preset, **values}, options.get(key, {}))
             except jobs.JobError as error:
                 error.issues = [{"code": "invalid-setting", "key": key, "kind": kind,
                                  "severity": "error", "message": str(error), "resolution_required": True}]
+                if scope:
+                    error.issues[0].update(scope=scope)
+                if affected_id is not None:
+                    error.issues[0]["affected_id"] = affected_id
+                if scope == "object" and key not in settings_schema().get("object_scope", []):
+                    error.issues[0].update(code="unsupported-object-setting", valid_scopes=["project", "plate"] if key in allowed else [])
                 raise
         if clean:
             out[kind] = dict(sorted(clean.items()))
@@ -531,7 +539,7 @@ def setting_issues(values, base, kind, scope, affected_id=None, *, inherited=Fal
                 for item in items:
                     _check_value(key, item, meta)
             else:
-                normalize_overrides({kind: {key: value}}, base, check_coupled=False)
+                normalize_overrides({kind: {key: value}}, base, check_coupled=False, scope=scope, affected_id=affected_id)
         except jobs.JobError as error:
             detail = getattr(error, "issues", [{"code": "unresolved-inherited-setting" if inherited else "invalid-setting", "key": key, "kind": kind,
                                                "severity": "error", "message": str(error), "resolution_required": True}])[0]

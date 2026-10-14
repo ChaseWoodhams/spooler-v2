@@ -29,7 +29,7 @@ const object = (id, plate, x, y) => ({ id, model: id, plate, name: `box${id}`, p
 
 async function open(browser, { tooClose = false } = {}) {
   const page = await browser.newPage({ viewport: process.env.VIEW ? { width: +process.env.VIEW.split('x')[0], height: +process.env.VIEW.split('x')[1] } : { width: 1400, height: 900 } });
-  const server = { patches: [], packs: [], revision: 1,
+  const server = { patches: [], packs: [], resolutions: [], issue: false, revision: 1,
     data: { plates: [{ id: 1, name: 'Plate 1' }, { id: 2, name: 'Plate 2' }], bed: 'textured', profile: { bundle_id: null, process: {}, filament: {} },
             objects: [object(1, 1, 50, 50), object(2, 1, 120, 50), object(3, 1, 200, 150), object(4, 2, 128, 128)] } };
   const project = () => ({ id: 70, name: 'Plates', revision: server.revision, split_id: null, split_ids: [], models: [1, 2, 3, 4].map(model), slices: {},
@@ -42,6 +42,14 @@ async function open(browser, { tooClose = false } = {}) {
   page.on('pageerror', e => console.error('Page error:', e.message));
   await page.route('**/api/**', async route => {
     const request = route.request(), method = request.method(), p = new URL(request.url()).pathname, body = request.postData();
+    if (p === '/api/projects/70/settings/resolve') {
+      const change = JSON.parse(body);
+      server.resolutions.push(change);
+      if (!change.replace) return route.fulfill({status:409,json:{error:'Review destination value',issues:[{code:'setting-move-collision',destination_value:'300',value:'250'}]}});
+      server.issue = false;
+      server.revision += 1;
+      return route.fulfill({json:project()});
+    }
     if (p === '/api/projects/70' && method === 'PATCH') {
       server.data = JSON.parse(body).data;
       server.revision += 1;
@@ -67,7 +75,7 @@ async function open(browser, { tooClose = false } = {}) {
       return route.fulfill({ json: { plates: server.data.plates.map(pl => ({ id: pl.id, problems: pl.id === 1 ? problems : [], problem_reason: null, warning_reason: null })),
                                      progress: { counts: {}, filament_g: {} } } });
     }
-    if (p.endsWith("/effective-settings")) return route.fulfill({ json: { version: 1, revision: server.revision, plate_id: Number(p.split("/")[5]), fingerprint: "review-fingerprint", evidence: "expected-inputs", machine: { nozzle_diameter: ["0.4"] }, process: { wall_loops: "6", curr_bed_type: "High Temp Plate" }, filament: { filament_type: ["PETG"], nozzle_temperature: ["250"] }, provenance: { process: { wall_loops: [{source:"project",value:"4"},{source:"plate",value:"6"}], curr_bed_type: [{source:"bed",value:"High Temp Plate"}] }, filament: {} }, objects: [], issues: [] } });
+    if (p.endsWith("/effective-settings")) return route.fulfill({ json: { version: 1, revision: server.revision, plate_id: Number(p.split("/")[5]), fingerprint: "review-fingerprint", evidence: "expected-inputs", machine: { nozzle_diameter: ["0.4"] }, process: { wall_loops: "6", curr_bed_type: "High Temp Plate" }, filament: { filament_type: ["PETG"], nozzle_temperature: ["250"] }, provenance: { process: { wall_loops: [{source:"project",value:"4"},{source:"plate",value:"6"}], curr_bed_type: [{source:"bed",value:"High Temp Plate"}] }, filament: {} }, objects: [], issues: server.issue ? [{code:'unsupported-object-setting',key:'travel_speed',kind:'process',scope:'object',affected_id:1,value:'250',valid_scopes:['project','plate'],resolution_required:true,message:'travel_speed belongs at Project or Plate scope'}] : [] } });
     return route.fulfill({ json: p === '/api/splits' ? { splits: [] } : p.endsWith('/jobs') ? { jobs: [] } : p === '/api/printers' ? []
       : p === '/api/defaults' ? { defaults: { options: {} } } : p === '/api/slicer/spools' ? { spools: [] }
       : p === '/api/slicer/presets' ? { machines: [], processes: {}, filaments: {} } : {} });
@@ -104,6 +112,19 @@ async function open(browser, { tooClose = false } = {}) {
     assert.equal(await review.innerText(), '', 'old Plate review is cleared');
     await page.getByRole('button', { name: 'Settings actually used', exact: true }).click();
     await review.locator('b').filter({hasText:'PETG'}).waitFor();
+    server.issue = true;
+    await page.getByRole('button', {name:'Settings actually used',exact:true}).click();
+    await review.getByRole('button', {name:'Move to Plate',exact:true}).waitFor();
+    assert.match(await review.innerText(), /Saved value: "250"/);
+    page.once('dialog', async dialog => {
+      assert.match(dialog.message(), /300.*250/);
+      await dialog.accept();
+    });
+    await review.getByRole('button', {name:'Move to Plate',exact:true}).click();
+    await page.waitForFunction(() => !document.querySelector('#effective-settings-review [data-resolve]'));
+    assert.equal(server.resolutions.length,2);
+    assert.deepEqual(server.resolutions[0],{revision:1,scope:'object',kind:'process',affected_id:1,key:'travel_speed',action:'move',destination:'plate'});
+    assert.equal(server.resolutions[1].replace,true);
     await page.close();
     console.log('PASS: selected Plate review shows authoritative expected inputs and clears on selection change');
   } finally { await browser.close(); }
