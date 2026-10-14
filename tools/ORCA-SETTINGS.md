@@ -153,3 +153,33 @@ below differed), `mismatch` and `unavailable`. Only `mismatch` is untrusted.
 
 Native check: `ORCA_SLICER_EXE=<bundled exe> python -m unittest tests.test_observed_output_native` (PETG and ASA cubes with
 Plate and Filament overrides: 249 settings compared, no differences, three recorded normalizations, ten unavailable keys).
+
+## Faithful single-file export (ticket 11)
+
+`projects.export_plan(project)` / `GET /api/projects/{id}/export-plan` returns a read-only plan (`export_plan.py`, version 1) built
+from `effective_settings` for every nonempty Plate: `faithful`, per-Plate `material` and `fingerprint`, the eligible
+`object_overrides` carried, `differences` (effective machine/process/filament values that are not common to all Plates),
+`blockers` (unresolved saved settings, Models still importing, nothing to export, no Orca for the template) and `limitations`
+(BrickLayers post-processing is not reproduced by an Orca file). Compatibility is decided on effective values: a Plate override
+or an Object override equal to what the Plate already resolves to changes nothing and is neither a difference nor Object
+metadata. Non-Object differences are never pushed into Object metadata. The plan's `fingerprint` also covers names, bed and the
+Plate/Object layout; `revision` is the Project revision.
+
+`projects.export_project(project, revision, fingerprint)` / `GET .../export.3mf?revision=&fingerprint=` generates only for a
+current, faithful plan (409 `export-plan-stale`, `export-review-required` or the plan's blockers). The legacy
+`GET .../export.3mf` and `export_orca_project()` make the same plan now and either return the single file or the same conflict;
+they never fall back to a thinner file or another file type. `representation` is `single-3mf`; tickets 12 and 13 add other
+representations beside it using the same plan, fingerprint and per-Plate effective results.
+
+Generation writes the effective machine/process/filament as the three JSON inputs of an isolated Orca `--export-3mf` run
+(data directory `slicer-data-export`) so Orca supplies the complete project configuration, then overlays the effective values
+canonically typed (`orca_3mf.config_value`: booleans `1`/`0`, null `nil`, vectors stay lists). Object metadata uses
+`orca_3mf.metadata_value` (vectors joined by `;`). An unreadable template (the earlier code silently fell back because Orca refuses
+a bare tetrahedron and binary STL) or an authored setting Orca's template has no key for is a 409, never a thinner file.
+Geometry is the Slice's own `place()` result carried as centred mesh plus transform at nine significant figures; Plates are
+numbered 1..n and each Plate's Objects stand at Orca's Plate-grid origin (`orca_3mf.plate_origin`), which `orca_3mf.parse`
+removes again on import for an instance that lies inside its own Plate cell.
+
+Native check: `SPOOLER_ORCA=<exe> python -m unittest tests.test_project_export_native` exports a disposable three-Plate PETG
+Project (one Object override, a no-op Plate override, a Plate-id gap), slices the 3MF with a direct Orca command given no
+Spooler settings, and compares Inner-wall deposition commands and footer values with Spooler's own Slices.

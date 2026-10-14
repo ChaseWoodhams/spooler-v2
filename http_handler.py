@@ -1168,10 +1168,18 @@ class SPHandler(SimpleHTTPRequestHandler):
             elif len(parts) == 5 and parts[4] == "quick-options":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 self._json(projects.quick_options(project_id, (query.get("preset") or [None])[0]))
+            elif len(parts) == 5 and parts[4] == "export-plan":
+                self._guard_draft(project_id)
+                self._json(projects.export_plan(project_id))
             elif len(parts) == 5 and parts[4] == "export.3mf":
-                record = projects.get_project(project_id)
-                name = re.sub(r'[^\w .-]+', "_", record["name"]).strip() or "project"
-                self._send_bytes(projects.export_orca_project(project_id), "model/3mf", download_name=f"{name}.3mf")
+                self._guard_draft(project_id)
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                if query.get("revision") or query.get("fingerprint"):      # the reviewed plan: refused if the Project changed since
+                    artifact = projects.export_project(project_id, (query.get("revision") or [None])[0], (query.get("fingerprint") or [None])[0])
+                else:                                                      # the direct action: the same plan, made now
+                    plan = projects.export_plan(project_id)
+                    artifact = projects.export_project(project_id, plan["revision"], plan["fingerprint"])
+                self._send_bytes(artifact["body"], artifact["content_type"], download_name=artifact["filename"])
             elif len(parts) == 7 and parts[4] == "models" and parts[6] == "preview":
                 self._send_file(projects.model_preview(project_id, int(parts[5])), "application/octet-stream")
             elif len(parts) == 7 and parts[4] == "objects" and parts[6] == "orientation":
@@ -1211,7 +1219,7 @@ class SPHandler(SimpleHTTPRequestHandler):
         except ValueError:
             self._json({"error": "Not found"}, 404)
         except jobs.JobError as e:
-            self._json({"error": str(e)}, e.status)
+            self._json({"error": str(e), **({"issues": e.issues} if getattr(e, "issues", None) else {})}, e.status)
 
     def _handle_projects_post(self):
         path = self.path.split("?", 1)[0]
