@@ -1,4 +1,5 @@
 """Warnings on the assembly plan and guide: heavy joins, disconnected parts and unlabelled parts. None of them blocks."""
+import re
 import unittest
 
 import assembly_pdf
@@ -90,7 +91,7 @@ class GuideTextTests(GuideCase):
         plan = splits.assembly_plan(split_id)
         step = next(w["step"] for w in plan["warnings"] if w["kind"] == "heavy_join")
         self.assertIn("Part 1 has no number", body)
-        self.assertLess(body.index(f"{step}:"), body.index("Warning: Heavy join: get a helper or support it."))
+        self.assertLess(re.search(rf"\b{step} (Add|Join)", body).start(), body.index("Warning: Heavy join: get a helper or support it."))
 
     def test_the_helpers_are_empty_for_a_plain_plan(self):
         self.assertEqual(assembly_pdf.step_warning_lines({"warnings": []}), [])

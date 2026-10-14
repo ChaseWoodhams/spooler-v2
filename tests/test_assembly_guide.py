@@ -12,7 +12,14 @@ from unittest import mock
 import assembly_pdf
 import jobs
 import splits
-from tests.test_assembly_plan import PlanServiceCase, GEOMETRY, grid_split, stack_split
+from tests.test_assembly_plan import PlanServiceCase, GEOMETRY, grid_split, stack_split, part, cut, joint, pins
+
+if GEOMETRY:
+    import manifold3d as m3d
+    import numpy as np
+
+    import assembly_render
+    import split_engine
 
 
 def page_texts(pdf: bytes) -> list:
@@ -33,6 +40,29 @@ def media_box(pdf: bytes) -> tuple:
     return float(box.group(1)), float(box.group(2))
 
 
+def box_mesh(bbox):
+    mesh = m3d.Manifold.cube([bbox[3] - bbox[0], bbox[4] - bbox[1], bbox[5] - bbox[2]]).translate(list(bbox[:3])).to_mesh()
+    return np.asarray(mesh.vert_properties)[:, :3], np.asarray(mesh.tri_verts)
+
+
+def lattice_split(n=3, size=40.0):
+    """n x n parts in a lattice, cut by planes across x and then across y: several Sections, several steps in each."""
+    number = lambda i, j: i * n + j + 1
+    parts = [part(number(i, j), (j * size, i * size, 0, (j + 1) * size, (i + 1) * size, 10)) for i in range(n) for j in range(n)]
+    cuts = [cut(k + 1, "x", (k + 1) * size) for k in range(n - 1)] + [cut(n + k, "y", (k + 1) * size) for k in range(n - 1)]
+    joints, all_pins = [], []
+    for k in range(n - 1):
+        for i in range(n):
+            a, b = number(i, k), number(i, k + 1)
+            joints.append(joint(a, b, k + 1))
+            all_pins += pins(a, b, "x", ((k + 1) * size, i * size + 10, 5))
+        for j in range(n):
+            a, b = number(k, j), number(k + 1, j)
+            joints.append(joint(a, b, n + k))
+            all_pins += pins(a, b, "y", (j * size + 10, (k + 1) * size, 5))
+    return {"parts": parts, "joints": joints, "pins": all_pins}, cuts
+
+
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
 class GuideCase(PlanServiceCase):
     def setUp(self):
@@ -40,6 +70,13 @@ class GuideCase(PlanServiceCase):
         patcher = mock.patch.object(assembly_pdf, "COMPRESS", False)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def make_split(self, result, cuts, meshes=None):
+        """Each part's preview mesh is a box of its bounding box, as the split engine would leave a real preview;
+        `meshes=[]` leaves the preview out."""
+        if meshes is None:
+            meshes = [box_mesh(p["bbox"]) for p in sorted(result["parts"], key=lambda p: p["number"])]
+        return super().make_split(result, cuts, meshes)
 
     def settle(self):
         async def run():
@@ -162,6 +199,7 @@ class OutOfDateTests(GuideCase):
         work = splits.work_dir(split_id)
         (work / "result.json").write_text(json.dumps(result), encoding="utf-8")
         (work / "cuts.json").write_text(json.dumps({"mode": "smart", "cuts": cuts}), encoding="utf-8")
+        split_engine.write_mesh_bin(work / "parts_preview.bin", [box_mesh(p["bbox"]) for p in result["parts"]])
         status = splits.guide_status(split_id)
         self.assertEqual(status["state"], "ready")
         self.assertTrue(status["out_of_date"])
@@ -241,3 +279,116 @@ class LongGuideTests(GuideCase):
             self.assertIn(f"page {number} of {len(pages)}", text)
         body = " ".join(pages[1:])
         self.assertIn("A59", body)
+
+
+def body_text(text: str) -> str:
+    """A page's text without its footer."""
+    return text.rsplit("model  |  Split", 1)[0]
+
+
+def step_pages(pages: list) -> list:
+    """The pages of the step section: the ones with a Section header or a step (not the cover or the rod page)."""
+    return [t for t in pages[1:] if "Made of" in body_text(t) or step_ids(t)]
+
+
+def step_ids(text: str) -> list:
+    return re.findall(r"\b([A-Z]\d{1,2}) (?=Add|Join)", body_text(text))
+
+
+class StepPageTests(GuideCase):
+    def pages(self, split_id):
+        self.generate(split_id)
+        return page_texts(self.pdf(split_id))
+
+    def test_steps_are_numbered_per_section_and_follow_the_plan(self):
+        split_id = self.make_split(*lattice_split())
+        pages = step_pages(self.pages(split_id))
+        plan = splits.assembly_plan(split_id)
+        expected = [step["id"] for section in plan["sections"] for step in section["steps"]]
+        self.assertGreater(len(plan["sections"]), 2)
+        self.assertEqual([i for text in pages for i in step_ids(text)], expected)
+        self.assertEqual(len(set(expected)), len(expected))
+
+    def test_two_steps_flow_to_a_page_and_a_step_is_never_split(self):
+        split_id = self.make_split(*stack_split(7))   # one Section of six steps
+        pages = step_pages(self.pages(split_id))
+        per_page = [step_ids(text) for text in pages]
+        self.assertEqual(per_page, [["A1", "A2"], ["A3", "A4"], ["A5", "A6"]])
+        for text in pages:     # every step's caption sits on the page with its number
+            self.assertEqual(body_text(text).count("slide"), len(step_ids(text)))
+
+    def test_section_headers_are_inline_and_side_sections_end_with_set_aside(self):
+        split_id = self.make_split(*lattice_split())
+        pages = step_pages(self.pages(split_id))
+        plan = splits.assembly_plan(split_id)
+        body = " ".join(body_text(t) for t in pages)
+        for section in plan["sections"]:
+            header = body.index(f"Section {section['letter']}")
+            if section["steps"]:
+                self.assertLess(header, body.index(section["steps"][0]["id"] + " "))
+            aside = f"Set aside as {section['letter']} (write {section['letter']} on a piece of tape)"
+            self.assertEqual(body.count(aside), 0 if section["main"] else 1)
+            if not section["main"] and section["steps"]:
+                self.assertGreater(body.index(aside), body.index(section["steps"][-1]["id"] + " "))
+
+    def test_a_section_header_is_never_alone_at_the_bottom_of_a_page(self):
+        for size in (3, 4):
+            split_id = self.make_split(*lattice_split(size))
+            for text in step_pages(self.pages(split_id)):
+                body = body_text(text)
+                headers = list(re.finditer(r"Section [A-Z]( \(main\))? Made of", body))
+                if headers:
+                    self.assertTrue(step_ids(body[headers[-1].start():]), f"header without a step on its page: {body[:200]}")
+
+    def test_the_same_split_draws_the_same_pages(self):
+        first_id = self.make_split(*lattice_split())
+        self.generate(first_id)
+        second_id = self.make_split(*lattice_split())
+        self.generate(second_id)
+        strip = lambda split, pdf: pdf.replace(f"Split {split}".encode(), b"Split N")
+        self.assertEqual(strip(second_id, self.pdf(second_id)), strip(first_id, self.pdf(first_id)))
+
+    def test_a_split_without_part_previews_cannot_get_a_guide(self):
+        split_id = self.make_split(*grid_split(), meshes=[])
+        status = splits.guide_status(split_id)
+        self.assertIn("preview", status["blocked"])
+        with self.assertRaises(jobs.JobError):
+            splits.start_guide(split_id, {})
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class CameraTests(unittest.TestCase):
+    def test_the_first_fit_camera_sees_the_receiving_face_from_above(self):
+        for u in ([1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, -1]):
+            u = np.array(u, float)
+            camera = assembly_render.choose_camera(None, {"direction": tuple(u)}, None)
+            self.assertAlmostEqual(float(np.linalg.norm(camera)), 1.0)
+            self.assertGreater(float(camera @ -u), 0.05)
+            self.assertGreater(camera[2], 0, "from above")
+        up = assembly_render.choose_camera(None, {"direction": (0, 0, 1)}, None)   # the face looks down: the camera is below
+        self.assertLess(up[2], 0)
+
+    def test_the_previous_camera_is_reused_while_it_still_sees_the_face(self):
+        previous = assembly_render.choose_camera(None, {"direction": (1, 0, 0)}, None)
+        same = assembly_render.choose_camera(None, {"direction": (1, 0, 0)}, previous)
+        np.testing.assert_allclose(same, previous)
+        kept = assembly_render.choose_camera(None, {"direction": (0.95, 0.3, 0)}, previous)
+        np.testing.assert_allclose(kept, previous)       # the dot with the face normal is still above 0.3
+        moved = assembly_render.choose_camera(None, {"direction": (-1, 0, 0)}, previous)
+        self.assertGreater(float(moved @ np.array([1.0, 0, 0])), 0.05)
+        self.assertFalse(np.allclose(moved, previous))
+
+    def test_the_arrow_is_long_and_clear_of_the_moving_part(self):
+        result, cuts = grid_split()
+        meshes = [box_mesh(p["bbox"]) for p in sorted(result["parts"], key=lambda p: p["number"])]
+        scene = assembly_render.Scene.from_split(result, meshes)
+        step = {"id": "A1", "kind": "part", "parts": (2,), "receiver": (1,), "direction": (1.0, 0.0, 0.0), "rods": 2,
+                "connectors": {}, "glue_only": False, "section": None}
+        art = assembly_render.prepare_step(scene, step, assembly_render.choose_camera(scene, step, None))
+        frame = assembly_render.layout_frames(art, 190 * assembly_render.MM)[1]
+        arrow, mover = assembly_render.frame_two_marks(art, frame)
+        a, b = np.array(arrow[0]), np.array(arrow[1])
+        self.assertGreaterEqual(np.linalg.norm(b - a), 46.0)
+        (lo, hi) = mover
+        clear = lambda p: not (lo[0] <= p[0] <= hi[0] and lo[1] <= p[1] <= hi[1])
+        self.assertTrue(all(clear(a + (b - a) * t) for t in np.linspace(0, 1, 25)))

@@ -596,6 +596,8 @@ def _guide_blocker(split_id: int) -> str:
         return str(e)
     if not plan["ok"]:
         return f"{plan['headline']}: {plan['failure']['message']}"
+    if not planner.read_preview(work_dir(split_id) / "parts_preview.bin"):
+        return "The part previews are missing, so the guide cannot be drawn. Split the model again."
     return ""
 
 
@@ -658,6 +660,7 @@ def _make_guide(split_id: int) -> None:
     """Build the guide PDF for a split whose guide.json says generating. Blocking."""
     import assembly_bom
     import assembly_pdf   # imports reportlab, so only when a guide is really made
+    import assembly_render
 
     def progress(stage: str, percent: int) -> None:
         _guide_progress[split_id] = {"stage": stage, "percent": percent}
@@ -669,9 +672,12 @@ def _make_guide(split_id: int) -> None:
     plan = assembly_plan(split_id)
     if not plan["ok"]:
         raise jobs.JobError(plan["headline"])
-    bom = assembly_bom.build_bom((_read(work, "result.json") or {}).get("pins") or [], plan)   # refuses when counts disagree
+    progress("Preparing the parts", 4)
+    result = _read(work, "result.json") or {}
+    scene = assembly_render.Scene.from_split(result, planner.read_preview(work / "parts_preview.bin"))
+    bom = assembly_bom.build_bom(result.get("pins") or [], plan)   # refuses when counts disagree
     data = assembly_pdf.GuideData(model_name=Path(get_split(split_id)["source_name"]).stem, split_id=split_id,
-                                  plan=plan, paper=paper, bom=bom, plan_line=edits.plan_line(plan.get("edits")))
+                                  plan=plan, paper=paper, bom=bom, plan_line=edits.plan_line(plan.get("edits")), scene=scene)
     tmp = work / "guide.pdf.tmp"
     pages = assembly_pdf.render_guide(tmp, data, progress)
     os.replace(tmp, work / "guide.pdf")

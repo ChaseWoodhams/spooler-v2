@@ -54,6 +54,7 @@ class GuideData:
     paper: str                 # "a4" or "letter"
     plan_line: str = "Automatic plan"
     bom: object = None         # assembly_bom.Bom, or None when the split needs no rods (then there is no rod page)
+    scene: object = None       # assembly_render.Scene: the parts' meshes and rods the step drawings come from
 
 
 def safe_area(paper: str) -> Rect:
@@ -233,27 +234,123 @@ def _cover(flow: PageFlow, data: GuideData) -> None:
     flow.y = area.bottom   # the cover is a page of its own
 
 
+STEP_TITLE_H = 11 * MM       # the step number and what is done, above the frames
+SECTION_HEADER_H = 36 * MM
+STEP_GAP = 5 * MM
+SET_ASIDE_H = 7 * MM
+
+
+def step_title(step: dict) -> str:
+    receiver = step["receiver"]
+    where = f"the {len(receiver)} parts built so far" if len(receiver) > 4 else parts_text(receiver)
+    moved = f"Section {step['section']} ({parts_text(step['parts'])})" if step["kind"] == "section" else parts_text(step["parts"])
+    return f"{'Join' if step['kind'] == 'section' else 'Add'} {moved} to {where}"
+
+
+def step_caption(step: dict) -> str:
+    receiver = step["receiver"]
+    where = f"the {len(receiver)} parts built so far" if len(receiver) > 4 else parts_text(receiver)
+    moved = f"Section {step['section']}" if step["kind"] == "section" else parts_text(step["parts"])
+    if step["glue_only"]:
+        return f"No rods: glue the face of {where} and slide {moved} on."
+    return f"Push {plural(step['rods'], 'rod')} into the holes of {where}, glue the face, slide {moved} on."
+
+
+def _step_block(flow: PageFlow, art, step: dict) -> tuple:
+    """(height of the whole step block, caption lines): number and title, two frames, caption."""
+    import assembly_render
+    lines = [(FONT, line) for line in wrap(step_caption(step), FONT, 10.5, flow.content.width)]
+    lines += [(BOLD, line) for text in step_warning_lines(step) for line in wrap(f"Warning: {text}", BOLD, 10, flow.content.width)]
+    return STEP_TITLE_H + assembly_render.step_height(art, flow.content.width) + 3 * MM + len(lines) * 10.5 * 1.3 + STEP_GAP, lines
+
+
+def _draw_step_block(flow: PageFlow, art, step: dict, top: float, lines: list) -> None:
+    import assembly_render
+    c, left = flow.canvas, flow.content.left
+    c.setFillGray(0)
+    c.setFont(BOLD, 26)
+    c.drawString(left, top - 9 * MM, step["id"])
+    c.setFont(BOLD, 12)
+    c.drawString(left + 17 * MM, top - 7 * MM, fit(step_title(step), BOLD, 12, flow.content.width - 17 * MM))
+    frames = assembly_render.draw_step(c, art, left, top - STEP_TITLE_H, flow.content.width)
+    y = top - STEP_TITLE_H - frames - 3 * MM
+    c.setFillGray(0)
+    for font, line in lines:
+        y -= 10.5 * 1.3
+        c.setFont(font, 10.5 if font == FONT else 10)
+        c.drawString(left, y + 3, line)
+
+
+def _section_header(flow: PageFlow, section: dict, picture, top: float) -> None:
+    import assembly_render
+    c, left = flow.canvas, flow.content.left
+    letter = section["letter"]
+    c.setFillGray(0)
+    c.setFont(BOLD, 44)
+    c.drawString(left, top - 15 * MM, letter)
+    text_left = left + 22 * MM
+    c.setFont(BOLD, 16)
+    c.drawString(text_left, top - 8 * MM, f"Section {letter}" + (" (main)" if section["main"] else ""))
+    c.setFont(FONT, 10)
+    y = top - 14 * MM
+    for line in wrap(f"Made of {parts_text(section['parts'])}", FONT, 10, flow.content.width - 22 * MM - 60 * MM)[:3]:
+        c.drawString(text_left, y, line)
+        y -= 13
+    if section["note"]:
+        for line in wrap(section["note"], FONT, 10, flow.content.width - 22 * MM - 60 * MM)[:2]:
+            c.drawString(text_left, y, line)
+            y -= 13
+    assembly_render.draw_picture(c, picture, flow.content.right - 56 * MM, top - SECTION_HEADER_H + 2 * MM, 56 * MM, SECTION_HEADER_H - 4 * MM)
+
+
 def _steps(flow: PageFlow, data: GuideData, progress) -> None:
-    sections, total, done = data.plan["sections"], max(data.plan["summary"]["steps"], 1), 0
+    """Section headers inline, then each Section's steps, two to a page, none split across pages."""
+    import assembly_render
+    if data.scene is None:
+        raise ValueError("The guide needs the part previews of the split")
+    sections, total, done, camera = data.plan["sections"], max(data.plan["summary"]["steps"], 1), 0, None
     flow.new_page()
+    c = flow.canvas
     for line in plan_note_lines(data.plan):
         flow.paragraph(f"Note: {line}", FONT, 10, gap=2)
     for index, section in enumerate(sections):
-        flow.y -= 4 * MM if index else 0
-        title = f"Section {section['letter']}" + (" (main)" if section["main"] else "")
-        flow.paragraph(title, BOLD, 16, keep_with=40, section=section["letter"])
-        flow.paragraph(f"Made of {parts_text(section['parts'])}", FONT, 10, gap=2)
-        if section["note"]:
-            flow.paragraph(section["note"], FONT, 10, gap=2)
-        for step in section["steps"]:
-            flow.paragraph(step_text(step), FONT, 10, indent=6 * MM, gap=1.5 * MM)
-            for line in step_warning_lines(step):
-                flow.paragraph(f"Warning: {line}", BOLD, 10, indent=10 * MM, gap=1.5 * MM)
+        picture = assembly_render.section_picture(data.scene, section["parts"])
+        steps = section["steps"]
+        aside = SET_ASIDE_H if not section["main"] else 0
+        prepared = None
+        if steps:
+            camera = assembly_render.choose_camera(data.scene, steps[0], camera)
+            art = assembly_render.prepare_step(data.scene, steps[0], camera)
+            prepared = (art, *_step_block(flow, art, steps[0]))
+        first_h = (prepared[1] + (aside if len(steps) == 1 else 0)) if prepared else aside
+        top = flow.reserve((STEP_GAP if index else 0) + SECTION_HEADER_H + first_h, section=section["letter"])
+        if index:
+            if top < flow.content.top - 1 * MM:
+                c.setStrokeGray(0)
+                c.setLineWidth(2)
+                c.line(flow.content.left, top - 2 * MM, flow.content.right, top - 2 * MM)
+            top -= STEP_GAP
+        _section_header(flow, section, picture, top)
+        y = top - SECTION_HEADER_H
+        for n, step in enumerate(steps):
+            if n:
+                camera = assembly_render.choose_camera(data.scene, step, camera)
+                art = assembly_render.prepare_step(data.scene, step, camera)
+                prepared = (art, *_step_block(flow, art, step))
+                last = n == len(steps) - 1
+                y = flow.reserve(prepared[1] + (aside if last else 0), section=section["letter"])
+            art, height, lines = prepared
+            _draw_step_block(flow, art, step, y, lines)
+            if n == len(steps) - 1 and aside:
+                c.setFillGray(0)
+                c.setFont(BOLD, 10)
+                c.drawString(flow.content.left, y - (height - STEP_GAP) - 5 * MM, f"Set aside as {section['letter']} (write {section['letter']} on a piece of tape).")
             done += 1
-            progress(f"Writing steps ({done} of {total})", 20 + 70 * done // total)
-        if not section["main"]:
-            flow.paragraph(f"Set aside as {section['letter']} (write {section['letter']} on a piece of tape).",
-                           BOLD, 10, indent=6 * MM, gap=1 * MM)
+            progress(f"Drawing steps ({done} of {total})", 20 + 70 * done // total)
+        if not steps and aside:
+            c.setFillGray(0)
+            c.setFont(BOLD, 10)
+            c.drawString(flow.content.left, top - SECTION_HEADER_H - 5 * MM, f"Set aside as {section['letter']} (write {section['letter']} on a piece of tape).")
 
 
 def render_guide(path, data: GuideData, progress=None) -> int:
