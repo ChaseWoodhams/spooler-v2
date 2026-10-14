@@ -212,6 +212,20 @@ const conflict = review({ blocked: true, required: false, binding: { ...binding,
     assert.equal(await dialog.count(), 0, 'nothing to review, nothing to ask');
     console.log('PASS: A clean 3MF is confirmed without a loss dialog');
 
+    // Settings the import leaves out need the same explicit Continue, even when no feature is lost.
+    calls.length = 0;
+    next = review({ required: true, report: { version: 1, losses: [], blockers: [], objects: 1, plates: 1, differences: [
+      { scope: 'project', code: 'blocked-setting', key: 'filament_start_gcode', reason: 'Scripts and G-code are never carried into a Project' }] } });
+    await openNew();
+    await drop(['Gcode.3mf']);
+    await dialog.waitFor({ state: 'visible' });
+    assert.match(await dialog.innerText(), /filament_start_gcode/, 'the left-out setting is shown');
+    assert.equal(calls.some(c => c.path.endsWith('/confirm')), false, 'nothing is committed before the person continues');
+    await dialog.getByRole('button', { name: 'Continue with differences' }).click();
+    for (let i = 0; i < 50 && !calls.some(c => c.path.endsWith('/confirm')); i++) await page.waitForTimeout(100);
+    assert.ok(calls.some(c => c.path.endsWith('/confirm')));
+    console.log('PASS: Differences that are left out are shown and need Continue');
+
     // Several files go through the draft: the 3MF is staged against the draft with its token, and Cancel leaves the draft alone.
     calls.length = 0;
     next = review();

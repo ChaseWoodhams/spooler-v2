@@ -2500,7 +2500,9 @@ function observedOutputHtml(check) {
 
 async function sendUnverified() {
   const plate = state.plate;
-  if (!await queuePlates([plate], { acceptUnverified: true })) return;
+  // "Send anyway" accepts the differences of the Slice that was reviewed: the server refuses it if that Slice has been replaced
+  const shown = (await api("GET", `/api/projects/${state.project.id}/plates/${plate}/slice-inputs`)).slice;
+  if (!await queuePlates([plate], { acceptUnverified: { [plate]: { fingerprint: shown.fingerprint, sliced_at: shown.sliced_at } } })) return;
   await loadJobs();
   toast("Sent to the printer");
 }
@@ -2587,13 +2589,13 @@ async function loadPrinters() {
 }
 
 /** Save the project, then turn the given Plates into Jobs (the Print step and the Slice step both send through here). */
-async function queuePlates(plates, { leveling, timelapse, again = false, acceptUnverified = false }) {
+async function queuePlates(plates, { leveling, timelapse, again = false, acceptUnverified = null }) {
   await flushSave();
   if ($('save-state').textContent === 'Not saved') {
     toast('Project changes could not be saved. Retry saving before sending these Plates.', true); return null;
   }
   if (leveling !== undefined || timelapse !== undefined) rememberDefaults({ options: { leveling, timelapse } });
-  return api("POST", `/api/projects/${state.project.id}/queue`, { plates, leveling, timelapse, again, ...(acceptUnverified ? { accept_unverified: true } : {}) });
+  return api("POST", `/api/projects/${state.project.id}/queue`, { plates, leveling, timelapse, again, ...(acceptUnverified ? { accept_unverified: acceptUnverified } : {}) });
 }
 
 // ── Dialogs ─────────────────────────────────────────────────────────────────────

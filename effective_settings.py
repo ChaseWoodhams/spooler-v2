@@ -4,10 +4,10 @@ Contract version 1 keeps common CLI profile JSON separate from Object metadata.
 Provenance lists are in precedence order, with the last entry the winner.
 """
 import copy
-import hashlib
 import json
 
 import brick_post
+from values import digest, first as _first
 
 
 def resolve(record, plate, settings, bed, alternate=None, issues=None):
@@ -35,7 +35,7 @@ def resolve(record, plate, settings, bed, alternate=None, issues=None):
     if alternate is None:
         layer("filament", profile.get("filament") or {}, "project")
     inputs = canonical_inputs(record, values, objects, bricks)
-    fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    fingerprint = digest(inputs)
     return {"version": 1, "project_id": record["id"], "revision": record["revision"], "plate_id": plate["id"],
             "fingerprint": fingerprint, **values, "objects": objects, "bricklayers": bricks,
             "provenance": provenance, "issues": copy.deepcopy(issues or []), "evidence": "expected-inputs"}
@@ -93,10 +93,6 @@ ENFORCED_SOURCES = ("bed", "bricklayers")
 SECTIONS = ("material", "nozzle", "bed", "temperature", "cooling", "flow", "retraction", "other", "machine")
 LABEL = "Settings that will be sent to Orca (expected inputs, not measured output)"
 CHAMBER_NOTE = "Passed to Orca as written. Spooler does not claim control of a chamber heater."
-
-
-def _first(value):
-    return value[0] if isinstance(value, list) and value else value
 
 
 def _section(kind, key):

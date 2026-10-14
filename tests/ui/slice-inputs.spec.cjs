@@ -83,7 +83,7 @@ const review = extra => ({ version: 1, project_id: 70, plate_id: 1, revision: 4,
       limits: ["Orca's reported configuration was compared with the saved inputs."] };
     let sent;
     ({ page, sent } = await open(browser, entry({ observed: { state: 'mismatch', trusted: false, difference_count: 1, differences: mismatch.differences } }), review({
-      slice: { state: 'sliced', outdated: false }, saved: { state: 'saved', reason: null, inputs: { revision: 3, process: {}, filament: {} } }, observed: mismatch })));
+      slice: { state: 'sliced', outdated: false, fingerprint: 'abc123', sliced_at: 1700000000.5 }, saved: { state: 'saved', reason: null, inputs: { revision: 3, process: {}, filament: {} } }, observed: mismatch })));
     assert.match(await page.locator('#preview-panel').innerText(), /Unverified.*nozzle_temperature/s);
     await page.locator('[data-slice-inputs] summary').click();
     const check = page.locator('[data-observed-output]');
@@ -97,7 +97,7 @@ const review = extra => ({ version: 1, project_id: 70, plate_id: 1, revision: 4,
     assert.equal(sent.length, 0, 'nothing is sent without the person asking');
     await check.locator('[data-send-unverified]').click();
     await page.waitForFunction(() => document.querySelector('[data-observed-output]') !== null);
-    assert.deepEqual(sent.map(b => b.accept_unverified), [true]);
+    assert.deepEqual(sent.map(b => b.accept_unverified), [{ '1': { fingerprint: 'abc123', sliced_at: 1700000000.5 } }], 'Send anyway names the Slice that was reviewed');
     await page.close();
 
     ({ page } = await open(browser, entry({ observed: { state: 'unavailable', trusted: false } }), review({

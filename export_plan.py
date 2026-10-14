@@ -18,11 +18,8 @@ Plan version 1:
                   Plate in a ZIP with a manifest. Available whenever nothing blocks the export; `default` when the single file
                   is not faithful. Each file lists plate_id, name, filename, material, fingerprint.
 """
-import hashlib
-import json
-import re
-
 import orca_3mf
+from values import digest, first as _first, safe_filename
 
 VERSION = 1
 SINGLE_FILE = "single-3mf"
@@ -42,24 +39,20 @@ BRICKLAYERS = ("BrickLayers post-processing changes the G-code after Orca slices
 
 
 def filename(project_name: str) -> str:
-    return (re.sub(r"[^\w .-]+", "_", project_name or "").strip() or "project") + ".3mf"
+    return safe_filename(project_name, "project") + ".3mf"
 
 
 def package_filename(project_name: str) -> str:
-    return (re.sub(r"[^\w .-]+", "_", project_name or "").strip() or "project") + " - Plate files.zip"
+    return safe_filename(project_name, "project") + " - Plate files.zip"
 
 
 def plate_filenames(plates: list) -> list:
     """One safe, distinct file name per Plate: its number then its name (the number keeps equal names apart)."""
     out = []
     for plate in plates:
-        label = re.sub(r"[^\w .-]+", "_", plate["name"] or "").strip(" .") or "Plate"
+        label = safe_filename(plate["name"], "Plate", " .")
         out.append(f"Plate {plate['id']} - {label}.3mf")
     return out
-
-
-def _first(value):
-    return value[0] if isinstance(value, list) and value else value
 
 
 def material(review: dict) -> dict:
@@ -68,14 +61,18 @@ def material(review: dict) -> dict:
             "colour": (choice or {}).get("colour", "")}
 
 
-def _object_overrides(review: dict, plate: dict) -> list:
-    """Object settings that change what Orca receives for this Plate; one equal to the Plate's effective value changes nothing."""
-    out = []
-    for obj in review["objects"]:
-        for key, value in sorted((obj.get("overrides") or {}).items()):
-            if review["process"].get(key) != value:
-                out.append({"plate": plate["id"], "object_id": obj["id"], "name": obj["name"], "key": key, "value": value})
-    return out
+def object_overrides(review: dict, base: dict | None = None) -> dict:
+    """{object id: its Object settings that differ from `base`} for a Plate's effective `review`. `base` is the process the file is
+    written with: the Plate's own unless the file carries another Plate's. A setting equal to it changes nothing and is left out."""
+    base = review["process"] if base is None else base
+    return {obj["id"]: {k: v for k, v in sorted((obj.get("overrides") or {}).items()) if base.get(k) != v} for obj in review["objects"]}
+
+
+def override_rows(review: dict, plate: dict, base: dict | None = None) -> list:
+    """The `object_overrides` of one Plate as report rows [{plate, object_id, name, key, value}]."""
+    found = object_overrides(review, base)
+    return [{"plate": plate["id"], "object_id": obj["id"], "name": obj["name"], "key": key, "value": value}
+            for obj in review["objects"] for key, value in found[obj["id"]].items()]
 
 
 def _differences(entries: list) -> list:
@@ -115,7 +112,7 @@ def plan(record: dict, entries: list, unavailable: list, waiting: list, template
         blockers.append({"code": "export-template-unavailable",
                          "message": "OrcaSlicer is needed to write the complete project configuration, and it was not found"})
     differences = _differences(entries) if entries else []
-    overrides = [o for plate, review in entries for o in _object_overrides(review, plate)]
+    overrides = [o for plate, review in entries for o in override_rows(review, plate)]
     limitations = []
     bricks = [plate["name"] for plate, review in entries if review.get("bricklayers")]
     if bricks:
@@ -135,7 +132,7 @@ def plan(record: dict, entries: list, unavailable: list, waiting: list, template
                "files": [{"plate_id": p["id"], "name": p["name"], "filename": n, "material": q["material"], "fingerprint": q["fingerprint"]}
                          for (p, _), n, q in zip(entries, names, plates)] if available else []}
     return {"version": VERSION, "project_id": record["id"], "revision": record["revision"],
-            "fingerprint": hashlib.sha256(json.dumps(bound, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            "fingerprint": digest(bound),
             "representation": SINGLE_FILE, "faithful": faithful, "plates": plates,
             "settings": {kind: len(common[kind]) for kind in KINDS} if common and faithful else None,
             "package": package, "object_overrides": overrides, "differences": differences, "blockers": blockers, "limitations": limitations,
@@ -144,27 +141,30 @@ def plan(record: dict, entries: list, unavailable: list, waiting: list, template
 
 
 def project_config(review: dict, template: dict, authored: set) -> tuple:
-    """(project_settings.config content, keys Orca's template has no place for). Effective values come first and are
+    """(project_settings.config content, keys Orca's template has no place for, or has a single slot for where the Project holds
+    several different vector entries). Effective values come first and are
     typed canonically; the template only supplies Orca defaults for everything the Project does not state."""
     merged = {}
     for kind in KINDS:
         for key, value in review[kind].items():
             if key not in IDENTITY_KEYS:
                 merged[key] = orca_3mf.config_value(value)
-    config, dropped = dict(template), []
+    config, dropped, truncated = dict(template), [], []
     for key, value in merged.items():
         if key not in template:
             dropped.append(key)
         elif isinstance(template[key], list) and not isinstance(value, list):
             config[key] = [value]
         elif not isinstance(template[key], list) and isinstance(value, list):
+            if len(set(value)) > 1:       # a single slot cannot hold several different entries: fail closed, never cut them
+                truncated.append(key)
             config[key] = value[0] if value else ""
         else:
             config[key] = value
     names = {"printer_settings_id": review["machine"].get("name"), "print_settings_id": review["process"].get("name"),
              "filament_settings_id": [material(review)["preset"]]}
     config.update({"from": "project", "name": "project_settings", **{k: v for k, v in names.items() if v}})
-    return config, sorted(set(dropped) & authored)
+    return config, sorted((set(dropped) & authored) | set(truncated))
 
 
 def manifest(record_name: str, plan: dict, entries: list) -> str:

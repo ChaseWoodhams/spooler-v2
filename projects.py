@@ -75,6 +75,7 @@ import thumbnails
 import time_estimate
 from gcode_meta import safe_gcode_name
 from persistence import DATA_DIR
+from values import digest, first
 
 MAX_PLATES, MAX_OBJECTS = 50, 500
 MAX_FILAMENT_NAME, MAX_FILAMENT_COLOUR = 80, 40
@@ -173,7 +174,7 @@ def fingerprint(record: dict, plate_id: int) -> str:
     chosen = plate_filaments(data, plate_id)
     if any(chosen):  # only when an object's model has a choice, so plates on the project default stay up to date
         payload["filament"] = [{"preset": c["preset"], "colour": c.get("colour", ""), **({"sha256": c["snapshot"]["sha256"]} if c.get("snapshot") else {})} if c else None for c in chosen]
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+    return digest(payload, length=16, compact=False)
 
 
 _print_fingerprints: dict = {}   # raw-input hash → canonical print-input fingerprint (a pure function of locked, content-addressed inputs)
@@ -489,7 +490,7 @@ def _arrange_new_project(project_id: int):
         view = _plan_view(record, planned)
         if planned.get("refused") or not planned["plates"]:
             return {"error": view["summary"]}
-        _save_data(project_id, record, planned["data"], planned["emptied"])
+        save_data(project_id, record, planned["data"], planned["emptied"])
         return {"summary": view["summary"], "plates": len(planned["plates"]), "too_big": planned.get("too_big", [])}
     except jobs.JobError as e:
         return {"error": str(e)}
@@ -574,7 +575,7 @@ def _numbers(value, count: int, name: str, low: float, high: float) -> list:
     return out
 
 
-def _spool_id(value) -> int | None:
+def parse_spool_id(value) -> int | None:
     """The Spoolman spool chosen as this project's filament (a reference for display and the amount check)."""
     if value in (None, ""):
         return None
@@ -664,7 +665,7 @@ def validate_data(raw, record: dict) -> dict:
         slicer.filament_compatibility(base["filament"], base["machine"])
     normalized = slicer.normalize_overrides(changes, base, previous={k: previous.get(k, {}) for k in ("process", "filament")}, check_coupled=False, scope="project") if base else {}
     profile = {"bundle_id": bundle_id, "process": normalized.get("process", {}), "filament": normalized.get("filament", {}),
-               "bricklayers": brick_post.validate(profile_raw.get("bricklayers")), "spool_id": _spool_id(profile_raw.get("spool_id"))}
+               "bricklayers": brick_post.validate(profile_raw.get("bricklayers")), "spool_id": parse_spool_id(profile_raw.get("spool_id"))}
 
     plates_raw = raw.get("plates")
     if not isinstance(plates_raw, list) or not 1 <= len(plates_raw) <= MAX_PLATES:
@@ -736,8 +737,8 @@ def validate_data(raw, record: dict) -> dict:
         old_data = record.get("data") or {}
         old_bundle_id = (old_data.get("profile") or {}).get("bundle_id")
         old_base = slicer.bundle_settings(old_bundle_id) if old_bundle_id else base
-        old_issues = _coupled_setting_issues(old_data, old_base)
-        issues = [i for i in _coupled_setting_issues(out, base) if i not in old_issues]
+        old_issues = coupled_setting_issues(old_data, old_base)
+        issues = [i for i in coupled_setting_issues(out, base) if i not in old_issues]
         if issues:
             error = jobs.JobError(issues[0]["message"])
             error.issues = issues
@@ -745,7 +746,7 @@ def validate_data(raw, record: dict) -> dict:
     return out
 
 
-def _coupled_setting_issues(data, base, staged=None):
+def coupled_setting_issues(data, base, staged=None):
     profile = data.get("profile") or {}
     common = {**base.get("machine", {}), **base.get("process", {}), **profile.get("process", {})}
     issues = []
@@ -838,7 +839,7 @@ def resolve_setting(project_id: int, body: dict) -> dict:
     elif body.get("action") != "remove":
         raise jobs.JobError("Choose remove or move")
     del source[key]
-    _save_data(project_id, record, validate_data(data, record))
+    save_data(project_id, record, validate_data(data, record))
     return get_project(project_id)
 
 
@@ -856,7 +857,7 @@ def _mutate(project_id: int, column: str, change, created_at: float | None = Non
 
 # ── Models ─────────────────────────────────────────────────────────────────────
 
-def _save_data(project_id: int, record: dict, data: dict, emptied=()) -> None:
+def save_data(project_id: int, record: dict, data: dict, emptied=()) -> None:
     """Write `data` as the project's next revision, only if the project is still at the revision `record` was read at.
     Plates in `emptied` lose their slices and their folders."""
     with database.transaction() as conn:
@@ -984,7 +985,7 @@ def _spool(stream, length: int) -> Path:
     return Path(name)
 
 
-_first = lambda value: (value[0] if isinstance(value, list) and value else value) or None
+_first = lambda value: first(value) or None
 MATERIAL_KEYS = ("nozzle_temperature", "nozzle_temperature_initial_layer", "hot_plate_temp", "textured_plate_temp", "cool_plate_temp",
                  "eng_plate_temp", "filament_flow_ratio", "fan_min_speed", "fan_max_speed", "filament_retraction_length")
 
@@ -1211,14 +1212,13 @@ def _append_material(project: dict, record: dict, base: dict, ctx: dict, notes: 
     profile = record["data"]["profile"]
     target = base["bundle"]["presets"]["filament"]["name"]
     available = stock["filaments"][machine["name"]]
-    values = None
+    values = unmatched = None
     if name in available:
         preset = name
     elif kind and kind == _first(base["filament"].get("filament_type")):
-        notes.append(f"The file's material “{name}” has no preset; it is the same material as the Project's “{target}”, which is kept")
-        ctx["differences"].append({"scope": "project", "code": "material-name-unmatched", "key": "filament_settings_id",
-                                   "reason": f"“{name}” has no preset; the Project's {target} was kept"})
-        return None
+        # Same material, no preset of that name: the file's own filament values are compared with the Project's preset and
+        # carried as a snapshot when they differ, never dropped.
+        preset, unmatched = target, name
     else:
         chosen = _material_choice(project, stock, machine["name"], machine, ctx)
         if chosen is None:
@@ -1237,11 +1237,17 @@ def _append_material(project: dict, record: dict, base: dict, ctx: dict, notes: 
             except jobs.JobError as error:
                 ctx["differences"].append({"scope": "project", "code": "invalid-setting", "key": key, "reason": str(error)})
         if preset == target and deltas == (profile.get("filament") or {}):
+            if unmatched:
+                notes.append(f"The file's material “{unmatched}” has no preset; it is the same material as the Project's “{target}”, which is kept")
+                ctx["differences"].append({"scope": "project", "code": "material-name-unmatched", "key": "filament_settings_id",
+                                           "reason": f"“{unmatched}” has no preset; its settings match the Project's {target}, which was kept"})
             return None
         if not deltas:
             reference = slicer.lock_filament(preset, machine)
             return {"preset": reference["name"], "colour": "", "snapshot": reference}
-        values = {**flat, **deltas, "name": f"{preset} (imported)"}
+        values = {**flat, **deltas, "name": f"{unmatched or preset} (imported)"}
+        if unmatched:
+            notes.append(f"The file's material “{unmatched}” has no preset; its own settings are kept as a saved Filament choice")
     reference, content = slicer.snapshot_proposal(values, machine)
     reference = slicer.store_filament(reference, content, machine)
     return {"preset": reference["name"], "colour": "", "snapshot": reference}
@@ -1454,8 +1460,17 @@ def _run_staging(kind: str, path: Path, folder: Path, record: dict | None, filen
     return conversion, notes, blockers, differences, ctx["applied"]
 
 
+# Differences that are settings of the file which would not reach the Project; the person acknowledges them like losses.
+# The rest record choices already made (a mapped printer, a convert, a kept material) and need no acknowledgement.
+UNCARRIED_DIFFERENCES = ("invalid-setting", "uncompared-settings", "blocked-setting")
+
+
+def _uncarried(report: dict) -> list:
+    return [d for d in report.get("differences") or [] if d.get("code") in UNCARRIED_DIFFERENCES]
+
+
 def _needs_acknowledgement(report: dict) -> bool:
-    return bool(report["losses"]) or bool((report.get("resolution") or {}).get("material", {}).get("material_change"))
+    return bool(report["losses"]) or bool(_uncarried(report)) or bool((report.get("resolution") or {}).get("material", {}).get("material_change"))
 
 
 def prepare_import(stream, length: int, filename: str, target: int | None = None, scale=1.0, up="z", plate=None, quick: bool = False) -> dict:
@@ -1588,7 +1603,8 @@ def _import_directly(target, stream, length: int, filename: str, **options) -> d
         cancel_import(review["token"])
         raise _review_error("This 3MF has features Spooler can't keep or settings it can't match. Add it from a Project's New project or Add models "
                             "page to review it first", 409,
-                            "import-review-required", losses=review["report"]["losses"], blockers=review["report"]["blockers"])
+                            "import-review-required", losses=review["report"]["losses"], blockers=review["report"]["blockers"],
+                            differences=_uncarried(review["report"]))
     return confirm_import(review["token"], review["binding"])
 
 
@@ -1610,7 +1626,8 @@ def confirm_import(token: str, confirmation: dict) -> dict:
         raise _review_error("This import can't continue until its blocking problems are resolved", 409, "import-blocked",
                             blockers=report["blockers"])
     if _needs_acknowledgement(report) and confirmation.get("acknowledged") is not True:
-        raise _review_error("Review the losses and choose Continue with losses", 409, "import-review-required", losses=report["losses"])
+        raise _review_error("Review the losses and differences and choose Continue", 409, "import-review-required", losses=report["losses"],
+                            differences=_uncarried(report))
     try:
         if _file_digest(folder / "source.3mf") != review["content_hash"]:
             raise _review_error("The staged file changed. Choose the file again", 409, "import-review-stale")
@@ -1653,7 +1670,7 @@ def _retain_import(project_id: int, review: dict, folder: Path, summary: dict) -
     report = review["report"]
     (keep / "record.json").write_text(json.dumps({
         "id": review["token"], "kind": review["kind"], "filename": review["filename"], "content_hash": review["content_hash"],
-        "size": review["size"], "accepted_at": time.time(), "acknowledged": bool(report["losses"]), "report_version": report["version"],
+        "size": review["size"], "accepted_at": time.time(), "acknowledged": _needs_acknowledgement(report), "report_version": report["version"],
         "losses": report["losses"], "differences": report.get("differences", []),
         "resolution": report.get("resolution", {}), "objects": report["objects"], "plates": report["plates"], "notes": review["notes"], **summary}), encoding="utf-8")
     return keep
@@ -1854,13 +1871,6 @@ def _plate_entries(record: dict) -> list:
             if any(o["plate"] == p["id"] for o in data["objects"])]
 
 
-def _object_overrides(result: dict, base: dict | None = None) -> dict:
-    """Object overrides that differ from `base`: the Plate's own process unless the file is written with another Plate's."""
-    base = result["process"] if base is None else base
-    return {obj["id"]: {k: v for k, v in sorted((obj.get("overrides") or {}).items()) if base.get(k) != v}
-            for obj in result["objects"]}
-
-
 def _export_object(project_id: int, obj: dict, overrides: dict, plate_number: int, offset) -> dict:
     """An Object as the 3MF writer takes it: centred mesh plus the transform that reproduces the placement a Slice sends."""
     import numpy as np
@@ -1887,7 +1897,7 @@ def _single_file(project_id: int, record: dict, plan: dict) -> bytes:
     config = _checked_config(project_id, record, entries, review, _export_template(project_id, review))
     overrides = {}
     for _, result in entries:
-        overrides.update(_object_overrides(result, review["process"]))
+        overrides.update(export_planner.object_overrides(result, review["process"]))
     # Orca numbers Plates 1..n and keeps each at its own place in a grid, so a Plate's Objects stand at that Plate's origin.
     numbers = {p["id"]: n for n, p in enumerate(data["plates"], start=1)}
     limits = machine_limits(review["machine"])
@@ -1908,7 +1918,7 @@ def _plate_package(project_id: int, record: dict, plan: dict) -> bytes:
         if key not in templates:
             templates[key] = _export_template(project_id, review)
         config = _checked_config(project_id, record, entries, review, templates[key])
-        overrides = _object_overrides(review)
+        overrides = export_planner.object_overrides(review)
         objects = [_export_object(project_id, obj, overrides, 1, (0.0, 0.0)) for obj in data["objects"] if obj["plate"] == plate["id"]]
         files.append((item["filename"], orca_3mf.build(objects, [{"id": 1, "name": plate["name"]}], config)))
     out = io.BytesIO()
@@ -2613,7 +2623,7 @@ def _apply_quick_choices(project_id: int, body: dict) -> None:
         jobs._require_printer(body["printer_id"])
     if body.get("bed") is not None and body["bed"] not in slicer.BED_TYPES:
         raise jobs.JobError(f"bed must be one of: {', '.join(slicer.BED_TYPES)}")
-    spool = _spool_id(body.get("spool_id")) if "spool_id" in body else None
+    spool = parse_spool_id(body.get("spool_id")) if "spool_id" in body else None
     bundle_id = body.get("preset") or get_project(project_id)["data"]["profile"].get("bundle_id")
     base = slicer.bundle_settings(bundle_id) if bundle_id else None   # a preset that doesn't exist is refused here
 
@@ -2806,7 +2816,7 @@ def _apply_layout(project_id: int, record: dict, plate_ids: list, layout: list, 
     used = _place_layout(data, free, layout, overrides_for)
     emptied = [plate_id for plate_id in free if plate_id not in used and plate_id not in holding]
     data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
-    _save_data(project_id, record, data, emptied)
+    save_data(project_id, record, data, emptied)
     return get_project(project_id)
 
 
@@ -3038,7 +3048,7 @@ def _set_arrange_engine(project_id: int, record: dict, engine: str) -> dict:
         data["arrange_engine"] = ORCA
     else:
         data.pop("arrange_engine", None)
-    _save_data(project_id, record, data)
+    save_data(project_id, record, data)
     return get_project(project_id)
 
 
@@ -3155,7 +3165,7 @@ def set_copies(project_id: int, object_id, copies, revision=None) -> dict:
         data["objects"] = [o for o in data["objects"] if o["id"] not in gone]
     if data["objects"] == record["data"]["objects"] and data["plates"] == record["data"]["plates"]:
         return {**record, "copies": result}
-    _save_data(project_id, record, data)
+    save_data(project_id, record, data)
     result["count"] = sum(1 for o in data["objects"] if o["model"] == source["model"])
     return {**get_project(project_id), "copies": result}
 
@@ -3318,7 +3328,7 @@ def _apply_rotations(project_id: int, record: dict, rotations: dict) -> dict:
     for obj in data["objects"]:
         if obj["id"] in rotations:
             obj["rotation"] = rotations[obj["id"]]
-    _save_data(project_id, record, data)
+    save_data(project_id, record, data)
     return get_project(project_id)
 
 
@@ -3536,7 +3546,7 @@ def _steady(project_id: int, obj: dict) -> bool:
 
 def _plan_fingerprint(data: dict, emptied: list) -> str:
     """Identifies what a plan would do: the data it would leave and the plates it would remove."""
-    return hashlib.sha256(json.dumps({"data": data, "emptied": sorted(emptied)}, sort_keys=True).encode()).hexdigest()[:16]
+    return digest({"data": data, "emptied": sorted(emptied)}, length=16, compact=False)
 
 
 def _plan_view(record: dict, planned: dict) -> dict:
@@ -3635,7 +3645,7 @@ def set_pack(project_id: int, body: dict) -> dict:
         if chosen:
             data["pack"] = chosen
     if data != record["data"]:
-        _save_data(project_id, record, data)
+        save_data(project_id, record, data)
         _problem_cache.pop(project_id, None)
     return get_project(project_id)
 
@@ -3667,7 +3677,7 @@ def accept_plan(project_id: int, plan, fingerprint=None, allow_tilt: bool = Fals
         raise jobs.JobError(view["summary"], 409)
     if not planned["plates"]:
         return {**record, "plan": view}
-    _save_data(project_id, record, planned["data"], planned["emptied"])
+    save_data(project_id, record, planned["data"], planned["emptied"])
     return {**get_project(project_id), "plan": view}
 
 
@@ -3908,7 +3918,7 @@ def _arrange_with_orca(project_id: int, plate_ids: list) -> dict:
     data = json.loads(json.dumps(record["data"]))
     _move_objects(data, placements)
     _require_valid_arrangement(project_id, record, data, plate_ids)
-    _save_data(project_id, record, data)   # refused if the project changed while OrcaSlicer was working: what was checked is what is written
+    save_data(project_id, record, data)   # refused if the project changed while OrcaSlicer was working: what was checked is what is written
     return get_project(project_id)
 
 
@@ -4052,7 +4062,7 @@ def effective_settings(project_id: int, plate_id: int, revision=None, *, record=
     for kind in ("process", "filament"):
         inherited = alternate if kind == "filament" and alternate is not None else settings[kind]
         result["issues"].extend(slicer.setting_issues(inherited, settings, kind, "preset", inherited=True))
-    result["issues"].extend(i for i in _coupled_setting_issues(data, settings)
+    result["issues"].extend(i for i in coupled_setting_issues(data, settings)
                             if i["plate_id"] == plate_id)
     result["filament_choice"] = chosen
     result["issues"] = [plate_settings.link_issue(i) for i in result["issues"]]
@@ -4349,6 +4359,22 @@ def _send_plate(record: dict, plate: dict, body: dict, batch_id: str) -> dict:
     return jobs.get_job(job["id"])
 
 
+def _accepted_as_reviewed(record: dict, unverified: list, accepted) -> bool:
+    """Whether the caller accepted the differences of exactly the Slices now in the project: `accepted` maps each unverified Plate id
+    to the {fingerprint, sliced_at} of the Slice whose differences were read. Nothing (or a blanket `true`) is not an acceptance;
+    a Slice replaced since it was read conflicts."""
+    if not isinstance(accepted, dict):
+        return False
+    for plate in unverified:
+        seen = accepted.get(str(plate["id"]))
+        entry = record["slices"][str(plate["id"])]
+        if not isinstance(seen, dict):
+            return False
+        if seen.get("fingerprint") != entry.get("fingerprint") or seen.get("sliced_at") != entry.get("sliced_at"):
+            raise _review_error(f"{plate['name']} was sliced again after you read its differences — review them again before sending", 409, "unverified-slice-changed")
+    return True
+
+
 def queue_plates(project_id: int, body: dict) -> dict:
     """Send sliced plates — the listed ones, or every plate with objects — to the print queue as one batch.
     Plates already waiting or printing in the queue are refused unless `again` is set (to print another copy)."""
@@ -4377,7 +4403,7 @@ def queue_plates(project_id: int, body: dict) -> dict:
         one = len(outdated) == 1
         raise jobs.JobError(f"{_names(outdated)} changed after {'it was' if one else 'they were'} sliced — slice {'it' if one else 'them'} again", 409)
     unverified = [p for p in plates if (record["slices"][str(p["id"])].get("observed") or {}).get("state") == "mismatch"]
-    if unverified and not body.get("accept_unverified"):
+    if unverified and not _accepted_as_reviewed(record, unverified, body.get("accept_unverified")):
         what = "; ".join(f"{p['name']}: " + ", ".join(sorted({d["key"] for d in record["slices"][str(p["id"])]["observed"]["differences"]})[:5])
                          for p in unverified)
         raise jobs.JobError(f"Orca's output for {_names([p['name'] for p in unverified])} does not match the settings it was prepared with "

@@ -8,14 +8,13 @@ proposed content differ from what was reviewed, stores the new immutable referen
 Project edit. Nothing here rebases Plate or Object overrides: incompatibility rejects the whole adoption.
 """
 import copy
-import hashlib
-import json
 
 import farm
 import jobs
 import preflight
 import projects
 import slicer
+from values import digest
 
 VERSION = 1
 
@@ -41,7 +40,7 @@ def apply(project_id: int, body: dict) -> dict:
         error = jobs.JobError((blockers or unacknowledged)[0]["message"], 409)
         error.issues = blockers + unacknowledged
         raise error
-    projects._save_data(project_id, record, projects.validate_data(plan["commit"](), record))
+    projects.save_data(project_id, record, projects.validate_data(plan["commit"](), record))
     return projects.get_project(project_id)
 
 
@@ -60,7 +59,7 @@ def _plan(record: dict, body: dict) -> dict:
 
 
 def _token(parts: dict) -> str:
-    return hashlib.sha256(json.dumps(parts, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:24]
+    return digest(parts, length=24)
 
 
 def _difference(before: dict, after: dict) -> list:
@@ -94,9 +93,9 @@ def _outdated(record: dict, plates: list) -> list:
 def _new_coupled(record: dict, new_data: dict, new_base: dict, staged=None) -> list:
     """Setting conflicts the adoption would introduce (ones already in the saved Project are not its doing)."""
     old_base = slicer.bundle_settings(record["data"]["profile"]["bundle_id"])
-    old = projects._coupled_setting_issues(record["data"], old_base)
+    old = projects.coupled_setting_issues(record["data"], old_base)
     return [{**issue, "severity": "error", "resolution_required": True}
-            for issue in projects._coupled_setting_issues(new_data, new_base, staged) if issue not in old]
+            for issue in projects.coupled_setting_issues(new_data, new_base, staged) if issue not in old]
 
 
 def _default_preset(record: dict) -> dict:
@@ -167,7 +166,9 @@ def _model_preset(record: dict, model_id) -> dict:
         current = {"name": saved["name"], "material": saved["material"], "sha256": saved["sha256"]}
     except jobs.JobError as exc:
         saved, before, current = None, {}, None
-        issues.append({"code": "no-verified-snapshot", "severity": "info", "message": f"{choice['preset']} has no verified saved material to compare: {exc}"})
+        issues.append({"code": "no-verified-snapshot", "severity": "warning", "acknowledgement_required": True,
+                       "message": f"{choice['preset']} has no verified saved material to compare ({exc}). Adopting it uses the catalogue's "
+                                  f"current “{choice['preset']}” as shown, which may not be what this Model printed with before"})
     reference = values = content = proposed = None
     try:
         reference, values, content = slicer.propose_filament(choice["preset"], machine, verify=False)
@@ -217,7 +218,7 @@ def _spool(record: dict, spool_id) -> dict:
     """Spool properties become Project-default Filament overrides; alternate Model Filaments never take them."""
     data = record["data"]
     profile = data["profile"]
-    spool_id = projects._spool_id(spool_id)
+    spool_id = projects.parse_spool_id(spool_id)
     if spool_id is None:
         raise jobs.JobError("Choose a spool to review", 400)
     if not profile.get("bundle_id"):
