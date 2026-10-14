@@ -1180,6 +1180,11 @@ class SPHandler(SimpleHTTPRequestHandler):
                     plan = projects.export_plan(project_id)
                     artifact = projects.export_project(project_id, plan["revision"], plan["fingerprint"])
                 self._send_bytes(artifact["body"], artifact["content_type"], download_name=artifact["filename"])
+            elif len(parts) == 5 and parts[4] == "export-package.zip":
+                self._guard_draft(project_id)
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)       # only for a plan the caller reviewed
+                artifact = projects.export_project(project_id, (query.get("revision") or [None])[0], (query.get("fingerprint") or [None])[0], "plate-3mf-package")
+                self._send_bytes(artifact["body"], artifact["content_type"], download_name=artifact["filename"])
             elif len(parts) == 7 and parts[4] == "models" and parts[6] == "preview":
                 self._send_file(projects.model_preview(project_id, int(parts[5])), "application/octet-stream")
             elif len(parts) == 7 and parts[4] == "objects" and parts[6] == "orientation":

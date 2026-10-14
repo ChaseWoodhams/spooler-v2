@@ -3,7 +3,7 @@
 A plan is computed from the per-Plate `effective_settings` results (the same calculation a Slice uses) and never from the
 raw override dictionaries. Generation consumes exactly this plan, so a representation that is not offered cannot be
 produced. Representations (`representation`) are named so later packages and an explicit lossy alternative can sit beside
-the single file: this version knows only "single-3mf".
+the single file: "single-3mf" and, beside it, "plate-3mf-package" (the `package` entry, ticket 12).
 
 Plan version 1:
   faithful        True only when one Orca project file represents every nonempty Plate
@@ -14,6 +14,9 @@ Plan version 1:
   blockers        [{code, message, ...}]: nothing can be exported until resolved
   limitations     [{code, message, plates}]: faithful but not reproduced by an Orca file (e.g. post-processing)
   filename/content_type: what the download is called and is, None when not faithful
+  package         {available, default, representation, filename, content_type, files, note}: one self-contained 3MF per nonempty
+                  Plate in a ZIP with a manifest. Available whenever nothing blocks the export; `default` when the single file
+                  is not faithful. Each file lists plate_id, name, filename, material, fingerprint.
 """
 import hashlib
 import json
@@ -24,6 +27,13 @@ import orca_3mf
 VERSION = 1
 SINGLE_FILE = "single-3mf"
 CONTENT_TYPE = "model/3mf"
+PACKAGE = "plate-3mf-package"
+PACKAGE_CONTENT_TYPE = "application/zip"
+MANIFEST = "MANIFEST.txt"
+NL = chr(10)
+PACKAGE_NOTE = ("A set of independent Orca project files, one per Plate, in an ordinary ZIP. It is not a Spooler backup and not an "
+                "Orca-native format: extract it and open each 3MF in Orca. Spooler does not import the ZIP itself; import the "
+                "extracted files one at a time.")
 KINDS = ("machine", "process", "filament")
 # keys naming a preset rather than carrying a setting; the project file states these itself
 IDENTITY_KEYS = {"name", "from", "instantiation", "type", "inherits", "setting_id", "compatible_printers", "filament_id"}
@@ -33,6 +43,19 @@ BRICKLAYERS = ("BrickLayers post-processing changes the G-code after Orca slices
 
 def filename(project_name: str) -> str:
     return (re.sub(r"[^\w .-]+", "_", project_name or "").strip() or "project") + ".3mf"
+
+
+def package_filename(project_name: str) -> str:
+    return (re.sub(r"[^\w .-]+", "_", project_name or "").strip() or "project") + " - Plate files.zip"
+
+
+def plate_filenames(plates: list) -> list:
+    """One safe, distinct file name per Plate: its number then its name (the number keeps equal names apart)."""
+    out = []
+    for plate in plates:
+        label = re.sub(r"[^\w .-]+", "_", plate["name"] or "").strip(" .") or "Plate"
+        out.append(f"Plate {plate['id']} - {label}.3mf")
+    return out
 
 
 def _first(value):
@@ -104,11 +127,18 @@ def plan(record: dict, entries: list, unavailable: list, waiting: list, template
              "plates": [(p["id"], p["name"]) for p in data["plates"]], "inputs": [(p["id"], p["fingerprint"]) for p in plates],
              "objects": [(o["id"], o["name"], o["plate"]) for o in data["objects"]]}
     common = entries[0][1] if entries else None
+    names = plate_filenames([p for p, _ in entries])
+    available = not blockers and bool(entries)
+    package = {"available": available, "default": available and not faithful, "representation": PACKAGE,
+               "filename": package_filename(record["name"]) if available else None,
+               "content_type": PACKAGE_CONTENT_TYPE if available else None, "note": PACKAGE_NOTE,
+               "files": [{"plate_id": p["id"], "name": p["name"], "filename": n, "material": q["material"], "fingerprint": q["fingerprint"]}
+                         for (p, _), n, q in zip(entries, names, plates)] if available else []}
     return {"version": VERSION, "project_id": record["id"], "revision": record["revision"],
             "fingerprint": hashlib.sha256(json.dumps(bound, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
             "representation": SINGLE_FILE, "faithful": faithful, "plates": plates,
             "settings": {kind: len(common[kind]) for kind in KINDS} if common and faithful else None,
-            "object_overrides": overrides, "differences": differences, "blockers": blockers, "limitations": limitations,
+            "package": package, "object_overrides": overrides, "differences": differences, "blockers": blockers, "limitations": limitations,
             "filename": filename(record["name"]) if faithful else None, "content_type": CONTENT_TYPE if faithful else None,
             "label": "Settings that will be written to the Orca project file (expected inputs, not measured output)"}
 
@@ -135,3 +165,35 @@ def project_config(review: dict, template: dict, authored: set) -> tuple:
              "filament_settings_id": [material(review)["preset"]]}
     config.update({"from": "project", "name": "project_settings", **{k: v for k, v in names.items() if v}})
     return config, sorted(set(dropped) & authored)
+
+
+def manifest(record_name: str, plan: dict, entries: list) -> str:
+    """The readable MANIFEST.txt of a package: which file is which Plate, its material and fingerprint, what an Orca file cannot keep."""
+    package = plan["package"]
+    lines = [f"Spooler Plate files for the Project \"{record_name}\"", "",
+             "This ZIP holds one independent Orca project (3MF) per Plate. Each file contains that Plate's own machine, process and",
+             "filament configuration, its Objects with their placement, and any Object-specific settings. It is not a backup of the",
+             "Spooler Project (queue, history and Split data are not included) and it is not an Orca-native ZIP format.", "",
+             "To use a file: Extract the ZIP, then in Orca choose File > Open Project (or drag the extracted .3mf onto Orca).",
+             "Open each file separately; the Plates do not share settings. To bring a file back into Spooler, import the extracted",
+             "3MF through the normal import; Spooler shows what it will keep before changing anything.", "",
+             f"Planned from Project revision {plan['revision']}; plan fingerprint {plan['fingerprint']}.", "", "Files", "-----"]
+    for item, (_, review) in zip(package["files"], entries):
+        material = item["material"]
+        lines += [item["filename"], f"  Plate: {item['name'] or '(unnamed)'} (id {item['plate_id']})",
+                  f"  Material: {material['type'] or '?'}, preset {material['preset'] or '?'}" + (f", colour {material['colour']}" if material["colour"] else ""),
+                  f"  Objects: {len(review['objects'])}", f"  Input fingerprint: {item['fingerprint']}"]
+        for limit in plan["limitations"]:
+            if item["name"] in limit["plates"]:
+                lines.append(f"  Limitation: {limit['message']}")
+        lines.append("")
+    if plan["differences"]:
+        lines += ["Why a single file was not used", "------------------------------",
+                  "These effective values differ between Plates, and one Orca project holds only one configuration:"]
+        for d in plan["differences"]:
+            lines.append(f"  {d['key']}: " + "; ".join(f"{p['name'] or p['id']} = {p['value'] if not isinstance(p['value'], list) else ' / '.join(map(str, p['value']))}" for p in d["plates"]))
+        lines.append("")
+    if plan["limitations"]:
+        lines += ["Limitations", "-----------"] + [f"  {l['message']} ({', '.join(l['plates'])})" for l in plan["limitations"]] + [""]
+    lines += ["These are the settings Spooler expects Orca to receive, not measured output."]
+    return NL.join(lines) + NL

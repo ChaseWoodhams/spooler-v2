@@ -34,6 +34,7 @@ Sending plates to the queue makes one batch of jobs that remember their project 
 import copy
 import asyncio
 import hashlib
+import io
 import json
 import math
 import os
@@ -1844,34 +1845,73 @@ def _authored_keys(record: dict, entries: list) -> set:
     return keys
 
 
-def _single_file(project_id: int, record: dict, plan: dict) -> bytes:
-    import numpy as np
+def _plate_entries(record: dict) -> list:
     data = record["data"]
-    entries = [(p, effective_settings(record["id"], p["id"], record=record)) for p in data["plates"]
-               if any(o["plate"] == p["id"] for o in data["objects"])]
-    review = entries[0][1]
-    config, dropped = export_planner.project_config(review, _export_template(project_id, review), _authored_keys(record, entries))
+    return [(p, effective_settings(record["id"], p["id"], record=record)) for p in data["plates"]
+            if any(o["plate"] == p["id"] for o in data["objects"])]
+
+
+def _object_overrides(result: dict) -> dict:
+    return {obj["id"]: {k: v for k, v in sorted((obj.get("overrides") or {}).items()) if result["process"].get(k) != v}
+            for obj in result["objects"]}
+
+
+def _export_object(project_id: int, obj: dict, overrides: dict, plate_number: int, offset) -> dict:
+    """An Object as the 3MF writer takes it: centred mesh plus the transform that reproduces the placement a Slice sends."""
+    import numpy as np
+    verts, tris = load_mesh(project_id, obj["model"])
+    centre = (verts.min(axis=0) + verts.max(axis=0)) / 2
+    turn = rotation_matrix(obj["rotation"]) @ np.diag(np.asarray(obj["scale"], float))
+    matrix = turn.T                                  # 3MF's row-vector form
+    shift = place(verts, obj)[0] - (verts[0] - centre) @ matrix + [*offset, 0.0]
+    return {"name": obj["name"], "verts": verts - centre, "tris": tris, "matrix": matrix, "shift": shift,
+            "plate": plate_number, "settings": overrides.get(obj["id"], {})}
+
+
+def _checked_config(project_id: int, record: dict, entries: list, review: dict, template: dict) -> dict:
+    config, dropped = export_planner.project_config(review, template, _authored_keys(record, entries))
     if dropped:
         raise _export_error("export-template-incomplete", "Orca has no place for these saved settings, so a faithful file is not possible: " + ", ".join(dropped), keys=dropped)
+    return config
+
+
+def _single_file(project_id: int, record: dict, plan: dict) -> bytes:
+    data = record["data"]
+    entries = _plate_entries(record)
+    review = entries[0][1]
+    config = _checked_config(project_id, record, entries, review, _export_template(project_id, review))
     overrides = {}
     for _, result in entries:
-        for obj in result["objects"]:
-            overrides[obj["id"]] = {k: v for k, v in sorted((obj.get("overrides") or {}).items()) if result["process"].get(k) != v}
+        overrides.update(_object_overrides(result))
     # Orca numbers Plates 1..n and keeps each at its own place in a grid, so a Plate's Objects stand at that Plate's origin.
     numbers = {p["id"]: n for n, p in enumerate(data["plates"], start=1)}
     limits = machine_limits(review["machine"])
     width, depth = limits["bed"][2] - limits["bed"][0], limits["bed"][3] - limits["bed"][1]
-    objects = []
-    for obj in data["objects"]:
-        verts, tris = load_mesh(project_id, obj["model"])
-        centre = (verts.min(axis=0) + verts.max(axis=0)) / 2
-        turn = rotation_matrix(obj["rotation"]) @ np.diag(np.asarray(obj["scale"], float))
-        matrix = turn.T                                  # 3MF's row-vector form
-        shift = place(verts, obj)[0] - (verts[0] - centre) @ matrix       # the placement a Slice sends, as a transform
-        shift = shift + [*orca_3mf.plate_origin(numbers[obj["plate"]], len(numbers), width, depth), 0.0]
-        objects.append({"name": obj["name"], "verts": verts - centre, "tris": tris, "matrix": matrix, "shift": shift,
-                        "plate": numbers[obj["plate"]], "settings": overrides.get(obj["id"], {})})
+    objects = [_export_object(project_id, obj, overrides, numbers[obj["plate"]],
+                              orca_3mf.plate_origin(numbers[obj["plate"]], len(numbers), width, depth)) for obj in data["objects"]]
     return orca_3mf.build(objects, [{**p, "id": numbers[p["id"]]} for p in data["plates"]], config)
+
+
+def _plate_package(project_id: int, record: dict, plan: dict) -> bytes:
+    """A ZIP of one self-contained Orca 3MF per nonempty Plate (each from that Plate's own effective settings, with the
+    Plate alone at Orca's first Plate position) plus MANIFEST.txt. Plates sharing a configuration share one template run."""
+    data = record["data"]
+    entries = _plate_entries(record)
+    templates, files = {}, []
+    for (plate, review), item in zip(entries, plan["package"]["files"]):
+        key = json.dumps({k: review[k] for k in export_planner.KINDS}, sort_keys=True)
+        if key not in templates:
+            templates[key] = _export_template(project_id, review)
+        config = _checked_config(project_id, record, entries, review, templates[key])
+        overrides = _object_overrides(review)
+        objects = [_export_object(project_id, obj, overrides, 1, (0.0, 0.0)) for obj in data["objects"] if obj["plate"] == plate["id"]]
+        files.append((item["filename"], orca_3mf.build(objects, [{"id": 1, "name": plate["name"]}], config)))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(export_planner.MANIFEST, export_planner.manifest(record["name"], plan, entries))
+        for name, body in files:
+            archive.writestr(name, body)
+    return out.getvalue()
 
 
 def _review_required(plan: dict) -> jobs.JobError:
@@ -1886,9 +1926,11 @@ def _review_required(plan: dict) -> jobs.JobError:
                          fingerprint=plan["fingerprint"])
 
 
-def export_project(project_id: int, revision, fingerprint) -> dict:
-    """The faithful single-file export for a plan the caller reviewed: {"body", "filename", "content_type", "plan"}. Refused
-    when the Project changed since that plan or when the plan offers no faithful file."""
+def export_project(project_id: int, revision, fingerprint, representation: str = export_planner.SINGLE_FILE) -> dict:
+    """The faithful export, in the named representation, for a plan the caller reviewed: {"body", "filename", "content_type",
+    "plan"}. Refused when the Project changed since that plan or when the plan offers no faithful artifact of that kind."""
+    if representation not in (export_planner.SINGLE_FILE, export_planner.PACKAGE):
+        raise jobs.JobError(f"Unknown export representation: {representation}", 400)
     record = get_project(project_id)
     plan = export_plan(project_id, record=record)
     try:
@@ -1898,6 +1940,12 @@ def export_project(project_id: int, revision, fingerprint) -> dict:
     if not current or fingerprint != plan["fingerprint"]:
         raise _export_error("export-plan-stale", "The Project changed since this export was planned — plan the export again",
                             revision=record["revision"], fingerprint=plan["fingerprint"])
+    if representation == export_planner.PACKAGE:
+        if not plan["package"]["available"]:
+            raise _review_required(plan)
+        package = plan["package"]
+        return {"body": _plate_package(project_id, record, plan), "filename": package["filename"],
+                "content_type": package["content_type"], "plan": plan}
     if not plan["faithful"]:
         raise _review_required(plan)
     return {"body": _single_file(project_id, record, plan), "filename": plan["filename"], "content_type": plan["content_type"], "plan": plan}
@@ -3784,7 +3832,7 @@ def write_plate_3mf(path: Path, project_id: int, objects: list, limits: dict) ->
                 config.append(f'  <object id="{index}">\n    <metadata key="name" value={escape_attr(obj["name"])}/>\n'
                               '    <metadata key="extruder" value="1"/>\n')
                 for key, value in sorted((obj.get("overrides") or {}).items()):
-                    config.append(f'    <metadata key={escape_attr(key)} value={escape_attr(value)}/>\n')
+                    config.append(f'    <metadata key={escape_attr(key)} value={escape_attr(orca_3mf.metadata_value(value))}/>\n')
                 config.append(f'    <part id="1" subtype="normal_part"><metadata key="name" value={escape_attr(obj["name"])}/></part>\n'
                               '  </object>\n')
             fh.write(b"</resources>\n<build>\n")
