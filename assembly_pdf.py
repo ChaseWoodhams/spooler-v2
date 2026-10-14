@@ -55,6 +55,8 @@ class GuideData:
     plan_line: str = "Automatic plan"
     bom: object = None         # assembly_bom.Bom, or None when the split needs no rods (then there is no rod page)
     scene: object = None       # assembly_render.Scene: the parts' meshes and rods the step drawings come from
+    labels: dict = None        # part number -> the saved label record (result.json parts[i]["label"]) or None
+    plates: dict = None        # part number -> name of the plate it is on; a part not on a plate is left out
 
 
 def safe_area(paper: str) -> Rect:
@@ -231,6 +233,9 @@ def _cover(flow: PageFlow, data: GuideData) -> None:
     c.drawString(area.left, area.top - 110 * MM, f"Split {data.split_id}. Compare the plan code on two printed copies to see that they are the same plan.")
     if not summary["rods"]:
         c.drawString(area.left, area.top - 118 * MM, "Glue the faces: no rods needed.")
+    if data.scene is not None:
+        import assembly_inventory
+        assembly_inventory.draw_overview(c, data.scene, (area.left, area.bottom + 5 * MM, area.width, area.height - 125 * MM))
     flow.y = area.bottom   # the cover is a page of its own
 
 
@@ -261,10 +266,13 @@ def _step_block(flow: PageFlow, art, step: dict) -> tuple:
     import assembly_render
     lines = [(FONT, line) for line in wrap(step_caption(step), FONT, 10.5, flow.content.width)]
     lines += [(BOLD, line) for text in step_warning_lines(step) for line in wrap(f"Warning: {text}", BOLD, 10, flow.content.width)]
-    return STEP_TITLE_H + assembly_render.step_height(art, flow.content.width) + 3 * MM + len(lines) * 10.5 * 1.3 + STEP_GAP, lines
+    import assembly_extras
+    return (STEP_TITLE_H + assembly_render.step_height(art, flow.content.width) + 3 * MM + len(lines) * 10.5 * 1.3
+            + assembly_extras.STRIP_GAP + assembly_extras.strip_height(art) + STEP_GAP), lines
 
 
 def _draw_step_block(flow: PageFlow, art, step: dict, top: float, lines: list) -> None:
+    import assembly_extras
     import assembly_render
     c, left = flow.canvas, flow.content.left
     c.setFillGray(0)
@@ -273,12 +281,14 @@ def _draw_step_block(flow: PageFlow, art, step: dict, top: float, lines: list) -
     c.setFont(BOLD, 12)
     c.drawString(left + 17 * MM, top - 7 * MM, fit(step_title(step), BOLD, 12, flow.content.width - 17 * MM))
     frames = assembly_render.draw_step(c, art, left, top - STEP_TITLE_H, flow.content.width)
+    assembly_extras.draw_step_extras(c, art, left, top - STEP_TITLE_H, flow.content.width)
     y = top - STEP_TITLE_H - frames - 3 * MM
     c.setFillGray(0)
     for font, line in lines:
         y -= 10.5 * 1.3
         c.setFont(font, 10.5 if font == FONT else 10)
         c.drawString(left, y + 3, line)
+    assembly_extras.draw_strip(c, art, left, y - assembly_extras.STRIP_GAP, flow.content.width)
 
 
 def _section_header(flow: PageFlow, section: dict, picture, top: float) -> None:
@@ -305,6 +315,7 @@ def _section_header(flow: PageFlow, section: dict, picture, top: float) -> None:
 
 def _steps(flow: PageFlow, data: GuideData, progress) -> None:
     """Section headers inline, then each Section's steps, two to a page, none split across pages."""
+    import assembly_extras
     import assembly_render
     if data.scene is None:
         raise ValueError("The guide needs the part previews of the split")
@@ -322,6 +333,7 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
             view = assembly_render.choose_view(data.scene, steps[0], camera)
             camera = view.camera
             art = assembly_render.prepare_step(data.scene, steps[0], camera, close_up=view.close_up)
+            assembly_extras.attach(art, data.scene, section["parts"])
             prepared = (art, *_step_block(flow, art, steps[0]))
         first_h = (prepared[1] + (aside if len(steps) == 1 else 0)) if prepared else aside
         top = flow.reserve((STEP_GAP if index else 0) + SECTION_HEADER_H + first_h, section=section["letter"])
@@ -338,6 +350,7 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
                 view = assembly_render.choose_view(data.scene, step, camera)
                 camera = view.camera
                 art = assembly_render.prepare_step(data.scene, step, camera, close_up=view.close_up)
+                assembly_extras.attach(art, data.scene, section["parts"])
                 prepared = (art, *_step_block(flow, art, step))
                 last = n == len(steps) - 1
                 y = flow.reserve(prepared[1] + (aside if last else 0), section=section["letter"])
@@ -370,7 +383,12 @@ def render_guide(path, data: GuideData, progress=None) -> int:
         import assembly_rod_page
         canvas.setViewerPreference("PrintScaling", "None")   # the rod page is true size: ask viewers not to scale
         assembly_rod_page.draw_rod_page(flow, data.bom)
+    if data.scene is not None:
+        import assembly_inventory
+        assembly_inventory.draw_inventory(flow, data)
     _steps(flow, data, progress)
+    if data.scene is not None:
+        assembly_inventory.draw_last_page(flow, data)
     progress("Saving the PDF", 95)
     canvas.showPage()
     canvas.save()

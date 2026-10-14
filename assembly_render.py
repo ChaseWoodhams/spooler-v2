@@ -592,7 +592,7 @@ def prepare_step(scene: Scene, step: dict, camera, close_up: bool = False) -> St
 # ── Drawing ────────────────────────────────────────────────────────────────────
 
 FRAME_GAP = 4 * MM
-FRAME_MIN_H, FRAME_MAX_H = 50 * MM, 74 * MM
+FRAME_MIN_H, FRAME_MAX_H = 50 * MM, 62 * MM     # shorter than 74 mm so a step with its extras still leaves two to a page
 
 
 def layout_frames(art: StepArt, width: float) -> tuple:

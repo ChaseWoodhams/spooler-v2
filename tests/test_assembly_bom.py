@@ -84,7 +84,8 @@ class RodPageTests(GuideCase):
                      "test-fit every rod", "deburr", "masking tape", "rubber bands", "Rod stock: steel, brass or carbon fibre"):
             self.assertIn(text.lower(), page.lower(), text)
         self.assertNotIn("Fallback size", pages[0])
-        self.assertIn("Section", pages[2])      # the steps start after the rod page
+        self.assertTrue(pages[2].startswith("Parts inventory"))   # the inventory follows the rod page
+        self.assertIn("Section", pages[3])      # the steps start after the inventory
 
     def test_the_ruler_measures_100_mm_and_the_rods_are_true_size(self):
         split_id = self.make_split(*rods_split(4, 2))
@@ -106,7 +107,7 @@ class RodPageTests(GuideCase):
         pages = page_texts(self.pdf(split_id))
         self.assertIn("no rods needed", pages[0])
         self.assertFalse(any("Rods to cut" in p for p in pages))
-        self.assertIn("glue the face", pages[1])
+        self.assertIn("glue the face", pages[2])   # pages[1] is the inventory
 
     def test_a_split_with_rods_does_not_say_no_rods_needed(self):
         split_id = self.make_split(*grid_split())
