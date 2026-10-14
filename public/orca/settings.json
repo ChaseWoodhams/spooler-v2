@@ -2394,6 +2394,121 @@
       ]
      }
     ]
+   },
+   {
+    "page": "Setting Overrides",
+    "groups": [
+     {
+      "group": "Retraction",
+      "rows": [
+       {
+        "options": [
+         "filament_retraction_length"
+        ]
+       },
+       {
+        "options": [
+         "filament_z_hop"
+        ]
+       },
+       {
+        "options": [
+         "filament_z_hop_types"
+        ]
+       },
+       {
+        "options": [
+         "filament_retract_lift_above"
+        ]
+       },
+       {
+        "options": [
+         "filament_retract_lift_below"
+        ]
+       },
+       {
+        "options": [
+         "filament_retract_lift_enforce"
+        ]
+       },
+       {
+        "options": [
+         "filament_retraction_speed"
+        ]
+       },
+       {
+        "options": [
+         "filament_deretraction_speed"
+        ]
+       },
+       {
+        "options": [
+         "filament_retract_restart_extra"
+        ]
+       },
+       {
+        "options": [
+         "filament_retraction_minimum_travel"
+        ]
+       },
+       {
+        "options": [
+         "filament_retract_when_changing_layer"
+        ]
+       },
+       {
+        "options": [
+         "filament_wipe"
+        ]
+       },
+       {
+        "options": [
+         "filament_wipe_distance"
+        ]
+       },
+       {
+        "options": [
+         "filament_retract_before_wipe"
+        ]
+       },
+       {
+        "options": [
+         "filament_long_retractions_when_cut"
+        ]
+       },
+       {
+        "options": [
+         "filament_retraction_distances_when_cut"
+        ]
+       }
+      ]
+     },
+     {
+      "group": "Ironing",
+      "rows": [
+       {
+        "options": [
+         "filament_ironing_flow"
+        ]
+       },
+       {
+        "options": [
+         "filament_ironing_spacing"
+        ]
+       },
+       {
+        "options": [
+         "filament_ironing_inset"
+        ]
+       },
+       {
+        "options": [
+         "filament_ironing_speed"
+        ]
+       }
+      ]
+     }
+    ]
    }
   ],
   "machine": [
@@ -2636,6 +2751,17 @@
    "label": "Activate air filtration",
    "tooltip": "Activate for better air filtration. G-code command: M106 P3 S(0-255)",
    "mode": "simple",
+   "dependencies": [
+    {
+     "kind": "machine",
+     "key": "support_air_filtration",
+     "test": "eq",
+     "value": "1",
+     "reason": "The selected printer preset must support air filtration."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -2646,6 +2772,8 @@
    "full_label": "During print",
    "tooltip": "Enable this to override the fan speed set in custom G-code during print.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -2656,6 +2784,8 @@
    "full_label": "On completion",
    "tooltip": "Enable this to override the fan speed set in custom G-code after print completion.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -2666,6 +2796,8 @@
    "label": "Activate temperature control",
    "tooltip": "Enable this option for automated chamber temperature control. This option activates the emitting of an M191 command before the \"machine_start_gcode\"\n which sets the chamber temperature and waits until it is reached. In addition, it emits an M141 command at the end of the print to turn off the chamber heater, if present.\n\nThis option relies on the firmware supporting the M191 and M141 commands either via macros or natively and is usually used when an active chamber heater is installed.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -2687,6 +2819,8 @@
    "label": "Enable adaptive pressure advance (beta)",
    "tooltip": "With increasing print speeds (and hence increasing volumetric flow through the nozzle) and increasing accelerations, it has been observed that the effective PA value typically decreases. This means that a single PA value is not always 100% optimal for all features and a compromise value is usually used that does not cause too much bulging on features with lower flow speed and accelerations while also not causing gaps on faster features.\n\nThis feature aims to address this limitation by modeling the response of your printer's extrusion system depending on the volumetric flow speed and acceleration it is printing at. Internally, it generates a fitted model that can extrapolate the needed pressure advance for any given volumetric flow speed and acceleration, which is then emitted to the printer depending on the current print conditions.\n\nWhen enabled, the pressure advance value above is overridden. However, a reasonable default value above is strongly recommended to act as a fallback and for when tool changing.\n\n",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -2698,6 +2832,8 @@
    "tooltip": "Pressure advance value for bridges. Set to 0 to disable.\n\nA lower PA value when printing bridges helps reduce the appearance of slight under extrusion immediately after bridges. This is caused by the pressure drop in the nozzle when printing in the air and a lower PA helps counteract this.",
    "max": 2.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -2708,6 +2844,8 @@
    "label": "Enable adaptive pressure advance for overhangs (beta)",
    "tooltip": "Enable adaptive PA for overhangs as well as when flow changes within the same feature. This is an experimental option, as if the PA profile is not set accurately, it will cause uniformity issues on the external surfaces before and after overhangs.\n",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -2721,6 +2859,17 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "simple",
+   "dependencies": [
+    {
+     "kind": "machine",
+     "key": "auxiliary_fan",
+     "test": "eq",
+     "value": "1",
+     "reason": "The selected printer preset must enable an auxiliary fan."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3147,6 +3296,8 @@
    "min": 0.0,
    "max": 1000.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3171,6 +3322,31 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "simple",
+   "dependencies": [
+    {
+     "kind": "machine",
+     "key": "support_air_filtration",
+     "test": "eq",
+     "value": "1",
+     "reason": "The selected printer preset must support air filtration."
+    },
+    {
+     "kind": "filament",
+     "key": "activate_air_filtration",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable air filtration to use this fan speed."
+    },
+    {
+     "kind": "filament",
+     "key": "activate_air_filtration_on_completion",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable air filtration for this stage to use this fan speed."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3185,6 +3361,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3199,6 +3377,8 @@
    "min": 0.0,
    "max": 120.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3247,6 +3427,8 @@
    "label": "Default color",
    "tooltip": "Default filament color.\nRight click to reset value to system default.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3352,6 +3534,17 @@
    "label": "Don't slow down outer walls",
    "tooltip": "If enabled, this setting will ensure external perimeters are not slowed down to meet the minimum layer time. This is particularly helpful in the below scenarios:\n1. To avoid changes in shine when printing glossy filaments\n2. To avoid changes in external wall speed which may create slight wall artifacts that appear like Z banding\n3. To avoid printing at speeds which cause VFAs (fine artifacts) on the external walls",
    "mode": "simple",
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "slow_down_for_layer_cooling",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable slowing down for layer cooling to use this value."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3385,6 +3578,31 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "simple",
+   "dependencies": [
+    {
+     "kind": "machine",
+     "key": "support_air_filtration",
+     "test": "eq",
+     "value": "1",
+     "reason": "The selected printer preset must support air filtration."
+    },
+    {
+     "kind": "filament",
+     "key": "activate_air_filtration",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable air filtration to use this fan speed."
+    },
+    {
+     "kind": "filament",
+     "key": "activate_air_filtration_during_print",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable air filtration for this stage to use this fan speed."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3474,6 +3692,8 @@
    "label": "Force cooling for overhangs and bridges",
    "tooltip": "Enable this option to allow adjustment of the part cooling fan speed for specifically for overhangs, internal and external bridges. Setting the fan speed specifically for these features can improve overall print quality and reduce warping.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3519,6 +3739,8 @@
    "label": "Enable pressure advance",
    "tooltip": "Enable pressure advance, auto calibration result will be overwritten once enabled.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3599,6 +3821,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3613,6 +3837,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3733,6 +3959,8 @@
    "min": 0.0,
    "max": 1000.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3758,6 +3986,8 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3771,6 +4001,8 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3782,6 +4014,8 @@
    "tooltip": "When enabled, the extrusion flow is limited by the smaller of the fitted value (calculated from line width and layer height) and the user-defined maximum flow. When disabled, only the user-defined maximum flow is applied.\n\nNote: Experimental and incomplete feature imported from BBS. Functional for some profiles that already have the variable saved.",
    "mode": "develop",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3793,6 +4027,8 @@
    "tooltip": "Filament category.",
    "min": 0.0,
    "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3805,6 +4041,8 @@
    "sidetext": "mm",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3815,6 +4053,8 @@
    "label": "Color",
    "tooltip": "Only used as a visual help on UI.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3827,6 +4067,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3839,6 +4081,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3851,6 +4095,8 @@
    "min": 0.0,
    "max": 20.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3863,6 +4109,8 @@
    "sidetext": "money/kg",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3875,6 +4123,36 @@
    "sidetext": "g/cm³",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_deretraction_speed": {
+   "type": "float",
+   "vector": true,
+   "label": "De-retraction Speed",
+   "full_label": "De-retraction Speed",
+   "tooltip": "Speed for reloading filament into the nozzle. Zero means same speed of retraction.",
+   "sidetext": "mm/s",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "deretraction_speed"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3887,6 +4165,8 @@
    "sidetext": "mm",
    "min": 0.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3900,6 +4180,8 @@
    "max": 2.0,
    "mode": "advanced",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3914,6 +4196,8 @@
    "max": 1500.0,
    "mode": "advanced",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3928,6 +4212,91 @@
    "max": 200.0,
    "mode": "advanced",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_ironing_flow": {
+   "type": "percent",
+   "vector": true,
+   "label": "Ironing flow",
+   "category": "Quality",
+   "tooltip": "Filament-specific override for ironing flow. This allows you to customize the ironing flow for each filament type. Too high value results in overextrusion on the surface.",
+   "sidetext": "%",
+   "min": 0.0,
+   "max": 100.0,
+   "mode": "advanced",
+   "nullable": true,
+   "inherits_from": {
+    "kind": "process",
+    "key": "ironing_flow"
+   },
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_ironing_inset": {
+   "type": "float",
+   "vector": true,
+   "label": "Ironing inset",
+   "category": "Quality",
+   "tooltip": "Filament-specific override for ironing inset. This allows you to customize the distance to keep from the edges when ironing for each filament type.",
+   "sidetext": "mm",
+   "min": 0.0,
+   "max": 100.0,
+   "mode": "advanced",
+   "nullable": true,
+   "inherits_from": {
+    "kind": "process",
+    "key": "ironing_inset"
+   },
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_ironing_spacing": {
+   "type": "float",
+   "vector": true,
+   "label": "Ironing line spacing",
+   "category": "Quality",
+   "tooltip": "Filament-specific override for ironing line spacing. This allows you to customize the spacing between ironing lines for each filament type.",
+   "sidetext": "mm",
+   "min": 0.0,
+   "max": 1.0,
+   "mode": "advanced",
+   "nullable": true,
+   "inherits_from": {
+    "kind": "process",
+    "key": "ironing_spacing"
+   },
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_ironing_speed": {
+   "type": "float",
+   "vector": true,
+   "label": "Ironing speed",
+   "category": "Speed",
+   "tooltip": "Filament-specific override for ironing speed. This allows you to customize the print speed of ironing lines for each filament type.",
+   "sidetext": "mm/s",
+   "min": 1.0,
+   "mode": "advanced",
+   "nullable": true,
+   "inherits_from": {
+    "kind": "process",
+    "key": "ironing_speed"
+   },
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3938,6 +4307,8 @@
    "label": "Support material",
    "tooltip": "Support material is commonly used to print supports and support interfaces.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3950,6 +4321,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3962,6 +4335,41 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_long_retractions_when_cut": {
+   "type": "bool",
+   "vector": true,
+   "label": "Long retraction when cut (beta)",
+   "tooltip": "Experimental feature: Retracting and cutting off the filament at a longer distance during changes to minimize purge. While this reduces flush significantly, it may also raise the risk of nozzle clogs or other printing problems.",
+   "nullable": true,
+   "mode": "simple",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "long_retractions_when_cut"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    },
+    {
+     "kind": "machine",
+     "key": "enable_long_retraction_when_cut",
+     "test": "eq",
+     "value": "2",
+     "reason": "The selected printer preset must allow Filament retraction when cutting."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3974,6 +4382,8 @@
    "sidetext": "mm³/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3986,6 +4396,8 @@
    "sidetext": "mm³",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -3996,6 +4408,8 @@
    "label": "Enable ramming for multi-tool setups",
    "tooltip": "Perform ramming when using multi-tool printer (i.e. when the 'Single Extruder Multimaterial' in Printer Settings is unchecked). When checked, a small amount of filament is rapidly extruded on the wipe tower just before the tool change. This option is only used when the wipe tower is enabled.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4008,6 +4422,8 @@
    "sidetext": "mm³/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4020,6 +4436,302 @@
    "sidetext": "mm³",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_before_wipe": {
+   "type": "percent",
+   "vector": true,
+   "label": "Retract amount before wipe",
+   "tooltip": "The length of fast retraction before wipe, relative to retraction length.",
+   "sidetext": "%",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_before_wipe"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_lift_above": {
+   "type": "float",
+   "vector": true,
+   "label": "Only lift Z above",
+   "tooltip": "If you set this to a positive value, Z lift will only take place above the specified absolute Z.",
+   "sidetext": "mm",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_lift_above"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_lift_below": {
+   "type": "float",
+   "vector": true,
+   "label": "Only lift Z below",
+   "tooltip": "If you set this to a positive value, Z lift will only take place below the specified absolute Z.",
+   "sidetext": "mm",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_lift_below"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_lift_enforce": {
+   "type": "enum",
+   "vector": true,
+   "label": "On surfaces",
+   "tooltip": "Enforce Z-Hop behavior. This setting is impacted by the above settings (Only lift Z above/below).",
+   "enum": [
+    [
+     "All Surfaces",
+     "All Surfaces"
+    ],
+    [
+     "Top Only",
+     "Top Only"
+    ],
+    [
+     "Bottom Only",
+     "Bottom Only"
+    ],
+    [
+     "Top and Bottom",
+     "Top and Bottom"
+    ]
+   ],
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_lift_enforce"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_restart_extra": {
+   "type": "float",
+   "vector": true,
+   "label": "Extra length on restart",
+   "tooltip": "When the retraction is compensated after the travel move, the extruder will push this additional amount of filament. This setting is rarely needed.",
+   "sidetext": "mm",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_restart_extra"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_when_changing_layer": {
+   "type": "bool",
+   "vector": true,
+   "label": "Retract when change layer",
+   "tooltip": "Force a retraction when changes layer.",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_when_changing_layer"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retraction_distances_when_cut": {
+   "type": "float",
+   "vector": true,
+   "label": "Retraction distance when cut",
+   "tooltip": "Experimental feature: Retraction length before cutting off during filament change.",
+   "min": 10.0,
+   "max": 18.0,
+   "nullable": true,
+   "mode": "simple",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retraction_distances_when_cut"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    },
+    {
+     "kind": "machine",
+     "key": "enable_long_retraction_when_cut",
+     "test": "eq",
+     "value": "2",
+     "reason": "The selected printer preset must allow Filament retraction when cutting."
+    },
+    {
+     "kind": "filament",
+     "key": "filament_long_retractions_when_cut",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable long retraction when cutting to use this distance."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retraction_length": {
+   "type": "float",
+   "vector": true,
+   "label": "Length",
+   "full_label": "Retraction Length",
+   "tooltip": "Some amount of material in extruder is pulled back to avoid ooze during long travel. Set zero to disable retraction.",
+   "sidetext": "mm",
+   "nullable": true,
+   "mode": "simple",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retraction_length"
+   },
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retraction_minimum_travel": {
+   "type": "float",
+   "vector": true,
+   "label": "Travel distance threshold",
+   "tooltip": "Only trigger retraction when the travel distance is longer than this threshold.",
+   "sidetext": "mm",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retraction_minimum_travel"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retraction_speed": {
+   "type": "float",
+   "vector": true,
+   "label": "Retraction Speed",
+   "full_label": "Retraction Speed",
+   "tooltip": "Speed for retracting filament from the nozzle.",
+   "sidetext": "mm/s",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retraction_speed"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4034,6 +4746,8 @@
    "max": 150.0,
    "mode": "advanced",
    "ratio_over": "",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4048,6 +4762,8 @@
    "max": 150.0,
    "mode": "advanced",
    "ratio_over": "",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4058,6 +4774,8 @@
    "label": "Soluble material",
    "tooltip": "Soluble material is commonly used to print supports and support interfaces.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4069,6 +4787,8 @@
    "tooltip": "If set to non-zero value, filament is moved toward the nozzle between the individual cooling moves (\"stamping\"). This option configures how long this movement should be before the filament is retracted again.",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4080,6 +4800,8 @@
    "tooltip": "Speed used for stamping.",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4092,6 +4814,8 @@
    "sidetext": "s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4104,6 +4828,8 @@
    "sidetext": "mm",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4116,6 +4842,8 @@
    "sidetext": "mm",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4128,6 +4856,8 @@
    "sidetext": "℃",
    "min": -1.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4140,6 +4870,8 @@
    "sidetext": "mm",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4152,6 +4884,8 @@
    "sidetext": "mm²",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4162,6 +4896,8 @@
    "label": "Type",
    "tooltip": "The material type of filament.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4174,6 +4910,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4186,6 +4924,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4196,6 +4936,135 @@
    "label": "Vendor",
    "tooltip": "Vendor of filament. For show only.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_wipe": {
+   "type": "bool",
+   "vector": true,
+   "label": "Wipe while retracting",
+   "tooltip": "Move nozzle along the last extrusion path when retracting to clean any leaked material on the nozzle. This can minimize blobs when printing a new part after traveling.",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "wipe"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_wipe_distance": {
+   "type": "float",
+   "vector": true,
+   "label": "Wipe Distance",
+   "tooltip": "Describe how long the nozzle will move along the last path when retracting.\n\nDepending on how long the wipe operation lasts, how fast and long the extruder/filament retraction settings are, a retraction move may be needed to retract the remaining filament.\n\nSetting a value in the retract amount before wipe setting below will perform any excess retraction before the wipe, else it will be performed after.",
+   "sidetext": "mm",
+   "min": 0.0,
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "wipe_distance"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_z_hop": {
+   "type": "float",
+   "vector": true,
+   "label": "Z-hop height",
+   "tooltip": "Whenever the retraction is done, the nozzle is lifted a little to create clearance between nozzle and the print. It prevents nozzle from hitting the print when travel move. Using spiral lines to lift Z can prevent stringing.",
+   "sidetext": "mm",
+   "min": 0.0,
+   "max": 5.0,
+   "nullable": true,
+   "mode": "simple",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "z_hop"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_z_hop_types": {
+   "type": "enum",
+   "vector": true,
+   "label": "Z-hop type",
+   "tooltip": "Type of Z-hop.",
+   "enum": [
+    [
+     "Auto Lift",
+     "Auto"
+    ],
+    [
+     "Normal Lift",
+     "Normal"
+    ],
+    [
+     "Slope Lift",
+     "Slope"
+    ],
+    [
+     "Spiral Lift",
+     "Spiral"
+    ]
+   ],
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "z_hop_types"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4280,6 +5149,8 @@
    "min": 0.0,
    "max": 1000.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4701,6 +5572,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4714,6 +5587,8 @@
    "sidetext": "℃",
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -4727,6 +5602,8 @@
    "min": 0.0,
    "max": 1500.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -5260,6 +6137,17 @@
    "min": -1.0,
    "max": 100.0,
    "mode": "advanced",
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "enable_overhang_bridge_fan",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable overhang and bridge cooling to use this value."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -5452,6 +6340,8 @@
    "min": -1.0,
    "max": 100.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -5678,6 +6568,8 @@
    "label": "Long retraction when extruder change",
    "mode": "advanced",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -5902,6 +6794,8 @@
    "min": 0.0,
    "max": 1500.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -5916,6 +6810,8 @@
    "min": 0.0,
    "max": 1500.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -5929,6 +6825,8 @@
    "min": 0.0,
    "max": 1500.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -5942,6 +6840,8 @@
    "min": 0.0,
    "max": 1500.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -5975,6 +6875,8 @@
      "Brass"
     ]
    ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "machine"
    ]
@@ -6160,6 +7062,17 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "advanced",
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "enable_overhang_bridge_fan",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable overhang and bridge cooling to use this value."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -6197,6 +7110,17 @@
      "95%"
     ]
    ],
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "enable_overhang_bridge_fan",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable overhang and bridge cooling to use this value."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -6286,6 +7210,8 @@
    "tooltip": "Pellet flow coefficient is empirically derived and allows for volume calculation for pellet printers.\n\nInternally it is converted to filament_diameter. All other volume calculations remain the same.\n\nfilament_diameter = sqrt( (4 * pellet_flow_coefficient) / PI )",
    "min": 0.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -6368,6 +7294,8 @@
    "tooltip": "Pressure advance (Klipper) AKA Linear advance factor (Marlin).",
    "max": 2.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -6504,6 +7432,8 @@
    "vector": true,
    "label": "Printable area",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "machine"
    ]
@@ -6624,6 +7554,8 @@
    "label": "Keep fan always on",
    "tooltip": "Enabling this setting means that the part cooling fan will never stop completely and will run at least at minimum speed to reduce the frequency of starting and stopping.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -6657,6 +7589,8 @@
    "min": 0.0,
    "max": 500.0,
    "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -6682,6 +7616,8 @@
    "max": 10.0,
    "mode": "advanced",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -7134,6 +8070,8 @@
    "label": "Slow printing down for better layer cooling",
    "tooltip": "Enable this option to slow printing speed down to make the final layer time not shorter than the layer time threshold in \"Max fan speed threshold\", so that layer can be cooled for longer time. This can improve the cooling quality for needle and small details.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -7147,6 +8085,8 @@
    "min": 0.0,
    "max": 1000.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -7172,6 +8112,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -7565,6 +8507,8 @@
    "min": 0.0,
    "max": 120.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -7579,6 +8523,8 @@
    "min": 0.0,
    "max": 120.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -7983,6 +8929,8 @@
    "min": -1.0,
    "max": 100.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -8204,6 +9152,8 @@
    "tooltip": "The material softens at this temperature, so when the bed temperature is equal to or greater than this, it's highly recommended to open the front door and/or remove the upper glass to avoid clogging.",
    "sidetext": "℃",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -8218,6 +9168,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -8232,6 +9184,8 @@
    "min": 0.0,
    "max": 120.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -8246,6 +9200,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -8260,6 +9216,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9242,6 +10200,17 @@
    "label": "Activate air filtration",
    "tooltip": "Activate for better air filtration. G-code command: M106 P3 S(0-255)",
    "mode": "simple",
+   "dependencies": [
+    {
+     "kind": "machine",
+     "key": "support_air_filtration",
+     "test": "eq",
+     "value": "1",
+     "reason": "The selected printer preset must support air filtration."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9252,6 +10221,8 @@
    "full_label": "During print",
    "tooltip": "Enable this to override the fan speed set in custom G-code during print.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9262,6 +10233,8 @@
    "full_label": "On completion",
    "tooltip": "Enable this to override the fan speed set in custom G-code after print completion.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9272,6 +10245,8 @@
    "label": "Activate temperature control",
    "tooltip": "Enable this option for automated chamber temperature control. This option activates the emitting of an M191 command before the \"machine_start_gcode\"\n which sets the chamber temperature and waits until it is reached. In addition, it emits an M141 command at the end of the print to turn off the chamber heater, if present.\n\nThis option relies on the firmware supporting the M191 and M141 commands either via macros or natively and is usually used when an active chamber heater is installed.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9301,6 +10276,8 @@
    "label": "Enable adaptive pressure advance (beta)",
    "tooltip": "With increasing print speeds (and hence increasing volumetric flow through the nozzle) and increasing accelerations, it has been observed that the effective PA value typically decreases. This means that a single PA value is not always 100% optimal for all features and a compromise value is usually used that does not cause too much bulging on features with lower flow speed and accelerations while also not causing gaps on faster features.\n\nThis feature aims to address this limitation by modeling the response of your printer's extrusion system depending on the volumetric flow speed and acceleration it is printing at. Internally, it generates a fitted model that can extrapolate the needed pressure advance for any given volumetric flow speed and acceleration, which is then emitted to the printer depending on the current print conditions.\n\nWhen enabled, the pressure advance value above is overridden. However, a reasonable default value above is strongly recommended to act as a fallback and for when tool changing.\n\n",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9312,6 +10289,8 @@
    "tooltip": "Pressure advance value for bridges. Set to 0 to disable.\n\nA lower PA value when printing bridges helps reduce the appearance of slight under extrusion immediately after bridges. This is caused by the pressure drop in the nozzle when printing in the air and a lower PA helps counteract this.",
    "max": 2.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9321,7 +10300,9 @@
    "vector": true,
    "label": "Adaptive pressure advance measurements (beta)",
    "tooltip": "Add sets of pressure advance (PA) values, the volumetric flow speeds and accelerations they were measured at, separated by a comma. One set of values per line. For example\n0.04,3.96,3000\n0.033,3.96,10000\n0.029,7.91,3000\n0.026,7.91,10000\n\nHow to calibrate:\n1. Run the pressure advance test for at least 3 speeds per acceleration value. It is recommended that the test is run for at least the speed of the external perimeters, the speed of the internal perimeters and the fastest feature print speed in your profile (usually its the sparse or solid infill). Then run them for the same speeds for the slowest and fastest print accelerations, and no faster than the recommended maximum acceleration as given by the Klipper input shaper\n2. Take note of the optimal PA value for each volumetric flow speed and acceleration. You can find the flow number by selecting flow from the color scheme drop down and move the horizontal slider over the PA pattern lines. The number should be visible at the bottom of the page. The ideal PA value should be decreasing the higher the volumetric flow is. If it is not, confirm that your extruder is functioning correctly. The slower and with less acceleration you print, the larger the range of acceptable PA values. If no difference is visible, use the PA value from the faster test\n3. Enter the triplets of PA values, Flow and Accelerations in the text box here and save your filament profile.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "adaptive_pressure_advance_overhangs": {
    "type": "bool",
@@ -9329,6 +10310,8 @@
    "label": "Enable adaptive pressure advance for overhangs (beta)",
    "tooltip": "Enable adaptive PA for overhangs as well as when flow changes within the same feature. This is an experimental option, as if the PA profile is not set accurately, it will cause uniformity issues on the external surfaces before and after overhangs.\n",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9342,6 +10325,17 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "simple",
+   "dependencies": [
+    {
+     "kind": "machine",
+     "key": "auxiliary_fan",
+     "test": "eq",
+     "value": "1",
+     "reason": "The selected printer preset must enable an auxiliary fan."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9353,7 +10347,9 @@
    "tooltip": "Auxiliary fan speed will be ramped up linearly from layer \"For the first\" to maximum at layer \"Full fan speed at layer\".\n\"Full fan speed at layer\" will be ignored if lower than \"For the first\", in which case the fan will run at maximum allowed speed at layer \"For the first\" + 1.",
    "min": 0.0,
    "max": 1000.0,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "align_infill_direction_to_model": {
    "type": "bool",
@@ -9421,7 +10417,9 @@
    "vector": true,
    "label": "Bed exclude area",
    "tooltip": "Unprintable area in XY plane. For example, X1 Series printers use the front left corner to cut filament during filament change. The area is expressed as polygon by points in following format: \"XxY, XxY, ...\"",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "bed_mesh_max": {
    "type": "point",
@@ -9840,7 +10838,9 @@
    "sidetext": "℃",
    "min": 0.0,
    "max": 1500.0,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "chamber_temperature": {
    "type": "int",
@@ -9851,7 +10851,9 @@
    "sidetext": "℃",
    "min": 0.0,
    "max": 1500.0,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "change_extrusion_role_gcode": {
    "type": "string",
@@ -9875,7 +10877,9 @@
    "sidetext": "layers",
    "min": 0.0,
    "max": 1000.0,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "close_fan_the_first_x_layers": {
    "type": "int",
@@ -9886,6 +10890,8 @@
    "min": 0.0,
    "max": 1000.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9904,13 +10910,17 @@
   "compatible_machine_expression_group": {
    "type": "string",
    "vector": true,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "compatible_printers": {
    "type": "string",
    "vector": true,
    "label": "Select printers",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "compatible_printers_condition": {
    "type": "string",
@@ -9923,7 +10933,9 @@
    "type": "string",
    "vector": true,
    "label": "Select profiles",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "compatible_prints_condition": {
    "type": "string",
@@ -9935,7 +10947,9 @@
   "compatible_process_expression_group": {
    "type": "string",
    "vector": true,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "complete_print_exhaust_fan_speed": {
    "type": "int",
@@ -9946,6 +10960,31 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "simple",
+   "dependencies": [
+    {
+     "kind": "machine",
+     "key": "support_air_filtration",
+     "test": "eq",
+     "value": "1",
+     "reason": "The selected printer preset must support air filtration."
+    },
+    {
+     "kind": "filament",
+     "key": "activate_air_filtration",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable air filtration to use this fan speed."
+    },
+    {
+     "kind": "filament",
+     "key": "activate_air_filtration_on_completion",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable air filtration for this stage to use this fan speed."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9960,6 +10999,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -9974,6 +11015,8 @@
    "min": 0.0,
    "max": 120.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10080,6 +11123,8 @@
    "label": "Default color",
    "tooltip": "Default filament color.\nRight click to reset value to system default.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10089,7 +11134,9 @@
    "vector": true,
    "label": "Default filament profile",
    "tooltip": "Default filament profile when switching to this machine profile.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "default_jerk": {
    "type": "float",
@@ -10123,7 +11170,9 @@
    "vector": true,
    "label": "Default Nozzle Volume Type.",
    "tooltip": "Default Nozzle volume type for extruders in this printer.",
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "default_print_profile": {
    "type": "string",
@@ -10139,7 +11188,9 @@
    "full_label": "De-retraction Speed",
    "tooltip": "Speed for reloading filament into the nozzle. Zero means same speed of retraction.",
    "sidetext": "mm/s",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "detect_narrow_internal_solid_infill": {
    "type": "bool",
@@ -10177,7 +11228,9 @@
   "different_settings_to_system": {
    "type": "string",
    "vector": true,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "disable_m73": {
    "type": "bool",
@@ -10220,6 +11273,17 @@
    "label": "Don't slow down outer walls",
    "tooltip": "If enabled, this setting will ensure external perimeters are not slowed down to meet the minimum layer time. This is particularly helpful in the below scenarios:\n1. To avoid changes in shine when printing glossy filaments\n2. To avoid changes in external wall speed which may create slight wall artifacts that appear like Z banding\n3. To avoid printing at speeds which cause VFAs (fine artifacts) on the external walls",
    "mode": "simple",
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "slow_down_for_layer_cooling",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable slowing down for layer cooling to use this value."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10253,6 +11317,31 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "simple",
+   "dependencies": [
+    {
+     "kind": "machine",
+     "key": "support_air_filtration",
+     "test": "eq",
+     "value": "1",
+     "reason": "The selected printer preset must support air filtration."
+    },
+    {
+     "kind": "filament",
+     "key": "activate_air_filtration",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable air filtration to use this fan speed."
+    },
+    {
+     "kind": "filament",
+     "key": "activate_air_filtration_during_print",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable air filtration for this stage to use this fan speed."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10369,6 +11458,8 @@
    "label": "Force cooling for overhangs and bridges",
    "tooltip": "Enable this option to allow adjustment of the part cooling fan speed for specifically for overhangs, internal and external bridges. Setting the fan speed specifically for these features can improve overall print quality and reduce warping.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10414,6 +11505,8 @@
    "label": "Enable pressure advance",
    "tooltip": "Enable pressure advance, auto calibration result will be overwritten once enabled.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10494,6 +11587,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10508,6 +11603,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10595,7 +11692,9 @@
    "vector": true,
    "label": "Extruder AMS count",
    "tooltip": "AMS counts per extruder.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "extruder_clearance_height_to_lid": {
    "type": "float",
@@ -10638,7 +11737,9 @@
    "vector": true,
    "label": "Extruder Color",
    "tooltip": "Only used as a visual help on UI.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "extruder_offset": {
    "type": "point",
@@ -10646,7 +11747,9 @@
    "label": "Extruder offset",
    "tooltip": "If your firmware doesn't handle the extruder displacement you need the G-code to take it into account. This option lets you specify the displacement of each extruder with respect to the first one. It expects positive coordinates (they will be subtracted from the XY coordinate).",
    "sidetext": "mm",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "extruder_printable_area": {
    "type": "unknown",
@@ -10662,7 +11765,9 @@
    "sidetext": "mm",
    "min": 0.0,
    "max": 1000.0,
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "extruder_type": {
    "type": "enum",
@@ -10679,14 +11784,18 @@
      "Bowden",
      "Bowden"
     ]
-   ]
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "extruder_variant_list": {
    "type": "string",
    "vector": true,
    "label": "Extruder variant list",
    "tooltip": "Extruder variant list.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "extrusion_rate_smoothing_external_perimeter_only": {
    "type": "bool",
@@ -10707,6 +11816,8 @@
    "min": 0.0,
    "max": 1000.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10732,6 +11843,8 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10745,6 +11858,8 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10771,6 +11886,8 @@
    "tooltip": "When enabled, the extrusion flow is limited by the smaller of the fitted value (calculated from line width and layer height) and the user-defined maximum flow. When disabled, only the user-defined maximum flow is applied.\n\nNote: Experimental and incomplete feature imported from BBS. Functional for some profiles that already have the variable saved.",
    "mode": "develop",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10782,6 +11899,8 @@
    "tooltip": "Filament category.",
    "min": 0.0,
    "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10791,7 +11910,9 @@
    "vector": true,
    "label": "Change extrusion role G-code (filament)",
    "tooltip": "This G-code is inserted when the extrusion role is changed for the active filament.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_change_length": {
    "type": "float",
@@ -10801,6 +11922,8 @@
    "sidetext": "mm",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10811,6 +11934,8 @@
    "label": "Color",
    "tooltip": "Only used as a visual help on UI.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10818,7 +11943,9 @@
   "filament_colour_type": {
    "type": "string",
    "vector": true,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_cooling_before_tower": {
    "type": "float",
@@ -10827,7 +11954,9 @@
    "tooltip": "Temperature drop before entering filament tower",
    "sidetext": "℃",
    "mode": "develop",
-   "nullable": true
+   "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_cooling_final_speed": {
    "type": "float",
@@ -10837,6 +11966,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10849,6 +11980,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10861,6 +11994,8 @@
    "min": 0.0,
    "max": 20.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10873,6 +12008,8 @@
    "sidetext": "money/kg",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10885,6 +12022,36 @@
    "sidetext": "g/cm³",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_deretraction_speed": {
+   "type": "float",
+   "vector": true,
+   "label": "De-retraction Speed",
+   "full_label": "De-retraction Speed",
+   "tooltip": "Speed for reloading filament into the nozzle. Zero means same speed of retraction.",
+   "sidetext": "mm/s",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "deretraction_speed"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10897,6 +12064,8 @@
    "sidetext": "mm",
    "min": 0.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10906,21 +12075,27 @@
    "vector": true,
    "label": "End G-code",
    "tooltip": "End G-code when finishing the printing of this filament.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_extruder_id": {
    "type": "int",
    "vector": true,
    "label": "Filament extruder id",
    "tooltip": "Filament extruder id.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_extruder_variant": {
    "type": "string",
    "vector": true,
    "label": "Filament's extruder variant",
    "tooltip": "Filament's extruder variant.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_flow_ratio": {
    "type": "float",
@@ -10931,6 +12106,8 @@
    "max": 2.0,
    "mode": "advanced",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10945,6 +12122,8 @@
    "max": 1500.0,
    "mode": "advanced",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10959,6 +12138,8 @@
    "max": 200.0,
    "mode": "advanced",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -10966,7 +12147,9 @@
   "filament_ids": {
    "type": "string",
    "vector": true,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_ironing_flow": {
    "type": "percent",
@@ -10978,7 +12161,16 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "advanced",
-   "nullable": true
+   "nullable": true,
+   "inherits_from": {
+    "kind": "process",
+    "key": "ironing_flow"
+   },
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
   },
   "filament_ironing_inset": {
    "type": "float",
@@ -10990,7 +12182,16 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "advanced",
-   "nullable": true
+   "nullable": true,
+   "inherits_from": {
+    "kind": "process",
+    "key": "ironing_inset"
+   },
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
   },
   "filament_ironing_spacing": {
    "type": "float",
@@ -11002,7 +12203,16 @@
    "min": 0.0,
    "max": 1.0,
    "mode": "advanced",
-   "nullable": true
+   "nullable": true,
+   "inherits_from": {
+    "kind": "process",
+    "key": "ironing_spacing"
+   },
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
   },
   "filament_ironing_speed": {
    "type": "float",
@@ -11013,7 +12223,16 @@
    "sidetext": "mm/s",
    "min": 1.0,
    "mode": "advanced",
-   "nullable": true
+   "nullable": true,
+   "inherits_from": {
+    "kind": "process",
+    "key": "ironing_speed"
+   },
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
   },
   "filament_is_support": {
    "type": "bool",
@@ -11021,6 +12240,8 @@
    "label": "Support material",
    "tooltip": "Support material is commonly used to print supports and support interfaces.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11033,6 +12254,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11045,6 +12268,41 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_long_retractions_when_cut": {
+   "type": "bool",
+   "vector": true,
+   "label": "Long retraction when cut (beta)",
+   "tooltip": "Experimental feature: Retracting and cutting off the filament at a longer distance during changes to minimize purge. While this reduces flush significantly, it may also raise the risk of nozzle clogs or other printing problems.",
+   "nullable": true,
+   "mode": "simple",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "long_retractions_when_cut"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    },
+    {
+     "kind": "machine",
+     "key": "enable_long_retraction_when_cut",
+     "test": "eq",
+     "value": "2",
+     "reason": "The selected printer preset must allow Filament retraction when cutting."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11054,7 +12312,9 @@
    "vector": true,
    "label": "Filament map to extruder",
    "tooltip": "Filament map to extruder.",
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_map_mode": {
    "type": "enum",
@@ -11089,6 +12349,8 @@
    "sidetext": "mm³/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11101,6 +12363,8 @@
    "sidetext": "mm³",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11108,7 +12372,9 @@
   "filament_multi_colour": {
    "type": "string",
    "vector": true,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_multitool_ramming": {
    "type": "bool",
@@ -11116,6 +12382,8 @@
    "label": "Enable ramming for multi-tool setups",
    "tooltip": "Perform ramming when using multi-tool printer (i.e. when the 'Single Extruder Multimaterial' in Printer Settings is unchecked). When checked, a small amount of filament is rapidly extruded on the wipe tower just before the tool change. This option is only used when the wipe tower is enabled.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11128,6 +12396,8 @@
    "sidetext": "mm³/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11140,6 +12410,8 @@
    "sidetext": "mm³",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11149,33 +12421,337 @@
    "vector": true,
    "label": "Filament notes",
    "tooltip": "You can put your notes regarding the filament here.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_printable": {
    "type": "int",
    "vector": true,
    "label": "Filament printable",
    "tooltip": "The filament is printable in extruder.",
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_ramming_parameters": {
    "type": "string",
    "vector": true,
    "label": "Ramming parameters",
    "tooltip": "This string is edited by RammingDialog and contains ramming specific parameters.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
+  },
+  "filament_retract_before_wipe": {
+   "type": "percent",
+   "vector": true,
+   "label": "Retract amount before wipe",
+   "tooltip": "The length of fast retraction before wipe, relative to retraction length.",
+   "sidetext": "%",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_before_wipe"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_lift_above": {
+   "type": "float",
+   "vector": true,
+   "label": "Only lift Z above",
+   "tooltip": "If you set this to a positive value, Z lift will only take place above the specified absolute Z.",
+   "sidetext": "mm",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_lift_above"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_lift_below": {
+   "type": "float",
+   "vector": true,
+   "label": "Only lift Z below",
+   "tooltip": "If you set this to a positive value, Z lift will only take place below the specified absolute Z.",
+   "sidetext": "mm",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_lift_below"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_lift_enforce": {
+   "type": "enum",
+   "vector": true,
+   "label": "On surfaces",
+   "tooltip": "Enforce Z-Hop behavior. This setting is impacted by the above settings (Only lift Z above/below).",
+   "enum": [
+    [
+     "All Surfaces",
+     "All Surfaces"
+    ],
+    [
+     "Top Only",
+     "Top Only"
+    ],
+    [
+     "Bottom Only",
+     "Bottom Only"
+    ],
+    [
+     "Top and Bottom",
+     "Top and Bottom"
+    ]
+   ],
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_lift_enforce"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_restart_extra": {
+   "type": "float",
+   "vector": true,
+   "label": "Extra length on restart",
+   "tooltip": "When the retraction is compensated after the travel move, the extruder will push this additional amount of filament. This setting is rarely needed.",
+   "sidetext": "mm",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_restart_extra"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retract_when_changing_layer": {
+   "type": "bool",
+   "vector": true,
+   "label": "Retract when change layer",
+   "tooltip": "Force a retraction when changes layer.",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retract_when_changing_layer"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retraction_distances_when_cut": {
+   "type": "float",
+   "vector": true,
+   "label": "Retraction distance when cut",
+   "tooltip": "Experimental feature: Retraction length before cutting off during filament change.",
+   "min": 10.0,
+   "max": 18.0,
+   "nullable": true,
+   "mode": "simple",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retraction_distances_when_cut"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    },
+    {
+     "kind": "machine",
+     "key": "enable_long_retraction_when_cut",
+     "test": "eq",
+     "value": "2",
+     "reason": "The selected printer preset must allow Filament retraction when cutting."
+    },
+    {
+     "kind": "filament",
+     "key": "filament_long_retractions_when_cut",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable long retraction when cutting to use this distance."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retraction_length": {
+   "type": "float",
+   "vector": true,
+   "label": "Length",
+   "full_label": "Retraction Length",
+   "tooltip": "Some amount of material in extruder is pulled back to avoid ooze during long travel. Set zero to disable retraction.",
+   "sidetext": "mm",
+   "nullable": true,
+   "mode": "simple",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retraction_length"
+   },
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retraction_minimum_travel": {
+   "type": "float",
+   "vector": true,
+   "label": "Travel distance threshold",
+   "tooltip": "Only trigger retraction when the travel distance is longer than this threshold.",
+   "sidetext": "mm",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retraction_minimum_travel"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_retraction_speed": {
+   "type": "float",
+   "vector": true,
+   "label": "Retraction Speed",
+   "full_label": "Retraction Speed",
+   "tooltip": "Speed for retracting filament from the nozzle.",
+   "sidetext": "mm/s",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "retraction_speed"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
   },
   "filament_self_index": {
    "type": "int",
    "vector": true,
    "label": "Filament self index",
    "tooltip": "Filament self index.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_settings_id": {
    "type": "string",
    "vector": true,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_shrink": {
    "type": "percent",
@@ -11187,6 +12763,8 @@
    "max": 150.0,
    "mode": "advanced",
    "ratio_over": "",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11201,6 +12779,8 @@
    "max": 150.0,
    "mode": "advanced",
    "ratio_over": "",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11211,6 +12791,8 @@
    "label": "Soluble material",
    "tooltip": "Soluble material is commonly used to print supports and support interfaces.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11222,6 +12804,8 @@
    "tooltip": "If set to non-zero value, filament is moved toward the nozzle between the individual cooling moves (\"stamping\"). This option configures how long this movement should be before the filament is retracted again.",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11233,6 +12817,8 @@
    "tooltip": "Speed used for stamping.",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11242,7 +12828,9 @@
    "vector": true,
    "label": "Start G-code",
    "tooltip": "Start G-code when starting the printing of this filament.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "filament_toolchange_delay": {
    "type": "float",
@@ -11252,6 +12840,8 @@
    "sidetext": "s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11264,6 +12854,8 @@
    "sidetext": "mm",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11276,6 +12868,8 @@
    "sidetext": "mm",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11288,6 +12882,8 @@
    "sidetext": "℃",
    "min": -1.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11300,6 +12896,8 @@
    "sidetext": "mm",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11312,6 +12910,8 @@
    "sidetext": "mm²",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11322,6 +12922,8 @@
    "label": "Type",
    "tooltip": "The material type of filament.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11334,6 +12936,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11346,6 +12950,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11356,6 +12962,135 @@
    "label": "Vendor",
    "tooltip": "Vendor of filament. For show only.",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_wipe": {
+   "type": "bool",
+   "vector": true,
+   "label": "Wipe while retracting",
+   "tooltip": "Move nozzle along the last extrusion path when retracting to clean any leaked material on the nozzle. This can minimize blobs when printing a new part after traveling.",
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "wipe"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_wipe_distance": {
+   "type": "float",
+   "vector": true,
+   "label": "Wipe Distance",
+   "tooltip": "Describe how long the nozzle will move along the last path when retracting.\n\nDepending on how long the wipe operation lasts, how fast and long the extruder/filament retraction settings are, a retraction move may be needed to retract the remaining filament.\n\nSetting a value in the retract amount before wipe setting below will perform any excess retraction before the wipe, else it will be performed after.",
+   "sidetext": "mm",
+   "min": 0.0,
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "wipe_distance"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_z_hop": {
+   "type": "float",
+   "vector": true,
+   "label": "Z-hop height",
+   "tooltip": "Whenever the retraction is done, the nozzle is lifted a little to create clearance between nozzle and the print. It prevents nozzle from hitting the print when travel move. Using spiral lines to lift Z can prevent stringing.",
+   "sidetext": "mm",
+   "min": 0.0,
+   "max": 5.0,
+   "nullable": true,
+   "mode": "simple",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "z_hop"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
+   "scopes": [
+    "filament"
+   ]
+  },
+  "filament_z_hop_types": {
+   "type": "enum",
+   "vector": true,
+   "label": "Z-hop type",
+   "tooltip": "Type of Z-hop.",
+   "enum": [
+    [
+     "Auto Lift",
+     "Auto"
+    ],
+    [
+     "Normal Lift",
+     "Normal"
+    ],
+    [
+     "Slope Lift",
+     "Slope"
+    ],
+    [
+     "Spiral Lift",
+     "Spiral"
+    ]
+   ],
+   "nullable": true,
+   "mode": "advanced",
+   "inherits_from": {
+    "kind": "machine",
+    "key": "z_hop_types"
+   },
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "filament_retraction_length",
+     "test": "gt",
+     "value": 0,
+     "reason": "Retraction length must be greater than zero to use this override."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11418,7 +13153,9 @@
    "label": "First layer print sequence",
    "min": 0.0,
    "max": 16.0,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "first_layer_sequence_choice": {
    "type": "enum",
@@ -11445,7 +13182,9 @@
    "sidetext": "%",
    "min": 0.0,
    "max": 100.0,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "flashforge_serial_number": {
    "type": "string",
@@ -11493,21 +13232,27 @@
    "label": "Flush multiplier",
    "tooltip": "The actual flushing volumes is equal to the flush multiplier multiplied by the flushing volumes in the table.",
    "sidetext": "",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "flush_volumes_matrix": {
    "type": "float",
    "vector": true,
    "label": "Purging volumes",
    "tooltip": "This matrix describes volumes (in cubic millimeters) required to purge the new filament on the wipe tower for any given pair of tools.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "flush_volumes_vector": {
    "type": "float",
    "vector": true,
    "label": "Purging volumes - load/unload volumes",
    "tooltip": "This vector saves required volumes to change from/to each tool used on the wipe tower. These values are used to simplify creation of the full purging volumes below.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "full_fan_speed_layer": {
    "type": "int",
@@ -11518,6 +13263,8 @@
    "min": 0.0,
    "max": 1000.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -11889,7 +13636,9 @@
    "label": "Grab length",
    "sidetext": "mm",
    "min": 0.0,
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "gyroid_optimized": {
    "type": "bool",
@@ -11923,7 +13672,9 @@
    "type": "point",
    "vector": true,
    "label": "Head wrap detect zone",
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "high_current_on_filament_swap": {
    "type": "bool",
@@ -12050,6 +13801,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -12063,6 +13816,8 @@
    "sidetext": "℃",
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -12076,6 +13831,8 @@
    "min": 0.0,
    "max": 1500.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -12285,7 +14042,9 @@
   "inherits_group": {
    "type": "string",
    "vector": true,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "initial_layer_acceleration": {
    "type": "float",
@@ -12673,6 +14432,17 @@
    "min": -1.0,
    "max": 100.0,
    "mode": "advanced",
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "enable_overhang_bridge_fan",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable overhang and bridge cooling to use this value."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -12865,6 +14635,8 @@
    "min": -1.0,
    "max": 100.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -13097,7 +14869,9 @@
    "vector": true,
    "label": "Long retraction when cut (beta)",
    "tooltip": "Experimental feature: Retracting and cutting off the filament at a longer distance during changes to minimize purge. While this reduces flush significantly, it may also raise the risk of nozzle clogs or other printing problems.",
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "long_retractions_when_ec": {
    "type": "bool",
@@ -13105,6 +14879,8 @@
    "label": "Long retraction when extruder change",
    "mode": "advanced",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -13133,7 +14909,9 @@
    "tooltip": "Maximum acceleration for extruding (M204 P)",
    "sidetext": "mm/s²",
    "min": 0.0,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "machine_max_acceleration_retracting": {
    "type": "float",
@@ -13143,7 +14921,9 @@
    "tooltip": "Maximum acceleration for retracting (M204 R)",
    "sidetext": "mm/s²",
    "min": 0.0,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "machine_max_acceleration_travel": {
    "type": "float",
@@ -13153,7 +14933,9 @@
    "tooltip": "Maximum acceleration for travel (M204 T), it only applies to Marlin 2.",
    "sidetext": "mm/s²",
    "min": 0.0,
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "machine_max_junction_deviation": {
    "type": "float",
@@ -13164,7 +14946,9 @@
    "sidetext": "mm",
    "min": 0.0,
    "max": 0.3,
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "machine_min_extruding_rate": {
    "type": "float",
@@ -13174,7 +14958,9 @@
    "tooltip": "Minimum speed for extruding (M205 S)",
    "sidetext": "mm/s",
    "min": 0.0,
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "machine_min_travel_rate": {
    "type": "float",
@@ -13184,7 +14970,9 @@
    "tooltip": "Minimum travel speed (M205 T)",
    "sidetext": "mm/s",
    "min": 0.0,
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "machine_pause_gcode": {
    "type": "string",
@@ -13290,7 +15078,9 @@
    "tooltip": "The highest printable layer height for the extruder. Used to limit the maximum layer height when enable adaptive layer height.",
    "sidetext": "mm",
    "min": 0.0,
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "max_resonance_avoidance_speed": {
    "type": "float",
@@ -13373,7 +15163,9 @@
    "tooltip": "The lowest printable layer height for the extruder. Used to limit the minimum layer height when enable adaptive layer height.",
    "sidetext": "mm",
    "min": 0.0,
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "min_length_factor": {
    "type": "float",
@@ -13479,13 +15271,17 @@
    "tooltip": "The diameter of nozzle.",
    "sidetext": "mm",
    "max": 100.0,
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "nozzle_flush_dataset": {
    "type": "int",
    "vector": true,
    "mode": "simple",
-   "nullable": true
+   "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "nozzle_height": {
    "type": "float",
@@ -13519,6 +15315,8 @@
    "min": 0.0,
    "max": 1500.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -13533,6 +15331,8 @@
    "min": 0.0,
    "max": 1500.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -13546,6 +15346,8 @@
    "min": 0.0,
    "max": 1500.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -13559,6 +15361,8 @@
    "min": 0.0,
    "max": 1500.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -13592,6 +15396,8 @@
      "Brass"
     ]
    ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "machine"
    ]
@@ -13603,14 +15409,18 @@
    "tooltip": "Volume of nozzle between the cutter and the end of nozzle.",
    "sidetext": "mm³",
    "mode": "advanced",
-   "nullable": true
+   "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "nozzle_volume_type": {
    "type": "enum",
    "vector": true,
    "label": "Nozzle Volume Type",
    "tooltip": "Nozzle volume type for extruders.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "only_one_wall_first_layer": {
    "type": "bool",
@@ -13650,7 +15460,9 @@
    "label": "Other layers print sequence",
    "min": 0.0,
    "max": 16.0,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "other_layers_print_sequence_nums": {
    "type": "int",
@@ -13824,6 +15636,17 @@
    "min": 0.0,
    "max": 100.0,
    "mode": "advanced",
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "enable_overhang_bridge_fan",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable overhang and bridge cooling to use this value."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -13861,6 +15684,17 @@
      "95%"
     ]
    ],
+   "dependencies": [
+    {
+     "kind": "filament",
+     "key": "enable_overhang_bridge_fan",
+     "test": "eq",
+     "value": "1",
+     "reason": "Enable overhang and bridge cooling to use this value."
+    }
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -13923,7 +15757,9 @@
    "vector": true,
    "label": "Parallel printheads bed exclude areas",
    "tooltip": "Ordered list of bed exclude areas by parallel printhead count. Item 1 applies to one printhead, item 2 to two printheads, and so on. Leave an item empty for no excluded area.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "parallel_printheads_count": {
    "type": "int",
@@ -13966,6 +15802,8 @@
    "tooltip": "Pellet flow coefficient is empirically derived and allows for volume calculation for pellet printers.\n\nInternally it is converted to filament_diameter. All other volume calculations remain the same.\n\nfilament_diameter = sqrt( (4 * pellet_flow_coefficient) / PI )",
    "min": 0.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -13985,14 +15823,18 @@
    "vector": true,
    "label": "Map the logical extruder to physical extruder",
    "tooltip": "Map the logical extruder to physical extruder.",
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "post_process": {
    "type": "string",
    "vector": true,
    "label": "Post-processing Scripts",
    "tooltip": "If you want to process the output G-code through custom scripts, just list their absolute paths here. Separate multiple scripts with a semicolon. Scripts will be passed the absolute path to the G-code file as the first argument, and they can access the Orca Slicer config settings by reading environment variables.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "precise_outer_wall": {
    "type": "bool",
@@ -14065,7 +15907,9 @@
    "vector": true,
    "label": "Printer preset names",
    "tooltip": "Names of presets related to the physical printer.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "pressure_advance": {
    "type": "float",
@@ -14074,6 +15918,8 @@
    "tooltip": "Pressure advance (Klipper) AKA Linear advance factor (Marlin).",
    "max": 2.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -14160,21 +16006,27 @@
   "print_compatible_printers": {
    "type": "string",
    "vector": true,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "print_extruder_id": {
    "type": "int",
    "vector": true,
    "label": "Print extruder id",
    "tooltip": "Print extruder id.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "print_extruder_variant": {
    "type": "string",
    "vector": true,
    "label": "Print's extruder variant",
    "tooltip": "Print's extruder variant.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "print_flow_ratio": {
    "type": "float",
@@ -14253,6 +16105,8 @@
    "vector": true,
    "label": "Printable area",
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "machine"
    ]
@@ -14282,14 +16136,18 @@
    "vector": true,
    "label": "Printer extruder id",
    "tooltip": "Printer extruder id.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "printer_extruder_variant": {
    "type": "string",
    "vector": true,
    "label": "Printer's extruder variant",
    "tooltip": "Printer's extruder variant.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "printer_model": {
    "type": "string",
@@ -14527,6 +16385,8 @@
    "label": "Keep fan always on",
    "tooltip": "Enabling this setting means that the part cooling fan will never stop completely and will run at least at minimum speed to reduce the frequency of starting and stopping.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -14560,6 +16420,8 @@
    "min": 0.0,
    "max": 500.0,
    "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -14589,7 +16451,9 @@
    "label": "Retract amount before wipe",
    "tooltip": "The length of fast retraction before wipe, relative to retraction length.",
    "sidetext": "%",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retract_length_toolchange": {
    "type": "float",
@@ -14598,7 +16462,9 @@
    "full_label": "Retraction Length (Toolchange)",
    "tooltip": "When retraction is triggered before changing tool, filament is pulled back by the specified amount (the length is measured on raw filament, before it enters the extruder).",
    "sidetext": "mm",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retract_lift_above": {
    "type": "float",
@@ -14606,7 +16472,9 @@
    "label": "Only lift Z above",
    "tooltip": "If you set this to a positive value, Z lift will only take place above the specified absolute Z.",
    "sidetext": "mm",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retract_lift_below": {
    "type": "float",
@@ -14614,7 +16482,9 @@
    "label": "Only lift Z below",
    "tooltip": "If you set this to a positive value, Z lift will only take place below the specified absolute Z.",
    "sidetext": "mm",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retract_lift_enforce": {
    "type": "enum",
@@ -14639,7 +16509,9 @@
      "Top and Bottom",
      "Top and Bottom"
     ]
-   ]
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retract_restart_extra": {
    "type": "float",
@@ -14647,7 +16519,9 @@
    "label": "Extra length on restart",
    "tooltip": "When the retraction is compensated after the travel move, the extruder will push this additional amount of filament. This setting is rarely needed.",
    "sidetext": "mm",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retract_restart_extra_toolchange": {
    "type": "float",
@@ -14655,14 +16529,18 @@
    "label": "Extra length on restart",
    "tooltip": "When the retraction is compensated after changing tool, the extruder will push this additional amount of filament.",
    "sidetext": "mm",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retract_when_changing_layer": {
    "type": "bool",
    "vector": true,
    "label": "Retract when change layer",
    "tooltip": "Force a retraction when changes layer.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retraction_distances_when_cut": {
    "type": "float",
@@ -14671,7 +16549,9 @@
    "tooltip": "Experimental feature: Retraction length before cutting off during filament change.",
    "min": 10.0,
    "max": 18.0,
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retraction_distances_when_ec": {
    "type": "float",
@@ -14682,6 +16562,8 @@
    "max": 10.0,
    "mode": "advanced",
    "nullable": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -14693,7 +16575,9 @@
    "full_label": "Retraction Length",
    "tooltip": "Some amount of material in extruder is pulled back to avoid ooze during long travel. Set zero to disable retraction.",
    "sidetext": "mm",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retraction_minimum_travel": {
    "type": "float",
@@ -14701,7 +16585,9 @@
    "label": "Travel distance threshold",
    "tooltip": "Only trigger retraction when the travel distance is longer than this threshold.",
    "sidetext": "mm",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "retraction_speed": {
    "type": "float",
@@ -14710,7 +16596,9 @@
    "full_label": "Retraction Speed",
    "tooltip": "Speed for retracting filament from the nozzle.",
    "sidetext": "mm/s",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "role_based_wipe_speed": {
    "type": "bool",
@@ -15174,6 +17062,8 @@
    "label": "Slow printing down for better layer cooling",
    "tooltip": "Enable this option to slow printing speed down to make the final layer time not shorter than the layer time threshold in \"Max fan speed threshold\", so that layer can be cooled for longer time. This can improve the cooling quality for needle and small details.",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -15187,6 +17077,8 @@
    "min": 0.0,
    "max": 1000.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -15212,6 +17104,8 @@
    "sidetext": "mm/s",
    "min": 0.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -15243,7 +17137,9 @@
    "vector": true,
    "label": "Flow Compensation Model",
    "tooltip": "Flow Compensation Model, used to adjust the flow for small infill areas. The model is expressed as a comma separated pair of values for extrusion length and flow correction factor. Each pair is on a ",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "small_perimeter_speed": {
    "type": "float_or_percent",
@@ -15608,7 +17504,9 @@
    "label": "Start end points",
    "tooltip": "The start and end points which is from cutter area to garbage can.",
    "mode": "develop",
-   "readonly": true
+   "readonly": true,
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "supertack_plate_temp": {
    "type": "int",
@@ -15620,6 +17518,8 @@
    "min": 0.0,
    "max": 120.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -15634,6 +17534,8 @@
    "min": 0.0,
    "max": 120.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -16038,6 +17940,8 @@
    "min": -1.0,
    "max": 100.0,
    "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -16271,6 +18175,8 @@
    "tooltip": "The material softens at this temperature, so when the bed temperature is equal to or greater than this, it's highly recommended to open the front door and/or remove the upper glass to avoid clogging.",
    "sidetext": "℃",
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -16292,6 +18198,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -16306,6 +18214,8 @@
    "min": 0.0,
    "max": 120.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -16320,6 +18230,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -16334,6 +18246,8 @@
    "min": 0.0,
    "max": 300.0,
    "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0,
    "scopes": [
     "filament"
    ]
@@ -16658,7 +18572,9 @@
    "sidetext": "°",
    "min": 1.0,
    "max": 90.0,
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "travel_speed": {
    "type": "float",
@@ -16869,7 +18785,9 @@
    "type": "string",
    "vector": true,
    "label": "upward compatible machine",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "use_3mf": {
    "type": "bool",
@@ -16905,7 +18823,9 @@
    "type": "string",
    "vector": true,
    "label": "Max volumetric speed multinomial coefficients",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "wall_direction": {
    "type": "enum",
@@ -17072,7 +18992,9 @@
    "vector": true,
    "label": "Wipe while retracting",
    "tooltip": "Move nozzle along the last extrusion path when retracting to clean any leaked material on the nozzle. This can minimize blobs when printing a new part after traveling.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "wipe_before_external_loop": {
    "type": "bool",
@@ -17092,7 +19014,9 @@
    "tooltip": "Describe how long the nozzle will move along the last path when retracting.\n\nDepending on how long the wipe operation lasts, how fast and long the extruder/filament retraction settings are, a retraction move may be needed to retract the remaining filament.\n\nSetting a value in the retract amount before wipe setting below will perform any excess retraction before the wipe, else it will be performed after.",
    "sidetext": "mm",
    "min": 0.0,
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "wipe_on_loops": {
    "type": "bool",
@@ -17296,7 +19220,9 @@
    "label": "Position X",
    "tooltip": "X coordinate of the left front corner of a wipe tower.",
    "sidetext": "mm",
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "wipe_tower_y": {
    "type": "float",
@@ -17304,14 +19230,18 @@
    "label": "Position Y",
    "tooltip": "Y coordinate of the left front corner of a wipe tower.",
    "sidetext": "mm",
-   "mode": "develop"
+   "mode": "develop",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "wiping_volumes_extruders": {
    "type": "float",
    "vector": true,
    "label": "Purging volumes - load/unload volumes",
    "tooltip": "This vector saves required volumes to change from/to each tool used on the wipe tower. These values are used to simplify creation of the full purging volumes below.",
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "wrapping_detection_gcode": {
    "type": "string",
@@ -17332,7 +19262,9 @@
    "vector": true,
    "label": "Probing exclude area of clumping",
    "tooltip": "Probing exclude area of clumping.",
-   "mode": "advanced"
+   "mode": "advanced",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "xy_contour_compensation": {
    "type": "float",
@@ -17366,7 +19298,9 @@
    "sidetext": "mm",
    "min": 0.0,
    "max": 5.0,
-   "mode": "simple"
+   "mode": "simple",
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "z_hop_types": {
    "type": "enum",
@@ -17391,7 +19325,9 @@
      "Spiral Lift",
      "Spiral"
     ]
-   ]
+   ],
+   "vector_shape": "preserve-existing",
+   "edit_index": 0
   },
   "z_offset": {
    "type": "float",

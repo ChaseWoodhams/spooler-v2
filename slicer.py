@@ -397,6 +397,12 @@ def _tab_keys(kind: str) -> set:
 
 def _check_value(key: str, value, meta: dict | None) -> str:
     label = (meta or {}).get("label") or key
+    if isinstance(value, (dict, list, tuple)):
+        raise jobs.JobError(f"{label} needs a scalar value for each entry")
+    if value is None or value == "nil":
+        if (meta or {}).get("nullable"):
+            return "nil"
+        raise jobs.JobError(f"{label} does not support nullable inheritance; reset the override instead")
     text = ("1" if value else "0") if isinstance(value, bool) else str(value).strip()
     if len(text) > 4000:
         raise jobs.JobError(f"{label}: the value is too long")
@@ -462,7 +468,7 @@ def normalize_overrides(overrides, base: dict, *, previous=None, check_coupled=T
                 clean[key] = value
                 continue
             try:
-                clean[key] = _normalize_setting(key, value, kind, preset, allowed, options)
+                clean[key] = _normalize_setting(key, value, kind, preset, allowed, options, previous.get(kind, {}))
                 _check_context(key, clean[key], {**base.get("machine", {}), **preset, **values}, options.get(key, {}))
             except jobs.JobError as error:
                 error.issues = [{"code": "invalid-setting", "key": key, "kind": kind,
@@ -481,7 +487,7 @@ def normalize_overrides(overrides, base: dict, *, previous=None, check_coupled=T
     return out
 
 
-def _normalize_setting(key, value, kind, preset, allowed, options):
+def _normalize_setting(key, value, kind, preset, allowed, options, previous=None):
     if key in BLOCKED_SETTINGS or key.endswith("_gcode"):
         raise jobs.JobError(f"“{key}” can't be overridden in a locked profile")
     meta = options.get(key)
@@ -489,9 +495,15 @@ def _normalize_setting(key, value, kind, preset, allowed, options):
         raise jobs.JobError(f"“{key}” isn't a {kind} setting")
     vector = bool(meta.get("vector"))
     if vector:
-        items = value if isinstance(value, list) else [value]
+        existing = (previous or {}).get(key, preset.get(key))
+        existing = existing if isinstance(existing, list) and existing else [existing]
+        # Single-nozzle editing changes entry zero. A complete vector must keep
+        # the existing shape; never silently discard unselected variants.
+        items = value if isinstance(value, list) else [value, *existing[1:]]
         if not 1 <= len(items) <= 16:
             raise jobs.JobError(f"“{key}” needs between 1 and 16 values")
+        if len(items) != len(existing):
+            raise jobs.JobError(f"“{key}” needs {len(existing)} value(s); preserve every stored entry. This printer edits entry 1 only")
         return [_check_value(key, item, meta) for item in items]
     else:
         if isinstance(value, (list, dict)):

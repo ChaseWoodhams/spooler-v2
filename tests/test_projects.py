@@ -95,6 +95,37 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rejected.exception.issues[0]["key"], key)
             self.assertEqual(projects.get_project(project["id"])["data"], project["data"])
 
+    async def test_filament_override_suite_keeps_explicit_inheritance_through_reopen_and_slice(self):
+        project = await self.project_with_cube()
+        # Independently listed from Orca 2.4.2's Setting Overrides page.
+        values = {
+            "filament_retraction_length": ["0.8"], "filament_z_hop": ["0.4"],
+            "filament_z_hop_types": ["nil"], "filament_retract_lift_above": [None],
+            "filament_retract_lift_below": ["nil"], "filament_retract_lift_enforce": ["nil"],
+            "filament_retraction_speed": ["35"], "filament_deretraction_speed": ["30"],
+            "filament_retract_restart_extra": ["0"], "filament_retraction_minimum_travel": ["2"],
+            "filament_retract_when_changing_layer": ["nil"], "filament_wipe": [True],
+            "filament_wipe_distance": ["2"], "filament_retract_before_wipe": ["80%"],
+            "filament_long_retractions_when_cut": ["nil"], "filament_retraction_distances_when_cut": ["nil"],
+            "filament_ironing_flow": ["nil"], "filament_ironing_spacing": ["0.15"],
+            "filament_ironing_inset": ["0.1"], "filament_ironing_speed": ["25"],
+        }
+        project = self.edit(project, profile={**project["data"]["profile"], "filament": values})
+        expected = {**values, "filament_retract_lift_above": ["nil"], "filament_wipe": ["1"]}
+        projects.init()
+        reopened = projects.get_project(project["id"])
+        self.assertEqual(reopened["data"]["profile"]["filament"], expected)
+        review = projects.effective_settings(project["id"], 1)
+        self.assertFalse([i for i in review["issues"] if i["key"] in values])
+        projects.request_slice(project["id"], 1)
+        with mock.patch.object(slicer, "runner", fake_runner()):
+            await self.run_worker()
+        supplied = json.loads((projects.plate_dir(project["id"], 1) / "profile" / "filament.json").read_text())
+        self.assertEqual({key: supplied[key] for key in expected}, expected)
+        reset = {key: value for key, value in expected.items() if key != "filament_ironing_flow"}
+        project = self.edit(reopened, profile={**reopened["data"]["profile"], "filament": reset})
+        self.assertNotIn("filament_ironing_flow", project["data"]["profile"]["filament"])
+
     async def test_legacy_setting_issues_survive_review_and_an_unrelated_save(self):
         project = await self.project_with_cube()
         # A historical persisted Project is the input fixture, never the assertion seam.

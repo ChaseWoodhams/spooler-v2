@@ -1260,7 +1260,8 @@ function renderSettings() {
     const note = kind !== "process" ? "Filament settings apply to every plate."
       : own.length ? `Changes here apply to every plate. ${listNames(own.map(p => p.name))} ${own.length === 1 ? "has settings of its" : "have settings of their"} own on top.`
       : "Changes here apply to every plate.";
-    state.settings.show({ tab: kind, tabs, layout: kind, base: base[kind], changes: data().profile[kind], target: { kind }, note });
+    state.settings.show({ tab: kind, tabs, layout: kind, base: base[kind], changes: data().profile[kind], target: { kind }, note,
+      inheritance: { machine: base.machine, process: effectiveProcess(base) } });
   }
 }
 
