@@ -159,12 +159,12 @@ def fingerprint(record: dict, plate_id: int) -> str:
         payload["bricklayers"] = bricks
     chosen = plate_filaments(data, plate_id)
     if any(chosen):  # only when an object's model has a choice, so plates on the project default stay up to date
-        payload["filament"] = [{"preset": c["preset"], "colour": c.get("colour", "")} if c else None for c in chosen]
+        payload["filament"] = [{"preset": c["preset"], "colour": c.get("colour", ""), **({"sha256": c["snapshot"]["sha256"]} if c.get("snapshot") else {})} if c else None for c in chosen]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def _choice_key(choice: dict | None) -> tuple | None:
-    return (choice["preset"], choice.get("colour", "")) if choice else None
+    return (choice["preset"], choice.get("colour", ""), (choice.get("snapshot") or {}).get("sha256")) if choice else None
 
 
 def choice_label(choice: dict | None) -> str:
@@ -617,7 +617,7 @@ def _filament_choice(value, model_id) -> dict:
     return {"preset": re.sub(r"\s+", " ", preset).strip(), "colour": re.sub(r"\s+", " ", colour).strip()}
 
 
-def _filament_choices(value, model_ids: set) -> dict:
+def _filament_choices(value, model_ids: set, base=None, previous=None, preserve_unresolved=True) -> dict:
     """{"<model id>": choice}; a model without an entry (or with null) prints in the project's default filament."""
     if value is None:
         return {}
@@ -632,7 +632,28 @@ def _filament_choices(value, model_ids: set) -> dict:
         if model_id not in model_ids:
             raise jobs.JobError(f"Filament choice for model {key}, which isn't in the project")
         if choice is not None:
-            choices[str(model_id)] = _filament_choice(choice, model_id)
+            clean = _filament_choice(choice, model_id)
+            old = (previous or {}).get(str(model_id)) or {}
+            if base is None:
+                raise jobs.JobError("Choose a profile before selecting a Model Filament")
+            same = old.get("preset") == clean["preset"]
+            reference = choice.get("snapshot") or (old.get("snapshot") if same else None)
+            try:
+                if reference:
+                    reference, _ = slicer.filament_snapshot(reference, base["machine"])
+                    if reference["name"] != clean["preset"]:
+                        raise jobs.JobError("The Filament snapshot does not match the selected preset", 409)
+                else:
+                    reference = slicer.lock_filament(clean["preset"], base["machine"])
+                choices[str(model_id)] = {**clean, "snapshot": reference}
+                if same and not old.get("snapshot"):
+                    choices[str(model_id)]["migration"] = {"version": 1, "evidence": "verified-catalogue-at-save", "legacy_name": old["preset"]}
+                elif old.get("migration") and same:
+                    choices[str(model_id)]["migration"] = old["migration"]
+            except jobs.JobError:
+                if not (same and preserve_unresolved and reference == old.get("snapshot")):
+                    raise
+                choices[str(model_id)] = {**old, **clean}
     return choices
 
 
@@ -650,6 +671,9 @@ def validate_data(raw, record: dict) -> dict:
     if base is None and (changes["process"] or changes["filament"]):
         raise jobs.JobError("Choose a profile before changing settings")
     previous = (record.get("data") or {}).get("profile") or {}
+    if base and bundle_id != previous.get("bundle_id"):
+        slicer.verify_bundle(base["bundle"])
+        slicer.filament_compatibility(base["filament"], base["machine"])
     normalized = slicer.normalize_overrides(changes, base, previous={k: previous.get(k, {}) for k in ("process", "filament")}, check_coupled=False) if base else {}
     profile = {"bundle_id": bundle_id, "process": normalized.get("process", {}), "filament": normalized.get("filament", {}),
                "bricklayers": brick_post.validate(profile_raw.get("bricklayers")), "spool_id": _spool_id(profile_raw.get("spool_id"))}
@@ -707,7 +731,8 @@ def validate_data(raw, record: dict) -> dict:
             "overrides": slicer.normalize_overrides({"process": overrides}, base, previous={"process": next((o.get("overrides", {}) for o in (record.get("data") or {}).get("objects", []) if o["id"] == object_id), {})}, check_coupled=False).get("process", {}) if overrides else {},
         })
     out = {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
-    filaments = _filament_choices(raw.get("filaments"), model_ids)
+    filaments = _filament_choices(raw.get("filaments"), model_ids, base, (record.get("data") or {}).get("filaments"),
+                                  preserve_unresolved=bundle_id == previous.get("bundle_id"))
     if filaments:  # likewise only when a model has a choice
         out["filaments"] = filaments
     if raw.get("arrange_engine") == ORCA:  # likewise only when OrcaSlicer's arranger is chosen over the nester
@@ -734,14 +759,22 @@ def validate_data(raw, record: dict) -> dict:
 
 def _coupled_setting_issues(data, base):
     profile = data.get("profile") or {}
-    common = {**base.get("machine", {}), **base.get("process", {}), **profile.get("process", {}),
-              **base.get("filament", {}), **profile.get("filament", {})}
+    common = {**base.get("machine", {}), **base.get("process", {}), **profile.get("process", {})}
     issues = []
     for plate in data.get("plates", []):
-        effective = {**common, **plate.get("overrides", {})}
+        choices = plate_filaments(data, plate["id"])
+        alternate = next((c for c in choices if c), None)
+        filament = {**base.get("filament", {}), **profile.get("filament", {})}
+        if alternate:
+            try:
+                _, filament = slicer.filament_snapshot(alternate.get("snapshot"), base["machine"])
+            except jobs.JobError:
+                filament = {}  # the material issue itself blocks this Plate
+        effective = {**common, **plate.get("overrides", {}), **filament}
         for issue in slicer.configuration_issues(effective):
-            scope = "plate" if issue["key"] in plate.get("overrides", {}) else "project"
-            issues.append({**issue, "kind": "filament" if issue["key"] in profile.get("filament", {}) else "process",
+            kind = "filament" if issue["key"] in filament else "process"
+            scope = "model" if alternate and kind == "filament" else "plate" if issue["key"] in plate.get("overrides", {}) else "project"
+            issues.append({**issue, "kind": kind,
                            "scope": scope, "plate_id": plate["id"], **({"affected_id": plate["id"]} if scope == "plate" else {})})
         for obj in data.get("objects", []):
             if obj["plate"] == plate["id"] and obj.get("overrides"):
@@ -1613,7 +1646,16 @@ def intake_files(project_id: int) -> dict:
                "check_units": count("check_units"), "analysing": analysing, "failed": failed}
     summary["can_create"] = bool(rows) and not (summary["check_units"] or analysing or failed)
     summary["steps"] = (["split"] if summary["split"] else []) + ["plates", "slice", "print"]
-    return {"rows": rows, "summary": summary}
+    suggested = None
+    if bundle_id := record["data"].get("profile", {}).get("bundle_id"):
+        try:
+            settings = slicer.bundle_settings(bundle_id)
+            slicer.verify_bundle(settings["bundle"])
+            slicer.filament_compatibility(settings["filament"], settings["machine"])
+            suggested = {"name": settings["filament"]["name"], "material": settings["filament"]["filament_type"]}
+        except jobs.JobError as exc:
+            suggested = {"error": str(exc)}
+    return {"rows": rows, "summary": summary, "suggested_filament": suggested}
 
 
 QUICK_LAYER_HEIGHTS = (0.08, 0.12, 0.16, 0.2, 0.24, 0.28, 0.32)   # the fixed list the Quick print dialog offers (0.4 mm nozzle)
@@ -3115,23 +3157,38 @@ def effective_settings(project_id: int, plate_id: int, revision=None, *, record=
     if mix:
         issues.append({"code": "conflicting-filament-choices", "scope": "plate", "plate_id": plate_id,
                        "affected_ids": [o["id"] for o in data["objects"] if o["plate"] == plate_id],
-                       "severity": "error", "message": mix})
+                       "affected_names": [o["name"] for o in data["objects"] if o["plate"] == plate_id],
+                       "severity": "error", "resolution_required": True, "message": mix})
     alternate = {} if mix else None
     chosen = next((c for c in plate_filaments(data, plate_id) if c), None)
+    if not chosen and not mix:
+        try:
+            slicer.filament_compatibility(settings["filament"], settings["machine"])
+        except jobs.JobError as exc:
+            alternate = {}
+            issues.append({"code": "unresolved-filament", "scope": "project", "plate_id": plate_id,
+                           "severity": "error", "resolution_required": True, "message": str(exc)})
     if chosen and not mix:
-        orca = slicer.require_orca()
-        alternate, _ = slicer.flatten_preset(slicer._presets("filament", orca), chosen["preset"])
-        machine = settings["machine"]["name"]
-        if alternate.get("type") != "filament" or not slicer._compatible(alternate, machine):
-            raise jobs.JobError(f"“{chosen['preset']}” isn't a filament preset for {machine}")
+        try:
+            if not chosen.get("snapshot"):
+                raise jobs.JobError(f"{chosen['preset']} has no verified saved material — select its Filament again. Historical profiles are retained but cannot establish this choice's material", 409)
+            _, alternate = slicer.filament_snapshot(chosen["snapshot"], settings["machine"])
+        except jobs.JobError as exc:
+            alternate = {}
+            issues.append({"code": "unresolved-filament", "scope": "model", "plate_id": plate_id,
+                           "affected_ids": [o["id"] for o in data["objects"] if o["plate"] == plate_id],
+                           "severity": "error", "resolution_required": True, "message": f"{chosen['preset']}: {exc}"})
     result = plate_settings.resolve(record, plate, settings, slicer.BED_TYPES[data["bed"]], alternate, issues)
     for kind in ("process", "filament"):
+        if kind == "filament" and alternate is not None:
+            continue
         result["issues"].extend(slicer.setting_issues(data["profile"].get(kind) or {}, settings, kind, "project"))
     result["issues"].extend(slicer.setting_issues(plate.get("overrides") or {}, settings, "process", "plate", plate_id))
     for obj in result["objects"]:
         result["issues"].extend(slicer.setting_issues(obj.get("overrides") or {}, settings, "process", "object", obj["id"]))
     for kind in ("process", "filament"):
-        result["issues"].extend(slicer.setting_issues(settings[kind], settings, kind, "preset", inherited=True))
+        inherited = alternate if kind == "filament" and alternate is not None else settings[kind]
+        result["issues"].extend(slicer.setting_issues(inherited, settings, kind, "preset", inherited=True))
     result["issues"].extend(i for i in _coupled_setting_issues(data, settings)
                             if i["plate_id"] == plate_id)
     result["filament_choice"] = chosen
@@ -3165,9 +3222,12 @@ def _require_one_filament(record: dict, plate_ids) -> None:
     """A plate that mixes filament choices can't be sliced."""
     for plate in record["data"]["plates"]:
         if plate["id"] in plate_ids:
-            mix = plate_mix(record["data"], plate["id"])
-            if mix:
-                raise jobs.JobError(mix, 409)
+            review = effective_settings(record["id"], plate["id"], record=record)
+            for issue in review["issues"]:
+                if issue.get("code") in ("unresolved-filament", "conflicting-filament-choices"):
+                    error = jobs.JobError(issue["message"], 409)
+                    error.issues = [issue]
+                    raise error
 
 
 def request_slice(project_id: int, plate_id: int, send: bool = False, send_opts: dict | None = None) -> dict:

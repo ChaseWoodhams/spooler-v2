@@ -150,7 +150,11 @@ function summaryText() {
 const STEP_TEXT = {
   split: s => `${plural(s.split, "model")} bigger than the bed will be cut into parts that fit.`,
   plates: s => `${plural(s.objects, "object")} (copies included) arranged onto plates automatically.`,
-  slice: () => "Default settings; change anything in All settings later.",
+  slice: () => {
+    const choice = intake?.suggested_filament;
+    return choice?.material ? `Suggested default: ${esc(choice.material.join(", "))} — ${esc(choice.name)}. Create adopts this material; change it in All settings before slicing.`
+      : "Default material is unverified. Choose a Filament in All settings before slicing.";
+  },
   print: () => "Send the plates to a printer and start them.",
 };
 const STEP_NAME = { split: "Split", plates: "Plates", slice: "Slice", print: "Print" };

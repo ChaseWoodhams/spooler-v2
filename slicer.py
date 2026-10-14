@@ -17,6 +17,7 @@ Slices
 """
 
 import asyncio
+import math
 import hashlib
 import json
 import os
@@ -657,6 +658,73 @@ def derive_bundle(bundle_id: str, overrides: dict | None, label: str | None = No
     merged = {kind: {**previous.get(kind, {}), **incoming.get(kind, {})}
               for kind in ("process", "filament") if previous.get(kind) or incoming.get(kind)}
     return create_bundle(names["machine"], names["process"], names["filament"], label, merged)
+
+
+def filament_compatibility(values: dict, machine: dict) -> None:
+    """Validate actual material and locked machine/nozzle, not the display label."""
+    material = values.get("filament_type")
+    if not isinstance(material, list) or len(material) != 1 or not isinstance(material[0], str) or not material[0].strip():
+        raise jobs.JobError("Filament material identity is unavailable — explicitly choose a verified preset", 409)
+    nozzle = machine.get("nozzle_diameter")
+    named = re.search(r" ([0-9.]+) nozzle$", machine.get("name", ""))
+    try:
+        valid = isinstance(nozzle, list) and len(nozzle) == 1 and math.isfinite(float(nozzle[0])) and float(nozzle[0]) > 0 and (not named or float(nozzle[0]) == float(named[1]))
+    except (ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise jobs.JobError("The locked machine nozzle cannot be verified — choose a compatible profile", 409)
+    if values.get("type") != "filament" or not _compatible(values, machine.get("name", "")):
+        raise jobs.JobError(f"“{values.get('name', 'Filament')}” isn't compatible with {machine.get('name', 'this machine')} and its nozzle", 409)
+    if not values.get("compatible_printers") and values.get("compatible_printers_condition"):
+        raise jobs.JobError("This Filament uses a compatibility condition that cannot be verified — choose an explicitly compatible preset", 409)
+
+
+def lock_filament(name: str, machine: dict) -> dict:
+    """Freeze an alternate in the existing content-addressed profile store."""
+    orca = require_orca()
+    values, chain = flatten_preset(_presets("filament", orca), name)
+    filament_compatibility(values, machine)
+    content = json.dumps(values, indent=1, sort_keys=True).encode()
+    digest = hashlib.sha256(content).hexdigest()
+    reference = {"version": 1, "sha256": digest, "name": values["name"], "material": values["filament_type"],
+                 "source_chain": chain, "schema": "OrcaSlicer 2.4.2", "slicer_folder": orca.parent.name,
+                 "vendor_profile_version": vendor_profile_version(orca)}
+    root = profiles_dir() / "filaments"
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / digest
+    if not target.exists():
+        staging = Path(tempfile.mkdtemp(prefix=".filament-", dir=root))
+        try:
+            (staging / "filament.json").write_bytes(content)
+            (staging / "snapshot.json").write_text(json.dumps(reference, indent=1), encoding="utf-8")
+            try:
+                os.replace(staging, target)
+            except OSError:
+                if not target.exists():
+                    raise
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    return filament_snapshot(reference, machine)[0]
+
+
+def filament_snapshot(reference: dict, machine: dict) -> tuple:
+    """Verify saved content without consulting the mutable preset catalogue."""
+    digest = reference.get("sha256") if isinstance(reference, dict) else None
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise jobs.JobError("Filament snapshot reference is invalid — explicitly choose a verified preset", 409)
+    folder = profiles_dir() / "filaments" / digest
+    try:
+        content = (folder / "filament.json").read_bytes()
+        saved = json.loads((folder / "snapshot.json").read_text(encoding="utf-8"))
+        values = json.loads(content)
+        if (hashlib.sha256(content).hexdigest() != digest or saved.get("sha256") != digest
+                or saved.get("version") != 1 or saved.get("material") != values.get("filament_type")
+                or saved.get("name") != values.get("name")):
+            raise ValueError("checksum")
+    except (OSError, ValueError):
+        raise jobs.JobError("The saved Filament snapshot is missing or damaged — historical Slices remain available; explicitly choose a verified preset", 409)
+    filament_compatibility(values, machine)
+    return saved, values
 
 
 def bundle_settings(bundle_id: str) -> dict:

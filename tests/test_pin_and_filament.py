@@ -34,6 +34,7 @@ class PinAndFilamentApiTests(unittest.TestCase):
         jobs.init(self.dir)
         slicer.configure(self.dir, orca_path=make_fake_orca(self.dir / "tools"))
         slicer.init()
+        slicer.save_user_preset("filament", "Elegoo PETG @ECC", "Elegoo PLA @ECC", {"filament_type": ["PETG"]})
         splits.configure(self.dir)
         projects.configure(self.dir)
         projects.init()
@@ -106,7 +107,7 @@ class PinAndFilamentApiTests(unittest.TestCase):
         project = self.project_with_cubes()
         status, saved = self.save(project, lambda d: d.update(filaments={"1": GREY, "2": {"preset": "Elegoo PLA @ECC"}}))
         self.assertEqual(status, 200, saved)
-        self.assertEqual(self.fetch(project)["data"]["filaments"],
+        self.assertEqual({key: {k: c[k] for k in ("preset", "colour")} for key, c in self.fetch(project)["data"]["filaments"].items()},
                          {"1": GREY, "2": {"preset": "Elegoo PLA @ECC", "colour": ""}})
         status, saved = self.save(saved, lambda d: d["filaments"].update({"1": None}))   # null clears a model's choice
         self.assertEqual(status, 200, saved)

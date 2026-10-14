@@ -187,7 +187,7 @@ function plateMix(plateId) {
   const seen = new Map();
   for (const o of plateObjects(plateId).sort((a, b) => a.id - b.id)) {
     const choice = filamentChoice(o.model);
-    seen.set(choice ? `${choice.preset}\n${choice.colour || ""}` : "", choiceLabel(choice));
+    seen.set(choice ? `${choice.preset}\n${choice.colour || ""}\n${choice.snapshot?.sha256 || ""}` : "", choiceLabel(choice));
   }
   const labels = [...seen.values()];
   return labels.length < 2 ? "" : `${plateById(plateId)?.name || `Plate ${plateId}`} mixes ${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
@@ -1286,7 +1286,8 @@ async function reviewEffectiveSettings() {
     }).join("");
     el.innerHTML = `<h4>Settings sent to Orca</h4><p>Current Plate inputs, not measured output from a completed Slice.</p>
       <p><b>${esc(value(result.filament?.filament_type))}</b> · Nozzle ${esc(value(result.machine?.nozzle_diameter))} mm · ${esc(result.process?.curr_bed_type)}</p>
-      ${(result.issues || []).map(i => `<p class="slicer-warning">${esc(i.message)}</p>`).join("")}
+      ${result.filament_choice ? `<p>Alternate saved Filament: ${esc(result.filament_choice.preset)}. Project default Filament changes and Spoolman tuning do not apply.${result.filament_choice.colour ? ` Colour label only: ${esc(result.filament_choice.colour)}.` : ""}</p>` : "<p>Project default Filament, including saved Project tuning.</p>"}
+      ${(result.issues || []).map(i => `<p class="slicer-warning">${esc(i.message)}${i.affected_names?.length ? ` — Objects: ${esc(i.affected_names.join(", "))}` : ""}</p>`).join("")}
       ${["filament", "process"].map(kind => `<details><summary>${kind === "filament" ? "Filament" : "Process"} values</summary><table><thead><tr><th>Setting</th><th>Value</th><th>Source</th></tr></thead><tbody>${rows(kind)}</tbody></table></details>`).join("")}
       <p>Object settings are sent separately for ${(result.objects || []).length} Objects.</p>`;
   } catch (err) { el.textContent = err.message; }
@@ -1469,7 +1470,8 @@ function filamentControls(object) {
       <option value="">Project default${base ? ` (${esc(base.replace(/ @.*$/, ""))})` : ""}</option>
       ${list.map(name => `<option value="${esc(name)}"${choice?.preset === name ? " selected" : ""}>${esc(name.replace(/ @.*$/, ""))}</option>`).join("")}
     </select></label>
-    <label class="slicer-field"${choice ? "" : " hidden"}>Colour <input type="text" id="object-filament-colour" maxlength="${FILAMENT_COLOUR_MAX}" placeholder="e.g. grey" value="${esc(choice?.colour || "")}"></label>
+    ${choice ? `<p class="slicer-muted">${choice.snapshot ? `Saved material: ${esc(choice.snapshot.material.join(", "))}.` : "Material snapshot pending verification; save and review before slicing."} Shared by every Copy of this Model. Project default Filament changes and Spoolman tuning do not apply.</p>` : ""}
+    <label class="slicer-field"${choice ? "" : " hidden"}>Colour label only <input type="text" id="object-filament-colour" maxlength="${FILAMENT_COLOUR_MAX}" placeholder="e.g. grey" value="${esc(choice?.colour || "")}"></label>
     <label class="slicer-check" title="The planner, Arrange and Orient leave a pinned object where it is; you can still move it by hand"><input type="checkbox" id="object-pinned"${object.pinned ? " checked" : ""}> Pin</label>
     ${mix ? `<p class="slicer-warn" role="alert">${esc(mix)}. Slicing is refused until each plate holds one filament.</p>` : ""}`;
 }

@@ -246,6 +246,7 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
         projects.import_model(project["id"], io.BytesIO(cube_stl(10)), len(cube_stl(10)), "other.stl")
         await self.run_worker()
         project = projects.get_project(project["id"])
+        slicer.save_user_preset("filament", "ASA custom", "Elegoo PLA @ECC", {"filament_type": ["ASA"]})
         project = self.edit(project, filaments={"1": {"preset": "ASA custom", "colour": "black"}})
         review = projects.effective_settings(project["id"], 1)
         self.assertEqual(review["issues"][0]["code"], "conflicting-filament-choices")
