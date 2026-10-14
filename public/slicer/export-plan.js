@@ -5,6 +5,19 @@
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const show = value => Array.isArray(value) ? value.join("; ") : value === null || value === undefined ? "(not set)" : String(value);
 
+/** The per-Plate package: one self-contained Orca file per Plate in a ZIP. Offered whenever nothing blocks the export; the
+    recommended way out when one file cannot keep the Project. */
+function packageHtml(plan) {
+  const pack = plan.package;
+  if (!pack?.available) return "";
+  const rows = pack.files.map(f => `<tr><td>${esc(f.filename)}</td><td>${esc(f.name)}</td><td>${esc(f.material.type || "?")} · ${esc(f.material.preset || "")}</td></tr>`).join("");
+  return `<section data-role="package"><h4>${pack.default ? "Export one Orca file per Plate instead" : "Or export one Orca file per Plate"}</h4>
+    <p class="slicer-hint">${pack.default ? "Each Plate keeps its own machine, process and filament settings in a file of its own. " : ""}${esc(pack.note)}</p>
+    <table class="import-diff"><thead><tr><th>File</th><th>Plate</th><th>Material</th></tr></thead><tbody>${rows}</tbody></table>
+    <button type="button" class="btn ${pack.default ? "btn-primary" : "btn-secondary"}" data-act="download-package">Download Plate files (ZIP)</button>
+    <span class="slicer-hint">${esc(pack.filename)}</span></section>`;
+}
+
 export function planHtml(plan, { error = null } = {}) {
   const materials = plan.plates.map(p => `<tr><td>${esc(p.name)}</td><td>${esc(p.material.type || "?")} · ${esc(p.material.preset || "")}${p.material.colour ? ` · ${esc(p.material.colour)}` : ""}</td><td>${p.objects}</td></tr>`).join("");
   const table = plan.plates.length ? `<table class="import-diff"><thead><tr><th>Plate</th><th>Material</th><th>Objects</th></tr></thead><tbody>${materials}</tbody></table>` : "";
@@ -22,7 +35,7 @@ export function planHtml(plan, { error = null } = {}) {
     ? `<p>One Orca project file keeps this Project's Plates, placement, material and settings. It is named <strong>${esc(plan.filename)}</strong>.</p>`
     : `<p><strong>A single Orca file cannot faithfully keep this Project.</strong> Nothing has been exported.</p>`;
   return `<h3 id="export-plan-title">Export to Orca</h3>${lead}
-    <p data-role="error" role="alert" class="slicer-error"${error ? "" : " hidden"}>${esc(error || "")}</p>${blockers}${differences}${table}${objects}${limits}
+    <p data-role="error" role="alert" class="slicer-error"${error ? "" : " hidden"}>${esc(error || "")}</p>${blockers}${differences}${packageHtml(plan)}${table}${objects}${limits}
     <p class="slicer-hint">${esc(plan.label)}</p>
     <div class="slicer-dialog-actions">
       <button type="button" class="btn btn-secondary" data-act="close">Close</button>
@@ -50,9 +63,9 @@ export async function showExport(host, projectId) {
       plan = await host.api("GET", `/api/projects/${projectId}/export-plan`);
       draw(notice);
     };
-    const download = async () => {
+    const download = async (route = "export.3mf", name = plan.filename) => {
       const query = new URLSearchParams({ revision: plan.revision, fingerprint: plan.fingerprint });
-      const response = await fetch(`/api/projects/${projectId}/export.3mf?${query}`);
+      const response = await fetch(`/api/projects/${projectId}/${route}?${query}`);
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
         if (body.issues?.[0]?.code === "export-plan-stale") return replan("The Project changed since this plan was made. Review the new plan before downloading.");
@@ -60,10 +73,10 @@ export async function showExport(host, projectId) {
       }
       const link = document.createElement("a");
       link.href = URL.createObjectURL(await response.blob());
-      link.download = plan.filename;
+      link.download = name;
       link.click();
       setTimeout(() => URL.revokeObjectURL(link.href), 10000);
-      host.toast(`Exported ${plan.filename}`);
+      host.toast(`Exported ${name}`);
     };
     dialog.addEventListener("click", async e => {
       const act = e.target.closest("[data-act]")?.dataset.act;
@@ -72,6 +85,7 @@ export async function showExport(host, projectId) {
         if (act === "close") dialog.close();
         else if (act === "replan") await replan(null);
         else if (act === "download") await download();
+        else if (act === "download-package") await download("export-package.zip", plan.package.filename);
       } catch (err) {
         const box = dialog.querySelector('[data-role="error"]');
         if (box) { box.textContent = err.message; box.hidden = false; }
