@@ -1272,6 +1272,17 @@ class SPHandler(SimpleHTTPRequestHandler):
                 return {"ok": True}
             self._jobs_call(discard, broadcast=False)
             return
+        if len(parts) == 5 and parts[3].isdigit() and parts[4] == "export-lossy":
+            # The explicit lossy whole-Project 3MF: only for an acknowledgement of the reviewed report, never from export.3mf
+            try:
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                artifact = projects.export_lossy(self._job_id(), body)
+            except jobs.JobError as e:
+                self._json({"error": str(e), **({"issues": e.issues} if getattr(e, "issues", None) else {})}, e.status)
+                return
+            self._send_bytes(artifact["body"], artifact["content_type"], download_name=artifact["filename"])
+            return
         if len(parts) == 6 and parts[4] == "settings" and parts[5] in ("review", "adopt"):
             def review_setting_change():   # preview or apply a preset refresh / Spoolman adoption (revision- and token-checked)
                 body = self._json_body()

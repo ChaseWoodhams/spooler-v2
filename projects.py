@@ -55,6 +55,7 @@ from xml.sax.saxutils import escape
 import brick_post
 import database
 import effective_settings as plate_settings
+import export_lossy as lossy_report
 import export_plan as export_planner
 import gcode_analysis
 import holds
@@ -1800,7 +1801,9 @@ def export_plan(project_id: int, *, record: dict | None = None) -> dict:
         except jobs.JobError as exc:
             unavailable.append({"code": "settings-unavailable", "message": str(exc), "plate_id": plate["id"]})
     waiting = [o["name"] for o in data["objects"] if models.get(o["model"], {}).get("state") != READY]
-    return export_planner.plan(record, entries, unavailable, waiting, slicer.orca_executable() is not None)
+    plan = export_planner.plan(record, entries, unavailable, waiting, slicer.orca_executable() is not None)
+    plan["lossy"] = lossy_report.alternative(record, plan, entries, import_records(record["id"]))
+    return plan
 
 
 def _export_template(project_id: int, review: dict) -> dict:
@@ -1856,7 +1859,7 @@ def _single_file(project_id: int, record: dict, plan: dict) -> bytes:
     overrides = {}
     for _, result in entries:
         for obj in result["objects"]:
-            overrides[obj["id"]] = {k: v for k, v in sorted((obj.get("overrides") or {}).items()) if result["process"].get(k) != v}
+            overrides[obj["id"]] = {k: v for k, v in sorted((obj.get("overrides") or {}).items()) if review["process"].get(k) != v}
     # Orca numbers Plates 1..n and keeps each at its own place in a grid, so a Plate's Objects stand at that Plate's origin.
     numbers = {p["id"]: n for n, p in enumerate(data["plates"], start=1)}
     limits = machine_limits(review["machine"])
@@ -1901,6 +1904,40 @@ def export_project(project_id: int, revision, fingerprint) -> dict:
     if not plan["faithful"]:
         raise _review_required(plan)
     return {"body": _single_file(project_id, record, plan), "filename": plan["filename"], "content_type": plan["content_type"], "plan": plan}
+
+
+def export_lossy(project_id: int, acknowledgement) -> dict:
+    """The explicit lossy whole-Project 3MF: {"body", "filename", "content_type", "plan"}. Generated only for an acknowledgement of
+    the report as it is now: it must repeat the plan's revision and fingerprint, the report's version and fingerprint and the
+    representation, and say `acknowledged: true`. The direct and faithful exports never come here. The file is the same single
+    Orca project file, written with the first Plate's configuration (see export_lossy.py)."""
+    ack = acknowledgement if isinstance(acknowledgement, dict) else {}
+    record = get_project(project_id)
+    plan = export_plan(project_id, record=record)
+    lossy = plan["lossy"]
+
+    def stale(message):
+        return _export_error("export-acknowledgement-stale", message, revision=record["revision"], fingerprint=plan["fingerprint"],
+                             report_fingerprint=lossy["report_fingerprint"])
+    try:
+        current = int(ack.get("revision")) == record["revision"]
+    except (TypeError, ValueError):
+        current = False
+    if not current or ack.get("fingerprint") != plan["fingerprint"]:
+        raise stale("The Project changed since you reviewed these losses — review the export again")
+    if ack.get("acknowledged") is not True:
+        raise _export_error("export-acknowledgement-required", "Acknowledge the losses before exporting the lossy 3MF")
+    if ack.get("representation") != lossy["representation"]:
+        raise _export_error("export-representation-mismatch", f"This acknowledgement is for {ack.get('representation')!r}, not {lossy['representation']!r}",
+                            representation=lossy["representation"])
+    if plan["blockers"]:
+        raise _review_required(plan)
+    if not lossy["available"]:
+        raise _export_error("export-lossy-unavailable", "Nothing is lost exporting this Project, so there is no lossy file to acknowledge — use the faithful export"
+                            if lossy["reason"] == "faithful-available" else "The lossy export is not available for this Project", reason=lossy["reason"])
+    if ack.get("report_version") != lossy["report_version"] or ack.get("report_fingerprint") != lossy["report_fingerprint"]:
+        raise stale("The list of losses changed since you reviewed it — review the export again")
+    return {"body": _single_file(project_id, record, plan), "filename": lossy["filename"], "content_type": lossy["content_type"], "plan": plan}
 
 
 def export_orca_project(project_id: int) -> bytes:
