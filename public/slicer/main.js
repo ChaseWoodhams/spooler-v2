@@ -1161,6 +1161,8 @@ function slicingText(entry) {
   return `${STAGE_TEXT[entry.stage] || "Slicing"} · ${clock(elapsed)}${usual}`;
 }
 
+const unverifiedKeys = entry => (entry.observed?.differences || []).slice(0, 3).map(d => d.key).join(", ") + ((entry.observed?.difference_count || 0) > 3 ? "…" : "");
+
 function plateStatus(plateId) {
   const entry = sliceEntry(plateId);
   if (!plateObjects(plateId).length) return { text: "Empty", cls: "" };
@@ -1170,6 +1172,7 @@ function plateStatus(plateId) {
   if (entry.state === "slicing") return { text: `Slice in progress — ${slicingText(entry)}`, cls: "" };
   if (entry.state === "failed") return { text: `Failed Slice: ${entry.error || 'The slicer could not finish'}. Retry slicing this Plate.`, cls: "bad" };
   if (entry.outdated) return { text: "Outdated Slice — objects, placement or relevant settings changed. Slice this Plate again before sending it.", cls: "warn" };
+  if (entry.observed?.state === "mismatch") return { text: `Unverified Slice — Orca's output differs from the expected settings (${unverifiedKeys(entry)}). Review the differences before sending.`, cls: "warn" };
   const text = ['Current Slice', duration(entry.estimate_s), entry.estimate_g != null ? `${Math.round(entry.estimate_g)} g` : "Filament estimate unavailable", plural(entry.layers, "layer")].filter(Boolean).join(" · ");
   const printer = state.printers.find(p => p.id === entry.sent_to)?.name;
   if (entry.send_error) return { text: `${text} · not sent: ${entry.send_error}`, cls: "warn" };
@@ -2477,6 +2480,30 @@ function startPlayback() {
   $("btn-play").textContent = "Pause";
 }
 
+/** Orca's own configuration compared with the saved inputs: differences by setting and scope, recorded normalization, and what is unavailable. */
+function observedOutputHtml(check) {
+  const table = (attr, caption, head, rows) => rows.length ? `<table ${attr}><caption>${caption}</caption><thead><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>` : "";
+  const settingRow = (d, extra) => `<tr><th scope="row">${esc(d.key)}</th><td>${esc(d.scope)}</td><td>${showValue(d.expected)}</td><td>${showValue(d.observed)}</td>${extra ? `<td>${esc(d.reason)}</td>` : ""}</tr>`;
+  return `<section data-observed-output data-observed-state="${esc(check.state)}"><h4>Orca output check</h4><p class="${check.trusted ? "" : "warn"}">${esc(check.label)}</p>`
+    + (check.reason ? `<p>${esc(check.reason)}</p>` : "")
+    + (check.compared ? `<p class="slicer-muted">${check.compared} reported settings compared${check.source ? ` (from ${esc(check.source)})` : ""}.</p>` : "")
+    + table("data-observed-differences", "Reported differently by Orca (affects the print)", ["Setting", "Set by", "Expected", "Orca reported"], (check.differences || []).map(d => settingRow(d)))
+    + table("data-observed-normalized", "Known Orca normalization (recorded, not a mismatch)", ["Setting", "Set by", "Expected", "Orca reported", "Why"], (check.normalized || []).map(d => settingRow(d, true)))
+    + ((check.unavailable || []).length ? `<p class="slicer-muted" data-observed-unavailable>Not reported by Orca, so unverified: ${esc(check.unavailable.map(u => u.key).join(", "))}.</p>` : "")
+    + (check.post_processing ? `<p class="warn" data-observed-post>${esc(check.post_processing.note)}</p>` : "")
+    + (check.object_overrides ? `<p class="slicer-muted">${esc(check.object_overrides.note)}</p>` : "")
+    + (check.limits || []).map(l => `<p class="slicer-muted">${esc(l)}</p>`).join("")
+    + (check.state === "mismatch" ? '<p><button type="button" data-send-unverified>Send anyway (I accept these differences)</button></p>' : "")
+    + "</section>";
+}
+
+async function sendUnverified() {
+  const plate = state.plate;
+  if (!await queuePlates([plate], { acceptUnverified: true })) return;
+  await loadJobs();
+  toast("Sent to the printer");
+}
+
 const showValue = value => esc(typeof value === "string" ? value : JSON.stringify(value) ?? "—");
 async function loadSliceInputs(details) {
   const body = details.querySelector("[data-slice-inputs-body]");
@@ -2493,7 +2520,8 @@ async function loadSliceInputs(details) {
       : `<p data-saved-unavailable class="warn">Saved inputs unavailable: ${esc(saved.reason)}</p>`)
       + (review.current.state === "unresolved" ? '<p class="warn">The current Project inputs cannot be resolved right now.</p>' : "")
       + (rows.length || objectsChanged ? `<table data-slice-differences><caption>Changed since this Slice</caption><thead><tr><th>Setting</th><th>Saved</th><th>Current Project</th></tr></thead><tbody>${rows.join("")}${objectsChanged ? '<tr><th scope="row">Objects</th><td colspan="2">Placement or geometry changed</td></tr>' : ""}</tbody></table>`
-        : saved.state === "saved" ? "<p>The current Project matches the saved inputs.</p>" : "");
+        : saved.state === "saved" ? "<p>The current Project matches the saved inputs.</p>" : "")
+      + (review.observed ? observedOutputHtml(review.observed) : "");
   } catch (err) { body.textContent = err.message; }
 }
 
@@ -2518,6 +2546,7 @@ function renderPreviewPanel(info) {
       <dt>Layers</dt><dd>${analysis.layers.length}</dd>
     </dl>
     ${entry?.outdated ? `<p class="slicer-slice-state warn">${entry.outdated_reason === "inputs-unresolved" ? "This plate's inputs can no longer be resolved, so this Slice cannot be confirmed as current." : "This plate changed after it was sliced."}</p>` : ""}
+    ${entry?.observed?.state === "mismatch" ? `<p class="slicer-slice-state warn">Unverified: Orca's output differs from the expected settings (${esc(unverifiedKeys(entry))}). Review the differences below before sending.</p>` : ""}
     <details class="slicer-subfold" data-slice-inputs${state.sliceInputsOpen ? " open" : ""}>
       <summary>Inputs this Slice was prepared with</summary>
       <div data-slice-inputs-body class="slicer-muted">Open to load the saved inputs.</div>
@@ -2557,13 +2586,13 @@ async function loadPrinters() {
 }
 
 /** Save the project, then turn the given Plates into Jobs (the Print step and the Slice step both send through here). */
-async function queuePlates(plates, { leveling, timelapse, again = false }) {
+async function queuePlates(plates, { leveling, timelapse, again = false, acceptUnverified = false }) {
   await flushSave();
   if ($('save-state').textContent === 'Not saved') {
     toast('Project changes could not be saved. Retry saving before sending these Plates.', true); return null;
   }
   if (leveling !== undefined || timelapse !== undefined) rememberDefaults({ options: { leveling, timelapse } });
-  return api("POST", `/api/projects/${state.project.id}/queue`, { plates, leveling, timelapse, again });
+  return api("POST", `/api/projects/${state.project.id}/queue`, { plates, leveling, timelapse, again, ...(acceptUnverified ? { accept_unverified: true } : {}) });
 }
 
 // ── Dialogs ─────────────────────────────────────────────────────────────────────
@@ -3131,6 +3160,7 @@ function bindUi() {
     if (e.target.matches("[data-preview-more]")) state.previewMore = e.target.open;
     if (e.target.matches("[data-slice-inputs]")) { state.sliceInputsOpen = e.target.open; if (e.target.open) loadSliceInputs(e.target); }
   }, true);
+  $("preview-panel").addEventListener("click", e => { if (e.target.closest("[data-send-unverified]")) sendUnverified().catch(err => toast(err.message, true)); });
   $("preview-panel").addEventListener("change", e => {
     const name = e.target.dataset.feature;
     if (!name) return;
