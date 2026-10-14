@@ -1229,6 +1229,15 @@ class SPHandler(SimpleHTTPRequestHandler):
         if path == "/api/projects/import-review":              # stage and inspect a 3MF; nothing changes yet
             self._handle_import_review_upload()
             return
+        if len(parts) == 6 and parts[3] == "import-review" and parts[5] == "resolve":
+            def resolve():
+                body = self._json_body()
+                pending = projects.get_import_review(parts[4])["binding"]["target"]
+                if pending:
+                    self._guard_draft(pending["project_id"], body)
+                return projects.resolve_import(parts[4], {k: v for k, v in body.items() if k != "draft_token"})
+            self._splits_call(resolve)
+            return
         if len(parts) == 6 and parts[3] == "import-review" and parts[5] == "confirm":
             def confirm():
                 body = self._json_body()

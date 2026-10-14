@@ -8,7 +8,7 @@
    stay in the project when the dialog closes (a model too big for the bed becomes a split on Done). Mounted by main.js, which
    passes { api, upload, toast, openCreated, importNotes }. */
 
-import { importWithReview, isReviewed } from "./import-review.js?v=1";
+import { importWithReview, isReviewed } from "./import-review.js?v=2";
 
 const POLL_MS = 1500;
 const POLL_FAILURES = 3;   // consecutive failed checks before the table stops asking
@@ -389,6 +389,7 @@ async function drain() {
           render();
           continue;
         }
+        if (result?.separate) host.toast(`${item.name} was imported as its own project, “${result.name}”.`);
         if (existing) importNotes = [...new Set([...importNotes, ...(result?.import_notes || [])])];
         queue = queue.filter(q => q !== item);
         await refresh();

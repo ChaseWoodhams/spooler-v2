@@ -626,3 +626,8 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .import-substitution dt { color: var(--muted, #888); }
 .import-substitution dd { margin: 0; }
 .import-notes { margin-top: 10px; font-size: 12px; }
+.import-resolution { display: grid; gap: 6px; margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--border, #444); border-radius: 8px; font-size: 13px; }
+.import-resolution label { display: flex; gap: 6px; align-items: baseline; }
+.import-diff { border-collapse: collapse; font-size: 12px; }
+.import-diff th, .import-diff td { text-align: left; padding: 2px 10px 2px 0; }
+.import-resolved ul, .import-differences ul { margin: 0; padding-left: 18px; font-size: 13px; }

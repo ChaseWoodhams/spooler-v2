@@ -498,7 +498,12 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
     async def test_adding_an_orca_project_appends_its_plates(self):
         project = await self.project_with_cube()
         data = self.orca_project()
-        added = projects.import_model(project["id"], io.BytesIO(data), len(data), "Bench set.3mf")
+        with self.assertRaises(jobs.JobError) as refused:   # its High Temp bed cannot coexist with this Project's bed
+            projects.import_model(project["id"], io.BytesIO(data), len(data), "Bench set.3mf")
+        self.assertEqual(refused.exception.issues[0]["blockers"][0]["code"], "incompatible-bed")
+        review = projects.prepare_import(io.BytesIO(data), len(data), "Bench set.3mf", target=project["id"])
+        review = projects.resolve_import(review["token"], {"conflicts": "convert"})
+        added = projects.confirm_import(review["token"], {**review["binding"], "acknowledged": True})
         await self.run_worker()
 
         self.assertEqual([p["id"] for p in added["data"]["plates"]], [1, 2, 3])
