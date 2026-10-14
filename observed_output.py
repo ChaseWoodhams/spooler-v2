@@ -104,8 +104,8 @@ def _is_nil(value) -> bool:
 
 # ── Known benign normalization ─────────────────────────────────────────────────
 
-def _choices(definition) -> set:
-    return {str(choice[0]) for choice in (definition or {}).get("enum") or []}
+def _choices(definition) -> list:
+    return [str(choice[0]) for choice in (definition or {}).get("enum") or []]
 
 
 def _normalization(key, kind, expected, observed, source, definition):
@@ -115,11 +115,13 @@ def _normalization(key, kind, expected, observed, source, definition):
         return "Orca appends the image format to each thumbnail size."
     if key == "enable_prime_tower" and _BOOLEANS.get(_show(expected).lower()) == "1" and _BOOLEANS.get(_unquote(observed).lower()) == "0":
         return "Orca turns the prime tower off when a Plate prints with one filament."
+    # An inherited preset value that is not a choice of the pinned enum (a vendor file's spelling): Orca falls back to the enum's
+    # default, its first declared choice. Only that fallback is benign; a user-set value, or any other change, is a mismatch.
     choices = _choices(definition)
-    if choices and not isinstance(expected, list) and str(expected) not in choices and source in ("preset", "alternate-preset") \
-            and _unquote(observed) in choices:
+    if choices and isinstance(expected, str) and expected not in choices and source in ("preset", "alternate-preset") \
+            and _unquote(observed) == choices[0]:
         return (f"The inherited preset value “{expected}” is not a valid OrcaSlicer 2.4.2 choice; "
-                f"Orca replaced it with “{_unquote(observed)}”.")
+                f"Orca replaced it with its default “{choices[0]}”.")
     return None
 
 
@@ -146,8 +148,7 @@ def _expected_values(snapshot) -> list:
             if key in IGNORED:
                 continue
             scope = _scope(snapshot.get("provenance"), kind, key)
-            if kind == "filament" and _is_nil((schema.get(key) or {}).get("nullable") and value or None) and \
-                    (schema.get(key) or {}).get("nullable") and _is_nil(value):
+            if kind == "filament" and (schema.get(key) or {}).get("nullable") and _is_nil(value):
                 continue                              # nil override: judged through the inherited key
             if (kind, key) in overridden:
                 value, scope = overridden[(kind, key)]

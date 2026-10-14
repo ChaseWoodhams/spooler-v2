@@ -19,10 +19,8 @@ Report version 1:
   features            accepted import losses (advanced Orca features) recorded with the Project; none is preserved
   bricklayers         null, or the Plates and the explanation that Orca configuration cannot reproduce the transformed G-code
 """
-import hashlib
-import json
-
 import export_plan as planner
+from values import digest
 
 VERSION = 1
 REPRESENTATION = "lossy-3mf"
@@ -40,16 +38,6 @@ def category(kind: str, key: str) -> str:
 
 def filename(project_name: str) -> str:
     return planner.filename(project_name)[:-len(".3mf")] + " (lossy).3mf"
-
-
-def _object_overrides(basis: dict, entries: list) -> list:
-    out = []
-    for plate, review in entries:
-        for obj in review["objects"]:
-            for key, value in sorted((obj.get("overrides") or {}).items()):
-                if basis["process"].get(key) != value:
-                    out.append({"plate": plate["id"], "object_id": obj["id"], "name": obj["name"], "key": key, "value": value})
-    return out
 
 
 def _inherited(entries: list) -> list:
@@ -96,11 +84,11 @@ def alternative(record: dict, plan: dict, entries: list, import_records: list) -
                             "plates": [{**p, "kept": p["value"] == reference} for p in d["plates"]]})
     bricks = next((l for l in plan["limitations"] if l["code"] == "bricklayers"), None)
     report = {"version": VERSION, "basis": basis_plate["id"], "plates": [(p["id"], p["material"], p["written_as"]) for p in plates],
-              "differences": differences, "object_overrides": _object_overrides(basis, entries), "inherited": _inherited(entries),
+              "differences": differences, "object_overrides": [row for plate, review in entries for row in planner.override_rows(review, plate, basis["process"])], "inherited": _inherited(entries),
               "features": _features(import_records), "bricklayers": bricks["plates"] if bricks else None}
     return {**base, "available": True, "filename": filename(record["name"]), "content_type": planner.CONTENT_TYPE,
             "basis": {"plate_id": basis_plate["id"], "plate_name": basis_plate["name"], "material": written},
             "plates": plates, "differences": differences, "object_overrides": report["object_overrides"], "inherited": report["inherited"],
             "features": report["features"],
             "bricklayers": {"plates": bricks["plates"], "message": BRICKLAYERS} if bricks else None,
-            "report_fingerprint": hashlib.sha256(json.dumps(report, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()}
+            "report_fingerprint": digest(report, default=str)}

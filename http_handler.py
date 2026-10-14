@@ -19,6 +19,7 @@ import asyncio
 import backup
 import bed_cleared
 import dashboard
+import export_plan
 import holds
 import farm
 import health
@@ -34,6 +35,7 @@ import splits
 import state
 import time
 import time_estimate
+from values import safe_filename
 from auth import (
     AUTH_ENABLED, BCRYPT_AVAILABLE, SECURE_COOKIES, SESSION_COOKIE,
     _auth_ok, _check_rate_limit, _create_session, _get_pw_hash, _get_username,
@@ -1155,7 +1157,7 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json({"imports": projects.import_records(project_id)})
             elif len(parts) == 7 and parts[4] == "imports" and parts[6] == "source":
                 path, name = projects.import_source(project_id, parts[5])
-                self._send_file(path, "model/3mf", download_name=re.sub(r'[^\w .-]+', "_", name) or "import.3mf")
+                self._send_file(path, "model/3mf", download_name=safe_filename(name, "import.3mf", ""))
             elif len(parts) == 5 and parts[4] == "jobs":
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
@@ -1183,7 +1185,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             elif len(parts) == 5 and parts[4] == "export-package.zip":
                 self._guard_draft(project_id)
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)       # only for a plan the caller reviewed
-                artifact = projects.export_project(project_id, (query.get("revision") or [None])[0], (query.get("fingerprint") or [None])[0], "plate-3mf-package")
+                artifact = projects.export_project(project_id, (query.get("revision") or [None])[0], (query.get("fingerprint") or [None])[0], export_plan.PACKAGE)
                 self._send_bytes(artifact["body"], artifact["content_type"], download_name=artifact["filename"])
             elif len(parts) == 7 and parts[4] == "models" and parts[6] == "preview":
                 self._send_file(projects.model_preview(project_id, int(parts[5])), "application/octet-stream")
@@ -1215,7 +1217,7 @@ class SPHandler(SimpleHTTPRequestHandler):
                 if parts[6] == "gcode":
                     record = projects.get_project(project_id)
                     plate = next((p for p in record["data"]["plates"] if p["id"] == plate_id), {"name": f"Plate {plate_id}"})
-                    name = re.sub(r'[^\w .-]+', "_", f"{record['name']}_{plate['name']}").strip() + ".gcode"
+                    name = safe_filename(f"{record['name']}_{plate['name']}") + ".gcode"
                     self._send_file(path, "text/plain; charset=utf-8", download_name=name)
                 else:
                     self._send_file(path, "application/octet-stream")

@@ -34,6 +34,7 @@ import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
 import state
 from gcode_meta import read_estimates, safe_gcode_name
 from persistence import DATA_DIR
+from values import first
 
 APP_DIR         = Path(__file__).parent
 SLICE_TIMEOUT_S = int(os.getenv("SLICE_TIMEOUT_S", "900"))
@@ -760,6 +761,15 @@ def filament_compatibility(values: dict, machine: dict) -> None:
         raise jobs.JobError("This Filament uses a compatibility condition that cannot be verified — choose an explicitly compatible preset", 409)
 
 
+def _filament_reference(values: dict, chain: list, orca: Path) -> tuple:
+    """(reference, content) of freezing `values`: the stored bytes and the reference that names their hash, material and origin."""
+    content = json.dumps(values, indent=1, sort_keys=True).encode()
+    reference = {"version": 1, "sha256": hashlib.sha256(content).hexdigest(), "name": values["name"], "material": values.get("filament_type"),
+                 "source_chain": chain, "schema": "OrcaSlicer 2.4.2", "slicer_folder": orca.parent.name,
+                 "vendor_profile_version": vendor_profile_version(orca)}
+    return reference, content
+
+
 def propose_filament(name: str, machine: dict, *, verify: bool = True) -> tuple:
     """What freezing the catalogue's current `name` would store: (reference, flattened values, content bytes).
     Writes nothing, so a review can show it and be cancelled."""
@@ -767,20 +777,16 @@ def propose_filament(name: str, machine: dict, *, verify: bool = True) -> tuple:
     values, chain = flatten_preset(_presets("filament", orca), name)
     if verify:
         filament_compatibility(values, machine)
-    content = json.dumps(values, indent=1, sort_keys=True).encode()
-    digest = hashlib.sha256(content).hexdigest()
-    reference = {"version": 1, "sha256": digest, "name": values["name"], "material": values.get("filament_type"),
-                 "source_chain": chain, "schema": "OrcaSlicer 2.4.2", "slicer_folder": orca.parent.name,
-                 "vendor_profile_version": vendor_profile_version(orca)}
+    reference, content = _filament_reference(values, chain, orca)
     return reference, values, content
 
 
 def imported_filament(project: dict, machine: dict, name: str | None) -> tuple:
     """The Filament configuration an Orca project carries, as an immutable-preset body: (values, left_out).
     Only keys this application may carry (the Filament tab, minus the blocked and script keys) are kept, each validated like an edit and
-    kept in Orca's own representation (full vectors, "nil" for nullable inheritance). `left_out` lists [{key, reason}] for the rest.
+    kept in Orca's own representation (full vectors, "nil" for nullable inheritance). `left_out` lists [{key, code, reason}] for the rest,
+    `code` being "blocked-setting" or "invalid-setting".
     Raises JobError when the file does not say what material it is, or sizes a different nozzle than `machine`."""
-    first = lambda value: value[0] if isinstance(value, list) and value else value
     material = first(project.get("filament_type"))
     if not isinstance(material, str) or not material.strip():
         raise jobs.JobError("The file doesn't say what material it is")
@@ -811,11 +817,7 @@ def snapshot_proposal(values: dict, machine: dict) -> tuple:
     Writes nothing; store_filament stores exactly this."""
     orca = require_orca()
     filament_compatibility(values, machine)
-    content = json.dumps(values, indent=1, sort_keys=True).encode()
-    reference = {"version": 1, "sha256": hashlib.sha256(content).hexdigest(), "name": values["name"], "material": values.get("filament_type"),
-                 "source_chain": [values["name"]], "schema": "OrcaSlicer 2.4.2", "slicer_folder": orca.parent.name,
-                 "vendor_profile_version": vendor_profile_version(orca)}
-    return reference, content
+    return _filament_reference(values, [values["name"]], orca)
 
 
 def lock_filament(name: str, machine: dict) -> dict:

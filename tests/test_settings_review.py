@@ -249,7 +249,17 @@ class AlternateRefresh(ReviewCase):
         preview, request = self.review(project, {"kind": "model", "model_id": 2})
         self.assertIsNone(preview["current"])
         self.assertEqual(preview["changes"], [])
-        adopted = settings_review.apply(project["id"], request)
+        # nothing verified to compare with, so the name alone is not enough: the person sees what it would become and confirms it
+        self.assertEqual((preview["proposed"]["name"], preview["proposed"]["material"], preview["proposed"]["sha256"] is not None),
+                         ("Workshop ASA", ["ASA"], True))
+        needs = [i for i in preview["issues"] if i.get("acknowledgement_required")]
+        self.assertEqual([i["code"] for i in needs], ["no-verified-snapshot"])
+        before = projects.get_project(project["id"])
+        with self.assertRaises(jobs.JobError) as refused:
+            settings_review.apply(project["id"], request)
+        self.assertEqual((refused.exception.status, refused.exception.issues[0]["code"]), (409, "no-verified-snapshot"))
+        self.assertEqual(projects.get_project(project["id"])["revision"], before["revision"])
+        adopted = settings_review.apply(project["id"], {**request, "accept_no_verified_snapshot": True})
         self.assertEqual(adopted["data"]["filaments"]["2"]["snapshot"]["material"], ["ASA"])
 
     async def test_model_without_an_alternate_has_nothing_to_refresh(self):

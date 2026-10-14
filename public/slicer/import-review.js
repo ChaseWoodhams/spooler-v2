@@ -68,7 +68,7 @@ function blockerHtml(blocker) {
   return `<li data-blocker="${esc(blocker.code)}"><strong>${esc(blocker.code.replace(/-/g, " "))}</strong>: ${esc(blocker.message)}${detail}${choices}</li>`;
 }
 
-function resolutionHtml(report) {
+function resolutionHtml(report, open = false) {
   const applied = report.resolution || {};
   const lines = [];
   if (applied.material) lines.push(applied.material.choice === "imported"
@@ -78,7 +78,7 @@ function resolutionHtml(report) {
   if (applied.conflicts) lines.push("Converted to this Project's printer and bed.");
   const left = (report.differences || []).map(d => d.keys ? `${d.keys.length} settings not in the presets (${d.keys.slice(0, 4).join(", ")}${d.keys.length > 4 ? ", …" : ""})` : `${d.key} — ${d.reason}`);
   return (lines.length ? `<section class="import-resolved"><h4>Your choices</h4><ul>${lines.map(l => `<li>${l}</li>`).join("")}</ul></section>` : "")
-    + (left.length ? `<details class="import-differences"><summary>${left.length === 1 ? "1 difference remains" : `${left.length} differences remain`} — fidelity is not complete</summary><ul>${left.map(l => `<li>${esc(l)}</li>`).join("")}</ul></details>` : "");
+    + (left.length ? `<details class="import-differences"${open ? " open" : ""}><summary>${left.length === 1 ? "1 difference remains" : `${left.length} differences remain`} — fidelity is not complete</summary><ul>${left.map(l => `<li>${esc(l)}</li>`).join("")}</ul></details>` : "");
 }
 
 function render(review) {
@@ -93,10 +93,10 @@ function render(review) {
   return `<h3 id="import-review-title">Review import of ${esc(review.filename)}</h3>
     <p class="slicer-hint">Nothing in your Project has changed. ${report.losses.length
       ? "These features are not carried into Spooler, and no Slice will include them."
-      : ""}</p><p data-role="error" role="alert" class="slicer-error" hidden></p>${blocked}${losses}${resolutionHtml(report)}${notes}
+      : ""}</p><p data-role="error" role="alert" class="slicer-error" hidden></p>${blocked}${losses}${resolutionHtml(report, review.required && !report.losses.length)}${notes}
     <div class="slicer-dialog-actions">
       <button type="button" class="btn btn-secondary" data-act="cancel">${report.blockers.length ? "Cancel import" : "Cancel"}</button>
-      ${report.blockers.length ? "" : `<button type="button" class="btn btn-primary" data-act="continue">${report.losses.length ? "Continue with losses" : "Import"}</button>`}
+      ${report.blockers.length ? "" : `<button type="button" class="btn btn-primary" data-act="continue">${report.losses.length ? "Continue with losses" : review.required ? "Continue with differences" : "Import"}</button>`}
     </div>`;
 }
 

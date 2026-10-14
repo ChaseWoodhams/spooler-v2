@@ -22,6 +22,8 @@ from xml.sax.saxutils import escape
 
 import numpy as np
 
+from values import first as _first
+
 MODEL_PATH    = "3D/3dmodel.model"
 SETTINGS_PATH = "Metadata/model_settings.config"
 PROJECT_PATH  = "Metadata/project_settings.config"
@@ -565,10 +567,6 @@ def _same(a, b) -> bool:
         return math.isclose(float(str(a).rstrip("%")), float(str(b).rstrip("%")), rel_tol=1e-9, abs_tol=1e-9) and str(a).endswith("%") == str(b).endswith("%")
     except ValueError:
         return False
-
-
-def _first(value):
-    return value[0] if isinstance(value, list) and value else value
 
 
 def settings_changes(project: dict, base: dict, allowed: dict) -> dict:

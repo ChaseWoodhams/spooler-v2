@@ -110,7 +110,33 @@ class CheckingOrcaOutput(ObservedCase):
         self.assertEqual(refused.exception.status, 409)
         self.assertIn("nozzle_temperature", str(refused.exception))
         # a person who has read the differences can still send it deliberately
-        job = projects.queue_plate(project["id"], 1, {"printer_id": "p1", "accept_unverified": True})
+        job = projects.queue_plate(project["id"], 1, {"printer_id": "p1", "accept_unverified": self.accepted(project)})
+        self.assertEqual(job["printer_id"], "p1")
+
+    def accepted(self, project):
+        """What the person's 'Send anyway' repeats: the Slice whose differences they read (from the Slice review)."""
+        shown = projects.slice_inputs(project["id"], 1)["slice"]
+        return {"1": {"fingerprint": shown["fingerprint"], "sliced_at": shown["sliced_at"]}}
+
+    async def test_sending_an_unverified_slice_anyway_is_bound_to_the_slice_that_was_reviewed(self):
+        def tweak(footer):
+            footer["wall_loops"] = "2"
+        project = await self.petg_project()
+        project = self.edit(project, lambda d: d["plates"][0].update(overrides={"wall_loops": "6"}))
+        project = await self.sliced(project, footer_runner(tweak))
+        reviewed = self.accepted(project)
+        for blanket in (True, {}, {"1": {"fingerprint": "nope", "sliced_at": 0}}):
+            with self.subTest(str(blanket)):
+                with self.assertRaises(jobs.JobError) as refused:
+                    projects.queue_plate(project["id"], 1, {"printer_id": "p1", "accept_unverified": blanket})
+                self.assertEqual(refused.exception.status, 409)
+        self.assertEqual(projects.project_jobs(project["id"]), [])
+        project = await self.sliced(project, footer_runner(tweak))          # sliced again: a new Slice the person has not read
+        with self.assertRaises(jobs.JobError) as stale:
+            projects.queue_plate(project["id"], 1, {"printer_id": "p1", "accept_unverified": reviewed})
+        self.assertEqual((stale.exception.status, stale.exception.issues[0]["code"]), (409, "unverified-slice-changed"))
+        self.assertEqual(projects.project_jobs(project["id"]), [])
+        job = projects.queue_plate(project["id"], 1, {"printer_id": "p1", "accept_unverified": self.accepted(project)})
         self.assertEqual(job["printer_id"], "p1")
 
     async def test_a_known_orca_normalization_is_recorded_and_does_not_make_the_slice_unverified(self):
@@ -139,6 +165,16 @@ class CheckingOrcaOutput(ObservedCase):
         self.assertIn("not a valid", note["reason"])
         self.assertEqual(self.review(project)["differences"], [])
         self.assertTrue(project["slices"]["1"]["observed"]["trusted"])
+
+    async def test_an_invalid_inherited_value_is_only_benign_when_orca_fell_back_to_its_default_choice(self):
+        def tweak(footer):
+            footer["sparse_infill_pattern"] = "grid"           # a valid choice, but not the fallback for an unknown value
+        self.stock_process_value("sparse_infill_pattern", "zig-zag")
+        project = await self.sliced(await self.petg_project(), footer_runner(tweak))
+        review = self.review(project)
+        self.assertEqual(review["state"], "mismatch")
+        self.assertEqual([d["key"] for d in review["differences"]], ["sparse_infill_pattern"])
+        self.assertFalse(project["slices"]["1"]["observed"]["trusted"])
 
     def stock_process_value(self, key, value):
         """Change a stock process preset in the fake Orca install, as a vendor file can carry a value Spooler would not accept."""

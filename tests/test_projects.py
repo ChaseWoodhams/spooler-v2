@@ -25,6 +25,12 @@ from tests.test_slicer import SLICED_GCODE, cube_stl, fake_runner, make_fake_orc
 TEMPLATE_EXTRAS = {"brim_width": "5", "enable_prime_tower": "0", "wipe_tower_x": "165"}
 
 
+def import_reviewed(data: bytes, name: str) -> dict:
+    """Open a 3MF the way the review screen does: stage it, then confirm what was shown, acknowledging what it lists."""
+    review = projects.prepare_import(io.BytesIO(data), len(data), name)
+    return projects.confirm_import(review["token"], {**review["binding"], "acknowledged": True})
+
+
 def template_runner(code=0, extras=None):
     """Writes a 3MF whose project_settings.config is every loaded preset value plus Orca defaults for everything else."""
     def run(args, timeout):
@@ -499,7 +505,7 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_orca_project_opens_with_its_plates_placements_and_settings(self):
         data = self.orca_project()
-        created = projects.create_project_from_upload(io.BytesIO(data), len(data), "Bench set.3mf")
+        created = import_reviewed(data, "Bench set.3mf")
         await self.run_worker()
         project = projects.get_project(created["id"])
 
@@ -543,7 +549,7 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
     async def test_exporting_gives_orca_the_same_plates_and_placements(self):
         import orca_3mf
         data = self.orca_project()
-        created = projects.create_project_from_upload(io.BytesIO(data), len(data), "Bench set.3mf")
+        created = import_reviewed(data, "Bench set.3mf")
         await self.run_worker()
 
         with mock.patch.object(slicer, "runner", template_runner()):
