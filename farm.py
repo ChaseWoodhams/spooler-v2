@@ -98,8 +98,13 @@ def suggest_preset(spool: dict, machine: str) -> str | None:
     return min(matches)[2] if matches else None
 
 
-def filament_changes(spool: dict, bed: str, base: dict) -> dict:
-    """Filament-setting changes that describe the spool, limited to what the preset `base` and OrcaSlicer accept."""
+SPOOL_KEYS = ("filament_density", "filament_diameter", "nozzle_temperature", "nozzle_temperature_initial_layer", "textured_plate_temp",
+              "textured_plate_temp_initial_layer", "hot_plate_temp", "hot_plate_temp_initial_layer", "filament_cost")   # what a spool sets
+
+
+def filament_proposal(spool: dict, bed: str, base: dict) -> tuple:
+    """(changes, skipped): the Filament settings that describe the spool, limited to what the preset `base` and
+    OrcaSlicer accept, and the properties that were left out with the reason."""
     wanted = {}
     if _number(spool.get("density")):
         wanted["filament_density"] = [spool["density"]]
@@ -112,13 +117,18 @@ def filament_changes(spool: dict, bed: str, base: dict) -> dict:
             wanted[key] = [int(spool["bed_temp"])]
     if _number(spool.get("price_per_kg")):
         wanted["filament_cost"] = [round(spool["price_per_kg"], 2)]
-    changes = {}
+    changes, skipped = {}, []
     for key, value in wanted.items():
         try:
             changes.update(slicer.normalize_overrides({"filament": {key: value}}, base).get("filament", {}))
-        except jobs.JobError:
-            continue
-    return changes
+        except jobs.JobError as exc:
+            skipped.append({"key": key, "value": value, "reason": str(exc)})
+    return changes, skipped
+
+
+def filament_changes(spool: dict, bed: str, base: dict) -> dict:
+    """Filament-setting changes that describe the spool, limited to what the preset `base` and OrcaSlicer accept."""
+    return filament_proposal(spool, bed, base)[0]
 
 
 def spool_match(spool_id: int, bundle_id: str, bed: str = "textured") -> dict:
