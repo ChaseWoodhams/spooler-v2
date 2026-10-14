@@ -1274,7 +1274,7 @@ async function reviewEffectiveSettings() {
     const rows = kind => Object.entries(result[kind] || {}).map(([key, v]) => {
       const chain = result.provenance?.[kind]?.[key] || [];
       const winner = chain.at(-1);
-      return `<tr><th scope="row">${esc(state.schema?.settings?.[key]?.label || key)}</th><td>${esc(value(v))}</td><td>${esc(winner?.source || "preset")}${winner?.reason ? ` — ${esc(winner.reason)}` : ""}</td></tr>`;
+      return `<tr><th scope="row">${esc(state.schema?.options?.[key]?.label || key)}</th><td>${esc(value(v))}</td><td>${esc(winner?.source || "preset")}${winner?.reason ? ` — ${esc(winner.reason)}` : ""}</td></tr>`;
     }).join("");
     el.innerHTML = `<h4>Settings sent to Orca</h4><p>Current Plate inputs, not measured output from a completed Slice.</p>
       <p><b>${esc(value(result.filament?.filament_type))}</b> · Nozzle ${esc(value(result.machine?.nozzle_diameter))} mm · ${esc(result.process?.curr_bed_type)}</p>
