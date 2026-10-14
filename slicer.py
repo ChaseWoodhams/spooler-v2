@@ -154,6 +154,48 @@ def vendor_profile_version(orca: Path) -> str | None:
         return None
 
 
+# Nozzle sizes Orca ships no Centauri Carbon profiles for, derived from a stock size: {size: stock size}
+DERIVED_NOZZLES = {"0.7": "0.8"}
+
+
+def _derived_presets(kind: str, index: dict) -> dict:
+    """0.7 mm printer and process presets, scaled from the 0.8 mm ones (layer height and line widths ×0.7/0.8)."""
+    out = {}
+    for size, stock in DERIVED_NOZZLES.items():
+        scale = float(size) / float(stock)
+        old, new = f"{stock} nozzle", f"{size} nozzle"
+        machine_old, machine_new = f"{PRINTER_FAMILY}{stock[2:]} nozzle", f"{PRINTER_FAMILY}{size[2:]} nozzle"
+        for name, preset in index.items():
+            if not name.endswith(old) or preset.get("instantiation") != "true":
+                continue
+            if kind == "machine" and name == machine_old:
+                out[machine_new] = {"name": machine_new, "inherits": name, "type": "machine", "instantiation": "true",
+                                    "from": "system", "nozzle_diameter": [size], "printer_variant": size}
+            elif kind == "process" and machine_old in (flatten_preset(index, name)[0].get("compatible_printers") or []):
+                flat = flatten_preset(index, name)[0]
+                derived = name[:-len(old)] + new
+                changes = {"name": derived, "inherits": name, "type": "process", "instantiation": "true", "from": "system",
+                           "compatible_printers": [machine_new]}
+                height = _number_or_none(flat.get("layer_height"))
+                if height:
+                    scaled = round(height * scale, 2)
+                    changes["layer_height"] = f"{scaled:g}"
+                    changes["name"] = re.sub(r"^\d\.\d+mm", f"{scaled:.2f}mm", derived)
+                for key, value in flat.items():
+                    width = _number_or_none(value) if key.endswith("line_width") else None
+                    if width:
+                        changes[key] = f"{round(width * scale, 2):g}"
+                out[changes["name"]] = changes
+    return out
+
+
+def _number_or_none(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _system_presets(kind: str, orca: Path) -> dict:
     key = (str(orca), kind)
     if key not in _preset_cache:
@@ -165,6 +207,7 @@ def _system_presets(kind: str, orca: Path) -> dict:
                 continue
             if isinstance(data, dict) and data.get("name"):
                 index[data["name"]] = data
+        index.update(_derived_presets(kind, index))
         _preset_cache[key] = index
     return _preset_cache[key]
 
@@ -213,6 +256,9 @@ def flatten_preset(presets: dict, name: str) -> tuple:
 
 def _compatible(preset: dict, machine: str) -> bool:
     printers = preset.get("compatible_printers") or []
+    for size, stock in DERIVED_NOZZLES.items():  # a derived size accepts whatever its stock size accepts
+        if preset.get("type") == "filament" and machine == f"{PRINTER_FAMILY}{size[2:]} nozzle" and f"{PRINTER_FAMILY}{stock[2:]} nozzle" in printers:
+            return True
     return not printers or machine in printers
 
 

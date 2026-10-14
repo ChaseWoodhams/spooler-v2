@@ -357,6 +357,9 @@ def request_split(split_id: int) -> dict:
     check = _read(work_dir(split_id), "check.json")
     if not check:
         raise jobs.JobError("Plan the cuts first", 409)
+    tiny = sum(bool(p.get("tiny")) for p in check["pieces"])
+    if tiny:
+        raise jobs.JobError(f"{tiny} part{'s are' if tiny != 1 else ' is'} too small to print — move the cut that makes {'them' if tiny != 1 else 'it'} or remove it", 409)
     oversize = sum(not p["fits"] for p in check["pieces"])
     if oversize:
         raise jobs.JobError(f"{oversize} part{'s are' if oversize != 1 else ' is'} still too big — use Auto-fix or move the cuts", 409)

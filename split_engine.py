@@ -56,6 +56,8 @@ PREVIEW_TRIANGLES = 250_000
 WORK_TRIANGLES    = 400_000
 SIMPLIFY_ABOVE    = 400_000      # full models above this are simplified at 0.01 mm (sculpt detail)
 MIN_BODY_MM3      = 1.0
+TINY_PART_MM3     = 1000.0       # a part smaller than this (1 cm³) is a sliver, not something worth printing
+TINY_PART_MM      = 2.0          # ... and so is one thinner than this in every direction
 MIN_SLAB_MM       = 30.0         # never leave a slab thinner than this along a cut normal
 NUDGE_FRACTIONS   = np.linspace(0.2, 0.8, 13)
 TOP_CANDIDATES    = 3
@@ -429,11 +431,14 @@ def describe_pieces(pieces: list, limits: dict) -> list:
     for piece in pieces:
         pts = hull_points(piece["man"])
         ext = obb_extents(pts)
+        size = sorted(round(float(x), 1) for x in (ext if ext is not None else np.ptp(pts, axis=0)))
+        volume = piece["man"].volume()
         out.append({
             "bbox":       [round(float(x), 2) for x in piece["man"].bounding_box()],
-            "volume_cm3": round(piece["man"].volume() / 1000, 2),
-            "size":       sorted(round(float(x), 1) for x in (ext if ext is not None else np.ptp(pts, axis=0))),
+            "volume_cm3": round(volume / 1000, 2),
+            "size":       size,
             "fits":       parts_needed(pts, limits) == 1,
+            "tiny":       volume < TINY_PART_MM3 or size[0] < TINY_PART_MM,
         })
     return out
 
@@ -876,6 +881,9 @@ def split(work: Path) -> None:
     stage.progress(2, "Loading the model")
     model = load_model(work / "model.npz")
     pieces, events = apply_cuts(model, cuts, stage, 3, 22)
+    tiny = sum(d["tiny"] for d in describe_pieces(pieces, limits))
+    if tiny:
+        raise EngineError(f"{tiny} part{'s are' if tiny != 1 else ' is'} too small to print — move the cut that makes {'them' if tiny != 1 else 'it'} or remove it")
     oversize = sum(parts_needed(hull_points(p["man"]), limits) > 1 for p in pieces)
     if oversize:
         raise EngineError(f"{oversize} part{'s are' if oversize != 1 else ' is'} still too big for the printer — use Auto-fix or move the cuts")

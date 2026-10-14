@@ -845,8 +845,11 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: bed_cleared.set_auto_start(
                 self._path_printer_id(), self._json_body().get("enabled")), broadcast=False)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
-            self._jobs_call(lambda: preflight.set_printer_hardware(
-                self._path_printer_id(), self._json_body().get("nozzle_diameter")), broadcast=False)
+            def set_hardware():
+                body = self._json_body()
+                return preflight.set_printer_hardware(
+                    self._path_printer_id(), body.get("nozzle_diameter"), body.get("nozzle_material"))
+            self._jobs_call(set_hardware, broadcast=False)
         elif self.path.startswith("/api/v1/"):
             self._proxy_spoolman_ui("POST", self.path, self._read_body())
         elif self.path.startswith("/api/spoolman"):

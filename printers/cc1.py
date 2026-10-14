@@ -216,6 +216,9 @@ class CC1Connection(PrinterConnection):
             url = payload.get("VideoUrl") or payload.get("Url")
             if url:
                 self.camera_url = url if url.startswith("http") else f"http://{url}"
+        elif cmd == CMD_START:
+            # The reply is the only place the printer says why it refused a start
+            print(f"[Printer {self.name}] Start print reply: {payload}")
         elif cmd == CMD_LIGHT:
             await self.send_cmd(CMD_STATUS, {})
         elif cmd == CMD_CANVAS:

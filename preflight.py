@@ -34,7 +34,8 @@ PRINTER_LIMITS = {
         "bed_max_c":    110,
     },
 }
-NOZZLE_SIZES      = (0.2, 0.4, 0.6, 0.8)
+NOZZLE_SIZES      = (0.2, 0.4, 0.6, 0.7, 0.8)
+NOZZLE_MATERIALS  = ("brass", "hardened steel")
 EDGE_TOLERANCE_MM = 0.5
 RUNOUT_MARGIN     = 1.05
 PLATE_BED_TYPE    = {False: "Textured PEI Plate", True: "High Temp Plate"}
@@ -57,10 +58,10 @@ def _load_hardware() -> dict:
 
 
 def printer_hardware(printer_id: str) -> dict:
-    return {"nozzle_diameter": None, **_load_hardware().get(printer_id, {})}
+    return {"nozzle_diameter": None, "nozzle_material": None, **_load_hardware().get(printer_id, {})}
 
 
-def set_printer_hardware(printer_id: str, nozzle_diameter) -> dict:
+def set_printer_hardware(printer_id: str, nozzle_diameter, nozzle_material=None) -> dict:
     if printer_id not in state.printers:
         raise jobs.JobError("Printer not found", 404)
     try:
@@ -69,9 +70,14 @@ def set_printer_hardware(printer_id: str, nozzle_diameter) -> dict:
         raise jobs.JobError("nozzle_diameter must be a number")
     if nozzle not in NOZZLE_SIZES:
         raise jobs.JobError(f"Nozzle must be one of {', '.join(f'{n:g}' for n in NOZZLE_SIZES)} mm")
+    if nozzle_material is not None and nozzle_material not in NOZZLE_MATERIALS:
+        raise jobs.JobError(f"Nozzle material must be one of {', '.join(NOZZLE_MATERIALS)}")
+    update = {"nozzle_diameter": nozzle}
+    if nozzle_material is not None:
+        update["nozzle_material"] = nozzle_material
     with _hardware_lock:
         data = _load_hardware()
-        data[printer_id] = {**data.get(printer_id, {}), "nozzle_diameter": nozzle}
+        data[printer_id] = {**data.get(printer_id, {}), **update}
         _atomic_write(HARDWARE_FILE, json.dumps(data, indent=2))
     return printer_hardware(printer_id)
 
