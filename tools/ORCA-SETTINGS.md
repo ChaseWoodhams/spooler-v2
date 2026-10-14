@@ -107,3 +107,20 @@ keys, and its material becomes a snapshot-backed Model Filament choice (none whe
 bed blocks (`incompatible-machine`, `incompatible-bed`, options `separate-project` / `convert`). The report keeps `differences`
 (blocked scripts, rejected values, `uncompared-settings` the chosen presets do not state, conversions) and the applied `resolution`;
 both are retained with the accepted import record and neither claims full fidelity.
+
+## Settings actually used (review rows)
+
+`projects.effective_settings(project, plate, revision, object_id=, search=, changed_only=)` and
+`GET /api/projects/{id}/plates/{plate}/effective-settings?revision=&object=&search=&changed=1` add a
+`review` block built by `effective_settings.review` from the same resolved layers and provenance
+the Slice uses. Each row carries `inherited` (preset), `requested` (top Project/Plate/Object
+override), `effective`, `source`, the ordered `chain`, `changed` (Plate view: differs from the
+preset; Object view: differs from the Plate), `enforced`/`enforced_reason` (bed selection and
+BrickLayers), `inactive_reason` from the pinned dependency metadata (the saved value is kept),
+`reset_to` (the parent that removing the top override restores, or the Orca default),
+`editable`/`read_only_reason` and the owning `control`. Search matches labels and keys.
+Keys with no pinned control and all machine values are listed read-only and passed through
+unchanged; chamber keys carry a note that Spooler does not claim chamber heater control.
+Issues gain a `control` link (null and `read_only` for inherited ones). Values are expected
+pre-slice inputs, never labelled as measured output. Specs: `tests/test_effective_review.py`,
+`tests/ui/effective-review.spec.cjs`.

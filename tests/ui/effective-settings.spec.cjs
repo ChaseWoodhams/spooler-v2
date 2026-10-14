@@ -27,6 +27,17 @@ function boxPreview() {
 const model = id => ({ id, file: `box${id}.stl`, state: 'ready', sha256: `sha${id}`, import: [1, 'z'], size: [40, 30, 20], triangles: 12, volume_cm3: 1, repairs: [] });
 const object = (id, plate, x, y) => ({ id, model: id, plate, name: `box${id}`, position: [x, y], rotation: [0, 0, 0], scale: [1, 1, 1] });
 
+// Presentation rows as the server's shared operation returns them.
+function reviewRows() {
+  const row = (kind, key, label, section, effective, source, o = {}) => ({ kind, key, label, section, inherited: null, has_inherited: false, requested: null, effective, source, chain: [],
+    changed: false, enforced: false, enforced_reason: null, inactive: false, inactive_reason: null, reset_to: null, editable: true, read_only: false, read_only_reason: null, control: null, note: null, ...o });
+  return { version: 1, label: 'Settings that will be sent to Orca', evidence: 'expected-inputs', scope: { kind: 'plate', id: 1 }, changed_basis: "the preset's inherited value",
+    filament_basis: { kind: 'default', explanation: 'Project default Filament preset plus the Project tuning.' },
+    rows: [row('filament', 'filament_type', 'Filament type', 'material', ['PETG'], 'preset'), row('machine', 'nozzle_diameter', 'Nozzle diameter', 'nozzle', ['0.4'], 'preset'),
+      row('process', 'curr_bed_type', 'Bed type', 'bed', 'High Temp Plate', 'bed', { enforced: true, enforced_reason: 'Project bed selection' }),
+      row('filament', 'nozzle_temperature', 'Nozzle temperature', 'temperature', ['250'], 'project'), row('process', 'wall_loops', 'Wall loops', 'other', '6', 'plate')] };
+}
+
 async function open(browser, { tooClose = false } = {}) {
   const page = await browser.newPage({ viewport: process.env.VIEW ? { width: +process.env.VIEW.split('x')[0], height: +process.env.VIEW.split('x')[1] } : { width: 1400, height: 900 } });
   const server = { patches: [], packs: [], resolutions: [], issue: false, revision: 1,
@@ -75,7 +86,7 @@ async function open(browser, { tooClose = false } = {}) {
       return route.fulfill({ json: { plates: server.data.plates.map(pl => ({ id: pl.id, problems: pl.id === 1 ? problems : [], problem_reason: null, warning_reason: null })),
                                      progress: { counts: {}, filament_g: {} } } });
     }
-    if (p.endsWith("/effective-settings")) return route.fulfill({ json: { version: 1, revision: server.revision, plate_id: Number(p.split("/")[5]), fingerprint: "review-fingerprint", evidence: "expected-inputs", machine: { nozzle_diameter: ["0.4"] }, process: { wall_loops: "6", curr_bed_type: "High Temp Plate" }, filament: { filament_type: ["PETG"], nozzle_temperature: ["250"] }, provenance: { process: { wall_loops: [{source:"project",value:"4"},{source:"plate",value:"6"}], curr_bed_type: [{source:"bed",value:"High Temp Plate"}] }, filament: {} }, objects: [], issues: server.issue ? [{code:'unsupported-object-setting',key:'travel_speed',kind:'process',scope:'object',affected_id:1,value:'250',valid_scopes:['project','plate'],resolution_required:true,message:'travel_speed belongs at Project or Plate scope'}] : [] } });
+    if (p.endsWith("/effective-settings")) return route.fulfill({ json: { version: 1, revision: server.revision, plate_id: Number(p.split("/")[5]), fingerprint: "review-fingerprint", evidence: "expected-inputs", machine: { nozzle_diameter: ["0.4"] }, process: { wall_loops: "6", curr_bed_type: "High Temp Plate" }, filament: { filament_type: ["PETG"], nozzle_temperature: ["250"] }, provenance: { process: { wall_loops: [{source:"project",value:"4"},{source:"plate",value:"6"}], curr_bed_type: [{source:"bed",value:"High Temp Plate"}] }, filament: {} }, objects: [], review: reviewRows(), issues: server.issue ? [{code:'unsupported-object-setting',key:'travel_speed',kind:'process',scope:'object',affected_id:1,value:'250',valid_scopes:['project','plate'],resolution_required:true,message:'travel_speed belongs at Project or Plate scope'}] : [] } });
     return route.fulfill({ json: p === '/api/splits' ? { splits: [] } : p.endsWith('/jobs') ? { jobs: [] } : p === '/api/printers' ? []
       : p === '/api/defaults' ? { defaults: { options: {} } } : p === '/api/slicer/spools' ? { spools: [] }
       : p === '/api/slicer/presets' ? { machines: [], processes: {}, filaments: {} } : {} });
@@ -98,8 +109,6 @@ async function open(browser, { tooClose = false } = {}) {
     const review = page.locator('#effective-settings-review');
     await review.locator('b').filter({hasText:'PETG'}).waitFor({timeout:3000});
     assert.match(await review.innerText(), /Settings sent to Orca/);
-    await review.locator('summary').filter({hasText:'Filament values'}).click();
-    await review.locator('summary').filter({hasText:'Process values'}).click();
     assert.match(await review.innerText(), /250/);
     assert.match(await review.innerText(), /High Temp Plate/);
     assert.match(await review.innerText(), /plate/);

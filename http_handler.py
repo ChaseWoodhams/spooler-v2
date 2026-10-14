@@ -1182,7 +1182,10 @@ class SPHandler(SimpleHTTPRequestHandler):
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "effective-settings":
                 self._guard_draft(project_id)
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                self._json(projects.effective_settings(project_id, int(parts[5]), (query.get("revision") or [None])[0]))
+                self._json(projects.effective_settings(
+                    project_id, int(parts[5]), (query.get("revision") or [None])[0],
+                    object_id=int(query["object"][0]) if query.get("object") else None,
+                    search=(query.get("search") or [""])[0], changed_only=(query.get("changed") or ["0"])[0] in ("1", "true")))
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "fit":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 self._json(farm.plate_fit(projects.get_project(project_id), int(parts[5]), (query.get("printer_id") or [None])[0]))

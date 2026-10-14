@@ -28,6 +28,7 @@ const state = {
   mode: "prepare",
   settingsTab: "process",
   reviewContext: null,
+  reviewQuery: { plate: null, search: "", changed: false, object: "" },
   schema: null,
   bundles: [],
   bundleSettings: new Map(),
@@ -263,8 +264,17 @@ async function boot() {
   });
   $("settings-mode").value = remember("slicer.mode") || (remember("slicer.advanced") === "1" ? "advanced" : "simple");
   $("settings-mode").addEventListener("change", e => { remember("slicer.mode", e.target.value); renderFoldSummaries(); });
-  $("review-effective-settings").addEventListener("click", reviewEffectiveSettings);
+  $("review-effective-settings").addEventListener("click", () => reviewEffectiveSettings());
+  $("effective-settings-review").addEventListener("input", event => {
+    if (event.target.matches("[data-review-search]")) updateReviewQuery({ search: event.target.value });
+  });
+  $("effective-settings-review").addEventListener("change", event => {
+    if (event.target.matches("[data-review-changed]")) updateReviewQuery({ changed: event.target.checked });
+    if (event.target.matches("[data-review-scope]")) updateReviewQuery({ object: event.target.value });
+  });
   $("effective-settings-review").addEventListener("click", event => {
+    const control = event.target.closest('[data-control]');
+    if (control) { openSettingControl(JSON.parse(control.dataset.control)); return; }
     const button = event.target.closest('[data-resolve]');
     if (button) resolveSavedSetting(JSON.parse(button.dataset.target), button.dataset.setting, button.dataset.resolve, button.dataset.destination);
   });
@@ -1362,29 +1372,104 @@ function settingResolutionButtons(issue) {
     destinations.map(d => `<button type="button" data-resolve="move" data-destination="${d}" ${attrs}>Move to ${d === 'plate' ? 'Plate' : 'Project'}</button>`).join('');
 }
 
-// The server owns precedence. Review displays its captured response, never a browser merge.
-async function reviewEffectiveSettings() {
+// The server owns precedence and every row below. Review presents its captured response; search, the changed filter and
+// the Object drill-down are requests to the server, never browser-side merges.
+const REVIEW_SECTIONS = [["material", "Material"], ["nozzle", "Nozzle"], ["bed", "Bed"], ["temperature", "Temperature"], ["cooling", "Cooling"],
+  ["flow", "Flow"], ["retraction", "Retraction"], ["other", "Other process and filament values"], ["machine", "Machine (read-only)"]];
+const SOURCE_NAMES = { preset: "preset", "alternate-preset": "alternate Filament", project: "project", plate: "plate", object: "object",
+  bed: "bed selection", bricklayers: "BrickLayers", "orca-default": "Orca default" };
+
+function reviewValue(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  return Array.isArray(v) ? v.join(", ") : String(v);
+}
+
+function reviewRow(r) {
+  const notes = [];
+  if (r.enforced) notes.push(`<span>Enforced: ${esc(r.enforced_reason || SOURCE_NAMES[r.source] || r.source)}.</span>`);
+  if (r.note) notes.push(`<span>${esc(r.note)}</span>`);
+  if (r.inactive) notes.push(`<span>Inactive: ${esc(r.inactive_reason)} Stored value is retained.</span>`);
+  if (r.read_only && !r.enforced) notes.push(`<span>Read-only: ${esc(r.read_only_reason || "")}</span>`);
+  if (r.reset_to) notes.push(`<span>Reset returns to ${r.reset_to.value == null ? "the Orca default" : esc(reviewValue(r.reset_to.value))} (${esc(SOURCE_NAMES[r.reset_to.source] || r.reset_to.source)}).</span>`);
+  if (r.control) notes.push(`<button type="button" class="btn btn-secondary btn-sm" data-control="${esc(JSON.stringify(r.control))}" aria-label="Go to ${esc(r.label)} control">Edit</button>`);
+  const chain = (r.chain || []).map(c => SOURCE_NAMES[c.source] || c.source).join(" › ");
+  return `<tr><th scope="row">${esc(r.label)}${r.label !== r.key ? ` <small>${esc(r.key)}</small>` : ""}</th>
+    <td>${esc(reviewValue(r.has_inherited ? r.inherited : null))}</td><td>${esc(reviewValue(r.requested))}</td><td>${esc(reviewValue(r.effective))}</td>
+    <td>${esc(SOURCE_NAMES[r.source] || r.source)}${chain ? ` <small>${esc(chain)}</small>` : ""}</td><td>${notes.join(" ")}</td></tr>`;
+}
+
+function reviewResults(result) {
+  const review = result.review;
+  const bySection = new Map();
+  for (const r of review.rows) bySection.set(r.section, [...(bySection.get(r.section) || []), r]);
+  const material = review.rows.find(r => r.key === "filament_type");
+  const nozzle = review.rows.find(r => r.key === "nozzle_diameter");
+  const bed = review.rows.find(r => r.key === "curr_bed_type");
+  const issues = (result.issues || []).map(i => `<div class="slicer-warning">${esc(i.scope || "")} ${esc(i.affected_id || "")}: ${esc(i.message)}${i.affected_names?.length ? ` — Objects: ${esc(i.affected_names.join(", "))}` : ""}${"value" in i ? ` Saved value: ${esc(JSON.stringify(i.value))}.` : ""} ${settingResolutionButtons(i)}${i.control && ["project", "plate", "object"].includes(i.control.scope) ? `<button type="button" class="btn btn-secondary btn-sm" data-control="${esc(JSON.stringify(i.control))}" aria-label="Go to ${esc(i.key)} control">Go to control</button>` : ""}${i.read_only ? " <small>Inherited and read-only: it is passed through unchanged and cannot be edited here.</small>" : ""}</div>`).join("");
+  const sections = REVIEW_SECTIONS.filter(([id]) => bySection.has(id)).map(([id, title]) => `<details${id !== "machine" ? " open" : ""}><summary>${title} (${bySection.get(id).length})</summary>
+    <table><thead><tr><th scope="col">Setting</th><th scope="col">Inherited</th><th scope="col">Requested</th><th scope="col">Effective</th><th scope="col">Source</th><th scope="col">Notes</th></tr></thead>
+    <tbody>${bySection.get(id).map(reviewRow).join("")}</tbody></table></details>`).join("");
+  return `<p><b>${esc(reviewValue(material?.effective))}</b> · Nozzle ${esc(reviewValue(nozzle?.effective))} mm · ${esc(reviewValue(bed?.effective))}</p>
+    <p>${esc(review.filament_basis.explanation)}</p>${issues}
+    <p class="slicer-muted">Changed means different from ${esc(review.changed_basis)}.</p>
+    ${sections || "<p>No settings match.</p>"}
+    <p>Object settings are sent separately for ${(result.objects || []).length} Objects.</p>`;
+}
+
+function effectiveReviewTitle(review) {
+  return review.scope.kind === "object" ? `Settings sent to Orca — ${review.scope.name}` : "Settings sent to Orca";
+}
+
+function openSettingControl(control) {
+  if (control.scope === "object") {
+    if (!plateObjects().some(o => o.id === control.id)) { toast("That Object is no longer on this Plate", true); return; }
+    state.settingsTab = "object";
+    selectObject(control.id);
+  } else state.settingsTab = control.scope === "plate" ? "plate" : control.kind === "filament" ? "filament" : "process";
+  $("fold-settings").open = true;
+  $("settings-search").value = control.key;
+  renderSettings();
+  $("settings-body").querySelector(`[data-key="${control.key}"]`)?.focus();
+}
+
+let reviewRequest = 0;
+async function reviewEffectiveSettings({ partial = false } = {}) {
   const el = $("effective-settings-review");
+  const ticket = ++reviewRequest;
   try {
     await flushSave();
     const projectId = state.project.id, plateId = currentPlate().id, revision = state.project.revision;
-    el.textContent = "Reviewing…";
-    const result = await api("GET", `/api/projects/${projectId}/plates/${plateId}/effective-settings?revision=${revision}`);
-    if (state.project.id !== projectId || currentPlate().id !== plateId || state.project.revision !== revision) return;
+    if (state.reviewQuery.plate !== plateId) state.reviewQuery = { plate: plateId, search: "", changed: false, object: "" };
+    const query = state.reviewQuery;
+    if (!partial) el.textContent = "Reviewing…";
+    const params = new URLSearchParams({ revision });
+    if (query.search.trim()) params.set("search", query.search.trim());
+    if (query.changed) params.set("changed", "1");
+    if (query.object) params.set("object", query.object);
+    const result = await api("GET", `/api/projects/${projectId}/plates/${plateId}/effective-settings?${params}`);
+    if (ticket !== reviewRequest || state.project.id !== projectId || currentPlate().id !== plateId || state.project.revision !== revision) return;
     state.reviewContext = effectiveReviewContext();
-    const value = v => Array.isArray(v) ? v.join(", ") : String(v ?? "Unavailable");
-    const rows = kind => Object.entries(result[kind] || {}).map(([key, v]) => {
-      const chain = result.provenance?.[kind]?.[key] || [];
-      const winner = chain.at(-1);
-      return `<tr><th scope="row">${esc(state.schema?.options?.[key]?.label || key)}</th><td>${esc(value(v))}</td><td>${esc(winner?.source || "preset")}${winner?.reason ? ` — ${esc(winner.reason)}` : ""}</td></tr>`;
-    }).join("");
-    el.innerHTML = `<h4>Settings sent to Orca</h4><p>Current Plate inputs, not measured output from a completed Slice.</p>
-      <p><b>${esc(value(result.filament?.filament_type))}</b> · Nozzle ${esc(value(result.machine?.nozzle_diameter))} mm · ${esc(result.process?.curr_bed_type)}</p>
-      ${result.filament_choice ? `<p>Alternate saved Filament: ${esc(result.filament_choice.preset)}. Project default Filament changes and Spoolman tuning do not apply.${result.filament_choice.colour ? ` Colour label only: ${esc(result.filament_choice.colour)}.` : ""}</p>` : "<p>Project default Filament, including saved Project tuning.</p>"}
-      ${(result.issues || []).map(i => `<div class="slicer-warning">${esc(i.scope || "")} ${esc(i.affected_id || "")}: ${esc(i.message)}${i.affected_names?.length ? ` — Objects: ${esc(i.affected_names.join(", "))}` : ""}${"value" in i ? ` Saved value: ${esc(JSON.stringify(i.value))}.` : ""} ${settingResolutionButtons(i)}</div>`).join("")}
-      ${["filament", "process"].map(kind => `<details><summary>${kind === "filament" ? "Filament" : "Process"} values</summary><table><thead><tr><th>Setting</th><th>Value</th><th>Source</th></tr></thead><tbody>${rows(kind)}</tbody></table></details>`).join("")}
-      <p>Object settings are sent separately for ${(result.objects || []).length} Objects.</p>`;
-  } catch (err) { el.textContent = err.message; }
+    if (partial && el.querySelector("[data-review-results]")) {
+      el.querySelector("[data-review-title]").textContent = effectiveReviewTitle(result.review);
+      el.querySelector("[data-review-results]").innerHTML = reviewResults(result);
+      return;
+    }
+    const objects = plateObjects(plateId);
+    el.innerHTML = `<h4 data-review-title>${esc(effectiveReviewTitle(result.review))}</h4><p>Expected inputs for this ${result.review.scope.kind}, not measured output from a completed Slice.</p>
+      <div class="slicer-review-controls" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <input type="search" data-review-search aria-label="Search reviewed settings" placeholder="Search labels or keys" value="${esc(query.search)}">
+        <label><input type="checkbox" data-review-changed${query.changed ? " checked" : ""}> Changed values only</label>
+        <label>Review scope <select data-review-scope aria-label="Review scope"><option value="">Plate</option>${objects.map(o => `<option value="${o.id}"${String(o.id) === String(query.object) ? " selected" : ""}>${esc(o.name)}</option>`).join("")}</select></label>
+      </div>
+      <div data-review-results>${reviewResults(result)}</div>`;
+  } catch (err) { if (ticket === reviewRequest) el.textContent = err.message; }
+}
+
+let reviewTimer = null;
+function updateReviewQuery(change) {
+  state.reviewQuery = { ...state.reviewQuery, ...change };
+  clearTimeout(reviewTimer);
+  reviewTimer = setTimeout(() => reviewEffectiveSettings({ partial: true }), 150);
 }
 
 function renderScope() {

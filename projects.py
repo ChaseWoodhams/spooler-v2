@@ -3800,13 +3800,14 @@ def read_arrangement(path: Path) -> dict:
 
 # ── Slicing a plate ────────────────────────────────────────────────────────────
 
-def effective_settings(project_id: int, plate_id: int, revision=None, *, record=None) -> dict:
+def effective_settings(project_id: int, plate_id: int, revision=None, *, record=None, object_id=None, search="", changed_only=False) -> dict:
     """Read the exact common inputs for a Plate without mutating the Project.
 
     Version 1 preserves existing alternate-preset resolution; immutable alternate
     snapshots and stricter Object scope are subsequent tickets. Slice preparation
     passes its captured record so review and preparation share the same calculation.
     """
+    import farm   # imported late: farm reads Projects
     record = record if record is not None else get_project(project_id)
     if revision is not None and int(revision) != record["revision"]:
         raise jobs.JobError("The Project changed — review its settings again", 409)
@@ -3859,6 +3860,12 @@ def effective_settings(project_id: int, plate_id: int, revision=None, *, record=
     result["issues"].extend(i for i in _coupled_setting_issues(data, settings)
                             if i["plate_id"] == plate_id)
     result["filament_choice"] = chosen
+    result["issues"] = [plate_settings.link_issue(i) for i in result["issues"]]
+    try:
+        result["review"] = plate_settings.review(result, slicer.settings_schema(), object_id=object_id, search=search, changed_only=changed_only,
+                                                 spool_id=data["profile"].get("spool_id"), spool_keys=farm.SPOOL_KEYS)
+    except KeyError:
+        raise jobs.JobError("Object not found on this Plate", 404) from None
     return result
 
 def _queued_entry(previous: dict | None, queued_at: float, send: bool = False, send_opts: dict | None = None) -> dict:
