@@ -61,7 +61,7 @@ class NativeObservedOutputTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(footer["z_hop"], "0.4")
                 # the stock Elegoo preset names an infill pattern Orca 2.4.2 does not know: recorded, not hidden
                 names = {n["key"] for n in review["normalized"]}
-                print(f"\n[{material}] compared {review['compared']}, normalized {sorted(names)}, "
+                self.assertIn("sparse_infill_pattern", names)
                 projects.queue_plate(project["id"], 1, {"printer_id": "p1"})
 
     async def test_a_real_footer_that_was_altered_is_reported_as_a_mismatch_by_setting_and_scope(self):
