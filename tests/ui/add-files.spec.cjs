@@ -44,6 +44,18 @@ async function open(browser, step, { fromSplit = false } = {}) {
       server.outdated = true;
       return route.fulfill({ json: file === 'orca.3mf' ? { ...project(), import_notes: ['Some User Preset was left out'] } : project() });
     }
+    if (p === '/api/projects/import-review') {   // a 3MF is staged and inspected first; this one has nothing to review
+      server.staged = url.searchParams.get('filename');
+      return route.fulfill({ json: { token: 'b'.repeat(32), kind: 'append', filename: server.staged, required: false, blocked: false, notes: ['Some User Preset was left out'],
+        report: { version: 1, losses: [], blockers: [] }, binding: { token: 'b'.repeat(32), content_hash: 'h', report_version: 1, conversion: 'c', target: { project_id: 60, created_at: 1, revision: 1 } } } });
+    }
+    if (p === `/api/projects/import-review/${'b'.repeat(32)}/confirm`) {
+      const id = server.models.length + 1;
+      server.models.push(model(id, server.staged));
+      server.objects.push(object(id, id, server.staged.replace(/\.3mf$/, '')));
+      server.outdated = true;
+      return route.fulfill({ json: { ...project(), import_notes: ['Some User Preset was left out'] } });
+    }
     if (p === '/api/splits/1') return route.fulfill({ json: split });
     let made;
     if ((made = p.match(/^\/api\/projects\/60\/models\/(\d+)\/make-split$/))) {

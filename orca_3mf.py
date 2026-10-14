@@ -186,6 +186,242 @@ def summary(source) -> dict:
     return {"objects": objects, "plates": plates, "orca": SETTINGS_PATH in names or PROJECT_PATH in names}
 
 
+# ── Inspecting ─────────────────────────────────────────────────────────────────
+
+REPORT_VERSION = 1
+PAINT_ATTRS = {"paint_supports": "paint-supports", "paint_seam": "paint-seam", "paint_fuzzy_skin": "paint-fuzzy-skin", "paint_color": "paint-color"}
+SUBTYPE_CODES = {"negative_part": "negative-volume", "modifier_part": "modifier-volume", "support_blocker": "support-blocker",
+                 "support_enforcer": "support-enforcer"}
+VOLUME_CODES = {"NegativeVolume": "negative-volume", "ParameterModifier": "modifier-volume", "SupportBlocker": "support-blocker",
+                "SupportEnforcer": "support-enforcer"}
+PART_INFO = OBJECT_INFO | {"subtype", "mesh_stat", "modifier", "text_information", "volume_type", "matrix"}
+PLATE_SETTINGS = ("bed_type", "print_sequence", "first_layer_print_sequence", "other_layers_print_sequence",
+                  "other_layers_print_sequence_nums", "spiral_mode", "filament_map_mode", "filament_maps", "limit_filament_maps")
+# code → (feature, scope, what the import does about it)
+LOSSES = {
+    "negative-volume":        ("Negative volume", "model", "The hole is not cut: the Model imports as a solid without it."),
+    "modifier-volume":        ("Modifier volume", "model", "The modifier region and its settings are left out."),
+    "support-blocker":        ("Support blocker", "model", "The blocker is left out, so supports can appear where it was."),
+    "support-enforcer":       ("Support enforcer", "model", "The enforcer is left out, so supports may be missing where it was."),
+    "paint-supports":         ("Painted supports", "model", "The painted support areas are not kept."),
+    "paint-seam":             ("Painted seam", "model", "The painted seam positions are not kept."),
+    "paint-fuzzy-skin":       ("Painted fuzzy skin", "model", "The painted fuzzy skin areas are not kept."),
+    "paint-color":            ("Painted colour", "model", "The painted colour regions are not kept."),
+    "variable-layer-height":  ("Variable layer height", "model", "The layer height profile is not kept; the Plate's layer height is used throughout."),
+    "layer-range":            ("Layer-range settings", "model", "Settings that apply only to a range of heights are not kept."),
+    "part-settings":          ("Part settings", "model", "Settings stored on individual parts are not kept; the parts merge into one Model."),
+    "legacy-volume-range":    ("Volumes inside one mesh", "model", "The volumes are not separated, so their triangles import as one solid Model."),
+    "brim-ears":              ("Brim ears", "model", "The manual brim ear points are not kept."),
+    "mirrored-transform":     ("Mirrored placement", "object", ""),
+    "skewed-transform":       ("Skewed placement", "object", ""),
+    "disabled-copy":          ("Disabled copy", "object", "The disabled copy is left out; only enabled copies are imported."),
+    "custom-gcode-per-layer": ("G-code at layers", "plate", "Colour changes, pauses and other layer G-code are not kept, so they will not appear in a Slice."),
+    "plate-metadata":         ("Plate settings", "plate", "The Plate's own bed type, print sequence and similar settings are not kept."),
+}
+TRANSFORM_EFFECT = {
+    "single": {"mirrored-transform": "The mirrored shape is baked into the Model's geometry; its position is chosen by Spooler.",
+               "skewed-transform": "The skewed shape is baked into the Model's geometry; its position is chosen by Spooler."},
+    "project": {"mirrored-transform": "The Object is placed unmirrored.", "skewed-transform": "The Object is placed unskewed."},
+}
+BLOCKERS = {"malformed-settings": "Metadata/model_settings.config can't be read, so the Plates and Object settings are unresolved.",
+            "malformed-project-settings": "Metadata/project_settings.config can't be read, so the project's material and settings are unresolved.",
+            "nothing-printable": "Every copy in the file is disabled, so there is nothing to print."}
+
+
+def _object_label(settings: dict, object_id) -> str:
+    label = settings.get("meta", {}).get("name") or f"Object {object_id}"
+    return re.sub(r"\.(stl|obj|3mf|step|stp)$", "", label.replace("\\", "/").rsplit("/", 1)[-1], flags=re.I) or f"Object {object_id}"
+
+
+def _scan_model(archive: zipfile.ZipFile, name: str) -> dict:
+    """What one model file holds without reading its meshes: {"objects": {id: {"components", "paint"}}, "items"}."""
+    objects, items, current = {}, [], None
+    try:
+        with archive.open(name) as fh:
+            for event, element in ElementTree.iterparse(fh, events=("start", "end")):
+                tag = _local(element.tag)
+                if event == "start":
+                    if tag == "object":
+                        current = {"components": [], "paint": set()}
+                        objects[element.attrib.get("id")] = current
+                    continue
+                if tag == "triangle" and current is not None:
+                    for key, code in PAINT_ATTRS.items():
+                        if element.attrib.get(key, "").strip():
+                            current["paint"].add(code)
+                    element.clear()
+                elif tag == "component" and current is not None:
+                    a = _attrs(element)
+                    current["components"].append(((a.get("path") or "").lstrip("/") or name, a.get("objectid")))
+                elif tag == "item":
+                    a = _attrs(element)
+                    matrix, _ = _transform(a.get("transform"))
+                    items.append({"object": a.get("objectid"), "matrix": matrix, "printable": a.get("printable", "1") != "0"})
+                elif tag == "object":
+                    current = None
+    except ElementTree.ParseError:
+        raise ThreeMFError("The 3MF's model can't be read")
+    return {"objects": objects, "items": items}
+
+
+def _text_lines(archive: zipfile.ZipFile, name: str) -> list:
+    """(1-based object position, payload) for each `object_id=N|payload` line that has a payload."""
+    if name not in archive.namelist():
+        return []
+    out = []
+    for line in archive.read(name).decode("utf-8", "replace").splitlines():
+        match = re.match(r"\s*object_id\s*=\s*(\d+)\s*\|(.*)$", line)
+        if match and match[2].strip():
+            out.append((int(match[1]), match[2].strip()))
+    return out
+
+
+def _xml(archive: zipfile.ZipFile, name: str):
+    """The root element of an optional metadata file, or None when it is absent or unreadable."""
+    if name not in archive.namelist():
+        return None
+    try:
+        return ElementTree.fromstring(archive.read(name))
+    except ElementTree.ParseError:
+        return None
+
+
+def _skewed(matrix: np.ndarray) -> bool:
+    a = matrix.T
+    scale = np.linalg.norm(a, axis=0)
+    scale[scale < 1e-9] = 1.0
+    rotation = a / scale
+    return bool(np.abs(rotation.T @ rotation - np.eye(3)).max() > 1e-3)
+
+
+def inspect(source, conversion: str = "project") -> dict:
+    """What importing this 3MF would drop, change or leave unresolved, read from the original archive before anything is
+    flattened: {"version", "objects", "plates", "orca", "project", "losses": [...], "blockers": [...]}. Each loss names its
+    `scope` (model, object, plate), the affected `name` and a stable `code`; a blocker is data that must be replaced before
+    any import. Detecting a feature never means it is kept. `conversion` ("single" or "project") says how the placement is
+    converted. Raises ThreeMFError for a file that isn't a readable 3MF."""
+    try:
+        archive = zipfile.ZipFile(source)
+    except (zipfile.BadZipFile, OSError):
+        raise ThreeMFError("That isn't a valid 3MF file")
+    with archive:
+        names = set(archive.namelist())
+        if MODEL_PATH not in names:
+            raise ThreeMFError("The 3MF has no model")
+        main = _scan_model(archive, MODEL_PATH)
+        cache = {MODEL_PATH: main}
+
+        def painted(path, object_id, seen=()):
+            if (path, object_id) in seen:
+                return set()
+            if path not in cache:
+                cache[path] = _scan_model(archive, path) if path in names else {"objects": {}, "items": []}
+            entry = cache[path]["objects"].get(object_id)
+            if entry is None:
+                return set()
+            found = set(entry["paint"])
+            for sub_path, sub_id in entry["components"]:
+                found |= painted(sub_path, sub_id, seen + ((path, object_id),))
+            return found
+
+        blockers = []
+        root = None
+        if SETTINGS_PATH in names:
+            root = _xml(archive, SETTINGS_PATH)
+            if root is None:
+                blockers.append({"code": "malformed-settings", "scope": "project", "name": SETTINGS_PATH, "message": BLOCKERS["malformed-settings"]})
+        info = _settings(archive) if root is not None else {"objects": {}, "plates": []}
+        project = None
+        if PROJECT_PATH in names:
+            try:
+                project = json.loads(archive.read(PROJECT_PATH).decode("utf-8", "replace"))
+            except ValueError:
+                blockers.append({"code": "malformed-project-settings", "scope": "project", "name": PROJECT_PATH,
+                                 "message": BLOCKERS["malformed-project-settings"]})
+        items = main["items"]
+        if items and not any(i["printable"] for i in items):
+            blockers.append({"code": "nothing-printable", "scope": "project", "name": "Build", "message": BLOCKERS["nothing-printable"]})
+
+        order = list(info["objects"]) or list(dict.fromkeys(i["object"] for i in items))
+        by_position = {n: object_id for n, object_id in enumerate(order, start=1)}
+        referenced = list(dict.fromkeys(i["object"] for i in items if i["object"] in main["objects"]))
+        found = {object_id: {} for object_id in referenced}     # object id → {code: detail}
+        for object_id in referenced:
+            entry, settings = found[object_id], info["objects"].get(object_id, {})
+            for code in sorted(painted(MODEL_PATH, object_id)):
+                entry[code] = None
+            for part in settings.get("parts", {}).values():
+                code = SUBTYPE_CODES.get(part.get("subtype", "normal_part"))
+                if code:
+                    entry[code] = None
+                elif set(part) - PART_INFO:
+                    entry["part-settings"] = sorted(set(part) - PART_INFO)
+            if settings.get("meta", {}).get("layer_height_profile", "").strip():
+                entry["variable-layer-height"] = None
+        for node in (root if root is not None else []):
+            if _local(node.tag) != "object" or node.attrib.get("id") not in found:
+                continue
+            entry = found[node.attrib["id"]]
+            volumes = [v for v in node if _local(v.tag) == "volume"]
+            for volume in volumes:
+                values = {m.attrib.get("key"): m.attrib.get("value", "") for m in volume if _local(m.tag) == "metadata"}
+                code = VOLUME_CODES.get(values.get("volume_type", ""))
+                if code:
+                    entry[code] = None
+                if set(values) - PART_INFO:
+                    entry.setdefault("part-settings", sorted(set(values) - PART_INFO))
+            if len(volumes) > 1 and any(v.attrib.get("firstid") is not None for v in volumes):
+                entry["legacy-volume-range"] = None
+        for file, code in (("Metadata/layer_heights_profile.txt", "variable-layer-height"), ("Metadata/brim_ear_points.txt", "brim-ears")):
+            for position, payload in _text_lines(archive, file):
+                if by_position.get(position) in found and re.search(r"\d", payload):
+                    found[by_position[position]][code] = None
+        ranges = _xml(archive, "Metadata/layer_config_ranges.xml")
+        for node in (ranges if ranges is not None else []):
+            if _local(node.tag) == "object" and any(_local(r.tag) == "range" for r in node):
+                target = node.attrib.get("id")
+                target = target if target in found else by_position.get(int(target)) if (target or "").isdigit() else None
+                if target in found:
+                    found[target]["layer-range"] = None
+
+        losses = []
+
+        def add(code, ident, name, detail=None):
+            feature, scope, text = LOSSES[code]
+            losses.append({"code": code, "feature": feature, "scope": scope, "id": ident, "name": name, "detail": detail,
+                           "effect": TRANSFORM_EFFECT.get(conversion, {}).get(code) or text})
+
+        for object_id in referenced:
+            name = _object_label(info["objects"].get(object_id, {}), object_id)
+            copies = [i for i in items if i["object"] == object_id]
+            for code in LOSSES:
+                if code in found[object_id]:
+                    add(code, object_id, name, found[object_id][code])
+            for code, count in (("mirrored-transform", sum(float(np.linalg.det(i["matrix"])) < 0 for i in copies)),
+                                ("skewed-transform", sum(_skewed(i["matrix"]) for i in copies)),
+                                ("disabled-copy", sum(not i["printable"] for i in copies))):
+                if count:
+                    add(code, object_id, name, {"copies": count})
+
+        plate_names = {str(p["id"]): p["name"] or f"Plate {p['id']}" for p in info["plates"]}
+        for node in (root if root is not None else []):
+            if _local(node.tag) == "plate":
+                values = {m.attrib.get("key"): m.attrib.get("value", "") for m in node if _local(m.tag) == "metadata"}
+                keys = [k for k in PLATE_SETTINGS if values.get(k, "").strip()]
+                if keys:
+                    ident = values.get("plater_id", "")
+                    add("plate-metadata", ident, plate_names.get(ident) or f"Plate {ident}", {"keys": keys})
+        custom = _xml(archive, "Metadata/custom_gcode_per_layer.xml")
+        for node in (custom if custom is not None else []):
+            if _local(node.tag) == "plate":
+                ident = next((c.attrib.get("id", "") for c in node if _local(c.tag) == "plate_info"), "")
+                count = sum(_local(c.tag) == "code" for c in node)
+                if count:
+                    add("custom-gcode-per-layer", ident, plate_names.get(ident) or f"Plate {ident}", {"changes": count})
+        return {"version": REPORT_VERSION, "orca": SETTINGS_PATH in names or PROJECT_PATH in names, "losses": losses, "blockers": blockers,
+                "objects": sum(i["printable"] for i in items), "plates": len(info["plates"]) or 1, "project": project}
+
+
 def parse(source) -> dict:
     """Read a project (path or file object). Raises ThreeMFError for a file that can't be read."""
     warnings = []

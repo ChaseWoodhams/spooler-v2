@@ -779,7 +779,9 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if self.path.startswith("/api/projects/"):
             parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'projects', <id>, 'models', <model id>]
-            if len(parts) == 6 and parts[4] == "models" and parts[5].isdigit():
+            if len(parts) == 5 and parts[3] == "import-review":      # cancel a pending import review
+                self._jobs_call(lambda: projects.cancel_import(parts[4]), broadcast=False)
+            elif len(parts) == 6 and parts[4] == "models" and parts[5].isdigit():
                 def remove():
                     self._guard_draft(self._job_id())
                     return projects.delete_model(self._job_id(), int(parts[5]))
@@ -1142,10 +1144,18 @@ class SPHandler(SimpleHTTPRequestHandler):
 
     def _handle_projects_get(self):
         parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'projects', <id>, <section>, <item id>, <what>]
+        if len(parts) == 5 and parts[3] == "import-review":      # a pending import review, by token
+            self._jobs_call(lambda: projects.get_import_review(parts[4]), broadcast=False)
+            return
         try:
             project_id = self._job_id()
             if len(parts) == 4:
                 self._json(projects.get_project(project_id))
+            elif len(parts) == 5 and parts[4] == "imports":
+                self._json({"imports": projects.import_records(project_id)})
+            elif len(parts) == 7 and parts[4] == "imports" and parts[6] == "source":
+                path, name = projects.import_source(project_id, parts[5])
+                self._send_file(path, "model/3mf", download_name=re.sub(r'[^\w .-]+', "_", name) or "import.3mf")
             elif len(parts) == 5 and parts[4] == "jobs":
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
@@ -1212,6 +1222,18 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/projects/upload":
             self._handle_project_upload(new_project=True)
+            return
+        if path == "/api/projects/import-review":              # stage and inspect a 3MF; nothing changes yet
+            self._handle_import_review_upload()
+            return
+        if len(parts) == 6 and parts[3] == "import-review" and parts[5] == "confirm":
+            def confirm():
+                body = self._json_body()
+                pending = projects.get_import_review(parts[4])["binding"]["target"]
+                if pending:
+                    self._guard_draft(pending["project_id"], body)
+                return projects.confirm_import(parts[4], body)
+            self._splits_call(confirm)
             return
         if len(parts) == 5 and parts[3].isdigit() and parts[4] == "create":   # promote a draft
             def create_it():
@@ -1390,6 +1412,27 @@ class SPHandler(SimpleHTTPRequestHandler):
                                                      scale=value("scale") or 1.0, up=value("up") or "z",
                                                      plate_id=value("plate") or None)
         self._jobs_call(add, broadcast=False)
+
+    def _handle_import_review_upload(self):
+        # The body is the raw 3MF; the Project it would join (`target`, with its Draft token), scale, up axis and plate travel in the query.
+        self.close_connection = True  # an early rejection leaves the body unread
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        def value(key: str) -> str:
+            return (query.get(key) or [""])[0]
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+
+        def stage():
+            target = self._int(value("target"), "target must be a Project number") if value("target") else None
+            if target is not None:
+                self._guard_draft(target)
+            return projects.prepare_import(self.rfile, length, value("filename"), target=target, scale=value("scale") or 1.0,
+                                           up=value("up") or "z", plate=value("plate") or None, quick=value("quick") in ("1", "true"))
+        self._jobs_call(stage, broadcast=False)
 
     def _handle_split_upload(self):
         # The body is the raw model file, streamed to disk; scale and up axis travel in the query string.
