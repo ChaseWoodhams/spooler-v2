@@ -145,8 +145,12 @@ def init() -> None:
 
 # ── Records ────────────────────────────────────────────────────────────────────
 
+INPUTS_VERSION = 2   # Slices carrying inputs.json and a canonical print-input fingerprint; older Slices keep the raw hash below
+
+
 def fingerprint(record: dict, plate_id: int) -> str:
-    """Everything that affects a plate's G-code."""
+    """A cheap hash of the raw stored inputs of a plate. It judges Slices made before saved inputs existed and keys caches;
+    current Slices are judged by print_fingerprint."""
     data = record["data"]
     models = {m["id"]: m for m in record["models"]}
     objects = sorted((o for o in data.get("objects", []) if o["plate"] == plate_id), key=lambda o: o["id"])
@@ -166,6 +170,27 @@ def fingerprint(record: dict, plate_id: int) -> str:
     if any(chosen):  # only when an object's model has a choice, so plates on the project default stay up to date
         payload["filament"] = [{"preset": c["preset"], "colour": c.get("colour", ""), **({"sha256": c["snapshot"]["sha256"]} if c.get("snapshot") else {})} if c else None for c in chosen]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
+_print_fingerprints: dict = {}   # raw-input hash → canonical print-input fingerprint (a pure function of locked, content-addressed inputs)
+
+
+def print_fingerprint(record: dict, plate_id: int) -> str | None:
+    """The canonical fingerprint of the effective print inputs of a Plate (see effective_settings.canonical_inputs), or None when
+    they cannot be resolved right now (a missing/damaged profile or Filament snapshot, a mixed Plate). Never raises."""
+    raw = fingerprint(record, plate_id)
+    if raw in _print_fingerprints:
+        return _print_fingerprints[raw]
+    try:
+        result = _resolve_plate(record, plate_id)[0]
+    except (jobs.JobError, KeyError, OSError, ValueError):
+        return None
+    if any(i.get("code") in ("unresolved-filament", "conflicting-filament-choices") for i in result["issues"]):
+        return None
+    if len(_print_fingerprints) > 2000:
+        _print_fingerprints.clear()
+    _print_fingerprints[raw] = result["fingerprint"]
+    return result["fingerprint"]
 
 
 def _choice_key(choice: dict | None) -> tuple | None:
@@ -219,7 +244,15 @@ def _to_project(row) -> dict:
     for plate in record["data"].get("plates", []):
         entry = record["slices"].get(str(plate["id"]))
         if entry and entry.get("state") == SLICED:
-            entry["outdated"] = not entry.get("imported") and entry.get("fingerprint") != fingerprint(record, plate["id"])
+            if entry.get("imported"):
+                entry["outdated"] = False
+            elif entry.get("inputs_version") == INPUTS_VERSION:
+                current = print_fingerprint(record, plate["id"])
+                entry["outdated"] = current != entry.get("fingerprint")
+                if current is None:
+                    entry["outdated_reason"] = "inputs-unresolved"
+            else:   # a Slice from before inputs were saved: judged by the raw hash it was made with
+                entry["outdated"] = entry.get("fingerprint") != fingerprint(record, plate["id"])
     return record
 
 
@@ -3491,17 +3524,9 @@ def read_arrangement(path: Path) -> dict:
 
 # ── Slicing a plate ────────────────────────────────────────────────────────────
 
-def effective_settings(project_id: int, plate_id: int, revision=None, *, record=None, object_id=None, search="", changed_only=False) -> dict:
-    """Read the exact common inputs for a Plate without mutating the Project.
-
-    Version 1 preserves existing alternate-preset resolution; immutable alternate
-    snapshots and stricter Object scope are subsequent tickets. Slice preparation
-    passes its captured record so review and preparation share the same calculation.
-    """
-    import farm   # imported late: farm reads Projects
-    record = record if record is not None else get_project(project_id)
-    if revision is not None and int(revision) != record["revision"]:
-        raise jobs.JobError("The Project changed — review its settings again", 409)
+def _resolve_plate(record: dict, plate_id: int) -> tuple:
+    """The shared resolution of a Plate's print inputs from a captured record: (result, settings, alternate Filament values, choice).
+    Reads the locked profile and Filament snapshot files; never the mutable preset catalogue."""
     data = record["data"]
     plate = next((p for p in data["plates"] if p["id"] == plate_id), None)
     if plate is None:
@@ -3537,6 +3562,23 @@ def effective_settings(project_id: int, plate_id: int, revision=None, *, record=
                            "affected_ids": [o["id"] for o in data["objects"] if o["plate"] == plate_id],
                            "severity": "error", "resolution_required": True, "message": f"{chosen['preset']}: {exc}"})
     result = plate_settings.resolve(record, plate, settings, slicer.BED_TYPES[data["bed"]], alternate, issues)
+    return result, settings, alternate, chosen
+
+
+def effective_settings(project_id: int, plate_id: int, revision=None, *, record=None, object_id=None, search="", changed_only=False) -> dict:
+    """Read the exact common inputs for a Plate without mutating the Project.
+
+    Version 1 preserves existing alternate-preset resolution; immutable alternate
+    snapshots and stricter Object scope are subsequent tickets. Slice preparation
+    passes its captured record so review and preparation share the same calculation.
+    """
+    import farm   # imported late: farm reads Projects
+    record = record if record is not None else get_project(project_id)
+    if revision is not None and int(revision) != record["revision"]:
+        raise jobs.JobError("The Project changed — review its settings again", 409)
+    data = record["data"]
+    result, settings, alternate, chosen = _resolve_plate(record, plate_id)
+    plate = next(p for p in data["plates"] if p["id"] == plate_id)
     for kind in ("process", "filament"):
         if kind == "filament" and alternate is not None:
             continue
@@ -3574,13 +3616,13 @@ def _require_printers(record: dict, plate_ids) -> None:
         raise jobs.JobError(f"Choose a printer for {_names(missing)} first", 409)
 
 
-def _stage(project_id: int, plate_id: int, stage: str) -> None:
+def _stage(project_id: int, plate_id: int, stage: str, created_at: float | None = None) -> None:
     """Tell the page what a running slice is doing (preparing → slicing → post-processing → analysing)."""
     def change(slices):
         entry = slices.get(str(plate_id))
         if entry and entry.get("state") == SLICING:
             entry.update(stage=stage, stage_at=time.time())
-    _mutate(project_id, "slices", change)
+    _mutate(project_id, "slices", change, created_at)
 
 
 def _require_one_filament(record: dict, plate_ids) -> None:
@@ -3654,10 +3696,20 @@ def request_slices(project_id: int, plate_ids=None, send: bool = False) -> dict:
     return get_project(project_id)
 
 
-def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
+def _staging_dir(project_id: int, plate_id: int) -> Path:
+    """Where one run of a plate's slice works; the plate's folder is replaced by it only when the result is published."""
+    return plate_dir(project_id, plate_id).with_name(f".work-{int(plate_id)}-{uuid.uuid4().hex[:8]}")
+
+
+def _slice(project_id: int, plate_id: int, slot: int = 0, created_at: float | None = None, work: Path | None = None) -> dict:
     """Build the plate's 3MF and profile, slice it and analyse the G-code. Blocking.
-    Concurrent slices each get their own OrcaSlicer data directory (`slot`), so their caches and logs don't collide."""
+    Concurrent slices each get their own OrcaSlicer data directory (`slot`), so their caches and logs don't collide.
+    Work happens in `work` (a staging folder) on the Project captured at the start; `_publish_slice` makes it the plate's."""
     record = get_project(project_id)
+    if created_at is not None and record["created_at"] != created_at:
+        raise jobs.JobError("The Project was replaced")
+    created_at = record["created_at"]
+    work = work or _staging_dir(project_id, plate_id)
     data = record["data"]
     plate = next((p for p in data["plates"] if p["id"] == plate_id), None)
     if plate is None:
@@ -3673,15 +3725,15 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
         raise jobs.JobError("Choose a profile first")
     _require_one_filament(record, {plate_id})
     _require_resolved_settings(record, {plate_id})
-    _stage(project_id, plate_id, "preparing")
-    stamp = fingerprint(record, plate_id)
-    settings = effective_settings(project_id, plate_id, record=record)
+    _stage(project_id, plate_id, "preparing", created_at)
+    settings = effective_settings(project_id, plate_id, record=record)    # the captured inputs: everything below uses this
+    stamp = settings["fingerprint"]
     orca = slicer.require_orca()
     process, filament, bricks = settings["process"], settings["filament"], settings["bricklayers"]
 
-    work = plate_dir(project_id, plate_id)
     shutil.rmtree(work, ignore_errors=True)
     (work / "profile").mkdir(parents=True)
+    (work / "inputs.json").write_text(json.dumps(plate_settings.snapshot(settings), sort_keys=True), encoding="utf-8")
     (work / "output").mkdir()
     for kind, values in (("machine", settings["machine"]), ("process", process), ("filament", filament)):
         (work / "profile" / f"{kind}.json").write_text(json.dumps(values, indent=1, sort_keys=True), encoding="utf-8")
@@ -3690,7 +3742,7 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
     args = [str(orca), "--datadir", str(_data_dir / ("slicer-data" if slot == 0 else f"slicer-data-{slot}")), "--slice", "0", "--arrange", "0",
             "--load-settings", f"{work / 'profile' / 'machine.json'};{work / 'profile' / 'process.json'}",
             "--load-filaments", str(work / "profile" / "filament.json"), "--outputdir", str(work / "output"), str(work / "plate.3mf")]
-    _stage(project_id, plate_id, "slicing")
+    _stage(project_id, plate_id, "slicing", created_at)
     started = time.monotonic()
     code, text = slicer.runner(args, slicer.SLICE_TIMEOUT_S)
     duration_ms = int((time.monotonic() - started) * 1000)
@@ -3703,7 +3755,7 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
         raise slicer.SliceError("OrcaSlicer finished without producing G-code", code)
     gcode = work / "plate.gcode"
     if bricks:
-        _stage(project_id, plate_id, "post-processing")
+        _stage(project_id, plate_id, "post-processing", created_at)
         orca_gcode = work / "plate.orca.gcode"
         os.replace(produced[0], orca_gcode)
         started = time.monotonic()
@@ -3715,7 +3767,7 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
             log.write(f"\n$ {subprocess.list2cmdline(brick_args)}\n{brick_text}")
     else:
         os.replace(produced[0], gcode)
-    _stage(project_id, plate_id, "analysing")
+    _stage(project_id, plate_id, "analysing", created_at)
     add_thumbnails(project_id, objects, settings["machine"], gcode, work / "slicer.log")
     analysis, toolpath = gcode_analysis.analyze(gcode)
     (work / "toolpath.bin").write_bytes(toolpath)
@@ -3725,7 +3777,8 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
         time_estimate.record_slice(project_id, plate_id, plate_features(project_id, record, plate_id), analysis)
     except sqlite3.Error as e:   # the log must never fail a slice
         print(f"[Projects] Could not log the slice of plate {plate_id} of project {project_id}: {e}")
-    return {"state": SLICED, "error": None, "fingerprint": stamp, "sliced_at": time.time(), "duration_ms": duration_ms,
+    return {"state": SLICED, "error": None, "fingerprint": stamp, "inputs_version": INPUTS_VERSION, "inputs_revision": record["revision"],
+            "sliced_at": time.time(), "duration_ms": duration_ms,
             "estimate_s": estimates.get("estimate_s"), "estimate_g": estimates.get("estimate_g"),
             "layers": len(analysis["layers"]), "slicer": analysis.get("slicer"), "gcode_bytes": gcode.stat().st_size,
             "bricklayers": bricks,
@@ -4059,8 +4112,9 @@ async def process_next(slot: int = 0) -> bool:
             auto, send_opts = bool(queued.get("auto_send")), queued.get("send_opts") or {}
         except jobs.JobError:
             auto, send_opts = False, {}
+        work = _staging_dir(project_id, item)
         try:
-            result = await loop.run_in_executor(None, _slice, project_id, item, slot)
+            result = await loop.run_in_executor(None, _slice, project_id, item, slot, created_at, work)
         except Exception as e:
             result = {"state": FAILED, "error": str(e) or type(e).__name__, "finished_at": time.time()}
             print(f"[Projects] Slicing plate {item} of project {project_id} failed: {e}")
@@ -4070,11 +4124,78 @@ async def process_next(slot: int = 0) -> bool:
                 print(f"[Projects] Could not record the placement problems of plate {item} of project {project_id}: {e}")
         if auto and result.get("state") == SLICED:
             result["auto_send"] = True   # the page keeps checking until the plate is in the queue (or says why not)
-        _mutate(project_id, "slices", lambda s: s.__setitem__(str(item), result), created_at)
-        if auto and result.get("state") == SLICED:
+        published = await loop.run_in_executor(None, _publish_slice, project_id, item, created_at, result, work)
+        if published and auto and result.get("state") == SLICED:
             await loop.run_in_executor(None, _auto_send, project_id, item, created_at, send_opts)
             await jobs.broadcast()
     return True
+
+
+def _publish_slice(project_id: int, plate_id: int, created_at: float, result: dict, work: Path) -> bool:
+    """Make a finished run the plate's Slice, only if the Project is still the one the run started on and the plate is
+    still being sliced. The run's own fingerprint is kept, so an edit made meanwhile shows it as Outdated rather than
+    giving old output the newer settings. Otherwise the run's files are discarded. The previous folder is replaced as one step."""
+    old = None
+    with database.transaction() as conn:
+        row = conn.execute("SELECT data, slices, created_at FROM projects WHERE id = ?", (project_id,)).fetchone()
+        entries = json.loads(row["slices"] or "{}") if row else {}
+        entry = entries.get(str(plate_id))
+        same = row is not None and row["created_at"] == created_at and entry is not None and entry.get("state") == SLICING
+        keep = same and any(p["id"] == plate_id for p in json.loads(row["data"] or "{}").get("plates", []))
+        if same and not keep:   # the plate was removed meanwhile: its running entry goes too
+            del entries[str(plate_id)]
+            conn.execute("UPDATE projects SET slices = ? WHERE id = ?", (json.dumps(entries), project_id))
+        if keep:
+            final = plate_dir(project_id, plate_id)
+            if work.is_dir():
+                final.parent.mkdir(parents=True, exist_ok=True)
+                if final.exists():
+                    old = work.with_name(f".old-{int(plate_id)}-{uuid.uuid4().hex[:8]}")
+                    os.replace(final, old)
+                os.replace(work, final)
+            entries[str(plate_id)] = result
+            conn.execute("UPDATE projects SET slices = ?, updated_at = ? WHERE id = ?", (json.dumps(entries), time.time(), project_id))
+    shutil.rmtree(old, ignore_errors=True) if old else None
+    shutil.rmtree(work, ignore_errors=True)
+    return keep
+
+
+def slice_inputs(project_id: int, plate_id: int) -> dict:
+    """Review a completed Slice: the inputs saved with it, apart from the Project as it is now. Expected inputs, not measured output.
+    A Slice made before inputs were saved (or whose saved file is gone) says so; nothing is reconstructed or guessed."""
+    record = get_project(project_id)
+    entry = record["slices"].get(str(plate_id))
+    if entry is None or entry.get("state") != SLICED:
+        raise jobs.JobError("The plate hasn't been sliced", 404)
+    saved, reason = None, None
+    if entry.get("imported"):
+        reason = "This Slice is uploaded G-code; Spooler never had its print inputs."
+    elif entry.get("inputs_version") != INPUTS_VERSION:
+        reason = "This Slice was made before its inputs were saved, so what it was prepared with cannot be reconstructed."
+    else:
+        try:
+            saved = json.loads((plate_dir(project_id, plate_id) / "inputs.json").read_text(encoding="utf-8"))
+            if saved.get("fingerprint") != entry.get("fingerprint") or saved.get("version") != INPUTS_VERSION:
+                saved, reason = None, "The saved inputs of this Slice do not match its record (damaged)."
+        except FileNotFoundError:
+            reason = "The saved inputs of this Slice are missing."
+        except (OSError, ValueError):
+            reason = "The saved inputs of this Slice are damaged."
+    current, differences = {"state": "unresolved", "fingerprint": None, "revision": record["revision"]}, []
+    try:
+        result = effective_settings(project_id, plate_id, record=record)
+        if not any(i.get("code") in ("unresolved-filament", "conflicting-filament-choices") for i in result["issues"]):
+            current.update(state="available", fingerprint=result["fingerprint"])
+            if saved is not None:
+                differences = plate_settings.differences(saved, result)
+    except jobs.JobError:
+        pass
+    return {"version": 1, "project_id": project_id, "plate_id": plate_id, "revision": record["revision"],
+            "label": "Saved inputs this Slice was prepared with (expected inputs, not measured output); the current Project is shown separately",
+            "slice": {"state": entry["state"], "sliced_at": entry.get("sliced_at"), "fingerprint": entry.get("fingerprint"),
+                      "outdated": bool(entry.get("outdated")), "outdated_reason": entry.get("outdated_reason")},
+            "saved": {"state": "saved" if saved else "unavailable", "inputs": saved, "reason": reason},
+            "current": current, "differences": differences}
 
 
 def _auto_send(project_id: int, plate_id: int, created_at: float, send_opts: dict | None = None) -> None:
