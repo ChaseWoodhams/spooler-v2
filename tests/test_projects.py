@@ -91,6 +91,59 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
             data[key] = value
         return projects.update_project(project["id"], {"data": data, "revision": project["revision"]})
 
+    async def test_reviewed_plate_settings_are_the_inputs_sent_to_orca(self):
+        project = await self.project_with_cube()
+        project = self.edit(project, bed="smooth",
+                            profile={**project["data"]["profile"], "process": {"wall_loops": "4"}},
+                            plates=[{**project["data"]["plates"][0], "overrides": {"wall_loops": "6"}}],
+                            objects=[{**project["data"]["objects"][0], "overrides": {"wall_loops": "8"}}])
+        before = projects.get_project(project["id"])
+        with mock.patch.object(projects.spoolman, "get_spoolman_db", side_effect=AssertionError("review must be offline")):
+            review = projects.effective_settings(project["id"], 1, revision=project["revision"])
+        self.assertEqual(review["process"]["wall_loops"], "6")
+        self.assertEqual(review["process"]["curr_bed_type"], "High Temp Plate")
+        self.assertEqual(review["objects"][0]["overrides"], {"wall_loops": "8"})
+        self.assertEqual([p["source"] for p in review["provenance"]["process"]["wall_loops"]],
+                         ["preset", "project", "plate"])
+        self.assertEqual(review, projects.effective_settings(project["id"], 1))
+        after = projects.get_project(project["id"])
+        for key in ("data", "revision", "models", "slices"):
+            self.assertEqual(before[key], after[key])
+        projects.request_slice(project["id"], 1)
+        with mock.patch.object(slicer, "runner", fake_runner()):
+            await self.run_worker()
+        work = projects.plate_dir(project["id"], 1)
+        for kind in ("machine", "process", "filament"):
+            self.assertEqual(json.loads((work / "profile" / f"{kind}.json").read_text()), review[kind])
+
+    async def test_review_explains_enforced_settings_and_refuses_a_stale_revision(self):
+        project = await self.project_with_cube()
+        project = self.edit(project, profile={**project["data"]["profile"],
+            "bricklayers": {"enabled": True}, "process": {"enable_arc_fitting": "1", "wall_generator": "arachne"}})
+        review = projects.effective_settings(project["id"], 1)
+        self.assertEqual(review["process"]["wall_generator"], "classic")
+        self.assertEqual(review["process"]["enable_arc_fitting"], "0")
+        self.assertEqual(review["provenance"]["process"]["wall_generator"][-1]["source"], "bricklayers")
+        self.assertIn("Required", review["provenance"]["process"]["wall_generator"][-1]["reason"])
+        with self.assertRaises(jobs.JobError) as stale:
+            projects.effective_settings(project["id"], 1, revision=project["revision"] - 1)
+        self.assertEqual(stale.exception.status, 409)
+        self.assertEqual(review["evidence"], "expected-inputs")
+
+    async def test_review_reports_conflicting_choices_without_claiming_a_default_material(self):
+        project = await self.project_with_cube()
+        obj = project["data"]["objects"][0]
+        projects.import_model(project["id"], io.BytesIO(cube_stl(10)), len(cube_stl(10)), "other.stl")
+        await self.run_worker()
+        project = projects.get_project(project["id"])
+        project = self.edit(project, filaments={"1": {"preset": "ASA custom", "colour": "black"}})
+        review = projects.effective_settings(project["id"], 1)
+        self.assertEqual(review["issues"][0]["code"], "conflicting-filament-choices")
+        self.assertEqual(review["issues"][0]["affected_ids"], [1, 2])
+        self.assertEqual(review["filament"], {})
+        with self.assertRaisesRegex(jobs.JobError, "mixes"):
+            projects.request_slice(project["id"], 1)
+
     async def test_import_places_the_model_on_the_first_plate(self):
         project = await self.project_with_cube()
         self.assertEqual(project["data"]["profile"]["bundle_id"], slicer.list_bundles()[0]["id"])
@@ -463,6 +516,18 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
 class ProjectApiTests(unittest.TestCase):
+    def test_effective_settings_http_review_is_revision_bound_and_read_only(self):
+        project = self.call("POST", "/api/projects", {"name": "Settings review"})[1]
+        pid = project["id"]
+        code, review = self.call("GET", f"/api/projects/{pid}/plates/1/effective-settings?revision={project['revision']}")
+        self.assertEqual(code, 200)
+        self.assertEqual(review["revision"], project["revision"])
+        self.assertEqual(review["process"]["wall_loops"], "3")
+        self.assertEqual(review["provenance"]["process"]["curr_bed_type"][-1]["source"], "bed")
+        self.assertEqual(self.call("GET", f"/api/projects/{pid}")[1]["revision"], project["revision"])
+        self.assertEqual(self.call("GET", f"/api/projects/{pid}/plates/1/effective-settings?revision=999")[0], 409)
+        self.assertEqual(self.call("GET", f"/api/projects/{pid}/plates/999/effective-settings")[0], 404)
+
     def test_project_progress_exposes_latest_unknown_outcome_without_changing_status(self):
         pid = self.call('POST', '/api/projects', {'name': 'Outcome fixture'})[1]['id']
         with database.transaction() as conn:

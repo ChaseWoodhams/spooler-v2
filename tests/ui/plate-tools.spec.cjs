@@ -87,7 +87,7 @@ async function saved(page, server, before) {
   assert.ok(server.patches.length > before, 'the change is saved');
 }
 // Select all, the supports choice and the custom gap live in the More menu
-const more = page => page.locator('.tool-more > summary').click();
+const more = page => page.locator('#prepare-tools .tool-more > summary').click();
 const selectAll = async page => { await more(page); await page.locator('#btn-select-all').click(); };
 const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer-object-select`);
 

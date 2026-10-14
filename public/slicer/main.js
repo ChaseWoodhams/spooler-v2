@@ -25,6 +25,7 @@ const state = {
   step: "plates",
   mode: "prepare",
   settingsTab: "process",
+  reviewContext: null,
   schema: null,
   bundles: [],
   bundleSettings: new Map(),
@@ -258,6 +259,7 @@ async function boot() {
   });
   $("settings-mode").value = remember("slicer.mode") || (remember("slicer.advanced") === "1" ? "advanced" : "simple");
   $("settings-mode").addEventListener("change", e => { remember("slicer.mode", e.target.value); renderFoldSummaries(); });
+  $("review-effective-settings").addEventListener("click", reviewEffectiveSettings);
   try {
     state.schema = await (await fetch("/orca/settings.json")).json();
     state.settings.setSchema(state.schema);
@@ -1212,6 +1214,8 @@ function effectiveProcess(base) {
 }
 
 function renderSettings() {
+  const review = $("effective-settings-review");
+  if (review && state.reviewContext !== effectiveReviewContext()) review.innerHTML = "";
   if (!state.project || !state.schema) return;
   if (state.settingsTab === "object" && !$("fold-settings").open) $("fold-settings").open = true;
   const base = state.bundleSettings.get(data().profile.bundle_id);
@@ -1250,6 +1254,34 @@ function renderSettings() {
       : "Changes here apply to every plate.";
     state.settings.show({ tab: kind, tabs, layout: kind, base: base[kind], changes: data().profile[kind], target: { kind }, note });
   }
+}
+
+function effectiveReviewContext() {
+  return state.project ? JSON.stringify([state.project.id, state.plate, state.project.revision, data()]) : null;
+}
+
+// The server owns precedence. Review displays its captured response, never a browser merge.
+async function reviewEffectiveSettings() {
+  const el = $("effective-settings-review");
+  try {
+    await flushSave();
+    const projectId = state.project.id, plateId = currentPlate().id, revision = state.project.revision;
+    el.textContent = "Reviewing…";
+    const result = await api("GET", `/api/projects/${projectId}/plates/${plateId}/effective-settings?revision=${revision}`);
+    if (state.project.id !== projectId || currentPlate().id !== plateId || state.project.revision !== revision) return;
+    state.reviewContext = effectiveReviewContext();
+    const value = v => Array.isArray(v) ? v.join(", ") : String(v ?? "Unavailable");
+    const rows = kind => Object.entries(result[kind] || {}).map(([key, v]) => {
+      const chain = result.provenance?.[kind]?.[key] || [];
+      const winner = chain.at(-1);
+      return `<tr><th scope="row">${esc(state.schema?.settings?.[key]?.label || key)}</th><td>${esc(value(v))}</td><td>${esc(winner?.source || "preset")}${winner?.reason ? ` — ${esc(winner.reason)}` : ""}</td></tr>`;
+    }).join("");
+    el.innerHTML = `<h4>Settings sent to Orca</h4><p>Current Plate inputs, not measured output from a completed Slice.</p>
+      <p><b>${esc(value(result.filament?.filament_type))}</b> · Nozzle ${esc(value(result.machine?.nozzle_diameter))} mm · ${esc(result.process?.curr_bed_type)}</p>
+      ${(result.issues || []).map(i => `<p class="slicer-warning">${esc(i.message)}</p>`).join("")}
+      ${["filament", "process"].map(kind => `<details><summary>${kind === "filament" ? "Filament" : "Process"} values</summary><table><thead><tr><th>Setting</th><th>Value</th><th>Source</th></tr></thead><tbody>${rows(kind)}</tbody></table></details>`).join("")}
+      <p>Object settings are sent separately for ${(result.objects || []).length} Objects.</p>`;
+  } catch (err) { el.textContent = err.message; }
 }
 
 function renderScope() {
