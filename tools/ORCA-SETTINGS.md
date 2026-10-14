@@ -124,3 +124,32 @@ unchanged; chamber keys carry a note that Spooler does not claim chamber heater 
 Issues gain a `control` link (null and `read_only` for inherited ones). Values are expected
 pre-slice inputs, never labelled as measured output. Specs: `tests/test_effective_review.py`,
 `tests/ui/effective-review.spec.cjs`.
+
+## Observed Orca output (ticket 14)
+
+A completed Slice is checked against the configuration footer OrcaSlicer wrote into its own G-code (`observed_output.py`; the
+report is kept as `observed.json` beside the Slice and summarised on the Slice entry as `observed`). The expected side is the
+Slice's saved `inputs.json`, never the current Project. States: `consistent`, `normalized` (only the documented normalization
+below differed), `mismatch` and `unavailable`. Only `mismatch` is untrusted.
+
+- Canonicalization: surrounding quotes and `\n`/`\"` escapes are removed; numbers and percentages compare by value; true/1 and
+  false/0 are equal; a vector compares element by element whether Orca joined it with `,` or `;`; `AxB` and `A,B` points are equal.
+- Ignored as cosmetic/identity (`observed_output.IGNORED`): preset names/ids (`name`, `from`, `inherits`, `instantiation`,
+  `setting_id`, `version`, `filament_id`, `*_settings_id`, `default_*_profile`), compatibility lists, `filament_colour`,
+  `extruder_colour`.
+- Recorded normalization (listed, never silent): `thumbnails` gaining `/PNG`; `enable_prime_tower` 1 -> 0 on a one-filament Plate;
+  an inherited preset value that is not a valid pinned enum choice replaced by a valid one (the stock Elegoo CC process spells
+  infill `zig-zag`; Orca 2.4.2 reports `rectilinear`). A user-set (Project/Plate/Object) value Orca changes is a mismatch.
+- Nullable Filament overrides: a `nil` override is omitted from Orca's footer and the inherited machine/process key is compared
+  instead; a set override (`filament_z_hop`) is the expected value of both itself and the inherited key (`z_hop`).
+- Settings absent from the footer are listed as `unavailable` per setting. A file with no footer, or none of the saved settings,
+  is `unavailable` as a whole: not verified, and not blocked.
+- Queue admission: `queue_plates` refuses a `mismatch` Slice (HTTP 409 naming the settings) unless the body sets
+  `accept_unverified`; Slice & send never sets it, so it records `send_error`. The output, log and `observed.json` stay for review.
+  Unavailable evidence (older Slices, uploaded G-code, no footer) does not block, and is never labelled verified.
+- BrickLayers: the footer examined is `plate.orca.gcode`, Orca's baseline before post-processing. The report carries the
+  post-processor identity and `transform_verified: false`; it is no evidence that the transformed G-code is right.
+- Not proven: Object-scope effects (reported as `object_overrides` unavailable), arbitrary firmware behaviour, print quality.
+
+Native check: `ORCA_SLICER_EXE=<bundled exe> python -m unittest tests.test_observed_output_native` (PETG and ASA cubes with
+Plate and Filament overrides: 249 settings compared, no differences, three recorded normalizations, ten unavailable keys).

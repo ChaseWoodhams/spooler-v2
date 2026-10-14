@@ -57,6 +57,7 @@ import database
 import effective_settings as plate_settings
 import gcode_analysis
 import holds
+import observed_output
 import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
 import orca_3mf
 import preflight
@@ -4042,7 +4043,8 @@ def _slice(project_id: int, plate_id: int, slot: int = 0, created_at: float | No
 
     shutil.rmtree(work, ignore_errors=True)
     (work / "profile").mkdir(parents=True)
-    (work / "inputs.json").write_text(json.dumps(plate_settings.snapshot(settings), sort_keys=True), encoding="utf-8")
+    inputs = plate_settings.snapshot(settings)
+    (work / "inputs.json").write_text(json.dumps(inputs, sort_keys=True), encoding="utf-8")
     (work / "output").mkdir()
     for kind, values in (("machine", settings["machine"]), ("process", process), ("filament", filament)):
         (work / "profile" / f"{kind}.json").write_text(json.dumps(values, indent=1, sort_keys=True), encoding="utf-8")
@@ -4077,6 +4079,9 @@ def _slice(project_id: int, plate_id: int, slot: int = 0, created_at: float | No
     else:
         os.replace(produced[0], gcode)
     _stage(project_id, plate_id, "analysing", created_at)
+    evidence = work / ("plate.orca.gcode" if bricks else "plate.gcode")   # Orca's own output, before any post-processing
+    observed = observed_output.check(inputs, evidence, slicer.settings_schema(), fingerprint=stamp, post_processed=bool(bricks))
+    (work / "observed.json").write_text(json.dumps(observed), encoding="utf-8")
     add_thumbnails(project_id, objects, settings["machine"], gcode, work / "slicer.log")
     analysis, toolpath = gcode_analysis.analyze(gcode)
     (work / "toolpath.bin").write_bytes(toolpath)
@@ -4090,7 +4095,7 @@ def _slice(project_id: int, plate_id: int, slot: int = 0, created_at: float | No
             "sliced_at": time.time(), "duration_ms": duration_ms,
             "estimate_s": estimates.get("estimate_s"), "estimate_g": estimates.get("estimate_g"),
             "layers": len(analysis["layers"]), "slicer": analysis.get("slicer"), "gcode_bytes": gcode.stat().st_size,
-            "bricklayers": bricks,
+            "bricklayers": bricks, "observed": observed_output.summary(observed),
             "findings": _placement_findings(project_id, record, plate_id)
                         + [f for f in analysis.get("findings", []) if f["level"] == "fail"][:5]}
 
@@ -4219,6 +4224,12 @@ def queue_plates(project_id: int, body: dict) -> dict:
     if outdated:
         one = len(outdated) == 1
         raise jobs.JobError(f"{_names(outdated)} changed after {'it was' if one else 'they were'} sliced — slice {'it' if one else 'them'} again", 409)
+    unverified = [p for p in plates if (record["slices"][str(p["id"])].get("observed") or {}).get("state") == "mismatch"]
+    if unverified and not body.get("accept_unverified"):
+        what = "; ".join(f"{p['name']}: " + ", ".join(sorted({d["key"] for d in record["slices"][str(p["id"])]["observed"]["differences"]})[:5])
+                         for p in unverified)
+        raise jobs.JobError(f"Orca's output for {_names([p['name'] for p in unverified])} does not match the settings it was prepared with "
+                            f"({what}) — review the differences, or send it anyway only if you accept them", 409)
     if not body.get("again"):
         repeats = [p["name"] for p in plates if p["id"] in _open_job_plates(project_id)]
         if repeats and record["quick"]:      # a quick print's user never sees plates
@@ -4491,6 +4502,7 @@ def slice_inputs(project_id: int, plate_id: int) -> dict:
         except (OSError, ValueError):
             reason = "The saved inputs of this Slice are damaged."
     current, differences = {"state": "unresolved", "fingerprint": None, "revision": record["revision"]}, []
+    observed = _saved_observation(project_id, plate_id, entry)
     try:
         result = effective_settings(project_id, plate_id, record=record)
         if not any(i.get("code") in ("unresolved-filament", "conflicting-filament-choices") for i in result["issues"]):
@@ -4504,7 +4516,24 @@ def slice_inputs(project_id: int, plate_id: int) -> dict:
             "slice": {"state": entry["state"], "sliced_at": entry.get("sliced_at"), "fingerprint": entry.get("fingerprint"),
                       "outdated": bool(entry.get("outdated")), "outdated_reason": entry.get("outdated_reason")},
             "saved": {"state": "saved" if saved else "unavailable", "inputs": saved, "reason": reason},
-            "current": current, "differences": differences}
+            "current": current, "differences": differences, "observed": observed}
+
+
+def _saved_observation(project_id: int, plate_id: int, entry: dict) -> dict:
+    """What Orca's output showed when the Slice was made, or why that evidence is unavailable. Never guessed or recomputed."""
+    if entry.get("imported"):
+        return observed_output.unavailable("This Slice is uploaded G-code; there is no Orca output to examine.")
+    if not entry.get("observed"):
+        return observed_output.unavailable("This Slice was made before Orca's output was checked, so no evidence was kept.")
+    try:
+        saved = json.loads((plate_dir(project_id, plate_id) / "observed.json").read_text(encoding="utf-8"))
+        if saved.get("fingerprint") != entry.get("fingerprint") or saved.get("state") != entry["observed"].get("state"):
+            return observed_output.unavailable("The saved output check of this Slice does not match its record (damaged).")
+        return saved
+    except FileNotFoundError:
+        return observed_output.unavailable("The saved output check of this Slice is missing.")
+    except (OSError, ValueError):
+        return observed_output.unavailable("The saved output check of this Slice is damaged.")
 
 
 def _auto_send(project_id: int, plate_id: int, created_at: float, send_opts: dict | None = None) -> None:
