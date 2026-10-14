@@ -9,7 +9,10 @@ permission. Develop, readonly, script and unclassified controls remain excluded.
 The generator retains copied enum choices, nullable declarations, numeric
 constants/referenced bounds, ratio targets and literal-limit metadata, and writes
 Unicode without transliteration. `scopes` records the pinned tab classification;
-the Object allowlist is a separate extension.
+the Object allowlist is the union of comment-stripped `PrintObjectConfig` and
+`PrintRegionConfig` declarations in pinned `PrintConfig.hpp`. Runtime editing
+requires both this membership and an editable typed Process definition; macro-only
+or Develop fields are not exposed.
 
 Primary sources:
 
@@ -41,3 +44,28 @@ separate disposable data directories and real Elegoo PETG/ASA presets. Both 20 m
 cube runs with 150% outer-wall width exited 0, emitted G-code, retained the relative
 width in the G-code configuration and reported the correct material identity.
 This confirms those reference inputs; no printer hardware was exercised.
+
+
+Object scope source: [PrintConfig.hpp](https://github.com/OrcaSlicer/OrcaSlicer/blob/v2.4.2/src/libslic3r/PrintConfig.hpp),
+SHA256 `26c193d279772f4a9f4d2222bcf3e17e12335af0634d51c5cde22a1e0010a89e`.
+Regenerate with `python tools/orca_settings.py`; comments and other configuration
+classes cannot admit Object controls. Scope is derived from declarations, never
+from a historical count. `travel_speed` belongs to Project/Plate; `wall_loops`
+is an eligible Object setting.
+
+Saved disallowed or unknown overrides remain in their original scope. Review
+reports their original value and owner; the Object editor also lists hidden old
+controls. `POST /api/projects/{id}/settings/resolve` takes the current revision,
+scope, affected id, kind, key and remove/move action. Moves validate the value at
+the destination, report existing destination values before replacement, and
+require an explicit replacement choice. Commit checks Project identity and revision.
+New output is blocked for affected Plates with unresolved saved overrides; old
+Slice references and artifacts remain readable. Read-only inherited preset
+metadata is still reported separately from authored overrides.
+
+Native verification: `SPOOLER_ORCA=<bundled executable> python -m unittest
+ tests.test_object_scope_orca` runs only disposable Projects/data directories.
+The PETG cube's Object override from one wall to four increases actual Inner-wall
+deposition commands and matches an independent Orca invocation using a common
+four-wall process with the Object override removed. This is a representative
+Object-effect check, not a claim about all Orca features or printer firmware.
