@@ -6,7 +6,8 @@ import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=3";
 import { projectPage } from "./project-page.js?v=7";
-import { newProject } from "./new-project.js?v=9";
+import { newProject } from "./new-project.js?v=10";
+import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=1";
 import { Viewport, featureColor } from "./viewport.js?v=5";
 
 const $ = id => document.getElementById(id);
@@ -2490,7 +2491,11 @@ async function uploadNewModel(file) {
   $("btn-new-upload").disabled = true;
   try {
     const params = new URLSearchParams({ filename: file.name, scale: "1", up: "z" });   // millimetres, Z up; a wrong guess is fixed per file later
-    let project = await upload(`/api/projects/upload?${params}`, file, pct => { bar.style.width = `${pct}%`; });
+    const onProgress = pct => { bar.style.width = `${pct}%`; };
+    let project = isReviewed(file)   // a 3MF is inspected and reviewed in staging before anything is created
+      ? await importWithReview({ file, host: { api, upload }, onProgress })
+      : await upload(`/api/projects/upload?${params}`, file, onProgress);
+    if (!project) { toast("Import cancelled — nothing was created"); return; }
     const name = $("new-project-name").value.trim();
     if (name && name !== project.name) project = await api("PATCH", `/api/projects/${project.id}`, { name });
     // A 3MF holding several objects on one plate opens crammed together: plan it like a batch import does
@@ -2614,6 +2619,10 @@ function bindUi() {
     }
   });
   $("btn-export-3mf").addEventListener("click", exportProject);
+  $("btn-import-records").addEventListener("click", () => {
+    $("btn-import-records").closest("details").open = false;
+    if (state.project) showRecords({ api }, state.project.id).catch(err => toast(err.message, true));
+  });
   $("btn-projects").addEventListener("click", showProjectsPage);
   $("btn-empty-projects").addEventListener("click", showProjectsPage);
   $("btn-pd-new").addEventListener("click", openProjectsDialog);

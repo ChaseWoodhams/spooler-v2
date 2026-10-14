@@ -122,7 +122,15 @@ class QuickIntakeApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.visible_ids(), [])
 
     async def test_a_disabled_object_does_not_make_a_single_object_3mf_a_multi_object_one(self):
-        project = await self.quick_upload(self.plain_3mf(1, disabled=2), "part.3mf")
+        data = self.plain_3mf(1, disabled=2)
+        status, refused = self.call("POST", "/api/projects/upload?filename=part.3mf&quick=1", raw=data)    # the disabled copies are a reviewable loss
+        self.assertEqual((status, refused["issues"][0]["code"]), (409, "import-review-required"))
+        self.assertEqual(self.call("GET", "/api/projects?include_quick=1")[1]["projects"], [])
+        status, review = self.call("POST", "/api/projects/import-review?filename=part.3mf&quick=1", raw=data)
+        self.assertEqual((status, [l["code"] for l in review["report"]["losses"]]), (200, ["disabled-copy"]))
+        status, project = self.call("POST", f"/api/projects/import-review/{review['token']}/confirm", {**review["binding"], "acknowledged": True})
+        self.assertEqual(status, 200, project)
+        await self.settle()
         self.assertIs(project["quick"], True)
         self.assertNotIn("routed", project)
         self.assertEqual(self.call("GET", f"/api/projects/{project['id']}/intake")[1]["can_print"], True)

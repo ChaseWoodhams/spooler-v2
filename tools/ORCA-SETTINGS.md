@@ -69,3 +69,23 @@ The PETG cube's Object override from one wall to four increases actual Inner-wal
 deposition commands and matches an independent Orca invocation using a common
 four-wall process with the Object override removed. This is a representative
 Object-effect check, not a claim about all Orca features or printer firmware.
+
+## Import loss review
+
+Every 3MF import path (new single-Model Project, new whole Project, append, plain
+3MF) is staged under `projects/.import-staging/<token>/` and inspected from the
+original archive by `orca_3mf.inspect` before any Project, Split or Model folder
+changes. `POST /api/projects/import-review` (raw body; `target`, `draft_token`,
+`scale`, `up`, `plate`, `quick` in the query) returns the report; `.../<token>/confirm`
+commits it and `DELETE .../<token>` cancels. Report version 1 lists `losses`
+(scope `model`, `object` or `plate`, affected `name`, stable `code`) and `blockers`
+(`unmatched-material`, `unmatched-printer`, `malformed-settings`,
+`malformed-project-settings`, `nothing-printable`, `unreadable-geometry`). The
+binding echoed by confirm covers the content hash, the proposed conversion digest,
+the report version and the target's id, `created_at` and revision; the transaction
+re-checks the target before moved Model folders are published, and a failure
+removes only what that commit moved. Accepted records (report, notes, original
+archive) live in `projects/<id>/imports/<token>/` and are listed at
+`GET /api/projects/<id>/imports`. A material or printer substitution is a blocker,
+never a loss; resolving it belongs to the next import ticket. The older direct
+routes refuse any file that has losses or blockers (HTTP 409 `import-review-required`).

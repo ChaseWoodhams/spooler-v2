@@ -45,8 +45,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import zipfile
+import zlib
 from pathlib import Path
+from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
 import brick_post
@@ -122,6 +125,7 @@ def plate_dir(project_id: int, plate_id: int) -> Path:
 def init() -> None:
     """Migrate, and queue again any plate that was slicing when Spooler stopped."""
     database.migrate()
+    sweep_import_staging(startup=True)    # a review that was being prepared when Spooler stopped
     with database.transaction() as conn:
         for row in conn.execute("SELECT id, slices FROM projects").fetchall():
             entries = json.loads(row["slices"] or "{}")
@@ -335,69 +339,15 @@ def create_project_from_upload(stream, length: int, filename: str, scale=1.0, up
     if filename.lower().endswith(".gcode"):
         return create_project_from_gcode(stream, length, filename, bed, quick=quick)
     if filename.lower().endswith(".3mf"):
-        path = _spool(stream, length)
-        try:
-            return _create_project_from_3mf(path, length, filename, scale, up, quick)
-        finally:
-            path.unlink(missing_ok=True)
+        result = _import_directly(None, stream, length, filename, scale=scale, up=up, quick=quick)
+        record = result["import_record"]
+        if quick and record["kind"] == "project":
+            counts = [f"{record['objects']} objects" if record["objects"] > 1 else None,
+                      f"{record['plates']} plates" if record["plates"] > 1 else None]
+            result["routed"] = {"to": "project", "reason": f"The file has {' on '.join(c for c in counts if c)}, so it opens as a project"}
+        return result
     split = splits.create_split(stream, length, filename, {"scale": scale, "up": up})
     return create_project(Path(split["source_name"]).stem, split_id=split["id"], quick=quick)
-
-
-def _create_project_from_3mf(path: Path, length: int, filename: str, scale, up, quick: bool) -> dict:
-    """Objects and plates are counted before anything is created. One object on one plate is a model like any other
-    (an Orca project's settings become the project's starting values); anything bigger becomes a normal, visible Project
-    with its objects and plates, even when a quick print was asked for (the result then says `routed`)."""
-    try:
-        found = orca_3mf.summary(path)
-    except orca_3mf.ThreeMFError as e:
-        raise jobs.JobError(str(e)) from e
-    stem = Path(filename.replace("\\", "/")).stem[:120]
-    if found["objects"] > 1 or found["plates"] > 1:
-        project = create_project(stem)
-        try:
-            imported = import_orca_project(project["id"], path, fresh=True)
-        except BaseException:
-            delete_project(project["id"])
-            raise
-        if quick:
-            counts = [f"{found['objects']} objects" if found["objects"] > 1 else None,
-                      f"{found['plates']} plates" if found["plates"] > 1 else None]
-            imported["routed"] = {"to": "project", "reason": f"The file has {' on '.join(c for c in counts if c)}, so it opens as a project"}
-        return imported
-    return _create_project_from_single_object_3mf(path, stem, scale, up, quick)
-
-
-def _create_project_from_single_object_3mf(path: Path, stem: str, scale, up, quick: bool) -> dict:
-    """A one-object 3MF (plain or Orca/Bambu), read with our own parser, normalised to the shape of a plain model upload (a split-owned whole model, so the
-    quick print intake works on it); the file's own settings and plate side become the project's starting values."""
-    _require_geometry()
-    try:
-        parsed = orca_3mf.parse(path)
-    except orca_3mf.ThreeMFError as e:
-        raise jobs.JobError(str(e)) from e
-    (obj,) = parsed["objects"]
-    notes = list(parsed["warnings"])
-    profile, bed = _orca_profile(parsed["project"], notes)
-    base = slicer.bundle_settings(profile["bundle_id"]) if profile.get("bundle_id") else None
-    profile["process"] = {**profile["process"], **_clean_object_settings(obj["settings"], base, obj["name"], notes)}
-    instance = next((i for i in obj["instances"] if i["printable"]), obj["instances"][0])   # a disabled copy is not the one to print
-    verts = obj["verts"] @ instance["matrix"]      # the object as the file poses it (its own scale and turn)
-    staging = Path(tempfile.mkdtemp(prefix=".orca-", dir=path.parent))
-    try:
-        stl = staging / "model.stl"
-        write_stl(stl, verts, obj["tris"])
-        with stl.open("rb") as fh:
-            split = splits.create_split(fh, stl.stat().st_size, f"{stem}.stl", {"scale": scale, "up": up})
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
-    project = create_project(stem, split_id=split["id"], quick=quick)
-    try:
-        _mutate(project["id"], "data", lambda d: d.update(bed=bed, profile={"spool_id": None, **profile}))
-    except BaseException:
-        delete_project(project["id"])
-        raise
-    return {**get_project(project["id"]), "import_notes": list(dict.fromkeys(notes))}
 
 
 def delete_project(project_id: int, only_draft_idle_before: float | None = None, only_draft: bool = False) -> None:
@@ -903,15 +853,7 @@ def _store_source(project_id: int, model_id: int, name: str, write_source, scale
     """Write a model's source file and import settings. Returns its record, waiting to be imported."""
     folder = model_dir(project_id, model_id)
     shutil.rmtree(folder, ignore_errors=True)
-    (folder / "source").mkdir(parents=True)
-    try:
-        size, digest = write_source(folder / "source" / name)
-    except BaseException:
-        shutil.rmtree(folder, ignore_errors=True)
-        raise
-    (folder / "job.json").write_text(json.dumps({"source": f"source/{name}", "scale": scale, "up": up}), encoding="utf-8")
-    return {"id": model_id, "name": Path(name).stem, "file": name, "state": IMPORTING, "error": None, "size_bytes": size,
-            "sha256": digest, "import": [scale, up]}
+    return {"id": model_id, **_write_source_folder(folder, name, write_source, scale, up)}
 
 
 def _copy_from(source: Path):
@@ -957,14 +899,7 @@ def import_model(project_id: int, stream, length: int, filename: str, scale=1.0,
     if length > splits.MAX_UPLOAD_BYTES:
         raise jobs.JobError(f"The file is larger than {splits.MAX_UPLOAD_BYTES // (1024 * 1024)} MB", 413)
     if filename.lower().endswith(".3mf"):
-        path = _spool(stream, length)
-        try:
-            if orca_3mf.is_project(path):
-                return import_orca_project(project_id, path)
-            _add_model(project_id, filename, _copy_from(path), scale, up, int(plate_id) if plate_id else None)
-            return get_project(project_id)
-        finally:
-            path.unlink(missing_ok=True)
+        return _import_directly(project_id, stream, length, filename, scale=scale, up=up, plate=plate_id)
 
     def write(path: Path) -> tuple:
         digest, remaining = hashlib.sha256(), length
@@ -1010,16 +945,20 @@ def _spool(stream, length: int) -> Path:
     return Path(name)
 
 
-def _orca_profile(project: dict | None, notes: list) -> tuple:
+def _orca_profile(project: dict | None, notes: list, blockers: list | None = None) -> tuple:
     """The profile (locked presets plus setting changes) and plate side an Orca project asks for.
     Presets that aren't among the stock Elegoo ones fall back to the defaults, and every setting of the project that
-    differs from them is carried over as a change, so a user's own Orca presets still slice the same."""
+    differs from them is carried over as a change, so a user's own Orca presets still slice the same.
+    A printer, or a material that would become a different one, is never replaced quietly: it is appended to `blockers`
+    (code, requested and proposed values) and the import waits for an explicit resolution."""
     default = {"bundle_id": _default_bundle_id(), "process": {}, "filament": {}, "bricklayers": None}
     if not project or slicer.orca_executable() is None:
         return default, "textured"
+    blockers = [] if blockers is None else blockers
     try:
         stock = slicer.stock_presets()
         machine = project.get("printer_settings_id")
+        requested_machine = machine
         if machine not in stock["machines"]:
             machine = stock["defaults"]["machine"]
             notes.append("The project's printer isn't a Centauri Carbon preset — using the default printer")
@@ -1030,6 +969,23 @@ def _orca_profile(project: dict | None, notes: list) -> tuple:
                  "filament": filament if filament in stock["filaments"][machine] else stock["defaults"]["filament"]}
         bundle = slicer.create_bundle(**names)
         base = slicer.bundle_settings(bundle["id"])
+        first = lambda value: (value[0] if isinstance(value, list) and value else value) or None
+        if requested_machine != machine:
+            blockers.append({"code": "unmatched-printer", "scope": "project", "name": requested_machine or "No printer",
+                             "requested": {"printer": requested_machine, "nozzle": first(project.get("nozzle_diameter"))},
+                             "proposed": {"printer": machine, "nozzle": first(base["machine"].get("nozzle_diameter"))},
+                             "message": f"The project's printer “{requested_machine}” has no matching Centauri Carbon preset. "
+                                        f"Choose a compatible printer before importing."})
+        if names["filament"] != filament and requested_machine == machine:
+            wanted, offered = first(project.get("filament_type")), first(base["filament"].get("filament_type"))
+            if not wanted or wanted != offered:
+                blockers.append({"code": "unmatched-material", "scope": "project", "name": filament or "No material",
+                                 "requested": {"filament": filament, "material": wanted, "nozzle": first(project.get("nozzle_diameter"))},
+                                 "proposed": {"filament": names["filament"], "material": offered,
+                                              "nozzle": first(base["machine"].get("nozzle_diameter"))},
+                                 "message": f"The project's material “{filament}” ({wanted or 'unknown type'}) has no matching preset. "
+                                            f"Spooler would use “{names['filament']}” ({offered or 'unknown type'}) instead. "
+                                            f"Choose a compatible material before importing."})
         allowed = {kind: slicer._tab_keys(kind) - slicer.BLOCKED_SETTINGS for kind in ("process", "filament")}
         wanted = orca_3mf.settings_changes(project, base, allowed)
         changes = {}
@@ -1062,72 +1018,419 @@ def _clean_object_settings(settings: dict, base: dict | None, label: str, notes:
     return kept
 
 
-def import_orca_project(project_id: int, path: Path, fresh: bool = False) -> dict:
-    """Bring the plates, objects, per-object settings and (for a new project) the settings of an Orca/Bambu 3MF into a project.
-    With `fresh` the project's empty first plate is replaced; otherwise the file's plates are added after the existing ones."""
+# ── Import review ──────────────────────────────────────────────────────────────
+#
+# An Orca/Bambu or plain 3MF is first inspected and converted into private staging under projects/.import-staging/<token>/:
+# the original archive, the converted Model sources and a review.json that records the loss report and what the conversion would
+# do. Nothing visible changes. Confirming binds the content hash, the proposed conversion (profile choice, Models, Plates, import
+# options), the target Project's identity and revision, and the report version; the prepared delta is then published in one
+# transaction. Cancelling, expiry or any failure removes only that token's staging folder.
+
+IMPORT_REVIEW_TTL_S = 30 * 60
+STAGING_NAME = ".import-staging"
+_TOKEN = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _staging_root() -> Path:
+    return projects_dir() / STAGING_NAME
+
+
+def _staging_path(token) -> Path:
+    if not isinstance(token, str) or not _TOKEN.match(token):
+        raise jobs.JobError("That import review isn't valid", 400)
+    return _staging_root() / token
+
+
+def _review_error(message: str, status: int, code: str, **extra) -> jobs.JobError:
+    error = jobs.JobError(message, status)
+    error.issues = [{"code": code, "message": message, **extra}]
+    return error
+
+
+def _load_review(token: str) -> dict:
+    try:
+        return json.loads((_staging_path(token) / "review.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise _review_error("This import review was cancelled or has expired. Choose the file again", 404, "import-review-gone") from None
+
+
+def cancel_import(token: str) -> dict:
+    """Throw away a review's staging. Only the named token's own folder is touched; cancelling twice is harmless."""
+    shutil.rmtree(_staging_path(token), ignore_errors=True)
+    return {"ok": True}
+
+
+def sweep_import_staging(now: float | None = None, startup: bool = False) -> int:
+    """Remove staging that has expired, or was interrupted before it recorded a review (all of those at startup, when no
+    preparation can be running). Folders that aren't a staging token are never touched."""
+    root = _staging_root()
+    if not root.is_dir():
+        return 0
+    now = time.time() if now is None else now
+    removed = 0
+    for entry in list(root.iterdir()):
+        if not entry.is_dir() or not _TOKEN.match(entry.name):
+            continue
+        try:
+            expired = json.loads((entry / "review.json").read_text(encoding="utf-8"))["expires_at"] <= now
+        except (OSError, ValueError, KeyError, TypeError):
+            try:
+                expired = startup or entry.stat().st_mtime + IMPORT_REVIEW_TTL_S <= now
+            except OSError:
+                expired = False
+        if expired:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+    return removed
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        while chunk := fh.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _binding(review: dict) -> dict:
+    return {"token": review["token"], "content_hash": review["content_hash"], "report_version": review["report"]["version"],
+            "conversion": review["conversion_digest"], "target": review["target"]}
+
+
+def _public_review(review: dict) -> dict:
+    report = review["report"]
+    return {"token": review["token"], "kind": review["kind"], "filename": review["filename"], "expires_at": review["expires_at"],
+            "required": bool(report["losses"]), "blocked": bool(report["blockers"]), "report": report, "notes": review["notes"],
+            "binding": _binding(review)}
+
+
+def get_import_review(token: str) -> dict:
+    review = _load_review(token)
+    if review["expires_at"] <= time.time():
+        cancel_import(token)
+        raise _review_error("This import review has expired. Choose the file again", 409, "import-review-expired")
+    return _public_review(review)
+
+
+def _write_source_folder(folder: Path, name: str, write_source, scale: float, up: str) -> dict:
+    """A Model's source folder (source file and import settings) in any directory. Returns its record without an id."""
+    (folder / "source").mkdir(parents=True)
+    try:
+        size, digest = write_source(folder / "source" / name)
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    (folder / "job.json").write_text(json.dumps({"source": f"source/{name}", "scale": scale, "up": up}), encoding="utf-8")
+    return {"name": Path(name).stem, "file": name, "state": IMPORTING, "error": None, "size_bytes": size,
+            "sha256": digest, "import": [scale, up]}
+
+
+def _stage_conversion(kind: str, path: Path, folder: Path, record: dict | None, filename: str, options: dict, notes: list, blockers: list):
+    """Convert the staged archive into Model sources and a Project delta, all inside `folder`. A file whose geometry or settings
+    can't be converted adds a blocker and returns None."""
+    if kind == "plain":
+        name = splits.safe_model_name(filename)
+        template = _write_source_folder(folder / "models" / "0", name, _copy_from(path), options["scale"], options["up"])
+        return {"kind": kind, "models": [{"folder": "0", "record": template, "object": template["name"]}],
+                "objects": [{"model": 0, "plate_target": options["plate"], "name": template["name"], "position": [128.0, 128.0],
+                             "rotation": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0], "overrides": {}}], "plates": []}
     _require_geometry()
     try:
         parsed = orca_3mf.parse(path)
     except orca_3mf.ThreeMFError as e:
-        raise jobs.JobError(str(e))
-    notes = list(parsed["warnings"])
-    record = get_project(project_id)
-    data = record["data"]
-    instances = sum(len(o["instances"]) for o in parsed["objects"])
-    if len(data["objects"]) + instances > MAX_OBJECTS:
-        raise jobs.JobError(f"A project holds at most {MAX_OBJECTS} objects")
-    if not fresh and len(data["plates"]) + len(parsed["plates"]) > MAX_PLATES:
-        raise jobs.JobError(f"A project has at most {MAX_PLATES} plates")
-    profile, bed = _orca_profile(parsed["project"], notes) if fresh else (data["profile"], data["bed"])
+        blockers.append({"code": "unreadable-geometry", "scope": "project", "name": filename, "message": str(e)})
+        return None
+    notes.extend(w for w in parsed["warnings"] if "were left out" not in w)
+    wanted = []        # (object, its enabled copies): a disabled copy is a reported loss and is not imported
+    for obj in parsed["objects"]:
+        copies = [i for i in obj["instances"] if i["printable"]]
+        if copies:
+            wanted.append((obj, copies))
+    if not wanted or (kind == "single" and len(wanted) != 1):
+        blockers.append({"code": "nothing-printable", "scope": "project", "name": filename,
+                         "message": "The file has no enabled copy to import" if not wanted else "The file holds more than one Object"})
+        return None
+    fresh = kind in ("single", "project")
+    if fresh:
+        profile, bed = _orca_profile(parsed["project"], notes, blockers)
+    else:
+        profile, bed = record["data"]["profile"], record["data"]["bed"]
     base = slicer.bundle_settings(profile["bundle_id"]) if profile.get("bundle_id") else None
+    if kind == "single":
+        obj, copies = wanted[0]
+        profile = {"spool_id": None, **profile}
+        profile["process"] = {**profile["process"], **_clean_object_settings(obj["settings"], base, obj["name"], notes)}
+        write_stl(folder / "model.stl", obj["verts"] @ copies[0]["matrix"], obj["tris"])
+        stl = folder / "model.stl"
+        return {"kind": kind, "stl": "model.stl", "size": stl.stat().st_size, "sha256": _file_digest(stl), "profile": profile, "bed": bed,
+                "name": Path(filename.replace("\\", "/")).stem[:120], "models": [], "objects": [], "plates": []}
+    if kind == "append":
+        data = record["data"]
+        if len(data["objects"]) + sum(len(c) for _, c in wanted) > MAX_OBJECTS:
+            raise jobs.JobError(f"A project holds at most {MAX_OBJECTS} objects")
+        if len(data["plates"]) + len(parsed["plates"]) > MAX_PLATES:
+            raise jobs.JobError(f"A project has at most {MAX_PLATES} plates")
+    elif sum(len(c) for _, c in wanted) > MAX_OBJECTS:
+        raise jobs.JobError(f"A project holds at most {MAX_OBJECTS} objects")
+    models, objects = [], []
+    for index, (obj, copies) in enumerate(wanted):
+        name = splits.safe_model_name(f"{obj['name']}.stl") if obj["name"].strip(". ") else f"object{index + 1}.stl"
 
-    def clean(settings: dict, label: str) -> dict:
-        return _clean_object_settings(settings, base, label, notes)
+        def write(target: Path, verts=obj["verts"], tris=obj["tris"]) -> tuple:
+            write_stl(target, verts, tris)
+            return target.stat().st_size, _file_digest(target)
+        models.append({"folder": str(index), "record": _write_source_folder(folder / "models" / str(index), name, write, 1.0, "z"),
+                       "object": obj["name"]})
+        overrides = _clean_object_settings(obj["settings"], base, obj["name"], notes)
+        for copy, instance in enumerate(copies, start=1):
+            placed = orca_3mf.pose(obj["verts"], instance["matrix"], instance["shift"])
+            objects.append({"model": index, "plate_source": instance["plate"], "name": obj["name"] if copy == 1 else f"{obj['name']} ({copy})",
+                            "position": placed["position"], "rotation": placed["rotation"], "scale": placed["scale"], "overrides": dict(overrides)})
+    return {"kind": kind, "models": models, "objects": objects, "plates": [{"id": p["id"], "name": p["name"]} for p in parsed["plates"]],
+            "profile": profile if fresh else None, "bed": bed if fresh else None,
+            "name": Path(filename.replace("\\", "/")).stem[:120]}
 
-    model_ids, models = {}, []
-    next_model = _next_id(record["models"])
+
+def prepare_import(stream, length: int, filename: str, target: int | None = None, scale=1.0, up="z", plate=None, quick: bool = False) -> dict:
+    """Stage and inspect a 3MF without changing any Project. `target` is the Project it would be added to (none: it would start a
+    new Project). Returns the review: its `token`, the `report` of losses and blockers, whether acknowledgement is `required`,
+    and the `binding` that confirm_import must echo."""
+    if not str(filename).lower().endswith(".3mf"):
+        raise jobs.JobError("Only 3MF files have an import review")
+    sweep_import_staging()
+    record = get_project(target) if target is not None else None
+    options = {**splits.normalize_settings({"scale": scale, "up": up}), "plate": int(plate) if plate else None, "quick": bool(quick)}
+    source = _spool(stream, length)
+    token = uuid.uuid4().hex
+    folder = _staging_path(token)
     try:
-        for index, obj in enumerate(parsed["objects"]):
-            model_id = next_model + index
-            name = splits.safe_model_name(f"{obj['name']}.stl") if obj["name"].strip(". ") else f"object{index + 1}.stl"
-
-            def write(target: Path, verts=obj["verts"], tris=obj["tris"]) -> tuple:
-                write_stl(target, verts, tris)
-                return target.stat().st_size, hashlib.sha256(target.read_bytes()).hexdigest()
-            models.append(_store_source(project_id, model_id, name, write, 1.0, "z"))
-            model_ids[index] = model_id
+        folder.mkdir(parents=True)
+        path = folder / "source.3mf"
+        os.replace(source, path)
+        digest = _file_digest(path)
+        try:
+            found = orca_3mf.summary(path)
+            kind = ("project" if found["objects"] > 1 or found["plates"] > 1 else "single") if record is None \
+                else "append" if orca_3mf.is_project(path) else "plain"
+            report = orca_3mf.inspect(path, "single" if kind == "single" else "project")
+        except orca_3mf.ThreeMFError as e:
+            raise jobs.JobError(str(e)) from e
+        except (zipfile.BadZipFile, ElementTree.ParseError, zlib.error, EOFError):
+            raise jobs.JobError("That isn't a valid 3MF file") from None
+        report.pop("project", None)
+        notes, blockers = [], list(report["blockers"])
+        conversion = None if blockers else _stage_conversion(kind, path, folder, record, filename, options, notes, blockers)
+        report["blockers"] = blockers
+        summary = json.dumps({"conversion": conversion, "options": options}, sort_keys=True, default=str)
+        now = time.time()
+        review = {"token": token, "kind": kind, "filename": Path(filename.replace("\\", "/")).name, "created_at": now,
+                  "expires_at": now + IMPORT_REVIEW_TTL_S, "content_hash": digest, "size": path.stat().st_size, "report": report,
+                  "notes": list(dict.fromkeys(notes)), "conversion": conversion, "options": options,
+                  "conversion_digest": hashlib.sha256(summary.encode()).hexdigest(),
+                  "target": {"project_id": record["id"], "created_at": record["created_at"], "revision": record["revision"]} if record else None}
+        (folder / "review.json").write_text(json.dumps(review, default=str), encoding="utf-8")
+        return _public_review(review)
     except BaseException:
-        for model in models:
-            shutil.rmtree(model_dir(project_id, model["id"]), ignore_errors=True)
+        source.unlink(missing_ok=True)
+        shutil.rmtree(folder, ignore_errors=True)
         raise
 
-    with database.transaction() as conn:
-        row = conn.execute("SELECT data, models FROM projects WHERE id = ?", (project_id,)).fetchone()
-        if row is None:
-            raise jobs.JobError("Project not found", 404)
-        data, existing = json.loads(row["data"]), json.loads(row["models"])
-        if fresh:
-            data["plates"], data["objects"] = [], []
-            data["profile"], data["bed"] = profile, bed
-        first = _next_id(data["plates"])
-        plate_ids = {}
-        for number, plate in enumerate(parsed["plates"]):
-            plate_ids[plate["id"]] = first + number
-            data["plates"].append({"id": first + number, "name": plate["name"] or f"Plate {first + number}", "overrides": {}})
-        for index, obj in enumerate(parsed["objects"]):
-            overrides = clean(obj["settings"], obj["name"])
-            for copy, instance in enumerate(obj["instances"], start=1):
-                placed = orca_3mf.pose(obj["verts"], instance["matrix"], instance["shift"])
-                if placed["notes"]:
-                    notes.append(f"{obj['name']} is {' and '.join(placed['notes'])} in the project; it was placed unmirrored/unskewed")
-                data["objects"].append({
-                    "id": _next_id(data["objects"]), "model": model_ids[index], "plate": plate_ids.get(instance["plate"], first),
-                    "name": obj["name"] if copy == 1 else f"{obj['name']} ({copy})", "position": placed["position"],
-                    "rotation": placed["rotation"], "scale": placed["scale"], "overrides": dict(overrides)})
-        conn.execute("UPDATE projects SET data = ?, models = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
-                     (json.dumps(data), json.dumps(existing + models), time.time(), project_id))
+
+def _import_directly(target, stream, length: int, filename: str, **options) -> dict:
+    """The one-step import of callers that have no review screen: a 3MF with nothing to review is converted as usual; any loss
+    or blocker refuses it (409, nothing changed) rather than skipping the review."""
+    review = prepare_import(stream, length, filename, target=target, **options)
+    if review["required"] or review["blocked"]:
+        cancel_import(review["token"])
+        raise _review_error("This 3MF has features Spooler can't keep or settings it can't match. Add it from a Project's New project or Add models "
+                            "page to review it first", 409,
+                            "import-review-required", losses=review["report"]["losses"], blockers=review["report"]["blockers"])
+    return confirm_import(review["token"], review["binding"])
+
+
+def confirm_import(token: str, confirmation: dict) -> dict:
+    """Commit a reviewed import. `confirmation` is the review's binding, plus `acknowledged: true` when it lists losses.
+    A confirmation that no longer matches (the file, the proposed conversion, the Project's identity or revision) conflicts and its
+    staging is removed; so are staging that expired or fails to commit."""
+    review = _load_review(token)
+    folder = _staging_path(token)
+    confirmation = confirmation if isinstance(confirmation, dict) else {}
+    if review["expires_at"] <= time.time():
+        cancel_import(token)
+        raise _review_error("This import review has expired. Choose the file again", 409, "import-review-expired")
+    if any(confirmation.get(key) != value for key, value in _binding(review).items()):
+        cancel_import(token)
+        raise _review_error("The import review is out of date. Choose the file again", 409, "import-review-stale")
+    report = review["report"]
+    if report["blockers"]:
+        raise _review_error("This import can't continue until its blocking problems are resolved", 409, "import-blocked",
+                            blockers=report["blockers"])
+    if report["losses"] and confirmation.get("acknowledged") is not True:
+        raise _review_error("Review the losses and choose Continue with losses", 409, "import-review-required", losses=report["losses"])
+    try:
+        if _file_digest(folder / "source.3mf") != review["content_hash"]:
+            raise _review_error("The staged file changed. Choose the file again", 409, "import-review-stale")
+        result = _commit_import(review, folder)
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    shutil.rmtree(folder, ignore_errors=True)
+    return result
+
+
+def _commit_import(review: dict, folder: Path) -> dict:
+    conversion, target = review["conversion"], review["target"]
+    notes = review["notes"]
+    if target is not None:
+        summary = _apply_conversion(target["project_id"], review, folder, target, fresh=False)
+        project_id = target["project_id"]
+    elif conversion["kind"] == "single":
+        project_id = _create_single_model_project(review, folder)
+        summary = {"model_ids": [], "plate_ids": []}
+    else:
+        project = create_project(conversion["name"])
+        project_id = project["id"]
+        try:
+            summary = _apply_conversion(project_id, review, folder, {"revision": project["revision"], "created_at": project["created_at"]},
+                                        fresh=True)
+        except BaseException:
+            delete_project(project_id)
+            raise
+    record = import_record(project_id, review["token"])
+    return {**get_project(project_id), "import_notes": notes, "import_record": record}
+
+
+def _retain_import(project_id: int, review: dict, folder: Path, summary: dict) -> Path:
+    """Keep the original archive and the accepted loss report with the Project (downloadable later). Returns the new folder,
+    which only this import owns."""
+    keep = project_dir(project_id) / "imports" / review["token"]
+    keep.mkdir(parents=True)
+    os.replace(folder / "source.3mf", keep / "source.3mf")
+    report = review["report"]
+    (keep / "record.json").write_text(json.dumps({
+        "id": review["token"], "kind": review["kind"], "filename": review["filename"], "content_hash": review["content_hash"],
+        "size": review["size"], "accepted_at": time.time(), "acknowledged": bool(report["losses"]), "report_version": report["version"],
+        "losses": report["losses"], "objects": report["objects"], "plates": report["plates"], "notes": review["notes"], **summary}), encoding="utf-8")
+    return keep
+
+
+def _apply_conversion(project_id: int, review: dict, folder: Path, expected: dict, fresh: bool) -> dict:
+    """Publish the staged Models and Project delta in one transaction, only if the Project is still the one that was reviewed.
+    Folders already moved into place are removed again if anything fails; nothing else is ever deleted."""
+    conversion = review["conversion"]
+    published = []
+    try:
+        with database.transaction() as conn:
+            row = conn.execute("SELECT data, models, revision, created_at FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if row is None:
+                raise _review_error("The Project this import was reviewed for is gone", 409, "import-review-stale")
+            if row["revision"] != expected["revision"] or row["created_at"] != expected["created_at"]:
+                raise _review_error("The Project changed since the import was reviewed. Review it again", 409, "import-review-stale")
+            data, existing = json.loads(row["data"]), json.loads(row["models"])
+            plates = [] if fresh else data["plates"]
+            if len(plates) + len(conversion["plates"]) > MAX_PLATES:
+                raise jobs.JobError(f"A project has at most {MAX_PLATES} plates")
+            if (0 if fresh else len(data["objects"])) + len(conversion["objects"]) > MAX_OBJECTS:
+                raise jobs.JobError(f"A project holds at most {MAX_OBJECTS} objects")
+            next_model = _next_id(existing)
+            model_ids, new_models = {}, []
+            for spec in conversion["models"]:
+                while model_dir(project_id, next_model).exists():     # never replace assets we don't own
+                    next_model += 1
+                destination = model_dir(project_id, next_model)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(folder / "models" / spec["folder"], destination)
+                published.append(destination)
+                model_ids[int(spec["folder"])] = next_model
+                new_models.append({**spec["record"], "id": next_model, "origin": {"import": review["token"]}})
+                next_model += 1
+            if fresh:
+                data["plates"], data["objects"] = [], []
+                data["profile"], data["bed"] = conversion["profile"], conversion["bed"]
+            first = _next_id(data["plates"])
+            plate_ids = {}
+            for number, plate in enumerate(conversion["plates"]):
+                plate_ids[plate["id"]] = first + number
+                data["plates"].append({"id": first + number, "name": plate["name"] or f"Plate {first + number}", "overrides": {}})
+            valid = {p["id"] for p in data["plates"]}
+            for obj in conversion["objects"]:
+                if "plate_source" in obj:
+                    plate_id = plate_ids.get(obj["plate_source"], first)
+                else:
+                    plate_id = obj["plate_target"] if obj["plate_target"] in valid else data["plates"][0]["id"]
+                data["objects"].append({"id": _next_id(data["objects"]), "model": model_ids[obj["model"]], "plate": plate_id,
+                                        "name": obj["name"], "position": obj["position"], "rotation": obj["rotation"],
+                                        "scale": obj["scale"], "overrides": dict(obj["overrides"])})
+            summary = {"model_ids": sorted(model_ids.values()), "plate_ids": sorted(plate_ids.values())}
+            published.append(_retain_import(project_id, review, folder, summary))
+            conn.execute("UPDATE projects SET data = ?, models = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+                         (json.dumps(data), json.dumps(existing + new_models), time.time(), project_id))
+    except BaseException:
+        for owned in reversed(published):
+            shutil.rmtree(owned, ignore_errors=True)
+        raise
     notify_worker()
-    return {**get_project(project_id), "import_notes": list(dict.fromkeys(notes))}
+    return summary
+
+
+def _create_single_model_project(review: dict, folder: Path) -> int:
+    """A one-Object 3MF becomes a Split-owned whole Model in a new Project, like a plain model upload."""
+    conversion, options = review["conversion"], review["options"]
+    stl = folder / conversion["stl"]
+    if _file_digest(stl) != conversion["sha256"]:
+        raise _review_error("The staged conversion changed. Choose the file again", 409, "import-review-stale")
+    with stl.open("rb") as fh:
+        split = splits.create_split(fh, stl.stat().st_size, f"{conversion['name']}.stl", {"scale": options["scale"], "up": options["up"]})
+    project = None
+    try:
+        project = create_project(conversion["name"], split_id=split["id"], quick=options["quick"])
+        _mutate(project["id"], "data", lambda d: d.update(bed=conversion["bed"], profile=conversion["profile"]))
+        _retain_import(project["id"], review, folder, {"model_ids": [], "plate_ids": [], "split_id": split["id"]})
+        return project["id"]
+    except BaseException:
+        if project is not None:
+            delete_project(project["id"])
+        _drop_split(split["id"])
+        raise
+
+
+def _drop_split(split_id: int) -> None:
+    try:
+        splits.delete_split(split_id)
+    except jobs.JobError:
+        pass  # already deleted with its Project
+
+
+_RECORD_ID = _TOKEN
+
+
+def import_records(project_id: int) -> list:
+    """The accepted imports of a Project, newest first: each keeps its loss report, notes and the original archive."""
+    get_project(project_id)
+    root = project_dir(project_id) / "imports"
+    out = []
+    for entry in (root.iterdir() if root.is_dir() else []):
+        try:
+            out.append(json.loads((entry / "record.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    return sorted(out, key=lambda r: r["accepted_at"], reverse=True)
+
+
+def import_record(project_id: int, record_id: str) -> dict:
+    get_project(project_id)
+    if not isinstance(record_id, str) or not _RECORD_ID.match(record_id):
+        raise jobs.JobError("Import record not found", 404)
+    try:
+        return json.loads((project_dir(project_id) / "imports" / record_id / "record.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise jobs.JobError("Import record not found", 404) from None
+
+
+def import_source(project_id: int, record_id: str) -> tuple:
+    """(path, download name) of the original archive an import kept."""
+    record = import_record(project_id, record_id)
+    return project_dir(project_id) / "imports" / record_id / "source.3mf", record["filename"]
 
 
 def export_orca_project(project_id: int) -> bytes:
