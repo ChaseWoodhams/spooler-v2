@@ -365,8 +365,9 @@ class CameraTests(unittest.TestCase):
             self.assertAlmostEqual(float(np.linalg.norm(camera)), 1.0)
             self.assertGreater(float(camera @ -u), 0.05)
             self.assertGreater(camera[2], 0, "from above")
-        up = assembly_render.choose_camera(None, {"direction": (0, 0, 1)}, None)   # the face looks down: the camera is below
-        self.assertLess(up[2], 0)
+        # a join that goes upward is drawn turned over, so its camera is above the turned model too (tests/test_assembly_camera.py)
+        up = assembly_render.choose_camera(None, {"direction": (0, 0, 1)}, None)
+        self.assertGreater(up[2], 0)
 
     def test_the_previous_camera_is_reused_while_it_still_sees_the_face(self):
         previous = assembly_render.choose_camera(None, {"direction": (1, 0, 0)}, None)

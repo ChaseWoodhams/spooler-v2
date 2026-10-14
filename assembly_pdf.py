@@ -319,8 +319,9 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
         aside = SET_ASIDE_H if not section["main"] else 0
         prepared = None
         if steps:
-            camera = assembly_render.choose_camera(data.scene, steps[0], camera)
-            art = assembly_render.prepare_step(data.scene, steps[0], camera)
+            view = assembly_render.choose_view(data.scene, steps[0], camera)
+            camera = view.camera
+            art = assembly_render.prepare_step(data.scene, steps[0], camera, close_up=view.close_up)
             prepared = (art, *_step_block(flow, art, steps[0]))
         first_h = (prepared[1] + (aside if len(steps) == 1 else 0)) if prepared else aside
         top = flow.reserve((STEP_GAP if index else 0) + SECTION_HEADER_H + first_h, section=section["letter"])
@@ -334,8 +335,9 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
         y = top - SECTION_HEADER_H
         for n, step in enumerate(steps):
             if n:
-                camera = assembly_render.choose_camera(data.scene, step, camera)
-                art = assembly_render.prepare_step(data.scene, step, camera)
+                view = assembly_render.choose_view(data.scene, step, camera)
+                camera = view.camera
+                art = assembly_render.prepare_step(data.scene, step, camera, close_up=view.close_up)
                 prepared = (art, *_step_block(flow, art, step))
                 last = n == len(steps) - 1
                 y = flow.reserve(prepared[1] + (aside if last else 0), section=section["letter"])
