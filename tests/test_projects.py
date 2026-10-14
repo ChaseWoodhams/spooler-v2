@@ -95,6 +95,111 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rejected.exception.issues[0]["key"], key)
             self.assertEqual(projects.get_project(project["id"])["data"], project["data"])
 
+    async def test_filament_override_suite_keeps_explicit_inheritance_through_reopen_and_slice(self):
+        project = await self.project_with_cube()
+        # Independently listed from Orca 2.4.2's Setting Overrides page.
+        values = {
+            "filament_retraction_length": ["0.8"], "filament_z_hop": ["0.4"],
+            "filament_z_hop_types": ["nil"], "filament_retract_lift_above": [None],
+            "filament_retract_lift_below": ["nil"], "filament_retract_lift_enforce": ["nil"],
+            "filament_retraction_speed": ["35"], "filament_deretraction_speed": ["30"],
+            "filament_retract_restart_extra": ["0"], "filament_retraction_minimum_travel": ["2"],
+            "filament_retract_when_changing_layer": ["nil"], "filament_wipe": [True],
+            "filament_wipe_distance": ["2"], "filament_retract_before_wipe": ["80%"],
+            "filament_long_retractions_when_cut": ["nil"], "filament_retraction_distances_when_cut": ["nil"],
+            "filament_ironing_flow": ["nil"], "filament_ironing_spacing": ["0.15"],
+            "filament_ironing_inset": ["0.1"], "filament_ironing_speed": ["25"],
+        }
+        project = self.edit(project, profile={**project["data"]["profile"], "filament": values})
+        expected = {**values, "filament_retract_lift_above": ["nil"], "filament_wipe": ["1"]}
+        projects.init()
+        reopened = projects.get_project(project["id"])
+        self.assertEqual(reopened["data"]["profile"]["filament"], expected)
+        review = projects.effective_settings(project["id"], 1)
+        self.assertFalse([i for i in review["issues"] if i["key"] in values])
+        projects.request_slice(project["id"], 1)
+        with mock.patch.object(slicer, "runner", fake_runner()):
+            await self.run_worker()
+        supplied = json.loads((projects.plate_dir(project["id"], 1) / "profile" / "filament.json").read_text())
+        self.assertEqual({key: supplied[key] for key in expected}, expected)
+        reset = {key: value for key, value in expected.items() if key != "filament_ironing_flow"}
+        project = self.edit(reopened, profile={**reopened["data"]["profile"], "filament": reset})
+        self.assertNotIn("filament_ironing_flow", project["data"]["profile"]["filament"])
+
+    async def test_setting_resolution_rechecks_project_identity_at_commit(self):
+        project = await self.project_with_cube()
+        project = self.edit(project, profile={**project["data"]["profile"], "process": {"wall_loops": "4"}})
+        transaction = database.transaction
+        def replace_before_commit():
+            # Storage boundary simulates deletion/recreation after the request's read.
+            with transaction() as conn:
+                conn.execute("UPDATE projects SET created_at = created_at + 1, name = 'Replacement Project' WHERE id = ?", (project["id"],))
+            return transaction()
+        with mock.patch.object(database, "transaction", side_effect=replace_before_commit):
+            with self.assertRaises(jobs.JobError) as conflict:
+                projects.resolve_setting(project["id"], {"revision": project["revision"], "scope": "project", "kind": "process", "key": "wall_loops", "action": "remove"})
+        self.assertEqual(conflict.exception.status, 409)
+        current = projects.get_project(project["id"])
+        self.assertEqual(current["name"], "Replacement Project")
+        self.assertEqual(current["data"]["profile"]["process"]["wall_loops"], "4")
+
+    async def test_object_scope_rejects_travel_but_resets_walls_to_parent_plate(self):
+        project = await self.project_with_cube()
+        objects = json.loads(json.dumps(project["data"]["objects"]))
+        objects[0]["overrides"] = {"travel_speed": "250"}
+        with self.assertRaises(jobs.JobError) as rejected:
+            self.edit(project, objects=objects)
+        issue = rejected.exception.issues[0]
+        self.assertEqual((issue["code"], issue["scope"], issue["affected_id"]),
+                         ("unsupported-object-setting", "object", objects[0]["id"]))
+        self.assertEqual(issue["valid_scopes"], ["project", "plate"])
+        plates = json.loads(json.dumps(project["data"]["plates"]))
+        plates[0]["overrides"] = {"wall_loops": "4"}
+        objects[0]["overrides"] = {"wall_loops": "6"}
+        project = self.edit(project, objects=objects, plates=plates)
+        review = projects.effective_settings(project["id"], 1)
+        self.assertEqual(review["objects"][0]["effective_process"]["wall_loops"], "6")
+        objects[0]["overrides"] = {}
+        project = self.edit(project, objects=objects)
+        self.assertEqual(projects.effective_settings(project["id"], 1)["objects"][0]["effective_process"]["wall_loops"], "4")
+
+    async def test_legacy_object_settings_are_reviewable_and_block_only_new_output_until_resolved(self):
+        project = await self.project_with_cube()
+        legacy = json.loads(json.dumps(project["data"]))
+        oid = legacy["objects"][0]["id"]
+        legacy["objects"][0]["overrides"] = {"travel_speed": "250", "unknown_old_setting": "kept"}
+        legacy["plates"][0]["overrides"] = {"travel_speed": "300"}
+        legacy["plates"].append({"id": 2, "name": "Unaffected Plate", "overrides": {}})
+        legacy["objects"].append({**legacy["objects"][0], "id": oid + 1, "plate": 2, "overrides": {}})
+        with database.transaction() as conn:
+            conn.execute("UPDATE projects SET data = ?, slices = ? WHERE id = ?",
+                         (json.dumps(legacy), json.dumps({"1": {"state": "sliced", "fingerprint": "old", "historical": True}}), project["id"]))
+        project = projects.get_project(project["id"])
+        saved = self.edit(project, bed="smooth")
+        self.assertEqual(saved["data"]["objects"][0]["overrides"], legacy["objects"][0]["overrides"])
+        issues = projects.effective_settings(project["id"], 1)["issues"]
+        issue = next(i for i in issues if i.get("key") == "travel_speed" and i.get("scope") == "object")
+        self.assertEqual((issue["value"], issue["affected_id"]), ("250", oid))
+        for operation in (lambda: projects.request_slice(project["id"], 1), lambda: projects.export_orca_project(project["id"])):
+            with self.assertRaises(jobs.JobError) as blocked:
+                operation()
+            self.assertEqual(blocked.exception.status, 409)
+        self.assertTrue(projects.get_project(project["id"])["slices"]["1"]["historical"])
+        self.assertEqual(projects.request_slice(project["id"], 2)["slices"]["2"]["state"], "queued")
+        body = {"revision": saved["revision"], "scope": "object", "affected_id": oid, "kind": "process", "key": "travel_speed", "action": "move", "destination": "plate"}
+        with self.assertRaises(jobs.JobError) as collision:
+            projects.resolve_setting(project["id"], body)
+        self.assertEqual(collision.exception.issues[0]["destination_value"], "300")
+        moved = projects.resolve_setting(project["id"], {**body, "replace": True})
+        self.assertEqual(moved["data"]["plates"][0]["overrides"]["travel_speed"], "250")
+        self.assertNotIn("travel_speed", moved["data"]["objects"][0]["overrides"])
+        with self.assertRaises(jobs.JobError) as stale:
+            projects.resolve_setting(project["id"], {**body, "action": "remove", "key": "unknown_old_setting"})
+        self.assertEqual(stale.exception.status, 409)
+        removed = projects.resolve_setting(project["id"], {**body, "revision": moved["revision"], "action": "remove", "key": "unknown_old_setting"})
+        self.assertEqual(removed["data"]["objects"][0]["overrides"], {})
+        projects.request_slice(project["id"], 1)
+
     async def test_legacy_setting_issues_survive_review_and_an_unrelated_save(self):
         project = await self.project_with_cube()
         # A historical persisted Project is the input fixture, never the assertion seam.
@@ -627,6 +732,20 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
 class ProjectApiTests(unittest.TestCase):
+    def test_explicit_setting_resolution_http_is_revision_checked(self):
+        project = self.call("POST", "/api/projects", {"name": "Legacy settings"})[1]
+        data = json.loads(json.dumps(project["data"]))
+        data["profile"]["process"]["unknown_old_setting"] = "kept"
+        with database.transaction() as conn:
+            conn.execute("UPDATE projects SET data = ? WHERE id = ?", (json.dumps(data), project["id"]))
+        path = f"/api/projects/{project['id']}/settings/resolve"
+        body = {"revision": project["revision"], "scope": "project", "kind": "process", "key": "unknown_old_setting", "action": "remove"}
+        self.assertEqual(self.call("POST", path, {**body, "revision": None})[0], 409)
+        code, result = self.call("POST", path, body)
+        self.assertEqual(code, 200)
+        self.assertNotIn("unknown_old_setting", result["data"]["profile"]["process"])
+        self.assertEqual(self.call("POST", path, body)[0], 409)
+
     def test_invalid_settings_http_response_identifies_fields_without_overwriting_project(self):
         project = self.call("POST", "/api/projects", {"name": "Validation"})[1]
         data = json.loads(json.dumps(project["data"]))

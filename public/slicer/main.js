@@ -229,7 +229,7 @@ async function boot() {
   showPrinter(printer.shown, { save: false });
   state.settings = new SettingsPanel({
     tabs: $("settings-tabs"), pages: $("settings-pages"), body: $("settings-body"), search: $("settings-search"),
-    mode: $("settings-mode"), onChange: changeSetting, onReset: resetSettings, onTab: tab => { state.settingsTab = tab; renderSettings(); },
+    mode: $("settings-mode"), onResolve: resolveSavedSetting, onChange: changeSetting, onReset: resetSettings, onTab: tab => { state.settingsTab = tab; renderSettings(); },
   });
   projectPage.attach({
     api, toast,
@@ -262,6 +262,10 @@ async function boot() {
   $("settings-mode").value = remember("slicer.mode") || (remember("slicer.advanced") === "1" ? "advanced" : "simple");
   $("settings-mode").addEventListener("change", e => { remember("slicer.mode", e.target.value); renderFoldSummaries(); });
   $("review-effective-settings").addEventListener("click", reviewEffectiveSettings);
+  $("effective-settings-review").addEventListener("click", event => {
+    const button = event.target.closest('[data-resolve]');
+    if (button) resolveSavedSetting(JSON.parse(button.dataset.target), button.dataset.setting, button.dataset.resolve, button.dataset.destination);
+  });
   try {
     state.schema = await (await fetch("/orca/settings.json")).json();
     state.settings.setSchema(state.schema);
@@ -1260,12 +1264,52 @@ function renderSettings() {
     const note = kind !== "process" ? "Filament settings apply to every plate."
       : own.length ? `Changes here apply to every plate. ${listNames(own.map(p => p.name))} ${own.length === 1 ? "has settings of its" : "have settings of their"} own on top.`
       : "Changes here apply to every plate.";
-    state.settings.show({ tab: kind, tabs, layout: kind, base: base[kind], changes: data().profile[kind], target: { kind }, note });
+    state.settings.show({ tab: kind, tabs, layout: kind, base: base[kind], changes: data().profile[kind], target: { kind }, note,
+      inheritance: { machine: base.machine, process: effectiveProcess(base) } });
   }
 }
 
 function effectiveReviewContext() {
   return state.project ? JSON.stringify([state.project.id, state.plate, state.project.revision, data()]) : null;
+}
+
+async function resolveSavedSetting(target, key, action, destination) {
+  try {
+    await flushSave();
+    const projectId = state.project.id, revision = state.project.revision;
+    const before = JSON.stringify(data());
+    const body = {revision, scope: ['object','plate'].includes(target.kind) ? target.kind : 'project',
+      kind: ['object','plate'].includes(target.kind) ? 'process' : target.kind, affected_id: target.id, key, action, destination};
+    let project;
+    try { project = await api('POST', `/api/projects/${projectId}/settings/resolve`, body); }
+    catch (error) {
+      const collision = error.issues?.find(i => i.code === 'setting-move-collision');
+      if (!collision || !confirm(`${key}: ${destination} currently has ${JSON.stringify(collision.destination_value)}. Replace it with ${JSON.stringify(collision.value)}?`)) throw error;
+      project = await api('POST', `/api/projects/${projectId}/settings/resolve`, {...body, replace:true});
+    }
+    if (state.project.id !== projectId) return;
+    const newerLocalEdits = before !== JSON.stringify(data());
+    applyProject(project, {keepLocalData:newerLocalEdits});
+    if (newerLocalEdits) {
+      state.project.revision = project.revision;
+      toast('The setting was resolved. Review your newer unsaved edits before saving.', true);
+    } else {
+      recordEdit();
+      state.settings.setIssues([]);
+      $("save-state").textContent = 'Saved';
+      renderAll();
+      await reviewEffectiveSettings();
+    }
+  } catch (error) { toast(error.message, true); }
+}
+
+function settingResolutionButtons(issue) {
+  if (!issue.resolution_required || !['project','plate','object'].includes(issue.scope) || !issue.key) return '';
+  const target = {kind: issue.scope === 'project' ? issue.kind : issue.scope, id:issue.affected_id};
+  const attrs = `data-target="${esc(JSON.stringify(target))}" data-setting="${esc(issue.key)}"`;
+  const destinations = issue.scope === 'object' ? (issue.valid_scopes || []) : issue.scope === 'plate' ? ['project'] : [];
+  return `<button type="button" data-resolve="remove" ${attrs}>Remove saved override</button>` +
+    destinations.map(d => `<button type="button" data-resolve="move" data-destination="${d}" ${attrs}>Move to ${d === 'plate' ? 'Plate' : 'Project'}</button>`).join('');
 }
 
 // The server owns precedence. Review displays its captured response, never a browser merge.
@@ -1287,7 +1331,7 @@ async function reviewEffectiveSettings() {
     el.innerHTML = `<h4>Settings sent to Orca</h4><p>Current Plate inputs, not measured output from a completed Slice.</p>
       <p><b>${esc(value(result.filament?.filament_type))}</b> · Nozzle ${esc(value(result.machine?.nozzle_diameter))} mm · ${esc(result.process?.curr_bed_type)}</p>
       ${result.filament_choice ? `<p>Alternate saved Filament: ${esc(result.filament_choice.preset)}. Project default Filament changes and Spoolman tuning do not apply.${result.filament_choice.colour ? ` Colour label only: ${esc(result.filament_choice.colour)}.` : ""}</p>` : "<p>Project default Filament, including saved Project tuning.</p>"}
-      ${(result.issues || []).map(i => `<p class="slicer-warning">${esc(i.message)}${i.affected_names?.length ? ` — Objects: ${esc(i.affected_names.join(", "))}` : ""}</p>`).join("")}
+      ${(result.issues || []).map(i => `<div class="slicer-warning">${esc(i.scope || "")} ${esc(i.affected_id || "")}: ${esc(i.message)}${i.affected_names?.length ? ` — Objects: ${esc(i.affected_names.join(", "))}` : ""}${"value" in i ? ` Saved value: ${esc(JSON.stringify(i.value))}.` : ""} ${settingResolutionButtons(i)}</div>`).join("")}
       ${["filament", "process"].map(kind => `<details><summary>${kind === "filament" ? "Filament" : "Process"} values</summary><table><thead><tr><th>Setting</th><th>Value</th><th>Source</th></tr></thead><tbody>${rows(kind)}</tbody></table></details>`).join("")}
       <p>Object settings are sent separately for ${(result.objects || []).length} Objects.</p>`;
   } catch (err) { el.textContent = err.message; }

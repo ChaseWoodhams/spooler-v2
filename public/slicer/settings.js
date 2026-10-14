@@ -10,8 +10,8 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": 
 const first = value => (Array.isArray(value) ? value[0] : value);
 
 export class SettingsPanel {
-  constructor({ tabs, pages, body, search, mode, onChange, onReset, onTab }) {
-    Object.assign(this, { tabsEl: tabs, pagesEl: pages, bodyEl: body, searchEl: search, modeEl: mode, onChange, onReset, onTab });
+  constructor({ tabs, pages, body, search, mode, onChange, onReset, onTab, onResolve }) {
+    Object.assign(this, { tabsEl: tabs, pagesEl: pages, bodyEl: body, searchEl: search, modeEl: mode, onChange, onReset, onTab, onResolve });
     this.schema = null;
     this.context = null;
     this.page = {};
@@ -42,6 +42,11 @@ export class SettingsPanel {
     });
     this.bodyEl.addEventListener("change", e => this._changed(e.target));
     this.bodyEl.addEventListener("click", e => {
+      const resolution = e.target.closest("[data-resolve]");
+      if (resolution && this.context) {
+        this.onResolve?.(this.context.target, resolution.dataset.setting, resolution.dataset.resolve, resolution.dataset.destination);
+        return;
+      }
       const btn = e.target.closest("[data-reset]");
       if (btn && this.context) {
         const keys = btn.dataset.reset.split(',');
@@ -73,6 +78,7 @@ export class SettingsPanel {
   }
 
   _visible(key, meta) {
+    if (this.context?.tab === "object" && !(this.schema.object_scope || []).includes(key)) return false;
     if (!meta || HIDDEN_KEYS.has(key) || key.endsWith("_gcode") || meta.readonly || meta.type === "point" || meta.type === "none") return false;
     const rank = { simple: 0, advanced: 1, expert: 2 };  // "develop" settings are never shown
     if (meta.mode && !(meta.mode in rank)) return false;
@@ -83,6 +89,28 @@ export class SettingsPanel {
   _value(key) {
     const { changes, base } = this.context;
     return key in changes ? changes[key] : base[key];
+  }
+
+  _inherited(meta) {
+    const from = meta.inherits_from;
+    return from ? first(this.context.inheritance?.[from.kind]?.[from.key]) : undefined;
+  }
+
+  _dependencyReason(meta) {
+    for (const dependency of meta.dependencies || []) {
+      let value = dependency.kind === this.context.layout ? first(this._value(dependency.key))
+        : first(this.context.inheritance?.[dependency.kind]?.[dependency.key]);
+      if (value === 'nil' || value == null) value = this._inherited(this.schema.options[dependency.key] || {});
+      const active = dependency.test === 'gt' ? Number(value) > dependency.value : String(value) === dependency.value;
+      if (!active) return dependency.reason;
+    }
+    return '';
+  }
+
+  _commit(key, value, meta) {
+    const existing = this._value(key);
+    this.onChange?.(this.context.target, key, meta.vector
+      ? [value, ...(Array.isArray(existing) ? existing.slice(1) : [])] : value);
   }
 
   render() {
@@ -118,6 +146,16 @@ export class SettingsPanel {
 
     const shown = query ? visiblePages : visiblePages.filter(p => p.page === current);
     const html = [];
+    if (ctx.tab === "object") {
+      html.push('<p class="set-note">Only Orca-supported Object settings are editable here. Travel and other shared settings belong at Project or Plate scope.</p>');
+      for (const [key, value] of Object.entries(ctx.changes)) {
+        if ((this.schema.object_scope || []).includes(key) && options[key]) continue;
+        const canMove = options[key]?.scopes?.includes('process');
+        html.push(`<div class="slicer-warning"><b>${esc(key)}</b>: ${esc(JSON.stringify(value))}. Saved on this Object; resolve before new slicing or export.
+          <button type="button" data-resolve="remove" data-setting="${esc(key)}">Remove saved override</button>
+          ${canMove ? ['plate','project'].map(destination => `<button type="button" data-resolve="move" data-setting="${esc(key)}" data-destination="${destination}">Move to ${destination === 'plate' ? 'Plate' : 'Project'}</button>`).join('') : ''}</div>`);
+      }
+    }
     if (ctx.note) html.push(`<p class="set-note">${esc(ctx.note)}</p>`);
     for (const page of shown) {
       for (const group of rowsOf(page)) {
@@ -143,14 +181,18 @@ export class SettingsPanel {
     return `<div class="set-row${modified ? " modified" : ""}${disabled ? " disabled" : ""}">
       <div class="set-label" title="${esc(tooltip)}">${esc(label)}${modified ? '<small> · modified</small>' : ''}</div>
       <div class="set-fields">${fields}</div>
-      <button type="button" class="set-reset" aria-label="Reset ${esc(label)} to inherited value" data-reset="${esc(keys.join(","))}" title="Back to the profile's value">↺</button>
+      <button type="button" class="set-reset" aria-label="Reset ${esc(label)} to inherited value" data-reset="${esc(keys.join(","))}" title="Back to the inherited parent value">↺</button>
     </div>`;
   }
 
   _field(key, meta, single, disabled, rowLabel = "") {
     const pendingKey = `${JSON.stringify(this.context.target)}:${key}`;
     const raw = this.pending.has(pendingKey) ? this.pending.get(pendingKey) : first(this._value(key));
-    const value = raw === undefined || raw === null ? "" : String(raw);
+    const inheriting = meta.nullable && (raw === 'nil' || raw === null);
+    const displayed = inheriting ? this._inherited(meta) : raw;
+    const value = displayed === undefined || displayed === null ? "" : String(displayed);
+    const reason = this._dependencyReason(meta);
+    disabled ||= !!reason || inheriting;
     const issue = this.fieldIssues.find(i => i.key === key && (!i.kind || i.kind === this.context.layout)
       && (!i.scope || i.scope === 'project' && !['plate','object'].includes(this.context.target.kind) || i.scope === this.context.target.kind)
       && (i.affected_id === undefined || i.affected_id === this.context.target.id)) || this.localIssues.get(pendingKey);
@@ -169,16 +211,34 @@ export class SettingsPanel {
       control = `<input type="text" data-key="${key}"${aria} value="${esc(value)}" placeholder="default"${meta.type !== "string" ? ' inputmode="decimal"' : ""}${dis}>`;
     }
     const correction = issue?.suggested_correction ? ` Suggested correction: ${Object.entries(issue.suggested_correction).map(([k,v])=>`${k} = ${v}`).join(', ')}.` : '';
+    const source = meta.inherits_from?.kind === 'machine' ? 'printer' : meta.inherits_from?.kind || 'Orca';
+    const inheritance = meta.nullable ? `<select data-inheritance="${key}" aria-label="Inheritance for ${esc(name)}"><option value="value"${!inheriting ? ' selected' : ''}>Use Filament value</option><option value="inherit"${inheriting ? ' selected' : ''}>Inherit ${source} value</option></select>` : '';
+    const stored = this._value(key);
+    const retained = meta.vector && Array.isArray(stored) && stored.length > 1
+      ? `<small>Editing entry 1. Other stored entries retained: ${esc(stored.slice(1).join(', '))}.</small>` : '';
+    control = inheritance + control;
     const unit = (meta.sidetext ? `<span class="set-unit">${esc(meta.sidetext)}</span>` : "")
+      + retained + (reason ? `<small class="set-note">Inactive: ${esc(reason)} Stored value is retained.</small>` : '')
       + (issue ? `<small class="set-error" role="alert">${esc(issue.message + correction)}</small>` : '');
     if (single) return `${control}${unit}`;
     return `<span class="set-field" title="${esc(meta.label || key)}"><small>${esc(meta.label || key)}</small>${control}${unit}</span>`;
   }
 
   _changed(input) {
-    const key = input.dataset?.key;
+    const key = input.dataset?.key || input.dataset?.inheritance;
     if (!key || !this.context) return;
     const meta = this.schema.options[key] || {};
+    if (input.dataset.inheritance && meta.nullable) {
+      let value = 'nil';
+      if (input.value === 'value') {
+        const base = first(this.context.base[key]);
+        value = this._inherited(meta) ?? (base !== 'nil' && base != null ? base : meta.enum?.[0]?.[0] ?? String(meta.min ?? 0));
+      }
+      const pendingKey = `${JSON.stringify(this.context.target)}:${key}`;
+      this.pending.delete(pendingKey); this.localIssues.delete(pendingKey);
+      this._commit(key, value, meta);
+      return;
+    }
     let value = input.type === "checkbox" ? (input.checked ? "1" : "0") : input.value.trim();
     const pendingKey = `${JSON.stringify(this.context.target)}:${key}`;
     const reject = message => {
@@ -207,7 +267,6 @@ export class SettingsPanel {
     this.pending.delete(pendingKey);
     this.localIssues.delete(pendingKey);
     input.classList.remove('invalid'); input.setAttribute('aria-invalid','false');
-    const base = this.context.base[key];
-    this.onChange?.(this.context.target, key, Array.isArray(base) || meta.vector ? [value] : value);
+    this._commit(key, value, meta);
   }
 }

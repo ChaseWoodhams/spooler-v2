@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 RAW = "https://raw.githubusercontent.com/OrcaSlicer/OrcaSlicer/{tag}/{path}"
-SOURCES = {"config": "src/libslic3r/PrintConfig.cpp", "tabs": "src/slic3r/GUI/Tab.cpp"}
+SOURCES = {"config": "src/libslic3r/PrintConfig.cpp", "tabs": "src/slic3r/GUI/Tab.cpp", "scope": "src/libslic3r/PrintConfig.hpp"}
 TAB_FUNCTIONS = {"process": "void TabPrint::build()", "filament": "void TabFilament::build()", "machine": "void TabPrinter::build_fff()"}
 TYPES = {
     "coFloat": ("float", False), "coFloats": ("float", True), "coInt": ("int", False), "coInts": ("int", True),
@@ -114,6 +114,21 @@ def parse_options(source: str) -> dict:
             references[named.group(1)] = options[key]
         for ref in re.findall(r"(?:auto\s*\*?|ConfigOptionDef\s*\*?)\s*(\w+)\s*=\s*def\s*;", body):
             references[ref] = options[key]
+    # These nullable Filament definitions are constructed from the printer's
+    # extruder definitions, rather than literal add("key", type) calls.
+    dynamic = re.search(r'filament_extruder_override_keys\s*=\s*\{(.*?)\};', source, re.S)
+    if dynamic and 'this->add_nullable(opt_key, it_opt->second.type)' in source:
+        keys = STRING.findall(re.sub(r'//[^\n]*', '', dynamic.group(1)))
+        simple = {"filament_retraction_length", "filament_z_hop", "filament_long_retractions_when_cut", "filament_retraction_distances_when_cut"}
+        for key in keys:
+            parent = key.removeprefix("filament_")
+            if parent not in options:
+                raise ValueError(f"Missing definition for dynamic override {key}")
+            options[key] = {k: v for k, v in options[parent].items()
+                            if k in {"type", "vector", "label", "full_label", "tooltip", "sidetext", "min", "max", "enum"}}
+            options[key].update(nullable=True, mode="simple" if key in simple else "advanced", inherits_from={"kind": "machine", "key": parent})
+    for key in ("filament_ironing_flow", "filament_ironing_spacing", "filament_ironing_inset", "filament_ironing_speed"):
+        options[key]["inherits_from"] = {"kind": "process", "key": key.removeprefix("filament_")}
     return options
 
 
@@ -152,7 +167,71 @@ def parse_tabs(source: str) -> dict:
                 line = None
         tabs[tab] = [{"page": p["page"], "groups": [g for g in p["groups"] if g["rows"]]} for p in pages]
         tabs[tab] = [p for p in tabs[tab] if p["groups"]]
+    # TabFilament::build mounts this helper; extract its active loop declarations
+    # (including ironing) so comments cannot accidentally become editable keys.
+    helper = re.search(r'void TabFilament::add_filament_overrides_page\(\)(.*?)\nvoid Tab', source, re.S)
+    if helper:
+        body = re.sub(r'//[^\n]*', '', helper.group(1))
+        groups = []
+        for group, appender in (("Retraction", "retraction"), ("Ironing", "ironing")):
+            loop = re.search(r'for\s*\(const std::string opt_key\s*:\s*\{([^{}]*)\}\)\s*append_' + appender + r'_option', body, re.S)
+            if not loop:
+                raise ValueError(f"Missing {group} override layout")
+            groups.append({"group": group, "rows": [{"options": [key]} for key in STRING.findall(loop.group(1))]})
+        tabs["filament"].append({"page": "Setting Overrides", "groups": groups})
     return tabs
+
+
+def filament_dependencies(options):
+    """Pinned TabFilament::update/update_filament_overrides_page conditions.
+
+    Keep inactive fields inspectable: the client disables them with this reason
+    instead of removing their stored values. Machine conditions use the locked
+    machine, not a claim about attached hardware capability.
+    """
+    def requires(keys, key, test, value, reason, kind="filament"):
+        for target in keys:
+            options[target].setdefault("dependencies", []).append(
+                {"kind": kind, "key": key, "test": test, "value": value, "reason": reason})
+    requires(["overhang_fan_speed", "overhang_fan_threshold", "internal_bridge_fan_speed"],
+             "enable_overhang_bridge_fan", "eq", "1", "Enable overhang and bridge cooling to use this value.")
+    requires(["dont_slow_down_outer_wall"], "slow_down_for_layer_cooling", "eq", "1",
+             "Enable slowing down for layer cooling to use this value.")
+    requires(["additional_cooling_fan_speed"], "auxiliary_fan", "eq", "1",
+             "The selected printer preset must enable an auxiliary fan.", "machine")
+    requires(["activate_air_filtration", "during_print_exhaust_fan_speed", "complete_print_exhaust_fan_speed"],
+             "support_air_filtration", "eq", "1", "The selected printer preset must support air filtration.", "machine")
+    for stage, key in (("during_print", "during_print_exhaust_fan_speed"), ("on_completion", "complete_print_exhaust_fan_speed")):
+        requires([key], "activate_air_filtration", "eq", "1", "Enable air filtration to use this fan speed.")
+        requires([key], f"activate_air_filtration_{stage}", "eq", "1", "Enable air filtration for this stage to use this fan speed.")
+    retract = [key for key, meta in options.items() if meta.get("inherits_from", {}).get("kind") == "machine" and key != "filament_retraction_length"]
+    requires(retract, "filament_retraction_length", "gt", 0, "Retraction length must be greater than zero to use this override.")
+    requires(["filament_long_retractions_when_cut", "filament_retraction_distances_when_cut"],
+             "enable_long_retraction_when_cut", "eq", "2", "The selected printer preset must allow Filament retraction when cutting.", "machine")
+    requires(["filament_retraction_distances_when_cut"], "filament_long_retractions_when_cut", "eq", "1",
+             "Enable long retraction when cutting to use this distance.")
+    for meta in options.values():
+        if meta.get("vector"):
+            meta.update(vector_shape="preserve-existing", edit_index=0)
+
+def no_comments(source: str) -> str:
+    """Keep literals and line positions while removing C++ comments."""
+    pattern = r'"(?:\\.|[^"\\])*"|/\*[\s\S]*?\*/|//[^\n]*'
+    return re.sub(pattern, lambda m: m[0] if m[0].startswith('"') else re.sub(r'[^\n]', ' ', m[0]), source)
+
+
+def object_scope(source: str) -> list[str]:
+    source = no_comments(source)
+    macros = list(re.finditer(r'^PRINT_CONFIG_CLASS_(?:DEFINE|DERIVED_DEFINE[01]?)\(\s*(\w+)', source, re.M))
+    keys = set()
+    for index, match in enumerate(macros):
+        if match[1] not in ("PrintObjectConfig", "PrintRegionConfig"):
+            continue
+        end = macros[index + 1].start() if index + 1 < len(macros) else len(source)
+        keys.update(re.findall(r'\(\(\s*ConfigOption[^,]+,\s*(\w+)\s*\)\)', source[match.end():end]))
+    if not keys:
+        raise ValueError("Pinned Object/Region definitions were not found")
+    return sorted(keys)
 
 
 def main(argv=None) -> int:
@@ -163,6 +242,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     cache = Path(args.cache)
     options = parse_options(fetch(args.tag, SOURCES["config"], cache))
+    filament_dependencies(options)
     tabs = parse_tabs(fetch(args.tag, SOURCES["tabs"], cache))
     used = {key for pages in tabs.values() for p in pages for g in p["groups"] for r in g["rows"] for key in r["options"]}
     missing = sorted(key for key in used if key not in options)
@@ -170,6 +250,7 @@ def main(argv=None) -> int:
         "orca_version": args.tag.lstrip("v"),
         "source": f"https://github.com/OrcaSlicer/OrcaSlicer/tree/{args.tag} — PrintConfig.cpp and Tab.cpp (AGPL-3.0)",
         "tabs": tabs,
+        "object_scope": object_scope(fetch(args.tag, SOURCES["scope"], cache)),
         "options": {key: options[key] for key in sorted(used) if key in options},
         "definitions": {key: options[key] for key in sorted(options)},
     }

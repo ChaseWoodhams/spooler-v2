@@ -31,6 +31,7 @@ A slice is outdated as soon as anything that affects the plate's G-code changes 
 Sending plates to the queue makes one batch of jobs that remember their project and plate.
 """
 
+import copy
 import asyncio
 import hashlib
 import json
@@ -674,7 +675,7 @@ def validate_data(raw, record: dict) -> dict:
     if base and bundle_id != previous.get("bundle_id"):
         slicer.verify_bundle(base["bundle"])
         slicer.filament_compatibility(base["filament"], base["machine"])
-    normalized = slicer.normalize_overrides(changes, base, previous={k: previous.get(k, {}) for k in ("process", "filament")}, check_coupled=False) if base else {}
+    normalized = slicer.normalize_overrides(changes, base, previous={k: previous.get(k, {}) for k in ("process", "filament")}, check_coupled=False, scope="project") if base else {}
     profile = {"bundle_id": bundle_id, "process": normalized.get("process", {}), "filament": normalized.get("filament", {}),
                "bricklayers": brick_post.validate(profile_raw.get("bricklayers")), "spool_id": _spool_id(profile_raw.get("spool_id"))}
 
@@ -694,7 +695,7 @@ def validate_data(raw, record: dict) -> dict:
         if overrides and base is None:
             raise jobs.JobError("Choose a profile before changing a plate's settings")
         plates.append({"id": plate_id, "name": _clean_name(plate.get("name")) or f"Plate {plate_id}",
-                       "overrides": slicer.normalize_overrides({"process": overrides}, base, previous={"process": next((p.get("overrides", {}) for p in (record.get("data") or {}).get("plates", []) if p["id"] == plate_id), {})}, check_coupled=False).get("process", {}) if overrides else {},
+                       "overrides": slicer.normalize_overrides({"process": overrides}, base, previous={"process": next((p.get("overrides", {}) for p in (record.get("data") or {}).get("plates", []) if p["id"] == plate_id), {})}, check_coupled=False, scope="plate", affected_id=plate_id).get("process", {}) if overrides else {},
                        "bricklayers": brick_post.validate(plate.get("bricklayers")),
                        "printer_id": plate.get("printer_id") if plate.get("printer_id") in state.printers else None,
                        **({"pack": chosen} if (chosen := _clean_pack(plate.get("pack"), project=False)) else {})})
@@ -728,7 +729,7 @@ def validate_data(raw, record: dict) -> dict:
             "position": _numbers(obj.get("position", [128, 128]), 2, "Position", -1000, 3000),
             "rotation": [round(r % 360, 4) for r in rotation],
             "scale": _numbers(obj.get("scale", [1, 1, 1]), 3, "Scale", 0.01, 100),
-            "overrides": slicer.normalize_overrides({"process": overrides}, base, previous={"process": next((o.get("overrides", {}) for o in (record.get("data") or {}).get("objects", []) if o["id"] == object_id), {})}, check_coupled=False).get("process", {}) if overrides else {},
+            "overrides": slicer.normalize_overrides({"process": overrides}, base, previous={"process": next((o.get("overrides", {}) for o in (record.get("data") or {}).get("objects", []) if o["id"] == object_id), {})}, check_coupled=False, scope="object", affected_id=object_id).get("process", {}) if overrides else {},
         })
     out = {"bed": bed, "profile": profile, "plates": plates, "objects": objects}
     filaments = _filament_choices(raw.get("filaments"), model_ids, base, (record.get("data") or {}).get("filaments"),
@@ -792,13 +793,63 @@ def update_project(project_id: int, body: dict) -> dict:
     name = _clean_name(body["name"]) or record["name"] if "name" in body else record["name"]
     data = validate_data(body["data"], record) if "data" in body else record["data"]
     with database.transaction() as conn:
-        current = conn.execute("SELECT revision, models FROM projects WHERE id = ?", (project_id,)).fetchone()
+        current = conn.execute("SELECT revision, models, created_at FROM projects WHERE id = ?", (project_id,)).fetchone()
         if current is None:
             raise jobs.JobError("Project not found", 404)
+        if current["revision"] != record["revision"] or current["created_at"] != record["created_at"]:
+            raise jobs.JobError("The project was changed elsewhere — reload it", 409)
         if json.loads(current["models"]) != record["models"] and "data" in body:
             data = validate_data(body["data"], {**record, "models": json.loads(current["models"])})
         conn.execute("UPDATE projects SET name = ?, data = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
                      (name, json.dumps(data), time.time(), project_id))
+    return get_project(project_id)
+
+
+def resolve_setting(project_id: int, body: dict) -> dict:
+    """Explicitly remove an old override or move it to its owning scope."""
+    record = get_project(project_id)
+    if body.get("revision") != record["revision"]:
+        raise jobs.JobError("The Project changed — review its settings again", 409)
+    data = copy.deepcopy(record["data"])
+    scope, kind, key = body.get("scope"), body.get("kind", "process"), body.get("key")
+    if kind not in ("process", "filament") or not isinstance(key, str):
+        raise jobs.JobError("Choose a setting to resolve")
+    owner = None
+    if scope == "project":
+        source = data["profile"].get(kind, {})
+    elif scope in ("object", "plate") and kind == "process":
+        owner = next((item for item in data[scope + "s"] if item["id"] == body.get("affected_id")), None)
+        if owner is None:
+            raise jobs.JobError("Setting owner not found", 404)
+        source = owner.get("overrides", {})
+    else:
+        raise jobs.JobError("Only saved Project, Plate and Object overrides can be resolved here")
+    if key not in source:
+        raise jobs.JobError("The saved setting was changed — review it again", 409)
+    if body.get("action") == "move":
+        destination = body.get("destination")
+        if destination == "project":
+            target = data["profile"].setdefault(kind, {})
+        elif destination == "plate" and scope == "object":
+            target = next(p for p in data["plates"] if p["id"] == owner["plate"]).setdefault("overrides", {})
+        else:
+            raise jobs.JobError("Move an Object setting to its Plate or Project, or a Plate setting to its Project")
+        if target is source:
+            raise jobs.JobError("Choose a different destination")
+        if key in target and target[key] != source[key] and body.get("replace") is not True:
+            error = jobs.JobError("The destination already has a different value. Review it before replacing it", 409)
+            error.issues = [{"code": "setting-move-collision", "key": key, "scope": scope,
+                             "affected_id": body.get("affected_id"), "value": source[key],
+                             "destination": destination, "destination_value": target[key], "message": str(error)}]
+            raise error
+        # Validate the moved value even if another legacy destination held the same value.
+        base = slicer.bundle_settings(data["profile"]["bundle_id"])
+        target[key] = slicer.normalize_overrides({kind: {key: source[key]}}, base, check_coupled=False,
+                                                scope=destination).get(kind, {})[key]
+    elif body.get("action") != "remove":
+        raise jobs.JobError("Choose remove or move")
+    del source[key]
+    _save_data(project_id, record, validate_data(data, record))
     return get_project(project_id)
 
 
@@ -820,10 +871,10 @@ def _save_data(project_id: int, record: dict, data: dict, emptied=()) -> None:
     """Write `data` as the project's next revision, only if the project is still at the revision `record` was read at.
     Plates in `emptied` lose their slices and their folders."""
     with database.transaction() as conn:
-        row = conn.execute("SELECT revision, slices FROM projects WHERE id = ?", (project_id,)).fetchone()
+        row = conn.execute("SELECT revision, slices, created_at FROM projects WHERE id = ?", (project_id,)).fetchone()
         if row is None:
             raise jobs.JobError("Project not found", 404)
-        if row["revision"] != record["revision"]:
+        if row["revision"] != record["revision"] or row["created_at"] != record["created_at"]:
             raise jobs.JobError("The project was changed elsewhere — reload it", 409)
         if emptied:
             slices = json.loads(row["slices"] or "{}")
@@ -1091,6 +1142,7 @@ def export_orca_project(project_id: int) -> bytes:
     waiting = [o["name"] for o in data["objects"] if models.get(o["model"], {}).get("state") != READY]
     if waiting:
         raise jobs.JobError(f"Still importing: {', '.join(waiting)}", 409)
+    _require_resolved_settings(record, {o["plate"] for o in data["objects"]})
     objects = []
     for obj in data["objects"]:
         verts, tris = load_mesh(project_id, obj["model"])
@@ -3185,6 +3237,7 @@ def effective_settings(project_id: int, plate_id: int, revision=None, *, record=
         result["issues"].extend(slicer.setting_issues(data["profile"].get(kind) or {}, settings, kind, "project"))
     result["issues"].extend(slicer.setting_issues(plate.get("overrides") or {}, settings, "process", "plate", plate_id))
     for obj in result["objects"]:
+        obj["effective_process"] = {**result["process"], **obj.get("overrides", {})}
         result["issues"].extend(slicer.setting_issues(obj.get("overrides") or {}, settings, "process", "object", obj["id"]))
     for kind in ("process", "filament"):
         inherited = alternate if kind == "filament" and alternate is not None else settings[kind]
@@ -3230,6 +3283,16 @@ def _require_one_filament(record: dict, plate_ids) -> None:
                     raise error
 
 
+def _require_resolved_settings(record: dict, plate_ids) -> None:
+    for plate_id in plate_ids:
+        review = effective_settings(record["id"], plate_id, record=record)
+        blockers = [i for i in review["issues"] if i.get("resolution_required") and i.get("scope") != "preset"]
+        if blockers:
+            error = jobs.JobError("Resolve the saved settings before creating new output: " + blockers[0]["message"], 409)
+            error.issues = blockers
+            raise error
+
+
 def request_slice(project_id: int, plate_id: int, send: bool = False, send_opts: dict | None = None) -> dict:
     """Slice one plate. With `send`, the finished plate goes to the queue for its own printer (or the next free one when it has none)."""
     record = get_project(project_id)
@@ -3240,6 +3303,7 @@ def request_slice(project_id: int, plate_id: int, send: bool = False, send_opts:
     if record["slices"].get(str(plate_id), {}).get("state") in (QUEUED, SLICING):
         raise jobs.JobError("The plate is already being sliced", 409)
     _require_one_filament(record, {plate_id})
+    _require_resolved_settings(record, {plate_id})
     _mutate(project_id, "slices", lambda s: s.__setitem__(str(plate_id), _queued_entry(s.get(str(plate_id)), time.time(), send, send_opts)))
     notify_worker()
     return get_project(project_id)
@@ -3267,6 +3331,7 @@ def request_slices(project_id: int, plate_ids=None, send: bool = False) -> dict:
     if not todo:
         raise jobs.JobError("Nothing to slice — every plate is empty, already sliced or slicing", 409)
     _require_one_filament(record, set(todo))
+    _require_resolved_settings(record, set(todo))
     now = time.time()
 
     def mark(slices):
@@ -3295,6 +3360,7 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
     if not data["profile"]["bundle_id"]:
         raise jobs.JobError("Choose a profile first")
     _require_one_filament(record, {plate_id})
+    _require_resolved_settings(record, {plate_id})
     _stage(project_id, plate_id, "preparing")
     stamp = fingerprint(record, plate_id)
     settings = effective_settings(project_id, plate_id, record=record)
