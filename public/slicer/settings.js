@@ -15,6 +15,9 @@ export class SettingsPanel {
     this.schema = null;
     this.context = null;
     this.page = {};
+    this.pending = new Map();
+    this.localIssues = new Map();
+    this.fieldIssues = [];
     this.searchEl.addEventListener("input", () => this.render());
     this.modeEl.addEventListener("change", () => this.render());
     this.pagesEl.addEventListener("click", e => {
@@ -40,12 +43,25 @@ export class SettingsPanel {
     this.bodyEl.addEventListener("change", e => this._changed(e.target));
     this.bodyEl.addEventListener("click", e => {
       const btn = e.target.closest("[data-reset]");
-      if (btn && this.context) this.onReset?.(this.context.target, btn.dataset.reset.split(","));
+      if (btn && this.context) {
+        const keys = btn.dataset.reset.split(',');
+        for (const key of keys) {
+          const pendingKey = `${JSON.stringify(this.context.target)}:${key}`;
+          this.pending.delete(pendingKey); this.localIssues.delete(pendingKey);
+        }
+        this.fieldIssues = this.fieldIssues.filter(i => !keys.includes(i.key));
+        this.onReset?.(this.context.target, keys);
+      }
     });
   }
 
   setSchema(schema) {
     this.schema = schema;
+  }
+
+  setIssues(issues) {
+    this.fieldIssues = issues || [];
+    this.render();
   }
 
   /* context: { tab: "process" | "filament" | "object", tabs: [{id, label}], layout: "process" | "filament",
@@ -59,6 +75,7 @@ export class SettingsPanel {
   _visible(key, meta) {
     if (!meta || HIDDEN_KEYS.has(key) || key.endsWith("_gcode") || meta.readonly || meta.type === "point" || meta.type === "none") return false;
     const rank = { simple: 0, advanced: 1, expert: 2 };  // "develop" settings are never shown
+    if (meta.mode && !(meta.mode in rank)) return false;
     const shown = rank[this.modeEl.value] ?? 0;
     return (rank[meta.mode || "simple"] ?? 0) <= shown;
   }
@@ -131,9 +148,13 @@ export class SettingsPanel {
   }
 
   _field(key, meta, single, disabled, rowLabel = "") {
-    const raw = first(this._value(key));
+    const pendingKey = `${JSON.stringify(this.context.target)}:${key}`;
+    const raw = this.pending.has(pendingKey) ? this.pending.get(pendingKey) : first(this._value(key));
     const value = raw === undefined || raw === null ? "" : String(raw);
-    const dis = disabled ? " disabled" : "";
+    const issue = this.fieldIssues.find(i => i.key === key && (!i.kind || i.kind === this.context.layout)
+      && (!i.scope || i.scope === 'project' && !['plate','object'].includes(this.context.target.kind) || i.scope === this.context.target.kind)
+      && (i.affected_id === undefined || i.affected_id === this.context.target.id)) || this.localIssues.get(pendingKey);
+    const dis = (disabled ? " disabled" : "") + (issue || this.pending.has(pendingKey) ? ' class="invalid" aria-invalid="true"' : ' aria-invalid="false"');
     const name = single || !rowLabel ? (rowLabel || meta.label || key) : `${rowLabel} – ${meta.label || key}`;
     const aria = ` aria-label="${esc(name)}"`;
     let control;
@@ -147,7 +168,9 @@ export class SettingsPanel {
     } else {
       control = `<input type="text" data-key="${key}"${aria} value="${esc(value)}" placeholder="default"${meta.type !== "string" ? ' inputmode="decimal"' : ""}${dis}>`;
     }
-    const unit = meta.sidetext ? `<span class="set-unit">${esc(meta.sidetext)}</span>` : "";
+    const correction = issue?.suggested_correction ? ` Suggested correction: ${Object.entries(issue.suggested_correction).map(([k,v])=>`${k} = ${v}`).join(', ')}.` : '';
+    const unit = (meta.sidetext ? `<span class="set-unit">${esc(meta.sidetext)}</span>` : "")
+      + (issue ? `<small class="set-error" role="alert">${esc(issue.message + correction)}</small>` : '');
     if (single) return `${control}${unit}`;
     return `<span class="set-field" title="${esc(meta.label || key)}"><small>${esc(meta.label || key)}</small>${control}${unit}</span>`;
   }
@@ -157,21 +180,33 @@ export class SettingsPanel {
     if (!key || !this.context) return;
     const meta = this.schema.options[key] || {};
     let value = input.type === "checkbox" ? (input.checked ? "1" : "0") : input.value.trim();
+    const pendingKey = `${JSON.stringify(this.context.target)}:${key}`;
+    const reject = message => {
+      this.pending.set(pendingKey, value);
+      this.localIssues.set(pendingKey, {key,message});
+      input.classList.add('invalid'); input.setAttribute('aria-invalid','true');
+      input.title = message;
+    };
     if (["int", "float", "percent", "float_or_percent"].includes(meta.type)) {
-      const number = Number(value.replace("%", ""));
-      const ok = value !== "" && Number.isFinite(number) && (meta.type !== "int" || Number.isInteger(number))
+      const number = Number(value.endsWith('%') ? value.slice(0,-1) : value);
+      const ok = value !== "" && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?%?$/.test(value) && Number.isFinite(number) && (meta.type !== "int" || Number.isInteger(number))
         && (!value.endsWith("%") || ["percent", "float_or_percent"].includes(meta.type))
-        && (meta.min === undefined || value.endsWith("%") && meta.type !== "percent" || number >= meta.min)
-        && (meta.max === undefined || value.endsWith("%") && meta.type !== "percent" || number <= meta.max);
+        && (meta.min === undefined || number >= meta.min)
+        && (meta.max === undefined || number <= meta.max);
       input.classList.toggle("invalid", !ok);
       input.setAttribute('aria-invalid',String(!ok));
       if (!ok) {
-        input.title = meta.min !== undefined || meta.max !== undefined
-          ? `Enter a number${meta.min !== undefined ? ` from ${meta.min}` : ""}${meta.max !== undefined ? ` up to ${meta.max}` : ""}` : "Enter a number";
+        reject(meta.min !== undefined || meta.max !== undefined
+          ? `Enter a number${meta.min !== undefined ? ` from ${meta.min}` : ""}${meta.max !== undefined ? ` up to ${meta.max}` : ""}` : "Enter a number"
+        );
         return;
       }
       if (meta.type === "percent" && !value.endsWith("%")) value = `${value}%`;
     }
+    if (meta.type === 'enum' && !meta.enum?.some(([v]) => v === value)) { reject('Choose one of the listed values'); return; }
+    this.pending.delete(pendingKey);
+    this.localIssues.delete(pendingKey);
+    input.classList.remove('invalid'); input.setAttribute('aria-invalid','false');
     const base = this.context.base[key];
     this.onChange?.(this.context.target, key, Array.isArray(base) || meta.vector ? [value] : value);
   }
