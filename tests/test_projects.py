@@ -767,6 +767,21 @@ class ProjectApiTests(unittest.TestCase):
         self.assertEqual(self.call("GET", f"/api/projects/{pid}/plates/1/effective-settings?revision=999")[0], 409)
         self.assertEqual(self.call("GET", f"/api/projects/{pid}/plates/999/effective-settings")[0], 404)
 
+    def test_effective_settings_http_review_searches_filters_and_drills_into_an_object(self):
+        project = self.call("POST", "/api/projects", {"name": "Review rows"})[1]
+        pid = project["id"]
+        base = f"/api/projects/{pid}/plates/1/effective-settings"
+        code, review = self.call("GET", base + "?search=wall%20loops")
+        self.assertEqual(code, 200)
+        self.assertEqual([r["key"] for r in review["review"]["rows"]], ["wall_loops"])
+        self.assertEqual(review["review"]["rows"][0]["source"], "preset")
+        self.assertEqual(review["review"]["evidence"], "expected-inputs")
+        code, changed = self.call("GET", base + "?changed=1")
+        self.assertEqual(code, 200)
+        self.assertEqual([r["key"] for r in changed["review"]["rows"]], ["curr_bed_type"])      # only the bed selection differs from the preset
+        self.assertEqual(self.call("GET", base + "?object=999")[0], 404)
+        self.assertEqual(self.call("GET", f"/api/projects/{pid}")[1]["revision"], project["revision"])
+
     def test_project_progress_exposes_latest_unknown_outcome_without_changing_status(self):
         pid = self.call('POST', '/api/projects', {'name': 'Outcome fixture'})[1]['id']
         with database.transaction() as conn:
