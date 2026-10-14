@@ -227,6 +227,70 @@ class OutdatedTests(GuideCase):
         self.assertEqual(len(kept.kept), 2)
         self.assertIsNotNone(kept.plan)
 
+    def _outdate(self, split_id, extra=None):
+        """Save edits (plus `extra` ones that cannot hold) the way an older split would have left them."""
+        work = splits.work_dir(split_id)
+        saved = json.loads((work / "guide_edits.json").read_text())
+        saved["edits"] += extra or []
+        (work / "guide_edits.json").write_text(json.dumps(saved))
+
+    def test_the_fingerprint_is_stored_with_the_edits(self):
+        split_id = self.make_split(*stack_split(4))
+        splits.edit_plan(split_id, move([1], [2]))
+        saved = assembly_edits.load(splits.work_dir(split_id))
+        self.assertEqual(saved["fingerprint"], splits._planning(split_id)["model"].fingerprint)
+
+    def test_discard_deletes_the_override_and_the_cover_says_automatic(self):
+        split_id = self.make_split(*stack_split(4))
+        splits.edit_plan(split_id, move([1], [2]))
+        self._outdate(split_id, [move([3], [1])])
+        done = splits.edit_plan(split_id, {"op": "discard"})
+        self.assertEqual((done["state"], done["count"]), ("none", 0))
+        self.assertFalse((splits.work_dir(split_id) / "guide_edits.json").exists())
+        self.generate(split_id)
+        self.assertIn("Automatic plan", page_texts(self.pdf(split_id))[0])
+
+    def test_try_to_keep_through_the_service_keeps_what_passes_and_lists_the_dropped(self):
+        split_id = self.make_split(*stack_split(4))
+        splits.edit_plan(split_id, move([1], [2]))
+        self._outdate(split_id, [move([3], [1])])
+        self.assertEqual(splits.assembly_plan(split_id)["edits"]["state"], "outdated")
+        done = splits.edit_plan(split_id, {"op": "keep"})
+        self.assertEqual((done["state"], done["count"]), ("applied", 1))
+        self.assertEqual([(d["index"], d["edit"]["parts"]) for d in done["dropped"]], [(1, [3])])
+        self.assertTrue(done["dropped"][0]["reason"])
+        self.assertEqual(assembly_edits.load(splits.work_dir(split_id))["edits"], [move([1], [2])])
+        self.generate(split_id)
+        self.assertIn("Edited plan (1 edit)", page_texts(self.pdf(split_id))[0])
+
+    def test_try_to_keep_after_the_cuts_changed_re_stamps_the_split(self):
+        split_id = self.make_split(*stack_split(4))
+        splits.edit_plan(split_id, move([1], [2]))
+        work = splits.work_dir(split_id)
+        cuts = json.loads((work / "cuts.json").read_text())
+        cuts["cuts"][0]["offset"] += 1.0
+        (work / "cuts.json").write_text(json.dumps(cuts))
+        self.assertEqual(splits.assembly_edits(split_id)["state"], "outdated")
+        done = splits.edit_plan(split_id, {"op": "keep"})
+        self.assertEqual(done["state"], "applied")
+        self.assertEqual(splits.assembly_edits(split_id)["state"], "applied")
+
+    def test_keep_and_discard_are_refused_when_nothing_is_outdated(self):
+        split_id = self.make_split(*stack_split(4))
+        splits.edit_plan(split_id, move([1], [2]))
+        for op in ("keep", "discard"):
+            with self.assertRaises(jobs.JobError):
+                splits.edit_plan(split_id, {"op": op})
+        self.assertEqual(splits.assembly_edits(split_id)["count"], 1)
+
+    def test_a_failing_edit_at_generation_falls_back_to_automatic_and_names_the_edit(self):
+        split_id = self.make_split(*stack_split(4))
+        splits.edit_plan(split_id, move([1], [2]))
+        self._outdate(split_id, [move([3], [1])])
+        self.generate(split_id)
+        self.assertIn("Automatic plan", page_texts(self.pdf(split_id))[0])
+        self.assertIn("Edit 2", splits.assembly_edits(split_id)["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
