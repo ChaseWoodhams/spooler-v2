@@ -266,10 +266,13 @@ def _step_block(flow: PageFlow, art, step: dict) -> tuple:
     import assembly_render
     lines = [(FONT, line) for line in wrap(step_caption(step), FONT, 10.5, flow.content.width)]
     lines += [(BOLD, line) for text in step_warning_lines(step) for line in wrap(f"Warning: {text}", BOLD, 10, flow.content.width)]
-    return STEP_TITLE_H + assembly_render.step_height(art, flow.content.width) + 3 * MM + len(lines) * 10.5 * 1.3 + STEP_GAP, lines
+    import assembly_extras
+    return (STEP_TITLE_H + assembly_render.step_height(art, flow.content.width) + 3 * MM + len(lines) * 10.5 * 1.3
+            + assembly_extras.STRIP_GAP + assembly_extras.strip_height(art) + STEP_GAP), lines
 
 
 def _draw_step_block(flow: PageFlow, art, step: dict, top: float, lines: list) -> None:
+    import assembly_extras
     import assembly_render
     c, left = flow.canvas, flow.content.left
     c.setFillGray(0)
@@ -278,12 +281,14 @@ def _draw_step_block(flow: PageFlow, art, step: dict, top: float, lines: list) -
     c.setFont(BOLD, 12)
     c.drawString(left + 17 * MM, top - 7 * MM, fit(step_title(step), BOLD, 12, flow.content.width - 17 * MM))
     frames = assembly_render.draw_step(c, art, left, top - STEP_TITLE_H, flow.content.width)
+    assembly_extras.draw_step_extras(c, art, left, top - STEP_TITLE_H, flow.content.width)
     y = top - STEP_TITLE_H - frames - 3 * MM
     c.setFillGray(0)
     for font, line in lines:
         y -= 10.5 * 1.3
         c.setFont(font, 10.5 if font == FONT else 10)
         c.drawString(left, y + 3, line)
+    assembly_extras.draw_strip(c, art, left, y - assembly_extras.STRIP_GAP, flow.content.width)
 
 
 def _section_header(flow: PageFlow, section: dict, picture, top: float) -> None:
@@ -310,6 +315,7 @@ def _section_header(flow: PageFlow, section: dict, picture, top: float) -> None:
 
 def _steps(flow: PageFlow, data: GuideData, progress) -> None:
     """Section headers inline, then each Section's steps, two to a page, none split across pages."""
+    import assembly_extras
     import assembly_render
     if data.scene is None:
         raise ValueError("The guide needs the part previews of the split")
@@ -326,6 +332,7 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
         if steps:
             camera = assembly_render.choose_camera(data.scene, steps[0], camera)
             art = assembly_render.prepare_step(data.scene, steps[0], camera)
+            assembly_extras.attach(art, data.scene, section["parts"])
             prepared = (art, *_step_block(flow, art, steps[0]))
         first_h = (prepared[1] + (aside if len(steps) == 1 else 0)) if prepared else aside
         top = flow.reserve((STEP_GAP if index else 0) + SECTION_HEADER_H + first_h, section=section["letter"])
@@ -341,6 +348,7 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
             if n:
                 camera = assembly_render.choose_camera(data.scene, step, camera)
                 art = assembly_render.prepare_step(data.scene, step, camera)
+                assembly_extras.attach(art, data.scene, section["parts"])
                 prepared = (art, *_step_block(flow, art, step))
                 last = n == len(steps) - 1
                 y = flow.reserve(prepared[1] + (aside if last else 0), section=section["letter"])
