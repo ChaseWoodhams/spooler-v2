@@ -2477,6 +2477,26 @@ function startPlayback() {
   $("btn-play").textContent = "Pause";
 }
 
+const showValue = value => esc(typeof value === "string" ? value : JSON.stringify(value) ?? "—");
+async function loadSliceInputs(details) {
+  const body = details.querySelector("[data-slice-inputs-body]");
+  const projectId = state.project.id, plateId = state.plate;
+  body.textContent = "Loading…";
+  try {
+    const review = await api("GET", `/api/projects/${projectId}/plates/${plateId}/slice-inputs`);
+    if (state.project.id !== projectId || state.plate !== plateId || !body.isConnected) return;
+    const saved = review.saved;
+    const rows = review.differences.filter(d => d.kind !== "objects").map(d => `<tr><th scope="row">${esc(d.key)}</th><td>${showValue(d.saved)}</td><td>${showValue(d.current)}</td></tr>`);
+    const objectsChanged = review.differences.some(d => d.kind === "objects");
+    body.innerHTML = `<p>${esc(review.label)}</p>` + (saved.state === "saved"
+      ? `<p data-saved-inputs>Saved inputs: ${esc(saved.inputs.filament.filament_type ?? "")} on ${esc(saved.inputs.process.curr_bed_type ?? "")}, project revision ${saved.inputs.revision}.</p>`
+      : `<p data-saved-unavailable class="warn">Saved inputs unavailable: ${esc(saved.reason)}</p>`)
+      + (review.current.state === "unresolved" ? '<p class="warn">The current Project inputs cannot be resolved right now.</p>' : "")
+      + (rows.length || objectsChanged ? `<table data-slice-differences><caption>Changed since this Slice</caption><thead><tr><th>Setting</th><th>Saved</th><th>Current Project</th></tr></thead><tbody>${rows.join("")}${objectsChanged ? '<tr><th scope="row">Objects</th><td colspan="2">Placement or geometry changed</td></tr>' : ""}</tbody></table>`
+        : saved.state === "saved" ? "<p>The current Project matches the saved inputs.</p>" : "");
+  } catch (err) { body.textContent = err.message; }
+}
+
 function renderPreviewPanel(info) {
   const { analysis } = state.preview;
   const entry = sliceEntry();
@@ -2497,7 +2517,11 @@ function renderPreviewPanel(info) {
       <dt>Filament</dt><dd>${entry?.estimate_g ? `${entry.estimate_g.toFixed(1)} g` : "—"}</dd>
       <dt>Layers</dt><dd>${analysis.layers.length}</dd>
     </dl>
-    ${entry?.outdated ? '<p class="slicer-slice-state warn">This plate changed after it was sliced.</p>' : ""}
+    ${entry?.outdated ? `<p class="slicer-slice-state warn">${entry.outdated_reason === "inputs-unresolved" ? "This plate's inputs can no longer be resolved, so this Slice cannot be confirmed as current." : "This plate changed after it was sliced."}</p>` : ""}
+    <details class="slicer-subfold" data-slice-inputs${state.sliceInputsOpen ? " open" : ""}>
+      <summary>Inputs this Slice was prepared with</summary>
+      <div data-slice-inputs-body class="slicer-muted">Open to load the saved inputs.</div>
+    </details>
     ${info?.stride > 1 ? `<p class="slicer-muted">Large toolpath: showing every ${info.stride}th move.</p>` : ""}
     <details class="slicer-subfold" data-preview-more${state.previewMore ? " open" : ""}>
       <summary>Features and details</summary>
@@ -3103,7 +3127,10 @@ function bindUi() {
     state.viewport?.setShell(e.target.value);
     savePrinterPrefs({ shell: e.target.value });
   });
-  $("preview-panel").addEventListener("toggle", e => { if (e.target.matches("[data-preview-more]")) state.previewMore = e.target.open; }, true);
+  $("preview-panel").addEventListener("toggle", e => {
+    if (e.target.matches("[data-preview-more]")) state.previewMore = e.target.open;
+    if (e.target.matches("[data-slice-inputs]")) { state.sliceInputsOpen = e.target.open; if (e.target.open) loadSliceInputs(e.target); }
+  }, true);
   $("preview-panel").addEventListener("change", e => {
     const name = e.target.dataset.feature;
     if (!name) return;

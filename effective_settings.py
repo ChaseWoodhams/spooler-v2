@@ -34,12 +34,54 @@ def resolve(record, plate, settings, bed, alternate=None, issues=None):
           "alternate-preset" if alternate is not None else "preset")
     if alternate is None:
         layer("filament", profile.get("filament") or {}, "project")
-    payload = {**values, "objects": objects, "bricklayers": bricks,
-               "geometry": {str(m["id"]): m.get("sha256") for m in record["models"] if m["id"] in {o["model"] for o in objects}}}
-    fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    inputs = canonical_inputs(record, values, objects, bricks)
+    fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {"version": 1, "project_id": record["id"], "revision": record["revision"], "plate_id": plate["id"],
             "fingerprint": fingerprint, **values, "objects": objects, "bricklayers": bricks,
             "provenance": provenance, "issues": copy.deepcopy(issues or []), "evidence": "expected-inputs"}
+
+
+def canonical_inputs(record, values, objects, bricks):
+    """What actually reaches Orca for a Plate. Names, ids, colour labels and revisions are descriptive and left out;
+    an Object override equal to what the Plate already resolves to changes nothing and is left out too."""
+    models = {m["id"]: m for m in record["models"]}
+    process = values["process"]
+    placed = []
+    for obj in objects:
+        model = models.get(obj["model"], {})
+        placed.append({"geometry": model.get("sha256"), "scale_up": model.get("import"),
+                       "position": obj.get("position"), "rotation": obj.get("rotation"), "scale": obj.get("scale"),
+                       "overrides": {k: v for k, v in sorted((obj.get("overrides") or {}).items()) if process.get(k) != v}})
+    placed.sort(key=lambda o: json.dumps(o, sort_keys=True))
+    return {"version": 2, "machine": values["machine"], "process": process, "filament": values["filament"],
+            "objects": placed, "bricklayers": bricks, "postprocessor": brick_post.identity() if bricks else None}
+
+
+def snapshot(result):
+    """The immutable record of a resolve() result that a completed Slice keeps: effective values, provenance and the
+    placed Objects as they were when work started."""
+    return {"version": 2, "project_id": result["project_id"], "revision": result["revision"], "plate_id": result["plate_id"],
+            "fingerprint": result["fingerprint"], "machine": result["machine"], "process": result["process"],
+            "filament": result["filament"], "objects": result["objects"], "bricklayers": result["bricklayers"],
+            "postprocessor": brick_post.identity() if result["bricklayers"] else None,
+            "provenance": result["provenance"], "filament_choice": result.get("filament_choice"),
+            "evidence": "expected-inputs"}
+
+
+def differences(saved, current):
+    """Setting-level differences between a saved snapshot and the current resolve() result."""
+    out = []
+    for kind in ("machine", "process", "filament"):
+        for key in sorted(set(saved.get(kind) or {}) | set(current.get(kind) or {})):
+            before, after = (saved.get(kind) or {}).get(key), (current.get(kind) or {}).get(key)
+            if before != after:
+                out.append({"kind": kind, "key": key, "saved": before, "current": after})
+    placed = lambda r: canonical_inputs({"models": []}, r, r["objects"], r.get("bricklayers"))["objects"]
+    if [{k: v for k, v in o.items() if k != "geometry"} for o in placed(saved)] != [{k: v for k, v in o.items() if k != "geometry"} for o in placed(current)]:
+        out.append({"kind": "objects", "key": "objects", "saved": saved["objects"], "current": current["objects"]})
+    if (saved.get("bricklayers") or None) != (current.get("bricklayers") or None):
+        out.append({"kind": "post-processing", "key": "bricklayers", "saved": saved.get("bricklayers"), "current": current.get("bricklayers")})
+    return out
 
 
 # ── Review rows ────────────────────────────────────────────────────────────────

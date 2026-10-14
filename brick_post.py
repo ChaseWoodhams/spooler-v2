@@ -12,6 +12,8 @@ BrickLayers can't handle arcs and needs classic walls printed inner then outer, 
 forced while it is on (only in the plate's own process.json; locked profiles are never changed).
 """
 
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -90,3 +92,19 @@ def run(source: Path, target: Path, setting: dict) -> tuple:
     if not target.is_file() or target.stat().st_size == 0:
         raise BrickLayersError("BrickLayers finished without writing G-code")
     return args, text
+
+
+_identity: dict = {}
+
+
+def identity() -> str:
+    """Which post-processor a BrickLayers Slice used: the hash of the vendored script plus the settings it forces on Orca."""
+    if "value" not in _identity:
+        digest = hashlib.sha256()
+        try:
+            digest.update(SCRIPT.read_bytes())
+        except OSError:
+            digest.update(b"missing")
+        digest.update(json.dumps(REQUIRED_PROCESS, sort_keys=True).encode())
+        _identity["value"] = digest.hexdigest()
+    return _identity["value"]
