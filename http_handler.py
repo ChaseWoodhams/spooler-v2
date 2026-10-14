@@ -1168,6 +1168,10 @@ class SPHandler(SimpleHTTPRequestHandler):
                 if query.get("face"):
                     query["face"] = [float(x) for x in query["face"].split(",")]   # "x,y,z", a direction in the model's space
                 self._json(projects.suggest_orientation(project_id, int(parts[5]), query))
+            elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "effective-settings":
+                self._guard_draft(project_id)
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                self._json(projects.effective_settings(project_id, int(parts[5]), (query.get("revision") or [None])[0]))
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "fit":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 self._json(farm.plate_fit(projects.get_project(project_id), int(parts[5]), (query.get("printer_id") or [None])[0]))

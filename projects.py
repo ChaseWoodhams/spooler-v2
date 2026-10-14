@@ -50,6 +50,7 @@ from xml.sax.saxutils import escape
 
 import brick_post
 import database
+import effective_settings as plate_settings
 import gcode_analysis
 import holds
 import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
@@ -3061,6 +3062,42 @@ def read_arrangement(path: Path) -> dict:
 
 # ── Slicing a plate ────────────────────────────────────────────────────────────
 
+def effective_settings(project_id: int, plate_id: int, revision=None, *, record=None) -> dict:
+    """Read the exact common inputs for a Plate without mutating the Project.
+
+    Version 1 preserves existing alternate-preset resolution; immutable alternate
+    snapshots and stricter Object scope are subsequent tickets. Slice preparation
+    passes its captured record so review and preparation share the same calculation.
+    """
+    record = record if record is not None else get_project(project_id)
+    if revision is not None and int(revision) != record["revision"]:
+        raise jobs.JobError("The Project changed — review its settings again", 409)
+    data = record["data"]
+    plate = next((p for p in data["plates"] if p["id"] == plate_id), None)
+    if plate is None:
+        raise jobs.JobError("Plate not found", 404)
+    if not data["profile"]["bundle_id"]:
+        raise jobs.JobError("Choose a profile first", 409)
+    settings = slicer.bundle_settings(data["profile"]["bundle_id"])
+    slicer.verify_bundle(settings["bundle"])
+    issues = []
+    mix = plate_mix(data, plate_id)
+    if mix:
+        issues.append({"code": "conflicting-filament-choices", "scope": "plate", "plate_id": plate_id,
+                       "affected_ids": [o["id"] for o in data["objects"] if o["plate"] == plate_id],
+                       "severity": "error", "message": mix})
+    alternate = {} if mix else None
+    chosen = next((c for c in plate_filaments(data, plate_id) if c), None)
+    if chosen and not mix:
+        orca = slicer.require_orca()
+        alternate, _ = slicer.flatten_preset(slicer._presets("filament", orca), chosen["preset"])
+        machine = settings["machine"]["name"]
+        if alternate.get("type") != "filament" or not slicer._compatible(alternate, machine):
+            raise jobs.JobError(f"“{chosen['preset']}” isn't a filament preset for {machine}")
+    result = plate_settings.resolve(record, plate, settings, slicer.BED_TYPES[data["bed"]], alternate, issues)
+    result["filament_choice"] = chosen
+    return result
+
 def _queued_entry(previous: dict | None, queued_at: float, send: bool = False, send_opts: dict | None = None) -> dict:
     """A plate waiting to be sliced. `last_duration_ms` (how long it took before) lets the page show an expected time."""
     previous = previous or {}
@@ -3161,21 +3198,9 @@ def _slice(project_id: int, plate_id: int, slot: int = 0) -> dict:
     _require_one_filament(record, {plate_id})
     _stage(project_id, plate_id, "preparing")
     stamp = fingerprint(record, plate_id)
-    settings = slicer.bundle_settings(data["profile"]["bundle_id"])
-    slicer.verify_bundle(settings["bundle"])
+    settings = effective_settings(project_id, plate_id, record=record)
     orca = slicer.require_orca()
-    process = {**settings["process"], **data["profile"]["process"], **(plate.get("overrides") or {}),
-               "curr_bed_type": slicer.BED_TYPES[data["bed"]]}
-    bricks = plate_bricklayers(data, plate)
-    if bricks:
-        process.update(brick_post.REQUIRED_PROCESS)
-    filament = {**settings["filament"], **data["profile"]["filament"]}
-    chosen = next((c for c in plate_filaments(data, plate_id) if c), None)
-    if chosen:  # the profile's filament changes tweak the default preset, so they don't carry over to another one
-        filament, _ = slicer.flatten_preset(slicer._presets("filament", orca), chosen["preset"])
-        machine = settings["machine"]["name"]
-        if filament.get("type") != "filament" or not slicer._compatible(filament, machine):
-            raise jobs.JobError(f"“{chosen['preset']}” isn't a filament preset for {machine}")
+    process, filament, bricks = settings["process"], settings["filament"], settings["bricklayers"]
 
     work = plate_dir(project_id, plate_id)
     shutil.rmtree(work, ignore_errors=True)

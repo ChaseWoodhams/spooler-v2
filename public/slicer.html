@@ -142,6 +142,10 @@
         <div id="bricklayers" class="slicer-bricklayers"></div>
       </details>
 
+      <section class="slicer-card" data-steps="plates slice" aria-label="Plate settings review">
+        <button id="review-effective-settings" class="btn btn-secondary btn-sm" type="button">Settings actually used</button>
+        <div id="effective-settings-review" aria-live="polite"></div>
+      </section>
       <details class="slicer-card slicer-settings slicer-fold" id="fold-settings" data-steps="plates slice">
         <summary><span>Print settings</span><small id="settings-summary"></small></summary>
         <div id="settings-scope-toggle" class="scope-toggle" role="group" aria-label="Settings apply to">
@@ -359,6 +363,6 @@
   <div id="toast-area"></div>
   <script src="/outcome-prompt.js?v=4"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=53"></script>
+  <script type="module" src="slicer/main.js?v=54"></script>
 </body>
 </html>
