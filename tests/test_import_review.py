@@ -457,10 +457,10 @@ class MaterialSubstitutionTests(ImportReviewCase):
         self.assertTrue(any("My PLA" in note for note in review["notes"]))
         projects.cancel_import(review["token"])
 
-    async def test_appending_does_not_adopt_the_files_material_so_it_does_not_block(self):
+    async def test_appending_never_adopts_the_files_material_as_the_projects_default(self):
         project = await self.project_with_cube()
         review = self.prepare(archive(project=self.PETG, **TWO_PLATES), target=project["id"])
-        self.assertFalse(review["blocked"])
+        self.assertEqual([b["code"] for b in review["report"]["blockers"]], ["unmatched-material"])   # resolved explicitly (ticket 10)
         projects.cancel_import(review["token"])
 
 

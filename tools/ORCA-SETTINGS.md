@@ -89,3 +89,21 @@ archive) live in `projects/<id>/imports/<token>/` and are listed at
 `GET /api/projects/<id>/imports`. A material or printer substitution is a blocker,
 never a loss; resolving it belongs to the next import ticket. The older direct
 routes refuse any file that has losses or blockers (HTTP 409 `import-review-required`).
+
+### Imported material and Plate settings (ticket 10)
+
+An unmatched material (or printer) stays a blocker, now with `resolutions`: the file's own `imported` configuration (available only when
+the file names a material and its nozzle fits the printer) and every stock `preset` for the printer with the material, nozzle and the
+file-versus-preset differences of the main PETG/ASA settings. `POST /api/projects/import-review/<token>/resolve` takes
+`{material: {choice: "imported" | "preset", preset, accept_material_change}, printer, conflicts: "convert"}`, re-stages the conversion and
+returns the review with a new binding (an earlier confirmation is stale). A preset of another material than the file's is refused unless
+`accept_material_change` is true, and a resolution that changes the material requires the acknowledgement at confirmation. A refused choice
+leaves the review as it was. The file's own configuration is stored as an immutable, content-addressed Filament snapshot (Filament tab keys
+only, validated like edits, full vectors and nullable `nil` preserved; scripts and `*_gcode` stay blocked).
+
+New Project: the resolved material becomes the Project's locked profile. Append: the file's process differences against the target's
+effective process become Plate overrides on the Plates it brings, Object differences become Object overrides only for Object-eligible
+keys, and its material becomes a snapshot-backed Model Filament choice (none when it equals the Project's). A different printer, nozzle or
+bed blocks (`incompatible-machine`, `incompatible-bed`, options `separate-project` / `convert`). The report keeps `differences`
+(blocked scripts, rejected values, `uncompared-settings` the chosen presets do not state, conversions) and the applied `resolution`;
+both are retained with the accepted import record and neither claims full fidelity.

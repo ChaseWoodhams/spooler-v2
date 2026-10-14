@@ -947,47 +947,152 @@ def _spool(stream, length: int) -> Path:
     return Path(name)
 
 
-def _orca_profile(project: dict | None, notes: list, blockers: list | None = None) -> tuple:
+_first = lambda value: (value[0] if isinstance(value, list) and value else value) or None
+MATERIAL_KEYS = ("nozzle_temperature", "nozzle_temperature_initial_layer", "hot_plate_temp", "textured_plate_temp", "cool_plate_temp",
+                 "eng_plate_temp", "filament_flow_ratio", "fan_min_speed", "fan_max_speed", "filament_retraction_length")
+
+
+def _new_context(resolution=None) -> dict:
+    """What a staging run reports besides the conversion: the caller's `resolution`, the `differences` kept in the report, what was `applied`."""
+    return {"resolution": resolution or {}, "differences": [], "applied": {}}
+
+
+def _flat(kind: str, name: str) -> dict:
+    return slicer.flatten_preset(slicer._presets(kind, slicer.require_orca()), name)[0]
+
+
+def _material_offers(project: dict, stock: dict, machine: str, machine_values: dict) -> dict:
+    """The ways an unmatched material can be resolved: the file's own configuration (when it can be verified) or a stock preset,
+    each with the settings that would differ from what the file asks for."""
+    nozzle = _first(machine_values.get("nozzle_diameter"))
+    wanted = _first(project.get("filament_type"))
+    try:
+        values, left_out = slicer.imported_filament(project, machine_values, _first(project.get("filament_settings_id")))
+        imported = {"available": True, "name": values["name"], "material": _first(values["filament_type"]), "nozzle": nozzle,
+                    "left_out": [item["key"] for item in left_out]}
+    except jobs.JobError as error:
+        imported = {"available": False, "reason": str(error), "material": wanted, "nozzle": _first(project.get("nozzle_diameter"))}
+    presets = []
+    for name in stock["filaments"][machine]:
+        values = _flat("filament", name)
+        material = _first(values.get("filament_type"))
+        differences = [{"key": key, "before": _first(project[key]), "after": _first(values[key])} for key in MATERIAL_KEYS
+                       if key in project and key in values and _first(project[key]) != _first(values[key])]
+        presets.append({"preset": name, "material": material, "nozzle": nozzle, "same_material": bool(wanted) and material == wanted,
+                        "differences": differences})
+    presets.sort(key=lambda p: (not p["same_material"], p["preset"]))
+    return {"imported": imported, "presets": presets}
+
+
+def _material_choice(project: dict, stock: dict, machine: str, machine_values: dict, ctx: dict):
+    """Apply the caller's explicit material resolution: ("imported", values) or ("preset", name); None when nothing was chosen.
+    A preset of another material than the file's needs `accept_material_change`."""
+    choice = ctx["resolution"].get("material")
+    if not choice:
+        return None
+    if choice.get("choice") == "imported":
+        try:
+            values, left_out = slicer.imported_filament(project, machine_values, _first(project.get("filament_settings_id")))
+        except jobs.JobError as error:
+            raise _review_error(f"The file's own material can't be used: {error}", 409, "imported-material-unavailable") from None
+        ctx["differences"].extend({"scope": "project", **item} for item in left_out)
+        ctx["applied"]["material"] = {"choice": "imported", "name": values["name"], "material": _first(values["filament_type"])}
+        return "imported", values
+    preset = choice.get("preset")
+    if preset not in stock["filaments"][machine]:
+        raise _review_error(f"“{preset}” isn't a material preset for {machine}", 409, "unknown-preset")
+    wanted, offered = _first(project.get("filament_type")), _first(_flat("filament", preset).get("filament_type"))
+    change = not wanted or wanted != offered
+    if change and choice.get("accept_material_change") is not True:
+        raise _review_error(f"“{preset}” is {offered or 'an unknown material'}, not {wanted or 'the file’s material'}. Confirm the material change to use it",
+                            409, "material-change-unconfirmed", requested=wanted, proposed=offered)
+    ctx["applied"]["material"] = {"choice": "preset", "preset": preset, "material": offered, "material_change": change}
+    return "preset", preset
+
+
+def _unmatched_material_blocker(project: dict, stock: dict, machine: str, machine_values: dict, proposed: str, scope: str = "project") -> dict:
+    filament, wanted = _first(project.get("filament_settings_id")), _first(project.get("filament_type"))
+    offered = _first(_flat("filament", proposed).get("filament_type"))
+    return {"code": "unmatched-material", "scope": scope, "name": filament or "No material",
+            "requested": {"filament": filament, "material": wanted, "nozzle": _first(project.get("nozzle_diameter"))},
+            "proposed": {"filament": proposed, "material": offered, "nozzle": _first(machine_values.get("nozzle_diameter"))},
+            "resolutions": _material_offers(project, stock, machine, machine_values),
+            "message": f"The project's material “{filament}” ({wanted or 'unknown type'}) has no matching preset. "
+                       f"Spooler would use “{proposed}” ({offered or 'unknown type'}) instead. Choose a compatible material before importing."}
+
+
+def _note_uncompared(project: dict, base: dict, ctx: dict, scope: str) -> None:
+    """Settings of the file that the chosen presets don't state can't be compared with them, so aren't carried: the report lists them."""
+    keys = sorted(key for kind in ("process", "filament") for key in slicer._tab_keys(kind) - slicer.BLOCKED_SETTINGS
+                  if key in project and key not in (base.get(kind) or {}) and not key.endswith("_gcode"))
+    if keys:
+        ctx["differences"].append({"scope": scope, "code": "uncompared-settings", "keys": keys,
+                                   "reason": "These settings are in the file but not in the chosen presets, so they could not be compared and were not carried"})
+
+
+def _note_blocked(project: dict, ctx: dict) -> None:
+    """Scripts and post-processing never enter a Project; the report says which of the file's were left out."""
+    for key in sorted(project):
+        if key == "post_process" or key.endswith("_gcode"):
+            ctx["differences"].append({"scope": "project", "code": "blocked-setting", "key": key,
+                                       "reason": "Scripts and G-code are never carried into a Project"})
+
+
+def _orca_profile(project: dict | None, notes: list, blockers: list | None = None, ctx: dict | None = None) -> tuple:
     """The profile (locked presets plus setting changes) and plate side an Orca project asks for.
-    Presets that aren't among the stock Elegoo ones fall back to the defaults, and every setting of the project that
-    differs from them is carried over as a change, so a user's own Orca presets still slice the same.
     A printer, or a material that would become a different one, is never replaced quietly: it is appended to `blockers`
-    (code, requested and proposed values) and the import waits for an explicit resolution."""
+    (requested and proposed values and the `resolutions` on offer) until the caller's explicit resolution in `ctx["resolution"]`
+    names the file's own material (an immutable snapshot) or a stock preset. Every setting of the file that differs from the chosen
+    presets is carried over as a change; those that can't be are kept in `ctx["differences"]`."""
     default = {"bundle_id": _default_bundle_id(), "process": {}, "filament": {}, "bricklayers": None}
     if not project or slicer.orca_executable() is None:
         return default, "textured"
     blockers = [] if blockers is None else blockers
+    ctx = ctx or _new_context()
     try:
         stock = slicer.stock_presets()
-        machine = project.get("printer_settings_id")
-        requested_machine = machine
+        machine = requested_machine = project.get("printer_settings_id")
+        printer_open = False
         if machine not in stock["machines"]:
-            machine = stock["defaults"]["machine"]
-            notes.append("The project's printer isn't a Centauri Carbon preset — using the default printer")
+            mapped = ctx["resolution"].get("printer")
+            if mapped is not None:
+                if mapped not in stock["machines"]:
+                    raise _review_error(f"“{mapped}” isn't a supported printer", 409, "unknown-printer")
+                machine = mapped
+                ctx["applied"]["printer"] = mapped
+                ctx["differences"].append({"scope": "project", "code": "printer-mapped", "key": "printer_settings_id",
+                                           "reason": f"The file's printer “{requested_machine}” was mapped to “{mapped}”"})
+            else:
+                machine, printer_open = stock["defaults"]["machine"], True
+                notes.append("The project's printer isn't a Centauri Carbon preset — using the default printer")
         process = project.get("print_settings_id")
         filament = (project.get("filament_settings_id") or [None])[0]
         names = {"machine": machine,
                  "process": process if process in stock["processes"][machine] else stock["defaults"]["process"],
                  "filament": filament if filament in stock["filaments"][machine] else stock["defaults"]["filament"]}
-        bundle = slicer.create_bundle(**names)
-        base = slicer.bundle_settings(bundle["id"])
-        first = lambda value: (value[0] if isinstance(value, list) and value else value) or None
-        if requested_machine != machine:
+        machine_values = _flat("machine", machine)
+        if printer_open:
+            printers = sorted(({"printer": name, "nozzle": _first(_flat("machine", name).get("nozzle_diameter"))} for name in stock["machines"]),
+                              key=lambda p: (p["printer"] != machine, p["printer"]))
             blockers.append({"code": "unmatched-printer", "scope": "project", "name": requested_machine or "No printer",
-                             "requested": {"printer": requested_machine, "nozzle": first(project.get("nozzle_diameter"))},
-                             "proposed": {"printer": machine, "nozzle": first(base["machine"].get("nozzle_diameter"))},
+                             "requested": {"printer": requested_machine, "nozzle": _first(project.get("nozzle_diameter"))},
+                             "proposed": {"printer": machine, "nozzle": _first(machine_values.get("nozzle_diameter"))},
+                             "resolutions": {"printers": printers},
                              "message": f"The project's printer “{requested_machine}” has no matching Centauri Carbon preset. "
                                         f"Choose a compatible printer before importing."})
-        if names["filament"] != filament and requested_machine == machine:
-            wanted, offered = first(project.get("filament_type")), first(base["filament"].get("filament_type"))
+        imported = None
+        if names["filament"] != filament and not printer_open:
+            wanted, offered = _first(project.get("filament_type")), _first(_flat("filament", names["filament"]).get("filament_type"))
             if not wanted or wanted != offered:
-                blockers.append({"code": "unmatched-material", "scope": "project", "name": filament or "No material",
-                                 "requested": {"filament": filament, "material": wanted, "nozzle": first(project.get("nozzle_diameter"))},
-                                 "proposed": {"filament": names["filament"], "material": offered,
-                                              "nozzle": first(base["machine"].get("nozzle_diameter"))},
-                                 "message": f"The project's material “{filament}” ({wanted or 'unknown type'}) has no matching preset. "
-                                            f"Spooler would use “{names['filament']}” ({offered or 'unknown type'}) instead. "
-                                            f"Choose a compatible material before importing."})
+                chosen = _material_choice(project, stock, machine, machine_values, ctx)
+                if chosen is None:
+                    blockers.append(_unmatched_material_blocker(project, stock, machine, machine_values, names["filament"]))
+                elif chosen[0] == "imported":
+                    imported = chosen[1]
+                else:
+                    names["filament"] = chosen[1]
+        bundle = slicer.create_bundle(**names, filament_values=imported)
+        base = slicer.bundle_settings(bundle["id"])
         allowed = {kind: slicer._tab_keys(kind) - slicer.BLOCKED_SETTINGS for kind in ("process", "filament")}
         wanted = orca_3mf.settings_changes(project, base, allowed)
         changes = {}
@@ -995,28 +1100,128 @@ def _orca_profile(project: dict | None, notes: list, blockers: list | None = Non
             for key, value in values.items():
                 try:
                     changes.setdefault(kind, {}).update(slicer.normalize_overrides({kind: {key: value}}, base).get(kind, {}))
-                except jobs.JobError:
+                except jobs.JobError as error:
                     notes.append(f"Setting “{key}” from the project can't be used here and was left out")
+                    ctx["differences"].append({"scope": "project", "code": "invalid-setting", "key": key, "reason": str(error)})
+        _note_blocked(project, ctx)
+        _note_uncompared(project, base, ctx, "project")
         profile = {"bundle_id": bundle["id"], "process": changes.get("process", {}), "filament": changes.get("filament", {}), "bricklayers": None}
-        if names["process"] != process or names["filament"] != filament:
+        if names["process"] != process or (names["filament"] != filament and imported is None):
             notes.append(f"The project used “{process}” / “{filament}”; its differences are applied on top of "
                          f"“{names['process']}” / “{names['filament']}”")
         return profile, BED_FROM_ORCA.get(project.get("curr_bed_type"), "textured")
     except jobs.JobError as e:
+        if getattr(e, "issues", None):
+            raise                       # a refused resolution is reported to the caller, never swallowed
         notes.append(f"The project's settings couldn't be applied: {e}")
         return default, "textured"
 
 
-def _clean_object_settings(settings: dict, base: dict | None, label: str, notes: list) -> dict:
+def _append_settings(project: dict, record: dict, base: dict, ctx: dict, notes: list, blockers: list) -> dict:
+    """What appending a file to an existing Project keeps of the file's own settings: its process differences become Plate overrides
+    for the Plates it brings, its material a snapshot-backed Model choice. A different printer, nozzle or bed cannot coexist with the
+    Project's: it blocks until the file is imported as a separate Project or its conversion is explicitly accepted."""
+    carried = {"plate_overrides": {}, "filament": None}
+    if slicer.orca_executable() is None:
+        return carried
+    data, profile, machine = record["data"], record["data"]["profile"], base["machine"]
+    convert = ctx["resolution"].get("conflicts") == "convert"
+    printer, nozzle, wanted_bed = project.get("printer_settings_id"), _first(project.get("nozzle_diameter")), project.get("curr_bed_type")
+    try:
+        nozzle_differs = nozzle is not None and float(nozzle) != float(_first(machine.get("nozzle_diameter")))
+    except (TypeError, ValueError):
+        nozzle_differs = True
+    conflicts = []
+    if (printer and printer != machine["name"]) or nozzle_differs:
+        conflicts.append(("incompatible-machine", printer or machine["name"], "printer_settings_id",
+                          {"printer": printer, "nozzle": nozzle}, {"printer": machine["name"], "nozzle": _first(machine.get("nozzle_diameter"))},
+                          f"The file was made for “{printer or machine['name']}” ({nozzle or '?'} mm nozzle); this Project prints on "
+                          f"“{machine['name']}” ({_first(machine.get('nozzle_diameter'))} mm nozzle)."))
+    file_bed = BED_FROM_ORCA.get(wanted_bed)
+    if file_bed and file_bed != data["bed"]:
+        conflicts.append(("incompatible-bed", wanted_bed, "curr_bed_type", {"bed": file_bed}, {"bed": data["bed"]},
+                          f"The file prints on the {file_bed} bed; this Project uses the {data['bed']} bed for every Plate."))
+    for code, name, key, requested, proposed, message in conflicts:
+        if convert:
+            ctx["applied"]["conflicts"] = "convert"
+            ctx["differences"].append({"scope": "project", "code": code, "key": key, "reason": message + " The Project's own was kept."})
+        else:
+            blockers.append({"code": code, "scope": "project", "name": name, "requested": requested, "proposed": proposed,
+                             "options": ["separate-project", "convert"],
+                             "message": message + " Import it as a separate Project, or convert it to this Project's printer and bed after reviewing the difference."})
+    effective = {**base, "process": {**base["process"], **(profile.get("process") or {})}}
+    allowed = {"process": slicer._tab_keys("process") - slicer.BLOCKED_SETTINGS}
+    for key, value in orca_3mf.settings_changes(project, effective, allowed)["process"].items():
+        try:
+            carried["plate_overrides"].update(slicer.normalize_overrides({"process": {key: value}}, effective, scope="plate").get("process", {}))
+        except jobs.JobError as error:
+            notes.append(f"Setting “{key}” from the file can't be used on a Plate and was left out")
+            ctx["differences"].append({"scope": "plate", "code": "invalid-setting", "key": key, "reason": str(error)})
+    _note_blocked(project, ctx)
+    _note_uncompared(project, effective, ctx, "plate")
+    carried["plate_overrides"] = dict(sorted(carried["plate_overrides"].items()))
+    carried["filament"] = _append_material(project, record, base, ctx, notes, blockers)
+    return carried
+
+
+def _append_material(project: dict, record: dict, base: dict, ctx: dict, notes: list, blockers: list):
+    """The Model Filament choice (preset name, snapshot) an appended file's material needs, or None when the Project's own already is it."""
+    machine = base["machine"]
+    stock = slicer.stock_presets()
+    name, kind = _first(project.get("filament_settings_id")), _first(project.get("filament_type"))
+    if machine["name"] not in stock["filaments"] or not (name or kind):
+        return None
+    profile = record["data"]["profile"]
+    target = base["bundle"]["presets"]["filament"]["name"]
+    available = stock["filaments"][machine["name"]]
+    values = None
+    if name in available:
+        preset = name
+    elif kind and kind == _first(base["filament"].get("filament_type")):
+        notes.append(f"The file's material “{name}” has no preset; it is the same material as the Project's “{target}”, which is kept")
+        ctx["differences"].append({"scope": "project", "code": "material-name-unmatched", "key": "filament_settings_id",
+                                   "reason": f"“{name}” has no preset; the Project's {target} was kept"})
+        return None
+    else:
+        chosen = _material_choice(project, stock, machine["name"], machine, ctx)
+        if chosen is None:
+            blockers.append(_unmatched_material_blocker(project, stock, machine["name"], machine, target))
+            return None
+        if chosen[0] == "imported":
+            values = chosen[1]
+        preset = chosen[1] if chosen[0] == "preset" else None
+    if values is None:
+        flat = _flat("filament", preset)
+        allowed = {"filament": slicer._tab_keys("filament") - slicer.BLOCKED_SETTINGS}
+        deltas = {}
+        for key, value in orca_3mf.settings_changes(project, {"filament": flat}, allowed)["filament"].items():
+            try:
+                deltas.update(slicer.normalize_overrides({"filament": {key: value}}, {"machine": machine, "filament": flat}).get("filament", {}))
+            except jobs.JobError as error:
+                ctx["differences"].append({"scope": "project", "code": "invalid-setting", "key": key, "reason": str(error)})
+        if preset == target and deltas == (profile.get("filament") or {}):
+            return None
+        if not deltas:
+            reference = slicer.lock_filament(preset, machine)
+            return {"preset": reference["name"], "colour": "", "snapshot": reference}
+        values = {**flat, **deltas, "name": f"{preset} (imported)"}
+    reference, content = slicer.snapshot_proposal(values, machine)
+    reference = slicer.store_filament(reference, content, machine)
+    return {"preset": reference["name"], "colour": "", "snapshot": reference}
+
+
+def _clean_object_settings(settings: dict, base: dict | None, label: str, notes: list, ctx: dict | None = None, scope: str | None = None) -> dict:
     """The per-object process settings of an Orca project that this profile accepts; the rest are noted and left out."""
     kept = {}
     for key, value in settings.items():
         try:
             if base is None:
                 raise jobs.JobError("no profile")
-            kept.update(slicer.normalize_overrides({"process": {key: value}}, base).get("process", {}))
-        except jobs.JobError:
+            kept.update(slicer.normalize_overrides({"process": {key: value}}, base, scope=scope).get("process", {}))
+        except jobs.JobError as error:
             notes.append(f"{label}: setting “{key}” can't be used here and was left out")
+            if ctx is not None:
+                ctx["differences"].append({"scope": "object", "name": label, "code": "invalid-setting", "key": key, "reason": str(error)})
     return kept
 
 
@@ -1102,7 +1307,7 @@ def _binding(review: dict) -> dict:
 def _public_review(review: dict) -> dict:
     report = review["report"]
     return {"token": review["token"], "kind": review["kind"], "filename": review["filename"], "expires_at": review["expires_at"],
-            "required": bool(report["losses"]), "blocked": bool(report["blockers"]), "report": report, "notes": review["notes"],
+            "required": _needs_acknowledgement(report), "blocked": bool(report["blockers"]), "report": report, "notes": review["notes"],
             "binding": _binding(review)}
 
 
@@ -1127,9 +1332,11 @@ def _write_source_folder(folder: Path, name: str, write_source, scale: float, up
             "sha256": digest, "import": [scale, up]}
 
 
-def _stage_conversion(kind: str, path: Path, folder: Path, record: dict | None, filename: str, options: dict, notes: list, blockers: list):
+def _stage_conversion(kind: str, path: Path, folder: Path, record: dict | None, filename: str, options: dict, notes: list, blockers: list,
+                      ctx: dict | None = None):
     """Convert the staged archive into Model sources and a Project delta, all inside `folder`. A file whose geometry or settings
     can't be converted adds a blocker and returns None."""
+    ctx = ctx or _new_context()
     if kind == "plain":
         name = splits.safe_model_name(filename)
         template = _write_source_folder(folder / "models" / "0", name, _copy_from(path), options["scale"], options["up"])
@@ -1154,14 +1361,17 @@ def _stage_conversion(kind: str, path: Path, folder: Path, record: dict | None, 
         return None
     fresh = kind in ("single", "project")
     if fresh:
-        profile, bed = _orca_profile(parsed["project"], notes, blockers)
+        profile, bed = _orca_profile(parsed["project"], notes, blockers, ctx)
     else:
         profile, bed = record["data"]["profile"], record["data"]["bed"]
     base = slicer.bundle_settings(profile["bundle_id"]) if profile.get("bundle_id") else None
+    carried = {"plate_overrides": {}, "filament": None}
+    if kind == "append" and parsed["project"] and base is not None:
+        carried = _append_settings(parsed["project"], record, base, ctx, notes, blockers)
     if kind == "single":
         obj, copies = wanted[0]
         profile = {"spool_id": None, **profile}
-        profile["process"] = {**profile["process"], **_clean_object_settings(obj["settings"], base, obj["name"], notes)}
+        profile["process"] = {**profile["process"], **_clean_object_settings(obj["settings"], base, obj["name"], notes, ctx)}
         write_stl(folder / "model.stl", obj["verts"] @ copies[0]["matrix"], obj["tris"])
         stl = folder / "model.stl"
         return {"kind": kind, "stl": "model.stl", "size": stl.stat().st_size, "sha256": _file_digest(stl), "profile": profile, "bed": bed,
@@ -1183,14 +1393,32 @@ def _stage_conversion(kind: str, path: Path, folder: Path, record: dict | None, 
             return target.stat().st_size, _file_digest(target)
         models.append({"folder": str(index), "record": _write_source_folder(folder / "models" / str(index), name, write, 1.0, "z"),
                        "object": obj["name"]})
-        overrides = _clean_object_settings(obj["settings"], base, obj["name"], notes)
+        overrides = _clean_object_settings(obj["settings"], base, obj["name"], notes, ctx, scope="object")
         for copy, instance in enumerate(copies, start=1):
             placed = orca_3mf.pose(obj["verts"], instance["matrix"], instance["shift"])
             objects.append({"model": index, "plate_source": instance["plate"], "name": obj["name"] if copy == 1 else f"{obj['name']} ({copy})",
                             "position": placed["position"], "rotation": placed["rotation"], "scale": placed["scale"], "overrides": dict(overrides)})
     return {"kind": kind, "models": models, "objects": objects, "plates": [{"id": p["id"], "name": p["name"]} for p in parsed["plates"]],
+            "plate_overrides": carried["plate_overrides"], "filament": carried["filament"],
             "profile": profile if fresh else None, "bed": bed if fresh else None,
             "name": Path(filename.replace("\\", "/")).stem[:120]}
+
+
+def _run_staging(kind: str, path: Path, folder: Path, record: dict | None, filename: str, options: dict, inspected: list) -> tuple:
+    """Convert the staged archive into `folder`. Returns (conversion, notes, blockers, differences, applied): the conversion is None
+    while blocked; `applied` echoes the explicit resolution that shaped it."""
+    notes, blockers, ctx = [], list(inspected), _new_context(options.get("resolution"))
+    conversion = None if blockers else _stage_conversion(kind, path, folder, record, filename, options, notes, blockers, ctx)
+    seen, differences = set(), []
+    for item in ctx["differences"]:
+        if (item.get("scope"), item.get("name"), item.get("key"), item["code"]) not in seen:
+            seen.add((item.get("scope"), item.get("name"), item.get("key"), item["code"]))
+            differences.append(item)
+    return conversion, notes, blockers, differences, ctx["applied"]
+
+
+def _needs_acknowledgement(report: dict) -> bool:
+    return bool(report["losses"]) or bool((report.get("resolution") or {}).get("material", {}).get("material_change"))
 
 
 def prepare_import(stream, length: int, filename: str, target: int | None = None, scale=1.0, up="z", plate=None, quick: bool = False) -> dict:
@@ -1220,14 +1448,14 @@ def prepare_import(stream, length: int, filename: str, target: int | None = None
         except (zipfile.BadZipFile, ElementTree.ParseError, zlib.error, EOFError):
             raise jobs.JobError("That isn't a valid 3MF file") from None
         report.pop("project", None)
-        notes, blockers = [], list(report["blockers"])
-        conversion = None if blockers else _stage_conversion(kind, path, folder, record, filename, options, notes, blockers)
-        report["blockers"] = blockers
+        inspected = list(report["blockers"])
+        conversion, notes, blockers, differences, applied = _run_staging(kind, path, folder, record, filename, options, inspected)
+        report.update(blockers=blockers, differences=differences, resolution=applied)
         summary = json.dumps({"conversion": conversion, "options": options}, sort_keys=True, default=str)
         now = time.time()
         review = {"token": token, "kind": kind, "filename": Path(filename.replace("\\", "/")).name, "created_at": now,
                   "expires_at": now + IMPORT_REVIEW_TTL_S, "content_hash": digest, "size": path.stat().st_size, "report": report,
-                  "notes": list(dict.fromkeys(notes)), "conversion": conversion, "options": options,
+                  "notes": list(dict.fromkeys(notes)), "conversion": conversion, "options": options, "inspected_blockers": inspected,
                   "conversion_digest": hashlib.sha256(summary.encode()).hexdigest(),
                   "target": {"project_id": record["id"], "created_at": record["created_at"], "revision": record["revision"]} if record else None}
         (folder / "review.json").write_text(json.dumps(review, default=str), encoding="utf-8")
@@ -1236,6 +1464,83 @@ def prepare_import(stream, length: int, filename: str, target: int | None = None
         source.unlink(missing_ok=True)
         shutil.rmtree(folder, ignore_errors=True)
         raise
+
+
+def _clean_resolution(raw) -> dict:
+    """The caller's explicit choices: a material (the file's own `imported` configuration or a named stock `preset`), a stock
+    `printer` for a new Project, and `conflicts: convert` to accept converting an appended file to the Project's printer and bed."""
+    if not isinstance(raw, dict):
+        raise jobs.JobError("Choose how to resolve the import")
+    clean = {}
+    material = raw.get("material")
+    if material is not None:
+        if not isinstance(material, dict) or material.get("choice") not in ("imported", "preset"):
+            raise jobs.JobError("Choose the file's own material or a preset")
+        clean["material"] = {"choice": material["choice"]}
+        if material["choice"] == "preset":
+            if not isinstance(material.get("preset"), str) or not material["preset"].strip():
+                raise jobs.JobError("Choose which preset to use")
+            clean["material"].update(preset=material["preset"], accept_material_change=material.get("accept_material_change") is True)
+    if raw.get("printer") is not None:
+        if not isinstance(raw["printer"], str):
+            raise jobs.JobError("Choose a printer preset")
+        clean["printer"] = raw["printer"]
+    if raw.get("conflicts") is not None:
+        if raw["conflicts"] != "convert":
+            raise jobs.JobError("The only conversion on offer is to the Project's own printer and bed")
+        clean["conflicts"] = "convert"
+    if not clean:
+        raise jobs.JobError("Choose how to resolve the import")
+    return clean
+
+
+def resolve_import(token: str, resolution: dict) -> dict:
+    """Apply an explicit resolution (see _clean_resolution) to a pending review and return the re-staged review. A choice that can't
+    be applied is refused and leaves the review as it was; an accepted one changes the conversion, so the binding changes and
+    an earlier confirmation is stale."""
+    review = _load_review(token)
+    folder = _staging_path(token)
+    if review["expires_at"] <= time.time():
+        cancel_import(token)
+        raise _review_error("This import review has expired. Choose the file again", 409, "import-review-expired")
+    if review.get("inspected_blockers"):
+        raise _review_error("This file can't be imported, so there is nothing to resolve", 409, "import-blocked",
+                            blockers=review["report"]["blockers"])
+    resolution = _clean_resolution(resolution)
+    options = {**review["options"], "resolution": {**(review["options"].get("resolution") or {}), **resolution}}
+    record = None
+    if review["target"] is not None:
+        target = review["target"]
+        try:
+            record = get_project(target["project_id"])
+        except jobs.JobError:
+            record = None
+        if record is None or record["revision"] != target["revision"] or record["created_at"] != target["created_at"]:
+            cancel_import(token)
+            raise _review_error("The Project changed since the import was reviewed. Review it again", 409, "import-review-stale")
+    path = folder / "source.3mf"
+    if _file_digest(path) != review["content_hash"]:
+        cancel_import(token)
+        raise _review_error("The staged file changed. Choose the file again", 409, "import-review-stale")
+    fresh = folder / "next"
+    shutil.rmtree(fresh, ignore_errors=True)
+    fresh.mkdir()
+    try:
+        conversion, notes, blockers, differences, applied = _run_staging(review["kind"], path, fresh, record, review["filename"], options, [])
+    except BaseException:
+        shutil.rmtree(fresh, ignore_errors=True)
+        raise
+    shutil.rmtree(folder / "models", ignore_errors=True)
+    (folder / "model.stl").unlink(missing_ok=True)
+    for entry in fresh.iterdir():
+        os.replace(entry, folder / entry.name)
+    shutil.rmtree(fresh, ignore_errors=True)
+    review["report"].update(blockers=blockers, differences=differences, resolution=applied)
+    summary = json.dumps({"conversion": conversion, "options": options}, sort_keys=True, default=str)
+    review.update(conversion=conversion, options=options, notes=list(dict.fromkeys(notes)),
+                  conversion_digest=hashlib.sha256(summary.encode()).hexdigest())
+    (folder / "review.json").write_text(json.dumps(review, default=str), encoding="utf-8")
+    return _public_review(review)
 
 
 def _import_directly(target, stream, length: int, filename: str, **options) -> dict:
@@ -1267,7 +1572,7 @@ def confirm_import(token: str, confirmation: dict) -> dict:
     if report["blockers"]:
         raise _review_error("This import can't continue until its blocking problems are resolved", 409, "import-blocked",
                             blockers=report["blockers"])
-    if report["losses"] and confirmation.get("acknowledged") is not True:
+    if _needs_acknowledgement(report) and confirmation.get("acknowledged") is not True:
         raise _review_error("Review the losses and choose Continue with losses", 409, "import-review-required", losses=report["losses"])
     try:
         if _file_digest(folder / "source.3mf") != review["content_hash"]:
@@ -1312,7 +1617,8 @@ def _retain_import(project_id: int, review: dict, folder: Path, summary: dict) -
     (keep / "record.json").write_text(json.dumps({
         "id": review["token"], "kind": review["kind"], "filename": review["filename"], "content_hash": review["content_hash"],
         "size": review["size"], "accepted_at": time.time(), "acknowledged": bool(report["losses"]), "report_version": report["version"],
-        "losses": report["losses"], "objects": report["objects"], "plates": report["plates"], "notes": review["notes"], **summary}), encoding="utf-8")
+        "losses": report["losses"], "differences": report.get("differences", []),
+        "resolution": report.get("resolution", {}), "objects": report["objects"], "plates": report["plates"], "notes": review["notes"], **summary}), encoding="utf-8")
     return keep
 
 
@@ -1345,6 +1651,8 @@ def _apply_conversion(project_id: int, review: dict, folder: Path, expected: dic
                 published.append(destination)
                 model_ids[int(spec["folder"])] = next_model
                 new_models.append({**spec["record"], "id": next_model, "origin": {"import": review["token"]}})
+                if conversion.get("filament"):
+                    data.setdefault("filaments", {})[str(next_model)] = dict(conversion["filament"])
                 next_model += 1
             if fresh:
                 data["plates"], data["objects"] = [], []
@@ -1353,7 +1661,8 @@ def _apply_conversion(project_id: int, review: dict, folder: Path, expected: dic
             plate_ids = {}
             for number, plate in enumerate(conversion["plates"]):
                 plate_ids[plate["id"]] = first + number
-                data["plates"].append({"id": first + number, "name": plate["name"] or f"Plate {first + number}", "overrides": {}})
+                data["plates"].append({"id": first + number, "name": plate["name"] or f"Plate {first + number}",
+                                       "overrides": dict(conversion.get("plate_overrides") or {})})
             valid = {p["id"] for p in data["plates"]}
             for obj in conversion["objects"]:
                 if "plate_source" in obj:

@@ -29,12 +29,28 @@ const blockedReview = review({ blocked: true, required: false, report: { version
   { code: 'unmatched-material', scope: 'project', name: 'Generic PETG', message: 'The project’s material “Generic PETG” (PETG) has no matching preset. Spooler would use “Elegoo PLA @ECC” (PLA) instead. Choose a compatible material before importing.',
     requested: { filament: 'Generic PETG', material: 'PETG', nozzle: '0.4' }, proposed: { filament: 'Elegoo PLA @ECC', material: 'PLA', nozzle: '0.4' } }] } });
 
+const offers = {
+  imported: { available: true, name: 'Generic PETG (imported)', material: 'PETG', nozzle: '0.4', left_out: [] },
+  presets: [
+    { preset: 'Elegoo PETG @ECC', material: 'PETG', nozzle: '0.4', same_material: true, differences: [{ key: 'nozzle_temperature', before: '245', after: '240' }] },
+    { preset: 'Elegoo PLA @ECC', material: 'PLA', nozzle: '0.4', same_material: false, differences: [{ key: 'nozzle_temperature', before: '245', after: '210' }] }] };
+const resolvable = review({ blocked: true, required: false, report: { version: 1, losses: [], objects: 1, plates: 1, blockers: [
+  { ...blockedReview.report.blockers[0], resolutions: offers }] } });
+const resolved = (applied, over = {}) => review({ required: false, binding: { ...binding, conversion: 'd'.repeat(64) },
+  report: { version: 1, losses: [], blockers: [], objects: 1, plates: 1, resolution: applied, differences: [{ scope: 'project', code: 'blocked-setting', key: 'filament_start_gcode', reason: 'Scripts and G-code are never carried into a Project' }] }, ...over });
+const conflict = review({ blocked: true, required: false, binding: { ...binding, target: { project_id: 11, created_at: 1700000000.5, revision: 1 } },
+  report: { version: 1, losses: [], objects: 1, plates: 1, blockers: [
+    { code: 'incompatible-machine', scope: 'project', name: 'Prusa MK4', options: ['separate-project', 'convert'],
+      message: 'The file was made for “Prusa MK4” (0.4 mm nozzle); this Project prints on “Elegoo Centauri Carbon 0.4 nozzle” (0.4 mm nozzle).',
+      requested: { printer: 'Prusa MK4', nozzle: '0.4' }, proposed: { printer: 'Elegoo Centauri Carbon 0.4 nozzle', nozzle: '0.4' } }] } });
+
 (async () => {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const calls = [];
     let next = review();
+    let resolveReply = null;
     await page.route('http://spooler.test/**', route => {
       const file = path.join(root, new URL(route.request().url()).pathname);
       if (!file.startsWith(root) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return route.fulfill({ status: 404 });
@@ -44,7 +60,8 @@ const blockedReview = review({ blocked: true, required: false, report: { version
     await page.route('**/api/**', route => {
       const url = new URL(route.request().url()), method = route.request().method();
       if (method !== 'GET') calls.push({ method, path: url.pathname, params: Object.fromEntries(url.searchParams), body: route.request().postData() });
-      const data = url.pathname === '/api/projects/import-review' ? next
+      const data = url.pathname === `/api/projects/import-review/${TOKEN}/resolve` ? (resolveReply instanceof Error ? null : resolveReply)
+        : url.pathname === '/api/projects/import-review' ? next
         : url.pathname === `/api/projects/import-review/${TOKEN}/confirm` ? created
         : url.pathname === `/api/projects/import-review/${TOKEN}` ? { ok: true }
         : url.pathname === '/api/projects' && method === 'GET' ? { projects: [] }
@@ -58,6 +75,7 @@ const blockedReview = review({ blocked: true, required: false, report: { version
         : url.pathname.endsWith('/jobs') ? { jobs: [] } : url.pathname === '/api/printers' ? []
         : url.pathname === '/api/defaults' ? { defaults: { options: {} } } : url.pathname === '/api/slicer/spools' ? { spools: [] }
         : url.pathname === '/api/slicer/presets' ? { machines: [], processes: {}, filaments: {} } : {};
+      if (data === null) return route.fulfill({ status: 409, json: { error: 'Elegoo PLA @ECC is PLA, not PETG. Confirm the material change to use it', issues: [{ code: 'material-change-unconfirmed' }] } });
       return route.fulfill({ json: data });
     });
     const drop = names => page.evaluate(names => {
@@ -137,6 +155,52 @@ const blockedReview = review({ blocked: true, required: false, report: { version
     await dialog.waitFor({ state: 'detached' });
     assert.deepEqual(review_calls().map(c => c.method), ['POST', 'DELETE']);
     console.log('PASS: A blocked review explains the proposed material and offers only Cancel import');
+
+    // An unmatched material is resolved in the dialog: the choices, their differences, and an explicit acceptance for another material.
+    calls.length = 0;
+    next = resolvable;
+    await openNew();
+    await drop(['Generic PETG.3mf']);
+    await dialog.waitFor({ state: 'visible' });
+    assert.equal(await dialog.getByLabel(/Use the file's own PETG settings/).isChecked(), true, 'the file’s own material is offered first');
+    await dialog.getByLabel('Material preset').selectOption('Elegoo PLA @ECC');
+    assert.match(await dialog.innerText(), /nozzle_temperature\s+245\s+210/, 'the before and after values are shown');
+    assert.equal(await dialog.getByLabel(/Print this in PLA, not PETG/).isVisible(), true, 'another material needs its own acceptance');
+    resolveReply = new Error('refused');
+    await dialog.getByRole('button', { name: 'Use this material' }).click();
+    await dialog.getByText('Confirm the material change').waitFor();
+    assert.equal(await dialog.getByRole('button', { name: /^(Import|Continue with losses)$/ }).count(), 0, 'a refused choice leaves the import blocked');
+    await dialog.getByLabel('Material preset').selectOption('Elegoo PETG @ECC');
+    resolveReply = resolved({ material: { choice: 'preset', preset: 'Elegoo PETG @ECC', material: 'PETG', material_change: false } });
+    await dialog.getByRole('button', { name: 'Use this material' }).click();
+    await dialog.getByText('Your choices').waitFor();
+    const resolvedText = await dialog.innerText();
+    assert.match(resolvedText, /Material: Elegoo PETG @ECC/);
+    assert.match(resolvedText, /1 difference remains — fidelity is not complete/);
+    const sent = calls.filter(c => c.path.endsWith('/resolve')).map(c => JSON.parse(c.body));
+    assert.deepEqual(sent[sent.length - 1], { material: { choice: 'preset', preset: 'Elegoo PETG @ECC', accept_material_change: false } });
+    await dialog.getByRole('button', { name: 'Import', exact: true }).click();
+    for (let i = 0; i < 50 && !calls.some(c => c.path.endsWith('/confirm')); i++) await page.waitForTimeout(100);
+    assert.deepEqual(JSON.parse(calls.find(c => c.path.endsWith('/confirm')).body), { ...binding, conversion: 'd'.repeat(64), acknowledged: true },
+      'Continue commits the binding of the resolved review, not the first one');
+    console.log('PASS: An unmatched material is resolved explicitly, with differences shown, and the resolved binding is what is confirmed');
+
+    // An incompatible printer offers a separate Project or a reviewed conversion; a separate Project drops the target.
+    calls.length = 0;
+    next = conflict;
+    await openNew();
+    await drop(['bracket.stl', 'Prusa.3mf']);
+    await dialog.waitFor({ state: 'visible' });
+    assert.match(await dialog.innerText(), /Prusa MK4/);
+    assert.equal(await dialog.getByRole('button', { name: /^(Import|Continue with losses)$/ }).count(), 0);
+    next = resolved({}, { binding });
+    await dialog.getByRole('button', { name: 'Import as a separate Project' }).click();
+    await dialog.waitFor({ state: 'visible' }).catch(() => {});
+    const posts = review_calls().filter(c => c.method === 'POST' && c.path === '/api/projects/import-review');
+    assert.equal(posts.length >= 2, true, 'the file is staged again');
+    assert.equal(posts[posts.length - 1].params.target, undefined, 'without the Project it did not fit');
+    assert.equal(review_calls().some(c => c.method === 'DELETE'), true, 'the first staging was thrown away');
+    console.log('PASS: A conflicting file can be imported as a separate Project');
 
     // A file with nothing to disclose is confirmed without a dialog.
     calls.length = 0;

@@ -18,6 +18,7 @@ Slices
 
 import asyncio
 import math
+import copy
 import hashlib
 import json
 import os
@@ -615,13 +616,18 @@ def configuration_issues(values):
     return issues
 
 
-def create_bundle(machine: str, process: str, filament: str, label: str | None = None, overrides: dict | None = None) -> dict:
+def create_bundle(machine: str, process: str, filament: str, label: str | None = None, overrides: dict | None = None,
+                  filament_values: dict | None = None) -> dict:
     """Lock a machine/process/filament combination, optionally with process overrides such as tree supports.
+    `filament_values` (an imported Filament configuration, see imported_filament) is locked in place of the catalogue's `filament`.
     Identical combinations return the existing bundle."""
     orca = require_orca()
     settings, chains = {}, {}
     for kind, name in zip(PRESET_KINDS, (machine, process, filament)):
-        settings[kind], chains[kind] = flatten_preset(_presets(kind, orca), name)
+        if kind == "filament" and filament_values is not None:
+            settings[kind], chains[kind] = copy.deepcopy(filament_values), [filament_values["name"]]
+        else:
+            settings[kind], chains[kind] = flatten_preset(_presets(kind, orca), name)
         if settings[kind].get("type") != kind:
             raise jobs.JobError(f"“{name}” is not a {kind} preset")
     for kind in ("process", "filament"):
@@ -767,6 +773,49 @@ def propose_filament(name: str, machine: dict, *, verify: bool = True) -> tuple:
                  "source_chain": chain, "schema": "OrcaSlicer 2.4.2", "slicer_folder": orca.parent.name,
                  "vendor_profile_version": vendor_profile_version(orca)}
     return reference, values, content
+
+
+def imported_filament(project: dict, machine: dict, name: str | None) -> tuple:
+    """The Filament configuration an Orca project carries, as an immutable-preset body: (values, left_out).
+    Only keys this application may carry (the Filament tab, minus the blocked and script keys) are kept, each validated like an edit and
+    kept in Orca's own representation (full vectors, "nil" for nullable inheritance). `left_out` lists [{key, reason}] for the rest.
+    Raises JobError when the file does not say what material it is, or sizes a different nozzle than `machine`."""
+    first = lambda value: value[0] if isinstance(value, list) and value else value
+    material = first(project.get("filament_type"))
+    if not isinstance(material, str) or not material.strip():
+        raise jobs.JobError("The file doesn't say what material it is")
+    wanted, offered = first(project.get("nozzle_diameter")), first(machine.get("nozzle_diameter"))
+    try:
+        mismatch = wanted is not None and float(wanted) != float(offered)
+    except (TypeError, ValueError):
+        mismatch = True
+    if mismatch:
+        raise jobs.JobError(f"The file's {wanted} mm nozzle doesn't match this printer's {offered} mm nozzle")
+    values = {"name": f"{name or material} (imported)", "type": "filament", "from": "system", "instantiation": "true",
+              "filament_type": [material.strip()], "compatible_printers": [machine.get("name", "")]}
+    left_out = []
+    allowed = _tab_keys("filament")
+    for key in sorted(project):
+        if key in values or not (key in allowed or key.startswith("filament_")) or key == "filament_settings_id":
+            continue
+        try:
+            values.update(normalize_overrides({"filament": {key: project[key]}}, {"machine": machine, "filament": {}}, check_coupled=False).get("filament", {}))
+        except jobs.JobError as error:
+            left_out.append({"key": key, "code": "blocked-setting" if key in BLOCKED_SETTINGS or key.endswith("_gcode") else "invalid-setting",
+                             "reason": str(error)})
+    return values, left_out
+
+
+def snapshot_proposal(values: dict, machine: dict) -> tuple:
+    """(reference, content) for freezing `values` (an imported or adjusted Filament configuration) as an immutable snapshot.
+    Writes nothing; store_filament stores exactly this."""
+    orca = require_orca()
+    filament_compatibility(values, machine)
+    content = json.dumps(values, indent=1, sort_keys=True).encode()
+    reference = {"version": 1, "sha256": hashlib.sha256(content).hexdigest(), "name": values["name"], "material": values.get("filament_type"),
+                 "source_chain": [values["name"]], "schema": "OrcaSlicer 2.4.2", "slicer_folder": orca.parent.name,
+                 "vendor_profile_version": vendor_profile_version(orca)}
+    return reference, content
 
 
 def lock_filament(name: str, machine: dict) -> dict:
