@@ -260,6 +260,9 @@ def get_split(split_id: int, detail: bool = False) -> dict:
             record[name] = _read(work, f"{name}.json")
         record["has_preview"] = (work / "preview.bin").is_file()
         record["has_parts_preview"] = (work / "parts_preview.bin").is_file()
+        failure = _read(work, "error.json") or {}
+        record["error_parts"] = list(failure.get("parts") or []) if record["state"] == FAILED and failure.get("stage") == record["stage"] else []
+        record["plan_note"] = (_read(work, PLAN_NOTE_FILE) or {}).get("message")  # why the last Auto-fix changed nothing
     return record
 
 
@@ -267,6 +270,9 @@ def list_splits(recent: int = RECENT_LIMIT) -> list:
     with database.transaction() as conn:
         rows = conn.execute("SELECT * FROM splits ORDER BY updated_at DESC, id DESC LIMIT ?", (recent,)).fetchall()
         return [_to_split(r, conn) for r in rows]
+
+
+PLAN_NOTE_FILE = "plan_note.json"
 
 
 def _set_state(split_id: int, new_state: str, **fields) -> None:
@@ -350,7 +356,7 @@ def update_settings(split_id: int, body: dict) -> dict:
         conn.execute("UPDATE splits SET settings = ?, updated_at = ? WHERE id = ?", (json.dumps(settings), time.time(), split_id))
     _write_job(split_id, {"source_file": record["source_file"], "settings": settings})
     if reanalyze:
-        for name in ("analysis.json", "cuts.json", "check.json", "result.json", "preview.bin", "parts_preview.bin"):
+        for name in ("analysis.json", "cuts.json", "check.json", "result.json", "preview.bin", "parts_preview.bin", PLAN_NOTE_FILE):
             (work_dir(split_id) / name).unlink(missing_ok=True)
         _set_state(split_id, ANALYZING, stage="analyze", error=None)
         notify_worker()
@@ -369,6 +375,7 @@ def request_plan(split_id: int, body: dict) -> dict:
     with database.transaction() as conn:
         conn.execute("UPDATE splits SET settings = ?, updated_at = ? WHERE id = ?", (json.dumps(settings), time.time(), split_id))
     _write_job(split_id, {"source_file": record["source_file"], "settings": settings})
+    (work_dir(split_id) / PLAN_NOTE_FILE).unlink(missing_ok=True)
     _set_state(split_id, PLANNING, stage="plan", error=None)
     notify_worker()
     return get_split(split_id)
@@ -385,6 +392,7 @@ def save_cuts(split_id: int, body: dict) -> dict:
     tmp = work / "cuts.json.tmp"
     tmp.write_text(json.dumps({"mode": previous.get("mode", "edited"), "cuts": cuts}, indent=1), encoding="utf-8")
     os.replace(tmp, work / "cuts.json")
+    (work / PLAN_NOTE_FILE).unlink(missing_ok=True)
     _set_state(split_id, CHECKING, stage="check", error=None)
     notify_worker()
     return get_split(split_id)
@@ -814,6 +822,16 @@ def _run_stage(split_id: int, stage: str) -> None:
         raise jobs.JobError(error.get("error") or f"The {stage} step stopped unexpectedly (exit code {code})")
 
 
+def _kept_cuts_survive(split_id: int) -> bool:
+    """Was the failed plan an Auto-fix (it keeps the current cuts) with cuts and a check still on disk to go back to?"""
+    work = work_dir(split_id)
+    try:
+        keep = bool(get_split(split_id)["settings"].get("planner", {}).get("keep_cuts"))
+    except jobs.JobError:
+        return False
+    return keep and (work / "cuts.json").is_file() and (work / "check.json").is_file()
+
+
 def _still_there(split_id: int, created_at: float) -> bool:
     """Is this still the split a stage was started for? SQLite hands a deleted split's id to the next new split."""
     with database.transaction() as conn:
@@ -835,7 +853,13 @@ async def process_next() -> bool:
         await loop.run_in_executor(None, _run_stage, split_id, stage)
     except Exception as e:
         if _still_there(split_id, created_at):
-            _set_state(split_id, FAILED, stage=stage, error=str(e) or type(e).__name__)
+            message = str(e) or type(e).__name__
+            if stage == "plan" and _kept_cuts_survive(split_id):
+                # a failed Auto-fix changed nothing: the split stays usable and the reason is a note, not a failure
+                (work_dir(split_id) / PLAN_NOTE_FILE).write_text(json.dumps({"message": message}), encoding="utf-8")
+                _set_state(split_id, READY, stage=None, error=None)
+            else:
+                _set_state(split_id, FAILED, stage=stage, error=message)
             print(f"[Split] #{split_id} {stage} failed: {e}")
     else:
         if _still_there(split_id, created_at):

@@ -4,12 +4,13 @@
    them). Projects without an uploaded model start at Plates. Talks to /api/projects, /api/splits and /api/jobs. */
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
-import { splitStep } from "./split-step.js?v=5";
+import { splitStep } from "./split-step.js?v=6";
 import { projectPage } from "./project-page.js?v=10";
 import { newProject } from "./new-project.js?v=10";
 import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
 import { showExport } from "./export-plan.js?v=2";
 import { Viewport, featureColor } from "./viewport.js?v=5";
+import { showWhyBlocked } from "./reasons.js?v=1";
 import { reviewHtml, reviewTitle, blockers, acknowledgements } from "./review.js?v=1";
 
 const $ = id => document.getElementById(id);
@@ -3016,6 +3017,7 @@ function bindUi() {
   $("step-bar").addEventListener("click", e => {
     const btn = e.target.closest("[data-step]");
     if (btn && btn.getAttribute("aria-disabled") !== "true") setStep(btn.dataset.step);
+    else if (btn) showWhyBlocked(btn);
   });
   $("slice-state").addEventListener("click", e => {
     if (e.target.closest("[data-show-problem]")) showProblem();
@@ -3025,8 +3027,10 @@ function bindUi() {
     if (btn && !btn.disabled) setStep(btn.dataset.go);
     const fwd = e.target.closest("[data-split-forward]");
     if (fwd && fwd.getAttribute("aria-disabled") !== "true") withButton(fwd, () => splitStep.perform(fwd.dataset.splitForward));
+    else if (fwd) showWhyBlocked(fwd);
     const send = e.target.closest("[data-send-this-plate]");
     if (send && !send.disabled && send.getAttribute("aria-disabled") !== "true") withButton(send, sendThisPlate);
+    else if (send?.getAttribute("aria-disabled") === "true") showWhyBlocked(send);
   });
 
   $("project-name").addEventListener("keydown", e => {   // Enter saves (through change), Escape puts the saved name back

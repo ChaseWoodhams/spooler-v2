@@ -164,6 +164,10 @@ header {
 input:disabled, select:disabled, textarea:disabled { cursor: not-allowed; }
 :where([aria-disabled="true"]) { cursor: not-allowed; }
 .reason-line { display: block; margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--text-muted); }
+/* Pressing a blocked control brings its reason into view and outlines it for a moment; reduced motion gets the outline without the pulse */
+.reason-line.reason-flash { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; animation: reason-pulse .6s ease-out 2; }
+@keyframes reason-pulse { 0% { outline-offset: 6px; } 100% { outline-offset: 2px; } }
+@media (prefers-reduced-motion: reduce) { .reason-line.reason-flash { animation: none; } }
 .qp-action { display: inline-flex; flex-direction: column; align-items: flex-start; vertical-align: top; max-width: 100%; }
 
 .btn-primary  { background: var(--accent-dim); color: #fff; }

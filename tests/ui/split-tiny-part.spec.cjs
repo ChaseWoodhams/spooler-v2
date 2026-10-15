@@ -5,8 +5,7 @@ const fx = require('./fixtures.cjs');
 const sf = require('./slicer-fixtures.cjs');
 const { chromium } = require('playwright');
 
-const cut = (id, offset) => ({ id, parent: null, normal: [1, 0, 0], offset, scope: null });
-const piece = (extra = {}) => ({ fits: true, tiny: false, bbox: [0, 0, 0, 100, 60, 30], size: [30, 60, 100], volume_cm3: 180, made_by_cut: 1, ...extra });
+const { cut, piece } = sf;
 const tinySplit = () => ({
   state: 'ready', result: null,
   cuts: { cuts: [cut(1, 100), cut(2, 101)] },
@@ -18,12 +17,7 @@ const okSplit = () => ({ state: 'ready', result: null, cuts: { cuts: [cut(1, 100
   const server = await fx.startServer();
   const browser = await chromium.launch({ headless: true });
   try {
-    const open = async (splitOverride, onPost) => {
-      const { page, context, split } = await sf.openSlicer(browser, server.baseUrl, { step: 'split', splitOverride, onPost });
-      await page.waitForSelector('.slicer-step.active[data-step="split"]', { timeout: 10000 });
-      await page.waitForSelector('[data-action="split"]', { timeout: 10000 });
-      return { page, context, split };
-    };
+    const open = (splitOverride, onWrite) => sf.openStep(browser, server.baseUrl, { step: 'split', ready: '[data-action="split"]', splitOverride, onWrite });
 
     const a = await open(tinySplit());
     try {
@@ -68,7 +62,7 @@ const okSplit = () => ({ state: 'ready', result: null, cuts: { cuts: [cut(1, 100
       console.log('PASS: A disabled Auto-fix and Even grid explain themselves');
     } finally { await d.context.close(); }
 
-    const e = await open(okSplit(), (path, body, split) => {
+    const e = await open(okSplit(), ({ path, split }) => {
       if (path.endsWith('/plan')) { split.state = 'planning'; return split; }
     });
     try {

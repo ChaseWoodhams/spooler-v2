@@ -5,6 +5,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/OrbitControls.js";
 import { smoothGeometry } from "../mesh-shading.js";
 import { parseMeshes } from "./viewport.js?v=5";
+import { showWhyBlocked } from "./reasons.js?v=1";
 
 const STATE_LABEL = {
   analyzing: "Analysing", planning: "Planning cuts", ready: "Ready to split", checking: "Checking cuts",
@@ -264,18 +265,21 @@ class SplitViewer {
     }
   }
 
-  showPieces(pieces) {
+  // failedParts: numbers (1-based, in the order of `pieces`) of the Parts the last Split stopped on, outlined whatever their size
+  showPieces(pieces, failedParts = []) {
     this.clear(this.boxGroup);
-    let flagged = 0;
-    for (const piece of pieces || []) {
-      if (piece.fits && !piece.tiny) continue;
+    let flagged = 0, failed = 0;
+    (pieces || []).forEach((piece, index) => {
+      if (failedParts.includes(index + 1)) failed++;
+      else if (piece.fits && !piece.tiny) return;
       const b = piece.bbox;
       const box = new THREE.Box3(new THREE.Vector3(b[0], b[1], b[2]), new THREE.Vector3(b[3], b[4], b[5]));
-      // a part too small to print is red whether or not it fits the bed; a part that is only too big stays amber
-      this.boxGroup.add(new THREE.Box3Helper(box, piece.tiny || !piece.fits ? 0xef4444 : 0xf59e0b));
+      // a part too small to print, or one the Split stopped on, is red whether or not it fits the bed
+      this.boxGroup.add(new THREE.Box3Helper(box, piece.tiny || !piece.fits || failedParts.includes(index + 1) ? 0xef4444 : 0xf59e0b));
       if (piece.tiny) flagged++;
-    }
+    });
     this.renderer.domElement.dataset.flaggedParts = String(flagged);
+    this.renderer.domElement.dataset.failedParts = String(failed);
   }
 
   setRay(event) {
@@ -380,7 +384,7 @@ function announce() {
     text = current.state === "checking" ? "Checking the cuts…" : current.progress?.message || `${STATE_LABEL[current.state]}…`;
   } else if (sawPlanning) {
     sawPlanning = false;
-    text = current.state === "failed" ? "Planning failed" : `Planning finished — ${plural((current.check?.pieces || []).length, "part")}`;
+    text = current.state === "failed" ? "Planning failed" : current.plan_note ? current.plan_note : `Planning finished — ${plural((current.check?.pieces || []).length, "part")}`;
   } else return;
   if (live.textContent !== text) live.textContent = text;
 }
@@ -397,6 +401,14 @@ function blockedReason(action) {
   return "";
 }
 
+// What the last Plan again / Auto-fix run did when it changed nothing: the server's reason when Auto-fix could not help
+// (the cuts are untouched and the split stays usable), else the same-plan note this page worked out.
+function planNoteHtml() {
+  const failed = !planNote && current.plan_note;
+  const text = planNote || current.plan_note;
+  return text ? `<p class="split-hint${failed ? " split-bad" : ""}" id="plan-result" role="status">${esc(text)}</p>` : "";
+}
+
 function planActionsHtml() {
   const button = (action, label, extra = "") => {
     const why = blockedReason(action);
@@ -404,7 +416,7 @@ function planActionsHtml() {
   };
   const reasons = ["plan", "autofix"].map(a => { const why = blockedReason(a); return why ? `<small class="reason-line" id="split-${a}-why">${esc(why)}</small>` : ""; }).join("");
   return `${button("plan", cuts.length ? "Plan again" : "Plan cuts")}
-      ${button("autofix", "Auto-fix", ` title="Keep these cuts, move or remove cuts that make parts too small, and add cuts where parts are still too big"`)}${reasons}${planNote ? `<p class="split-hint" id="plan-result" role="status">${esc(planNote)}</p>` : ""}`;
+      ${button("autofix", "Auto-fix", ` title="Keep these cuts, move or remove cuts that make parts too small, and add cuts where parts are still too big"`)}${reasons}${planNoteHtml()}`;
 }
 
 function renderProgress() {
@@ -422,8 +434,8 @@ function renderProgress() {
     box.querySelector(".job-progress-bar").style.width = `${p?.percent ?? 0}%`;
   }
   if (current.state === "checking" && $("split-check")) $("split-check").innerHTML = '<span class="split-muted">Checking the cuts…</span>';
-  const splitButton = document.querySelector('#split-side [data-action="split"]');
-  if (splitButton) splitButton.disabled = !canSplit();
+  const splitBox = $("split-actions");
+  if (splitBox) { const html = splitButtonHtml(); if (splitBox.dataset.html !== html) { splitBox.dataset.html = html; splitBox.innerHTML = html; } }
 }
 
 async function syncViewer() {
@@ -456,7 +468,7 @@ async function syncViewer() {
     const editing = view === "split" && sub === "cuts";
     viewer.editable = editing && !["analyzing", "planning", "splitting"].includes(current.state);
     viewer.showCuts(editing ? cuts : [], selectedCut);
-    viewer.showPieces(editing && !checkDirty ? current.check?.pieces : null);
+    viewer.showPieces(editing && !checkDirty ? current.check?.pieces : null, failedParts());
   }
 }
 
@@ -467,6 +479,8 @@ function renderSide() {
   const parts = view !== "model" && sub === "parts" && current.result;
   if (parts) loadPlan();
   side.innerHTML = view === "model" ? sideModel() : parts ? sideParts() : sideCuts();
+  const splitBox = $("split-actions");
+  if (splitBox) splitBox.dataset.html = splitButtonHtml();
 }
 
 async function loadPlan() {
@@ -692,9 +706,9 @@ function sideModel() {
   const raw = Math.max(...a.raw_size);
   const hint = Math.max(...a.size) > 3000 ? 'Check the units: a dimension exceeds 3000 mm. If millimetres were treated as metres, enter scale 1 and analyse again; for oversized source coordinates, try scale 0.001.' : raw < 5 && s.scale === 1 ? "This model looks like it's in metres — try ×1000."
              : raw < 60 && s.scale === 1 ? "This is small — if it was modelled in centimetres use ×10, or ×25.4 for inches." : "";
-  const blocked = RUNNING.has(current.state) || current.state === 'failed';
+  const why = RUNNING.has(current.state) ? `Can't split while the split is ${STAGE_PHRASE[current.state]}` : current.state === "failed" ? "Can't split until the model is analysed: use Try again above" : "";
   // The forward action ("Plan the cuts →", "Put it on a plate →") lives in the workspace header, the same place on every step
-  const next = a.fits_whole ? `<button class="btn btn-secondary" data-action="go-split"${blocked ? ' disabled' : ''}>Split it anyway</button>` : "";
+  const next = a.fits_whole ? `<button class="btn btn-secondary" data-action="go-split"${why ? ' aria-disabled="true" aria-describedby="go-split-why"' : ""}>Split it anyway</button>${why ? `<small class="reason-line" id="go-split-why">${esc(why)}</small>` : ""}` : "";
   return `${failedBlock()}
   <section class="split-section"><h4>${esc(current.source_name)}</h4>
     ${hint ? `<p class="split-hint split-bad">${esc(hint)}</p>` : ""}
@@ -728,39 +742,71 @@ function sideModel() {
 
 function canSplit() {
   const pieces = current?.check?.pieces || [];
-  return !!pieces.length && !pieces.some(p => !p.fits || p.tiny) && !checkDirty && !pendingSave && !RUNNING.has(current.state);
+  return !!pieces.length && !pieces.some(p => !p.fits || p.tiny) && !checkDirty && !pendingSave && !RUNNING.has(current.state) && current.state !== "failed";
 }
 
+const cutsText = ids => `${ids.length === 1 ? "Cut" : "Cuts"} ${ids.join(", ")}`;
+
 // One entry per Part the cuts make that is too small to print: Part numbers follow the order of the check.
+// `cuts` are the cuts to change: the one that made the Part, else the cuts that apply to it.
 function tinyParts() {
   if (checkDirty || current.state === "checking") return [];
-  return (current.check?.pieces || []).map((p, i) => ({ number: i + 1, cut: p.made_by_cut, tiny: p.tiny, size: p.size })).filter(p => p.tiny);
+  return (current.check?.pieces || []).map((p, i) => ({ number: i + 1, cut: p.made_by_cut, cuts: p.made_by_cut != null ? [p.made_by_cut] : p.cuts || [], tiny: p.tiny, size: p.size })).filter(p => p.tiny);
+}
+
+// Parts that are too big for the printer, with the cuts that shaped them.
+function bigParts() {
+  if (checkDirty || current.state === "checking") return [];
+  return (current.check?.pieces || []).map((p, i) => ({ number: i + 1, cuts: p.cuts || [], fits: p.fits, tiny: p.tiny })).filter(p => !p.fits && !p.tiny);
+}
+
+// Parts the last Split stopped on (its error names them); they stay marked until the cuts change.
+function failedParts() {
+  if (checkDirty || current.state !== "failed" || current.stage !== "split") return [];
+  return (current.error_parts || []).filter(n => n >= 1 && n <= (current.check?.pieces || []).length);
+}
+
+// Why "Split the model" is blocked, one line per cause, or "" when nothing blocks it.
+function splitReasons() {
+  if (RUNNING.has(current.state)) return [{ text: `Can't split while the split is ${STAGE_PHRASE[current.state]}` }];
+  if (checkDirty || pendingSave) return [{ text: "Can't split until the cuts are checked" }];
+  const pieces = current.check?.pieces || [];
+  if (!pieces.length) return [{ text: "Plan the cuts first: there are no parts to split yet" }];
+  const out = [];
+  for (const p of tinyParts()) {
+    if (!p.cuts.length) out.push({ text: `Part ${p.number} is too small to print and no cut made it, so check the model's scale and units` });
+    else out.push({ text: `Part ${p.number} is too small to print, move or remove ${cutsText(p.cuts)}`, cut: p.cuts.length === 1 ? p.cuts[0] : null });
+  }
+  for (const p of bigParts()) out.push({ text: `Part ${p.number} is too big for the printer, ${p.cuts.length ? `move ${cutsText(p.cuts)} or use Auto-fix` : "check the printer size"}`, cut: p.cuts.length === 1 ? p.cuts[0] : null });
+  if (!out.length && current.state === "failed") out.push({ text: "The last attempt failed: change a cut, or use Try again above" });
+  return out;
 }
 
 function splitWhyHtml() {
-  const tiny = tinyParts();
-  if (!tiny.length) return "";
-  return `<small class="reason-line split-bad" id="split-why">${tiny.map(p => p.cut == null
-    ? `<span>Part ${p.number} is too small to print, use fewer cuts</span>`
-    : `<span>Part ${p.number} is too small to print, move or remove Cut ${p.cut}</span> <button type="button" class="btn btn-secondary btn-sm" data-action="select-cut" data-cut="${p.cut}">Select cut</button>`).join("<br>")}</small>`;
+  const reasons = splitReasons();
+  if (!reasons.length) return "";
+  return `<small class="reason-line split-bad" id="split-why">${reasons.map(r => `<span>${esc(r.text)}</span>${r.cut != null
+    ? ` <button type="button" class="btn btn-secondary btn-sm" data-action="select-cut" data-cut="${r.cut}">Select cut</button>` : ""}`).join("<br>")}</small>`;
 }
 
 const cutsSignature = list => JSON.stringify((list || []).map(c => [c.id, c.parent, c.normal, c.offset]));
 
 function splitButtonHtml() {
+  const why = splitWhyHtml();
   const blocked = !canSplit();
-  const why = !!splitWhyHtml();
-  return `<button class="btn btn-primary" data-action="split"${blocked ? " disabled" : ""}${why ? ' aria-describedby="split-why"' : ""}>${current.result ? "Split again" : "Split the model"}</button>${splitWhyHtml()}`;
+  return `<button class="btn btn-primary" data-action="split"${blocked ? ' aria-disabled="true"' : ""}${why ? ' aria-describedby="split-why"' : ""}>${current.result ? "Split again" : "Split the model"}</button>${why}`;
 }
 
 function checkPartsHtml() {
   const pieces = current.check?.pieces || [];
   if (!pieces.length || checkDirty || current.state === "checking") return "";
   const tinyNumbers = new Set(tinyParts().map(p => p.number));
-  if (!tinyNumbers.size) return "";
+  const failedNumbers = new Set(failedParts());
+  if (!tinyNumbers.size && !failedNumbers.size) return "";
   return `<ul class="split-check-parts" aria-label="Parts these cuts make">${pieces.map((p, i) => {
-    const n = i + 1, bad = tinyNumbers.has(n);
-    return `<li data-check-part="${n}"${bad ? " data-tiny" : ""}>Part ${n}${bad ? ` <span class="split-bad">too small to print${p.made_by_cut != null ? ` · made by Cut ${p.made_by_cut}` : ""}</span>` : ""}</li>`;
+    const n = i + 1, bad = tinyNumbers.has(n), failed = failedNumbers.has(n);
+    const cut = p.made_by_cut != null ? p.made_by_cut : (p.cuts || []).at(-1) ?? null;
+    return `<li data-check-part="${n}"${bad ? " data-tiny" : ""}${failed ? " data-failed" : ""}>Part ${n}${bad ? ` <span class="split-bad">too small to print${p.made_by_cut != null ? ` · made by Cut ${p.made_by_cut}` : ""}</span>` : ""}${failed ? ` <span class="split-bad">the split stopped on this part${cut != null ? ` · change Cut ${cut}` : ""}</span>${cut != null ? ` <button type="button" class="btn btn-secondary btn-sm" data-action="select-cut" data-cut="${cut}">Select cut</button>` : ""}` : ""}</li>`;
   }).join("")}</ul>`;
 }
 
@@ -935,14 +981,17 @@ function removeCut(id) {
 
 function cutsEdited() {
   checkDirty = true;
-  planNote = planAsked = null;
+  // Editing a cut is the user's own change: it ends any "same plan as before" comparison (a Plan again still running
+  // will have its result replaced by these cuts) and any note about the last plan or failed split.
+  planAsked = null;
   planNote = "";
+  if (current) { current.plan_note = null; current.error_parts = []; }
   if ($("split-cut-list")) $("split-cut-list").innerHTML = cutListHtml();
   if ($("split-check")) $("split-check").innerHTML = checkText();
   if ($("split-check-parts")) $("split-check-parts").innerHTML = checkPartsHtml();
   if ($("split-actions")) $("split-actions").innerHTML = splitButtonHtml();
   viewer?.showCuts(cuts, selectedCut);
-  viewer?.showPieces(null);
+  viewer?.showPieces(null, []);
   renderProgress();
   clearTimeout(checkTimer);
   checkTimer = setTimeout(saveCuts, 700);
@@ -968,6 +1017,7 @@ async function saveCuts() {
 
 async function planCuts(keepCuts) {
   planNote = "";
+  current.plan_note = null;
   planAsked = { before: cutsSignature(current.cuts?.cuts), keepCuts };
   const record = await host.api("POST", `/api/splits/${current.id}/plan`, {
     mode: document.querySelector('input[name="split-mode"]:checked')?.value || "smart",
@@ -1021,7 +1071,7 @@ async function refresh() {
       cuts = clone(detail.cuts?.cuts || []);
       checkDirty = false;
     }
-    if (planAsked && detail.state !== "failed" && cutsSignature(detail.cuts?.cuts) === planAsked.before)
+    if (planAsked && detail.state !== "failed" && !detail.plan_note && cutsSignature(detail.cuts?.cuts) === planAsked.before)
       planNote = planAsked.keepCuts ? "Auto-fix found nothing to change: the cuts are the same as before." : "Plan again made the same plan as before.";
     if (detail.stage !== "check") planAsked = null;
     if (detail.state === "split") sub = "parts";
@@ -1045,7 +1095,7 @@ function bindEvents() {
   side.addEventListener("click", async (e) => {
     const el = e.target.closest("[data-action]");
     if (!el || el.disabled || !current) return;
-    if (el.getAttribute("aria-disabled") === "true") return;   // blocked: its reason is already showing
+    if (el.getAttribute("aria-disabled") === "true") { showWhyBlocked(el); return; }   // blocked: bring its reason into view
     try {
       switch (el.dataset.action) {
         case "go-split":     host.onStep("split"); break;

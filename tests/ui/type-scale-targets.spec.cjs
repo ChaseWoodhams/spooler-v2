@@ -25,29 +25,6 @@ assert.equal(tokens['fs-body'].$value, '14px', 'body text is 14 px');
 for (const [k, v] of sizes) assert.ok(parseFloat(v.$value) >= 12, `${k} is under 12 px`);
 console.log('PASS: font sizes come from type tokens, none under 12 px');
 
-function measure(controlsSelector) {
-  const visible = el => {
-    const r = el.getBoundingClientRect(), s = getComputedStyle(el);
-    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0' && !el.closest('[hidden], canvas, dialog:not([open])');
-  };
-  const small = [], tiny = [];
-  const label = el => `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).join('.') : ''} "${(el.innerText || el.getAttribute('aria-label') || el.value || '').trim().slice(0, 30)}"`;
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  for (let n; (n = walker.nextNode());) {
-    if (!n.nodeValue.trim()) continue;
-    const el = n.parentElement;
-    if (!el || ['SCRIPT', 'STYLE', 'OPTION'].includes(el.tagName) || !visible(el)) continue;
-    const px = parseFloat(getComputedStyle(el).fontSize);
-    if (px < 12) tiny.push(`${px}px ${label(el)}`);
-  }
-  for (const el of document.querySelectorAll(controlsSelector)) {
-    if (!visible(el)) continue;
-    const box = el.matches('input[type=checkbox], input[type=radio]') && el.closest('label') ? el.closest('label') : el;
-    const r = box.getBoundingClientRect();
-    if (r.width < 24 || r.height < 24) small.push(`${Math.round(r.width)}x${Math.round(r.height)} ${label(el)}`);
-  }
-  return { small, tiny };
-}
 
 (async () => {
   const server = await fx.startServer();
@@ -59,7 +36,7 @@ function measure(controlsSelector) {
         await page.waitForSelector(`.slicer-step.active[data-step="${step}"]`, { timeout: 10000 });
         await page.waitForTimeout(600);
         if (step === 'print') { await page.locator('[data-tick]').first().check(); await page.evaluate(() => document.querySelectorAll('details').forEach(d => { d.open = true; })); }
-        const { small, tiny } = await page.evaluate(measure, CONTROLS);
+        const { small, tiny } = await page.evaluate(sf.measure, CONTROLS);
         assert.deepEqual(tiny, [], `${theme}/${step}: text under 12 px`);
         assert.deepEqual(small, [], `${theme}/${step}: controls under 24x24`);
 
