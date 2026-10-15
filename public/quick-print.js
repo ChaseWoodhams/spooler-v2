@@ -50,7 +50,6 @@
       method, headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-    if (response.status === 401) { location.replace("/login"); throw new Error("Signed out"); }
     let data = {};
     try { data = await response.json(); } catch (_) { /* not JSON */ }
     if (!response.ok) {
@@ -126,7 +125,6 @@
       xhr.onload = () => {
         let body = {};
         try { body = JSON.parse(xhr.responseText); } catch (_) { /* not JSON */ }
-        if (xhr.status === 401) { location.replace("/login"); return; }
         if (session.closed) { resolve(); return; }
         if (xhr.status !== 200 || !body.id) { reject(new Error(body.error || `The upload failed (HTTP ${xhr.status})`)); return; }
         session.id = body.id;

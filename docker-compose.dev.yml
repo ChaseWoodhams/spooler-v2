@@ -26,6 +26,12 @@ services:
         required: false
     environment:
       DATA_DIR: /data
+      # Spooler has no login, so it listens on 127.0.0.1 (this machine only) by
+      # default. With network_mode: host that means other devices cannot reach it.
+      # To open it to your network, uncomment ONE of these (or set BIND_HOST in
+      # .env); anyone who can reach the port can then control your printers:
+      # BIND_HOST: 0.0.0.0          # all interfaces
+      # BIND_HOST: 192.168.1.10     # one LAN address
     volumes:
       - spooler_data:/data
     depends_on:

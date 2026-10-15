@@ -36,10 +36,9 @@ class PlateStatusTests(unittest.TestCase):
         self.loop_thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.loop_thread.start()
         state.loop = self.loop
-        for patcher in (mock.patch.object(jobs, "uploader", lambda ip, path, name, progress: None),
-                        mock.patch("http_handler._auth_ok", return_value=True)):
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(jobs, "uploader", lambda ip, path, name, progress: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), SPHandler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"

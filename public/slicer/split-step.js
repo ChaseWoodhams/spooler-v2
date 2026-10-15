@@ -386,7 +386,6 @@ async function syncViewer() {
     geometryKey = key;
     try {
       const response = await fetch(`/api/splits/${current.id}/${partsView ? "parts-preview" : "preview"}`);
-      if (response.status === 401) { location.replace("/login"); return; }
       if (!response.ok) throw new Error(`Couldn't load the preview (HTTP ${response.status})`);
       const buffer = await response.arrayBuffer();
       if (!viewer || geometryKey !== key) return;

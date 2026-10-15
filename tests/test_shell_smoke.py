@@ -125,9 +125,6 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         splits.configure(self.dir)
         projects.configure(self.dir)
         projects.init()
-        patcher = mock.patch("http_handler._auth_ok", return_value=True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         # /config.js tells the page where the websocket is; point it at a closed port so the test page never
         # reaches a real Spooler (which would also redirect it to /login)
         env = mock.patch.dict(os.environ, {"WS_PORT": "1", "WSS_PORT": "1"})

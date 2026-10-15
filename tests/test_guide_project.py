@@ -64,14 +64,13 @@ class ProjectGuidesTests(GuideCase):
         from http_handler import SPHandler
         a, b = self.make_split(*stack_split(3)), self.make_split(*stack_split(2))
         project_id = self.project_with(a, b)
-        with mock.patch("http_handler._auth_ok", return_value=True):
-            server = ThreadingHTTPServer(("127.0.0.1", 0), SPHandler)
-            threading.Thread(target=server.serve_forever, daemon=True).start()
-            self.addCleanup(server.server_close)
-            self.addCleanup(server.shutdown)
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(f"http://127.0.0.1:{server.server_address[1]}/api/projects/{project_id}/guides", timeout=10) as resp:
-                body = json.loads(resp.read())
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SPHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{server.server_address[1]}/api/projects/{project_id}/guides", timeout=10) as resp:
+            body = json.loads(resp.read())
         self.assertEqual([e["split_id"] for e in body["guides"]], [a, b])
 
     def test_an_unknown_project_is_a_404(self):

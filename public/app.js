@@ -15,16 +15,6 @@ const RECONNECT_MAX_MS  = 15000;
   }
 })();
 
-// Redirect to login on any 401 from our own API
-const _fetch = window.fetch.bind(window);
-window.fetch = async function(url, options) {
-  const resp = await _fetch(url, options);
-  if (resp.status === 401 && typeof url === "string" && url.startsWith("/api/")) {
-    location.replace("/login");
-  }
-  return resp;
-};
-
 let ws       = null;
 let printers = {}; // id → printer data
 let spools   = []; // spool inventory from Spoolman
@@ -204,7 +194,6 @@ function connect() {
   };
 
   ws.onclose = (ev) => {
-    if (ev.code === 1008) { location.replace("/login"); return; }
     _wsConnected = false;
     _wsAttempts++;
     // Back off while Spooler is down (e.g. restarting) instead of hammering it every few seconds
@@ -1203,14 +1192,6 @@ async function confirmStop(id) {
   })) send({ action: "stop", printer_id: id });
 }
 
-// ─── Sign out ─────────────────────────────────────────────────────────────────
-async function signOut() {
-  await fetch("/api/logout", { method: "POST" }).catch(() => {});
-  location.replace("/login");
-}
-document.getElementById("btn-signout")?.addEventListener("click", signOut);
-document.getElementById("btn-signout-nav")?.addEventListener("click", signOut);
-
 const mobileMoreButton = document.getElementById("btn-mobile-more");
 const mobileMoreMenu = document.getElementById("mobile-more-menu");
 function closeMobileMore() {
@@ -1242,11 +1223,6 @@ document.getElementById("btn-mobile-settings")?.addEventListener("click", () => 
   closeMobileMore();
   mobileMoreButton?.focus();
   document.getElementById("btn-app-settings")?.click();
-});
-document.getElementById("btn-mobile-signout")?.addEventListener("click", async () => {
-  closeMobileMore();
-  const ok = await confirmDialog({ title: "Sign out of Spooler?", body: "You will need to sign in again on this device. Prints and the queue keep running.", confirmLabel: "Sign out", opener: mobileMoreButton });
-  if (ok) signOut(); else mobileMoreButton?.focus();
 });
 document.addEventListener("click", event => {
   if (!mobileMoreMenu?.hidden && !mobileMoreMenu.contains(event.target) && event.target !== mobileMoreButton) closeMobileMore();
@@ -1348,7 +1324,6 @@ document.addEventListener("keydown", event => {
 // ─── App settings ─────────────────────────────────────────────────────────────
 const _settingsModal          = document.getElementById("modal-app-settings");
 const _settingsMenu           = document.getElementById("settings-menu");
-const _settingsPwPage         = document.getElementById("settings-change-password");
 const _settingsNotifPage      = document.getElementById("settings-notifications");
 const _settingsPrintersPage   = document.getElementById("settings-printers");
 const _settingsPrinterEditPage = document.getElementById("settings-printer-edit");
@@ -1363,7 +1338,7 @@ function _settingsFeedback(message, state = "info") {
   feedback.textContent = message;
 }
 
-const _allSettingsPages = () => [_settingsPwPage, _settingsNotifPage, _settingsPrintersPage, _settingsPrinterEditPage];
+const _allSettingsPages = () => [_settingsNotifPage, _settingsPrintersPage, _settingsPrinterEditPage];
 
 function _openSettings() {
   _allSettingsPages().forEach(p => p && (p.style.display = "none"));
@@ -1642,75 +1617,6 @@ document.getElementById("btn-settings-printer-remove")?.addEventListener("click"
   send({ action: "remove_printer", printer_id: _settingsEditingPrinterId });
 });
 
-// Password sub-page
-// Each password field shows its own error right under it; aria-invalid marks the field that needs fixing.
-function _pwSetError(inputId, message) {
-  const input = document.getElementById(inputId), error = document.getElementById(`${inputId}-error`);
-  if (message) input.setAttribute("aria-invalid", "true"); else input.removeAttribute("aria-invalid");
-  error.textContent = message || "";
-  error.hidden = !message;
-}
-function _pwReveal(show) {
-  for (const id of ["settings-new-password", "settings-confirm-password"]) document.getElementById(id).type = show ? "text" : "password";
-  document.getElementById("settings-pw-reveal").checked = show;
-}
-document.getElementById("settings-pw-reveal")?.addEventListener("change", e => _pwReveal(e.target.checked));
-document.getElementById("btn-settings-goto-password")?.addEventListener("click", () => {
-  document.getElementById("settings-new-password").value = "";
-  document.getElementById("settings-confirm-password").value = "";
-  _pwSetError("settings-new-password", "");
-  _pwSetError("settings-confirm-password", "");
-  _pwReveal(false);
-  _settingsFeedback("");
-  _showSettingsPage(_settingsPwPage);
-});
-document.getElementById("btn-settings-back")?.addEventListener("click", _backToSettingsMenu);
-document.getElementById("btn-app-settings-save")?.addEventListener("click", async () => {
-  const pw  = document.getElementById("settings-new-password").value;
-  const pw2 = document.getElementById("settings-confirm-password").value;
-  _pwSetError("settings-new-password", "");
-  _pwSetError("settings-confirm-password", "");
-  _settingsFeedback("");
-  if (pw.length < 8) {
-    _pwSetError("settings-new-password", "Use at least 8 characters.");
-    document.getElementById("settings-new-password").focus();
-    return;
-  }
-  if (pw !== pw2) {
-    _pwSetError("settings-confirm-password", "The two passwords don't match.");
-    document.getElementById("settings-confirm-password").focus();
-    return;
-  }
-  // A failure from the server is shown under the last field (it is not a mistake in that field, so no aria-invalid)
-  const failed = message => { const e = document.getElementById("settings-confirm-password-error"); e.textContent = message; e.hidden = false; };
-  const button = document.getElementById("btn-app-settings-save");
-  button.disabled = true;
-  button.textContent = "Saving…";
-  _settingsFeedback("Saving password…", "info");
-  try {
-    const r = await fetch("/api/change-password", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: pw }),
-    });
-    if (r.ok) {
-      _settingsFeedback("Password updated.", "ok");
-      document.getElementById("settings-new-password").value = "";
-      document.getElementById("settings-confirm-password").value = "";
-      _pwReveal(false);
-    } else {
-      const d = await r.json().catch(() => ({}));
-      _settingsFeedback("");
-      failed(d.error || "Failed to update password. Check the connection and try again.");
-    }
-  } catch (err) {
-    _settingsFeedback("");
-    failed(`Failed to update password: ${err.message}. Check the connection and try again.`);
-  } finally {
-    button.disabled = false;
-    button.textContent = "Save";
-  }
-});
 
 // ─── Push notifications ───────────────────────────────────────────────────────
 
@@ -3634,12 +3540,8 @@ document.getElementById("modal-changelog")?.addEventListener("click", e => {
 });
 
 // ─── Boot ──────────────────────────────────────────────────────────────────────
-fetch("/api/auth-status")
-  .then(r => r.json())
-  .then(({ spoolman_url }) => {
-    if (spoolman_url) document.getElementById("btn-spoolman-ui").href = spoolman_url;
-  })
-  .catch(() => {});
+const _spoolmanLink = document.getElementById("btn-spoolman-ui");
+if (_spoolmanLink) _spoolmanLink.href = "/spoolman/";
 loadChangelog();
 syncEmptyState();   // "Looking for your printers…" until the first list arrives
 connect();

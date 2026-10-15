@@ -10,7 +10,6 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-import auth
 import database
 import jobs
 import state
@@ -42,15 +41,12 @@ class JobsApiTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
         from tests.test_jobs import isolate_preflight
         isolate_preflight(self, self.dir)
-        self.logged_in = mock.patch("http_handler._auth_ok", return_value=True)
-        self.logged_in.start()
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), SPHandler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def tearDown(self):
-        self.logged_in.stop()
         self.server.shutdown()
         self.server.server_close()
 
@@ -171,7 +167,7 @@ class JobsApiTests(unittest.TestCase):
             self.assertEqual(resp.headers["Content-Type"], "application/octet-stream")
             self.assertGreater(len(resp.read()), 0)
 
-        self.assertEqual(self.call("GET", "/api/printers/p1/hardware"), (200, {"nozzle_diameter": None}))
+        self.assertEqual(self.call("GET", "/api/printers/p1/hardware"), (200, {"nozzle_diameter": None, "nozzle_material": None}))
         status, hardware = self.call("POST", "/api/printers/p1/hardware", {"nozzle_diameter": 0.6})
         self.assertEqual((status, hardware["nozzle_diameter"]), (200, 0.6))
         self.assertEqual(self.call("POST", "/api/printers/p1/hardware", {"nozzle_diameter": 0.5})[0], 400)
@@ -214,14 +210,6 @@ class JobsApiTests(unittest.TestCase):
         self.assertEqual(self.call("POST", "/api/slices/1/retry", {})[0], 404)
         self.assertEqual(self.call("DELETE", "/api/slices/1")[0], 404)
         self.assertEqual(jobs.list_jobs(), [])
-
-    @unittest.skipUnless(auth.AUTH_ENABLED, "authentication disabled in this environment")
-    def test_login_is_required(self):
-        self.logged_in.stop()
-        try:
-            self.assertEqual(self.call("GET", "/api/jobs")[0], 401)
-        finally:
-            self.logged_in.start()
 
 
 if __name__ == "__main__":

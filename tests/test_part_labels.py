@@ -208,14 +208,14 @@ class PartLabelTests(unittest.TestCase):
     # ── No room ──
 
     def test_a_part_too_small_for_7_mm_gets_a_smaller_number(self):
-        result, _ = self.run_split(M.cube([19, 9.5, 9.5]), [cut(1, (1, 0, 0), 9.5)])
+        result, _ = self.run_split(M.cube([24, 10.5, 10.5]), [cut(1, (1, 0, 0), 12.0)])
         self.assertEqual(result["unlabelled"], [])
         for part in result["parts"]:
             self.assertLess(part["label"]["height_mm"], 7.0)
             self.assertGreaterEqual(part["label"]["height_mm"], 5.5)
 
     def test_a_part_with_no_room_is_left_unlabelled_and_the_split_still_works(self):
-        result, work = self.run_split(M.cube([8, 4, 4]), [cut(1, (1, 0, 0), 4.0)])
+        result, work = self.run_split(M.cube([130, 4, 4]), [cut(1, (1, 0, 0), 65.0)])
         self.assertEqual(result["unlabelled"], [1, 2])
         self.assertEqual([part["label"] for part in result["parts"]], [None, None])
         self.assertEqual(result["summary"]["parts"], 2)

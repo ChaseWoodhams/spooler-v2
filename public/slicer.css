@@ -732,3 +732,8 @@ body[data-workflow-step="model"] .slicer-small-screen-note, body[data-workflow-s
 
 /* Ticket 28 · a Plate row says its status once, then what it will take */
 .pp-meta { font-size: 13px; white-space: nowrap; }
+.quality-buttons { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 auto; }
+.quality-buttons button { background: var(--surface2, var(--bg)); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; line-height: 1.3; }
+.quality-buttons button small { display: block; color: var(--text-muted); font-size: 10px; }
+.quality-buttons button[aria-pressed="true"] { border-color: var(--accent, currentColor); }

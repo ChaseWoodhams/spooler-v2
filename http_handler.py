@@ -33,22 +33,12 @@ import splits
 import state
 import time
 import time_estimate
-from auth import (
-    AUTH_ENABLED, BCRYPT_AVAILABLE, SECURE_COOKIES, SESSION_COOKIE,
-    _auth_ok, _check_rate_limit, _create_session, _get_pw_hash, _get_username,
-    _has_password, _invalidate_session, _parse_sid, _reset_rate_limit, _save_auth,
-)
 from persistence import DATA_DIR, save_printers
 from push import (
     WEBPUSH_AVAILABLE, add_subscription, get_public_key, has_subscriptions,
     load_notif_settings, remove_subscription, save_notif_settings, send_push_all,
 )
 from spoolman import get_spoolman_db, get_spoolman_url
-
-try:
-    import bcrypt as _bcrypt
-except ImportError:
-    _bcrypt = None  # type: ignore
 
 CAMERA_STALL_TIMEOUT_S  = 15   # close a proxied camera stream after this long without data
 CAMERA_REENABLE_SETTLE_S = 1   # CC1 needs a moment after re-enable before /video answers
@@ -129,141 +119,12 @@ class SPHandler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
-    # ── Auth helpers ─────────────────────────────────────────────────────────
-
-    def _check_auth(self) -> bool:
-        if _auth_ok(self):
-            return True
-        if self.path.startswith("/api/"):
-            self._json({"error": "Unauthorized"}, 401)
-        else:
-            self.send_response(302)
-            self.send_header("Location", "/login")
-            self.end_headers()
-        return False
-
-    def _session_cookie(self, token: str, clear: bool = False) -> str:
-        is_secure = SECURE_COOKIES or getattr(self.server, "_is_https", False)
-        if clear:
-            value = f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
-        else:
-            value = f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict"
-        if is_secure:
-            value += "; Secure"
-        return value
-
     def _read_body(self) -> bytes | None:
         raw = int(self.headers.get("Content-Length", 0))
         if raw > MAX_BODY:
             self._json({"error": "Request body too large"}, 413)
             return None
         return self.rfile.read(raw) if raw else None
-
-    def _handle_login(self):
-        ip = self.client_address[0]
-        if not _check_rate_limit(ip):
-            self._json({"error": "Too many login attempts, try again later"}, 429)
-            return
-        try:
-            body = json.loads(self._read_body() or b"{}")
-        except Exception:
-            self._json({"error": "Bad request"}, 400)
-            return
-        username = body.get("username", "")
-        password = body.get("password", "")
-
-        ok = False
-        pw_hash = _get_pw_hash()
-        if AUTH_ENABLED and BCRYPT_AVAILABLE and _bcrypt and pw_hash and username == _get_username():
-            try:
-                ok = _bcrypt.checkpw(password.encode(), pw_hash.encode())
-            except Exception:
-                pass
-
-        if not ok:
-            self._json({"error": "Invalid credentials"}, 401)
-            return
-
-        _reset_rate_limit(ip)
-        token = _create_session()
-        resp = json.dumps({"ok": True}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(resp)))
-        self.send_header("Set-Cookie", self._session_cookie(token))
-        self.end_headers()
-        self.wfile.write(resp)
-
-    def _handle_logout(self):
-        token = _parse_sid(self.headers.get("Cookie", ""))
-        _invalidate_session(token)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", "2")
-        self.send_header("Set-Cookie", self._session_cookie("", clear=True))
-        self.end_headers()
-        self.wfile.write(b"{}")
-
-    def _handle_setup(self):
-        if _has_password():
-            self._json({"error": "Already configured"}, 403)
-            return
-        if not BCRYPT_AVAILABLE or not _bcrypt:
-            self._json({"error": "bcrypt not installed on server"}, 500)
-            return
-        try:
-            body = json.loads(self._read_body() or b"{}")
-        except Exception:
-            self._json({"error": "Bad request"}, 400)
-            return
-        username = body.get("username", "").strip()
-        password = body.get("password", "")
-        if not username or not password:
-            self._json({"error": "Username and password are required"}, 400)
-            return
-        if len(password) < 8:
-            self._json({"error": "Password must be at least 8 characters"}, 400)
-            return
-        try:
-            pw_hash = _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
-            _save_auth(username, pw_hash)
-        except Exception as e:
-            self._json({"error": str(e)}, 500)
-            return
-        token = _create_session()
-        resp = json.dumps({"ok": True}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(resp)))
-        self.send_header("Set-Cookie", self._session_cookie(token))
-        self.end_headers()
-        self.wfile.write(resp)
-        print(f"[Auth] Initial password set for user '{username}'")
-
-    def _handle_change_password(self):
-        if not BCRYPT_AVAILABLE or not _bcrypt:
-            self._json({"error": "bcrypt not installed on server"}, 500)
-            return
-        try:
-            body = json.loads(self._read_body() or b"{}")
-        except Exception:
-            self._json({"error": "Bad request"}, 400)
-            return
-        password = body.get("password", "")
-        if len(password) < 8:
-            self._json({"error": "Password must be at least 8 characters"}, 400)
-            return
-        try:
-            pw_hash = _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
-            from auth import _load_auth
-            auth_data = _load_auth()
-            username = auth_data.get("username", "admin")
-            _save_auth(username, pw_hash)
-        except Exception as e:
-            self._json({"error": str(e)}, 500)
-            return
-        self._json({"ok": True})
-        print(f"[Auth] Password changed for user '{username}'")
 
     # ── Camera proxy ──────────────────────────────────────────────────────────
 
@@ -345,7 +206,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._request_camera_enable(p, wait_s=0)
 
     # ── Thumbnail proxy ───────────────────────────────────────────────────────
-    # CC1: http://{ip}:80/thumbnail/{bare_filename}  (no auth needed)
+    # CC1: http://{ip}:80/thumbnail/{bare_filename}
     # CC2: no accessible thumbnail endpoint — skipped client-side
 
     def _proxy_thumbnail(self):
@@ -368,7 +229,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._json({"error": "Thumbnail unavailable"}, 404)
             return
 
-        # CC1: dedicated /thumbnail/{bare_filename} endpoint (no auth required)
+        # CC1: dedicated /thumbnail/{bare_filename} endpoint
         conn = None
         try:
             path = f"/thumbnail/{urllib.parse.quote(bare_name)}"
@@ -535,21 +396,11 @@ class SPHandler(SimpleHTTPRequestHandler):
     # ── HTTP verbs ────────────────────────────────────────────────────────────
 
     def do_GET(self):
-        # Auth-exempt routes
         if self.path == "/cert.pem":
             data = CERT_FILE.read_bytes() if CERT_FILE.exists() else b""
             self.send_response(200)
             self.send_header("Content-Type", "application/x-pem-file")
             self.send_header("Content-Disposition", 'attachment; filename="spooler-cert.pem"')
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
-        if self.path in ("/login", "/login.html"):
-            login_file = Path(__file__).parent / "public" / "login.html"
-            data = login_file.read_bytes() if login_file.exists() else b"Login page not found"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -595,7 +446,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._proxy_spoolman_ui("GET", self.path)
             return
         if self.path == "/api/health":
-            # Liveness probe for supervisor.py — unauthenticated, so it reveals nothing but up/down.
+            # Liveness probe for supervisor.py — it reveals nothing but up/down.
             ok = health.event_loop_responsive()
             self._json({"status": "ok" if ok else "unresponsive", "uptime_s": health.uptime_s()},
                        200 if ok else 503)
@@ -605,16 +456,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._json({"build": ui_build()})
             return
 
-        if self.path == "/api/auth-status":
-            resp = {"setup_required": not _has_password()}
-            if _auth_ok(self):
-                resp["authenticated"] = True
-                resp["spoolman_url"] = "/spoolman/" if PROXY_SPOOLMAN else get_spoolman_url() + "/"
-            self._json(resp)
-            return
-
         if self.path == "/api/push-public-key":
-            # Public key is safe to expose without auth — it's literally a public key.
+            # Public key is safe to expose — it is literally a public key.
             # Service workers need it to renew expired subscriptions without a session cookie.
             if WEBPUSH_AVAILABLE and get_public_key():
                 self._json({"publicKey": get_public_key()})
@@ -623,12 +466,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
 
         if self.path == "/api/notification-settings":
-            if not self._check_auth():
-                return
             self._json(load_notif_settings())
-            return
-
-        if not self._check_auth():
             return
 
         if self.path.startswith("/api/camera/"):
@@ -744,8 +582,6 @@ class SPHandler(SimpleHTTPRequestHandler):
                 super().do_GET()
 
     def do_PATCH(self):
-        if not self._check_auth():
-            return
         if self.path.startswith("/api/jobs/"):
             self._jobs_call(lambda: jobs.update_job(self._job_id(), self._json_body()))
             return
@@ -768,8 +604,6 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._json({"error": "Not found"}, 404)
 
     def do_DELETE(self):
-        if not self._check_auth():
-            return
         if self.path.startswith("/api/jobs/") and "/holds/" in self.path:
             parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'jobs', <id>, 'holds', <hold id>]
             self._jobs_call(lambda: holds.remove(self._job_id(), self._int(parts[5], "Hold not found")))
@@ -808,23 +642,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._json({"error": "Not found"}, 404)
 
     def do_POST(self):
-        # Auth-exempt
-        if self.path == "/api/login":
-            self._handle_login()
-            return
-        if self.path == "/api/logout":
-            self._handle_logout()
-            return
-        if self.path == "/api/setup":
-            self._handle_setup()
-            return
-
-        if not self._check_auth():
-            return
-
-        if self.path == "/api/change-password":
-            self._handle_change_password()
-        elif self.path == "/api/push-subscribe":
+        if self.path == "/api/push-subscribe":
             self._handle_push_subscribe()
         elif self.path == "/api/push-unsubscribe":
             self._handle_push_unsubscribe()
@@ -856,8 +674,11 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._jobs_call(lambda: bed_cleared.set_auto_start(
                 self._path_printer_id(), self._json_body().get("enabled")), broadcast=False)
         elif self.path.startswith("/api/printers/") and self.path.endswith("/hardware"):
-            self._jobs_call(lambda: preflight.set_printer_hardware(
-                self._path_printer_id(), self._json_body().get("nozzle_diameter")), broadcast=False)
+            def set_hardware():
+                body = self._json_body()
+                return preflight.set_printer_hardware(
+                    self._path_printer_id(), body.get("nozzle_diameter"), body.get("nozzle_material"))
+            self._jobs_call(set_hardware, broadcast=False)
         elif self.path.startswith("/api/v1/"):
             self._proxy_spoolman_ui("POST", self.path, self._read_body())
         elif self.path.startswith("/api/spoolman"):
@@ -1594,10 +1415,27 @@ class _Server(ThreadingHTTPServer):
     request_queue_size = 256
 
 
+from bind_address import LOOPBACK_HOSTS, bind_host  # noqa: E402  (listeners bind to bind_host())
+
+
+def bind_warning() -> str | None:
+    """Plain warning to log when the listeners are reachable from other machines, else None."""
+    host = bind_host()
+    if host in LOOPBACK_HOSTS:
+        return None
+    return (f"[Net] WARNING: BIND_HOST={host} - Spooler has no login, so anyone who can reach "
+            f"{host} can control the printers.")
+
+
+def make_http_server(port: int) -> _Server:
+    host = bind_host()
+    server = _Server((host, port), SPHandler)
+    print(f"[HTTP] Serving on http://{server.server_address[0]}:{server.server_address[1]}")
+    return server
+
+
 def run_http(port: int) -> None:
-    server = _Server(("0.0.0.0", port), SPHandler)
-    print(f"[HTTP] Serving on http://0.0.0.0:{port}")
-    server.serve_forever()
+    make_http_server(port).serve_forever()
 
 
 def run_https(port: int) -> None:
@@ -1605,8 +1443,8 @@ def run_https(port: int) -> None:
         return
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(str(CERT_FILE), str(KEY_FILE))
-    server = _Server(("0.0.0.0", port), SPHandler)
+    server = _Server((bind_host(), port), SPHandler)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
     server._is_https = True
-    print(f"[HTTPS] Serving on https://0.0.0.0:{port}")
+    print(f"[HTTPS] Serving on https://{server.server_address[0]}:{port}")
     server.serve_forever()

@@ -36,9 +36,6 @@ class IntakeFilesTests(unittest.TestCase):
         splits.configure(self.dir)
         projects.configure(self.dir)
         projects.init()
-        patcher = mock.patch("http_handler._auth_ok", return_value=True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), SPHandler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"

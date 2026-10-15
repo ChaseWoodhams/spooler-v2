@@ -60,10 +60,6 @@ async function api(method, path, body, { timeoutMs = method === "GET" ? 20000 : 
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   }, { timeoutMs, retries: 1 });
-  if (response.status === 401) {
-    location.replace("/login");
-    throw new Error("Signed out");
-  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || `Request failed (HTTP ${response.status})`);
@@ -75,7 +71,6 @@ async function api(method, path, body, { timeoutMs = method === "GET" ? 20000 : 
 
 async function binary(path) {
   const response = await fetchWithTimeout(path, {}, { timeoutMs: 60000, retries: 1 });
-  if (response.status === 401) location.replace("/login");
   if (!response.ok) throw new Error(`Couldn't load ${path} (HTTP ${response.status})`);
   return response.arrayBuffer();
 }
@@ -87,7 +82,6 @@ function upload(url, file, onProgress) {
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total * 100); };
     xhr.onload = () => {
-      if (xhr.status === 401) { location.replace("/login"); return; }
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch (_) {}
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
@@ -361,6 +355,7 @@ function renderFarm() {
   button.textContent = name ? `Slice & send to ${name}` : "Slice & send";
   button.disabled = !plateObjects().length || !data().profile.bundle_id || isBusy(state.plate) || plateImporting(state.plate);
   if (state.step === "slice") renderStepActions();
+  renderQuality();
   refreshFit();
 }
 
@@ -982,6 +977,61 @@ function bindFolds() {
     if (saved) fold.open = saved === "1";
     fold.addEventListener("toggle", () => remember(`slicer.fold.${fold.id}`, fold.open ? "1" : "0"));
   }
+}
+
+// ── Quality ─────────────────────────────────────────────────────────────────────
+// Fine / Standard / Draft … buttons: the process presets of the nozzle installed in the plate's printer
+// (the machine preset's nozzle when the printer's isn't set), ordered by layer height.
+const QUALITY_ORDER = ["Extra Fine", "Fine", "Optimal", "Standard", "Strength", "Draft", "Extra Draft"];
+const nozzleOf = machine => /(\d\.\d+) nozzle$/.exec(machine || "")?.[1];
+
+async function printerHardware(printerId) {
+  if (!printerId) return null;
+  state.hardware ||= {};
+  if (!(printerId in state.hardware)) {
+    state.hardware[printerId] = null;
+    try { state.hardware[printerId] = await api("GET", `/api/printers/${encodeURIComponent(printerId)}/hardware`); } catch { /* keep null */ }
+    renderQuality();
+  }
+  return state.hardware[printerId];
+}
+
+function qualityTarget() {
+  const names = currentPresets();
+  const printerId = currentPlate()?.printer_id;
+  const saved = printerId ? state.hardware?.[printerId]?.nozzle_diameter : null;
+  const nozzle = saved ? String(saved) : nozzleOf(names?.machine);
+  const machine = state.presets?.machines.find(m => nozzleOf(m) === nozzle);
+  return { names, nozzle, machine, fromPrinter: !!saved, printerId };
+}
+
+function renderQuality() {
+  const box = $("quality-buttons"), note = $("quality-note");
+  const { names, nozzle, machine, fromPrinter, printerId } = qualityTarget();
+  if (printerId) printerHardware(printerId);
+  const presets = machine && state.presets ? state.presets.processes[machine] || [] : [];
+  const parsed = presets.map(name => {
+    const [, height, tier] = /^(\d\.\d+)mm (.+?) @/.exec(name) || [];
+    return { name, height, tier };
+  }).filter(p => p.tier && p.tier !== "Strength")   // Strength changes walls and infill, not just the layer height
+    .sort((a, b) => a.height - b.height);
+  box.innerHTML = parsed.map(p => `<button type="button" data-quality="${esc(p.name)}" aria-pressed="${p.name === names?.process}"
+    title="${esc(p.name)}">${esc(p.tier)}<small>${p.height} mm</small></button>`).join("");
+  note.hidden = !nozzle;
+  const material = printerId ? state.hardware?.[printerId]?.nozzle_material : null;
+  note.textContent = nozzle ? `Layer heights for a ${nozzle} mm ${material || "nozzle"}`
+    + (fromPrinter ? " · the installed nozzle of this plate's printer" : "")
+    + (nozzle === "0.7" ? " · 0.7 mm profiles are scaled from the 0.8 mm ones" : "") : "";
+}
+
+async function chooseQuality(process) {
+  const { names, machine } = qualityTarget();
+  if (!names || !machine) return;
+  if (machine !== names.machine) {   // the printer's nozzle differs from the project's: move to it first
+    await choosePreset("machine", machine);
+    if (currentPresets()?.machine !== machine) return;
+  }
+  await choosePreset("process", process);
 }
 
 // Pick another preset: the choice is locked in as a new profile; the other kinds keep their changes
@@ -2711,6 +2761,10 @@ function bindUi() {
     renderSettings();
   });
   for (const kind of PRESET_KINDS) $(`preset-${kind}-select`).addEventListener("change", e => choosePreset(kind, e.target.value));
+  $("quality-buttons").addEventListener("click", e => {
+    const button = e.target.closest("[data-quality]");
+    if (button) chooseQuality(button.dataset.quality);
+  });
   for (const kind of ["process", "filament"]) {
     $(`btn-save-${kind}`).addEventListener("click", () => openSavePreset(kind));
     $(`btn-delete-${kind}`).addEventListener("click", () => deletePreset(kind));
