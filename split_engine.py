@@ -58,6 +58,9 @@ SIMPLIFY_ABOVE    = 400_000      # full models above this are simplified at 0.01
 MIN_BODY_MM3      = 1.0
 TINY_PART_MM3     = 1000.0       # a part smaller than this (1 cm³) is a sliver, not something worth printing
 TINY_PART_MM      = 2.0          # ... and so is one thinner than this in every direction
+DEFAULT_MARGIN_MM = 2.0          # parts made by cuts stay this far inside the bed on every side
+FIT_EPS           = 1e-6         # the one tolerance every limit comparison uses
+TURN_STEP_DEG     = 1.0          # footprint turns tried on the bed when looking for a fit
 MIN_SLAB_MM       = 30.0         # never leave a slab thinner than this along a cut normal
 NUDGE_FRACTIONS   = np.linspace(0.2, 0.8, 13)
 TOP_CANDIDATES    = 3
@@ -166,6 +169,24 @@ def printer_limits(job: dict) -> dict:
             raise EngineError(f"Printer {key.replace('_', ' ')} must be between 50 and 2000 mm")
         limits[key] = value
     return limits
+
+
+def part_limits(job: dict) -> dict:
+    """The space a part made by a cut may use: the bed less the safety margin on every side."""
+    limits = printer_limits(job)
+    margin = (job.get("printer") or {}).get("margin", DEFAULT_MARGIN_MM)
+    try:
+        margin = float(margin)
+    except (TypeError, ValueError):
+        margin = -1.0
+    if not 0 <= margin <= 20:
+        raise EngineError("Printer margin must be between 0 and 20 mm")
+    return {key: value - margin for key, value in limits.items()}
+
+
+def fit_limits(job: dict, cuts: list) -> dict:
+    """A model left whole may use the whole bed; parts made by cuts keep the margin."""
+    return part_limits(job) if cuts else printer_limits(job)
 
 
 def parts_needed(points, limits: dict) -> int:
@@ -437,8 +458,9 @@ def describe_pieces(pieces: list, limits: dict) -> list:
             "bbox":       [round(float(x), 2) for x in piece["man"].bounding_box()],
             "volume_cm3": round(volume / 1000, 2),
             "size":       size,
-            "fits":       parts_needed(pts, limits) == 1,
-            "tiny":       volume < TINY_PART_MM3 or size[0] < TINY_PART_MM,
+            "fits":       piece_fits(piece, limits),
+            "tiny":       is_tiny(piece["man"]),
+            "cut":        piece["last"][0] if piece["last"] else None,   # the cut that made this part
         })
     return out
 
@@ -459,6 +481,31 @@ def plan_grid(model, limits: dict, balanced: bool) -> list:
             normal = [0.0, 0.0, 0.0]
             normal[axis] = 1.0
             cuts.append({"id": len(cuts) + 1, "parent": None, "normal": normal, "offset": round(offset, 3), "scope": None})
+    return cuts
+
+
+GRID_NUDGES = [s * k * 5.0 for k in range(1, 9) for s in (-1, 1)]   # mm a grid line is moved to stop it clipping a sliver
+
+
+def nudge_grid(model, cuts: list, limits: dict) -> list:
+    """Move each grid line that leaves a part too small to print, as long as every part still fits."""
+    cuts = [dict(c) for c in cuts]
+    for _ in range(len(cuts)):
+        pieces, _ = apply_cuts(model, cuts)
+        culprit = next((p["last"][0] for p in pieces if p["last"] and is_tiny(p["man"])), None)
+        if culprit is None:
+            return cuts
+        cut = next(c for c in cuts if c["id"] == culprit)
+        start = cut["offset"]
+        for shift in GRID_NUDGES:
+            cut["offset"] = round(start + shift, 3)
+            trial, _ = apply_cuts(model, cuts)
+            if not any(p["last"] and p["last"][0] == culprit and is_tiny(p["man"]) for p in trial) \
+                    and all(piece_fits(p, limits) for p in trial):
+                break
+        else:
+            cut["offset"] = start
+            return cuts   # the check reports the sliver; Auto-fix can remove it
     return cuts
 
 
@@ -507,12 +554,15 @@ def _exact_score(piece, candidate: dict, limits: dict) -> tuple:
               for b in half.decompose() if b.volume() >= MIN_BODY_MM3]
     hulls = [hull_points(b) for b in bodies]
     need = sum(parts_needed(h, limits) for h in hulls)
-    tiny = sum(b.volume() < 2000.0 for b in bodies)
+    tiny = sum(is_tiny(b) for b in bodies)
     widest = max((float(np.ptp(h, axis=0).max()) for h in hulls), default=0.0)
     return need, tiny, candidate["no_room"], candidate["islands"], round(widest / 20)
 
 
 def choose_cut(piece, limits: dict, room: float):
+    """The best cut for a piece that doesn't fit. A cut that leaves a part too small to print is never chosen:
+    candidates are scored exactly in order of their cheap score until TOP_CANDIDATES without a sliver are found.
+    Returns (candidate, reason) with candidate None when no cut will do."""
     pts, candidates = _cut_candidates(piece, limits)
     rotations, scored = {}, []
     for n, d in candidates:
@@ -523,26 +573,54 @@ def choose_cut(piece, limits: dict, room: float):
         R, rotated = rotations[key]
         scored.append(_cheap_score(pts, rotated, R, n, d, limits, room))
     if not scored:
-        return None
+        return None, "A piece couldn't be cut small enough — check the printer size settings"
     scored.sort(key=lambda s: (s["estimate"], s["no_room"], s["islands"]))
-    return min(scored[:TOP_CANDIDATES], key=lambda s: _exact_score(piece, s, limits))
+    best, clean = None, 0
+    for candidate in scored:
+        score = _exact_score(piece, candidate, limits)
+        if score[1]:
+            continue
+        if best is None or score < best[0]:
+            best = (score, candidate)
+        clean += 1
+        if clean >= TOP_CANDIDATES:
+            break
+    if best is None:
+        centre = np.round((np.asarray(piece.bounding_box()[:3]) + np.asarray(piece.bounding_box()[3:])) / 2).astype(int).tolist()
+        return None, f"Every cut through the piece around {centre} mm leaves a part too small to print — add a cut there by hand"
+    return best[1], ""
+
+
+def drop_sliver_cuts(model, cuts: list) -> list:
+    """Remove each cut that leaves a part too small to print, with the cuts made inside it, until none is left."""
+    while True:
+        pieces, _ = apply_cuts(model, cuts)
+        culprits = {p["last"][0] for p in pieces if p["last"] and is_tiny(p["man"])}
+        if not culprits:
+            return cuts
+        gone = set(culprits)
+        for cut in cuts:  # cuts are stored parents first
+            if cut.get("parent") and cut["parent"][0] in gone:
+                gone.add(cut["id"])
+        cuts = [c for c in cuts if c["id"] not in gone]
 
 
 def plan_smart(model, limits: dict, room: float, base_cuts: list, stage: Stage) -> tuple:
-    """Recursive cuts: repeatedly split the biggest piece that doesn't fit, trying world and oriented-box axes."""
-    cuts = list(base_cuts)
+    """Recursive cuts: repeatedly split the biggest piece that doesn't fit, trying world and oriented-box axes.
+    Kept cuts (Auto-fix) that leave a part too small to print are removed first."""
+    cuts = drop_sliver_cuts(model, list(base_cuts))
     pieces, _ = apply_cuts(model, cuts)
-    next_id = max((c["id"] for c in cuts), default=0) + 1
+    next_id = max((c["id"] for c in base_cuts), default=0) + 1
     while len(cuts) < MAX_CUTS:
-        oversize = [p for p in pieces if parts_needed(hull_points(p["man"]), limits) > 1]
+        oversize = [p for p in pieces if not piece_fits(p, limits)]
         if not oversize:
             return cuts, pieces
         target = max(oversize, key=lambda p: p["man"].volume())
         stage.progress(5 + 90 * len(cuts) / (len(cuts) + 2 * len(oversize)),
                        f"Choosing cut {len(cuts) + 1} — {len(oversize)} piece{'s' if len(oversize) != 1 else ''} still too big")
-        best = choose_cut(target["man"], limits, room)
+        best, reason = choose_cut(target["man"], limits, room)
         if best is None:
-            raise EngineError("A piece couldn't be cut small enough — check the printer size settings")
+            raise EngineError(reason)
         bb = np.asarray(target["man"].bounding_box(), float)
         cut = {"id": next_id, "parent": list(target["last"]) if target["last"] else None,
                "normal": [round(float(x), 6) for x in best["n"]], "offset": round(best["d"], 3),
@@ -879,6 +957,93 @@ def label_part(part, number: int, R, shift, islands: list, events: list) -> tupl
 
 # ── Orientation ────────────────────────────────────────────────────────────────
 
+TURNS = np.radians(np.arange(0.0, 90.0, TURN_STEP_DEG))
+
+
+def footprint_turn(xy: np.ndarray, limits: dict):
+    """The turn on the bed with the smallest footprint that fits, as (2x2 rotation, sorted footprint), or None.
+
+    The smallest-area rectangle is tried first, then turns every TURN_STEP_DEG: the smallest-area rectangle can be
+    longer than the bed when an axis-aligned footprint fits it."""
+    bed = sorted([limits["bed_x"], limits["bed_y"]])
+    turns = TURNS
+    try:
+        T2, _ = trimesh.bounds.oriented_bounds_2D(xy)
+        turns = np.concatenate([[math.atan2(float(T2[0][1]), float(T2[0][0]))], TURNS])
+    except Exception:
+        pass
+    c, s = np.cos(turns), np.sin(turns)
+    ext_u = np.ptp(xy @ np.vstack([c, s]), axis=0)
+    ext_v = np.ptp(xy @ np.vstack([-s, c]), axis=0)
+    short, long = np.minimum(ext_u, ext_v), np.maximum(ext_u, ext_v)
+    ok = (short <= bed[0] + FIT_EPS) & (long <= bed[1] + FIT_EPS)
+    if not ok.any():
+        return None
+    i = int(np.flatnonzero(ok)[np.argmin((short * long)[ok])])
+    return np.array([[c[i], s[i]], [-s[i], c[i]]]), [float(short[i]), float(long[i])]
+
+
+def up_directions(hull: np.ndarray, cut_normals: list) -> list:
+    """The directions tried as 'up': the cut normals, the world axes and the oriented box axes, both ways round."""
+    dirs = [np.asarray(c, float) for c in cut_normals] + list(np.eye(3))
+    try:
+        dirs += list(trimesh.bounds.oriented_bounds(hull)[0][:3, :3])
+    except Exception:
+        pass
+    ups = []
+    for v in dirs:
+        v = unit(v)
+        for sign in (1.0, -1.0):
+            up = sign * v
+            if all(float(up @ t) <= 0.999 for t in ups):
+                ups.append(up)
+    return ups
+
+
+def fitting_placements(man, cut_normals: list, limits: dict):
+    """Every orientation that fits the limits, as (rotation, height, footprint). The one fit test the planner,
+    the check, Auto-fix and the split all use."""
+    hull = hull_points(man)
+    for up in up_directions(hull, cut_normals):
+        R = to_z(up)
+        hp = hull @ R.T
+        height = float(np.ptp(hp[:, 2]))
+        if height > limits["height"] + FIT_EPS:
+            continue
+        turn = footprint_turn(hp[:, :2], limits)
+        if turn is None:
+            continue
+        rot2, footprint = turn
+        R = np.block([[rot2, np.zeros((2, 1))], [np.zeros((1, 2)), np.ones((1, 1))]]) @ R
+        yield R, height, footprint
+
+
+def piece_fits(piece: dict, limits: dict) -> bool:
+    key = tuple(sorted(limits.items()))
+    cache = piece.setdefault("fit_cache", {})
+    if key not in cache:
+        cache[key] = next(fitting_placements(piece["man"], piece["normals"], limits), None) is not None
+    return cache[key]
+
+
+def is_tiny(man) -> bool:
+    """Too small to print: the one rule the planner and the check that blocks a split share."""
+    if man.volume() < TINY_PART_MM3:
+        return True
+    pts = hull_points(man)
+    ext = obb_extents(pts)
+    thinnest = min(float(np.ptp(pts, axis=0).min()), float(min(ext)) if ext is not None else math.inf)
+    return thinnest < TINY_PART_MM
+
+
+def ordered(pieces: list) -> list:
+    """Parts are numbered bottom to top, front to back, left to right; check and split share this order."""
+    def key(piece):
+        bb = np.asarray(piece["man"].bounding_box(), float)
+        return round((bb[2] + bb[5]) / 100), round((bb[1] + bb[4]) / 100), (bb[0] + bb[3]) / 2
+    return sorted(pieces, key=key)
+
+
 def choose_orientation(man, cut_normals: list, limits: dict):
     """Pick a print orientation that fits, keeps overhangs low and stands on a big flat face."""
     verts, tris = arrays(man)
@@ -889,37 +1054,13 @@ def choose_orientation(man, cut_normals: list, limits: dict):
     normals, areas, centres = cross[keep] / doubled[keep, None], doubled[keep] / 2, tri[keep].mean(axis=1)
     surface = float(areas.sum())
     hull = hull_points(man)
-    dirs = [np.asarray(c, float) for c in cut_normals] + list(np.eye(3))
-    try:
-        dirs += list(trimesh.bounds.oriented_bounds(hull)[0][:3, :3])
-    except Exception:
-        pass
-    bed = sorted([limits["bed_x"], limits["bed_y"]])
-    options, tried = [], []
-    for v in dirs:
-        v = unit(v)
-        for sign in (1.0, -1.0):
-            up = sign * v
-            if any(float(up @ t) > 0.999 for t in tried):
-                continue
-            tried.append(up)
-            R = to_z(up)
-            hp = hull @ R.T
-            height = float(np.ptp(hp[:, 2]))
-            if height > limits["height"]:
-                continue
-            T2, ext2 = trimesh.bounds.oriented_bounds_2D(hp[:, :2])
-            footprint = sorted(float(x) for x in ext2)
-            if footprint[0] > bed[0] or footprint[1] > bed[1]:
-                continue
-            nz = normals @ R[2]
-            z = centres @ R[2] - float(hp[:, 2].min())
-            contact = float(areas[(nz < -0.985) & (z < 0.3)].sum())
-            overhang = float(areas[(nz < -OVERHANG_SIN) & (z >= 0.3)].sum())
-            rot2 = np.asarray(T2)[:2, :2]
-            if np.linalg.det(rot2) > 0:
-                R = np.block([[rot2, np.zeros((2, 1))], [np.zeros((1, 2)), np.ones((1, 1))]]) @ R
-            options.append({"R": R, "contact": contact, "overhang": overhang, "height": height, "footprint": footprint})
+    options = []
+    for R, height, footprint in fitting_placements(man, cut_normals, limits):
+        nz = normals @ R[2]
+        z = centres @ R[2] - float((hull @ R[2]).min())
+        contact = float(areas[(nz < -0.985) & (z < 0.3)].sum())
+        overhang = float(areas[(nz < -OVERHANG_SIN) & (z >= 0.3)].sum())
+        options.append({"R": R, "contact": contact, "overhang": overhang, "height": height, "footprint": footprint})
     if not options:
         return None, surface
     best_contact = max(o["contact"] for o in options)
@@ -984,8 +1125,8 @@ def analyze(work: Path) -> None:
         "bodies":             bodies,
         "repairs":            repairs,
         "watertight_source":  not repairs,
-        "fits_whole":         parts_needed(hull, limits) == 1,
-        "estimated_parts":    parts_needed(hull, limits),
+        "fits_whole":         piece_fits(whole(model)[0], limits),
+        "estimated_parts":    1 if piece_fits(whole(model)[0], limits) else max(2, parts_needed(hull, part_limits(job))),
     }
     write_json(work / "analysis.json", analysis)
     stage.progress(100, "Analysed")
@@ -994,52 +1135,56 @@ def analyze(work: Path) -> None:
 def plan(work: Path) -> None:
     job = read_json(work / "job.json")
     stage = Stage(work, "plan")
-    limits = printer_limits(job)
+    limits = part_limits(job)
     specs, _, _ = connector_specs(job)
     planner = job.get("planner") or {}
     mode = planner.get("mode") or "smart"
     stage.progress(2, "Loading the model")
     model = load_model(work / "work.npz")
-    if mode == "grid":
-        cuts = plan_grid(model, limits, bool(planner.get("balanced", True)))
+    keep = planner.get("keep_cuts") and mode == "smart" and (work / "cuts.json").is_file()
+    if not keep and piece_fits(whole(model)[0], printer_limits(job)):  # fits the whole bed: nothing to cut
+        cuts, pieces = [], whole(model)
+    elif mode == "grid":
+        cuts = nudge_grid(model, plan_grid(model, limits, bool(planner.get("balanced", True))), limits)
         stage.progress(50, "Checking the grid")
         pieces, _ = apply_cuts(model, cuts)
     elif mode == "smart":
-        base = validate_cuts(read_json(work / "cuts.json")["cuts"]) if planner.get("keep_cuts") and (work / "cuts.json").is_file() else []
+        base = validate_cuts(read_json(work / "cuts.json")["cuts"]) if keep else []
         room = keepout(specs[0]) if specs else 2.75
         cuts, pieces = plan_smart(model, limits, room, base, stage)
     else:
         raise EngineError("Planner must be smart or grid")
     write_json(work / "cuts.json", {"mode": mode, "cuts": cuts})
-    write_json(work / "check.json", {"cuts": cuts, "pieces": describe_pieces(pieces, limits)})
+    write_json(work / "check.json", {"cuts": cuts, "pieces": describe_pieces(ordered(pieces), fit_limits(job, cuts))})
     stage.progress(100, f"{len(pieces)} parts from {len(cuts)} cuts")
 
 
 def check(work: Path) -> None:
     job = read_json(work / "job.json")
     stage = Stage(work, "check")
-    limits = printer_limits(job)
     cuts = validate_cuts(read_json(work / "cuts.json")["cuts"])
+    limits = fit_limits(job, cuts)
     model = load_model(work / "work.npz")
     pieces, _ = apply_cuts(model, cuts, stage, 5, 80)
-    write_json(work / "check.json", {"cuts": cuts, "pieces": describe_pieces(pieces, limits)})
+    write_json(work / "check.json", {"cuts": cuts, "pieces": describe_pieces(ordered(pieces), limits)})
     stage.progress(100, f"{len(pieces)} parts")
 
 
 def split(work: Path) -> None:
     job = read_json(work / "job.json")
     stage = Stage(work, "split")
-    limits = printer_limits(job)
     specs, spacing, per_joint = connector_specs(job)
     cuts = validate_cuts(read_json(work / "cuts.json")["cuts"])
+    limits = fit_limits(job, cuts)
     started = time.monotonic()
     stage.progress(2, "Loading the model")
     model = load_model(work / "model.npz")
     pieces, events = apply_cuts(model, cuts, stage, 3, 22)
+    pieces = ordered(pieces)  # the same numbering the check showed
     tiny = sum(d["tiny"] for d in describe_pieces(pieces, limits))
     if tiny:
         raise EngineError(f"{tiny} part{'s are' if tiny != 1 else ' is'} too small to print — move the cut that makes {'them' if tiny != 1 else 'it'} or remove it")
-    oversize = sum(parts_needed(hull_points(p["man"]), limits) > 1 for p in pieces)
+    oversize = sum(not piece_fits(p, limits) for p in pieces)
     if oversize:
         raise EngineError(f"{oversize} part{'s are' if oversize != 1 else ' is'} still too big for the printer — use Auto-fix or move the cuts")
 
@@ -1075,7 +1220,6 @@ def split(work: Path) -> None:
             # body and cutter are kept so the preview can be simplified before the holes go in (see parts_preview.bin)
             built.append({"man": man, "body": piece["man"], "cutter": cutter,
                           "bb": np.asarray(man.bounding_box(), float), "normals": piece["normals"]})
-        built.sort(key=lambda p: (round((p["bb"][2] + p["bb"][5]) / 100), round((p["bb"][1] + p["bb"][4]) / 100), (p["bb"][0] + p["bb"][3]) / 2))
         return built
 
     def unshared_holes(built: list) -> list:
@@ -1150,7 +1294,8 @@ def split(work: Path) -> None:
     total_triangles = sum(part["body"].num_tri() for part in parts) or 1
     for number, part in enumerate(parts, start=1):
         stage.progress(65 + 30 * (number - 1) / len(parts), f"Orienting and saving part {number} of {len(parts)}")
-        placed, surface = choose_orientation(part["man"], part["normals"], limits)
+        # oriented on the body before the holes, exactly as the check judged it; holes only remove material
+        placed, surface = choose_orientation(part["body"], part["normals"], limits)
         if placed is None:
             raise EngineError(f"Part {number} has no orientation that fits the printer")
         oriented = rotate(part["man"], placed["R"])

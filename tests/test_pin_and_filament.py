@@ -34,7 +34,8 @@ class PinAndFilamentApiTests(unittest.TestCase):
         jobs.init(self.dir)
         slicer.configure(self.dir, orca_path=make_fake_orca(self.dir / "tools"))
         slicer.init()
-        slicer.save_user_preset("filament", "Elegoo PETG @ECC", "Elegoo PLA @ECC", {"filament_type": ["PETG"]})
+        if "Elegoo PETG @ECC" not in slicer._system_presets("filament", slicer.require_orca()):   # newer fake Orcas ship it
+            slicer.save_user_preset("filament", "Elegoo PETG @ECC", "Elegoo PLA @ECC", {"filament_type": ["PETG"]})
         splits.configure(self.dir)
         projects.configure(self.dir)
         projects.init()
