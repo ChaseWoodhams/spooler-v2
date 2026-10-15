@@ -217,11 +217,23 @@ async function inventory(fixture) {
   fixture.inventoryMode = 'ready'; fixture.inventoryRelease();
   await waitState(page, 'spools-status', 'ready');
   assert.equal(await page.locator('#spools-empty').isVisible(), true);
+  // The empty state uses the shared state block, not an inline-styled paragraph
+  const emptyBlock = await page.locator('#spools-empty').evaluate(el => ({ cls: el.className, state: el.dataset.state, role: el.getAttribute('role'), inline: el.getAttribute('style'),
+    pad: getComputedStyle(el).padding, display: getComputedStyle(el).display }));
+  assert.deepEqual([emptyBlock.cls, emptyBlock.state, emptyBlock.role, emptyBlock.inline], ['state-block', 'empty', 'status', null]);
+  assert.equal(emptyBlock.display, 'flex'); assert.equal(emptyBlock.pad, '24px 16px');
   await page.locator('#btn-spools-close').click();
   fixture.inventoryMode = 'error';
   await page.locator('#btn-spools').click();
   await waitState(page, 'spools-status', 'error');
   assert.equal(await page.locator('#spools-empty').isVisible(), false);
+  // The error block takes its border from a real token, not an undefined variable's fallback
+  const errorBorder = await page.locator('#spools-status .state-block').evaluate(el => {
+    const probe = document.createElement('div'); probe.style.border = '1px solid color-mix(in srgb, var(--red) 55%, var(--border))'; document.body.appendChild(probe);
+    const expected = getComputedStyle(probe).borderTopColor; probe.remove();
+    return { actual: getComputedStyle(el).borderTopColor, expected };
+  });
+  assert.equal(errorBorder.actual, errorBorder.expected, 'error state border uses --red');
   fixture.inventoryMode = 'ready';
   fixture.inventory = [{ id: 17, location: '', initial_weight: 1000, remaining_weight: 750,
     filament: { id: 18, material: 'PLA', name: 'Blue', color_hex: '0000FF', vendor: { name: 'Fixture brand' } } }];

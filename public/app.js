@@ -557,6 +557,19 @@ function renderPrinter(printer) {
   const cameraExpanded = _cameraPreferences.get(String(printer.id)) ?? window.innerWidth > 640;
 
   const focusKey = _cardFocusKey(card);   // a printer_update redraws the card: put the focus back where it was
+  card.classList.toggle("printer-card-offline", !connected);
+  if (!connected) {   // an offline printer is a one-line row: live printers keep the space
+    prevCameraImg?.remove();
+    card.innerHTML = `
+      <div class="status-dot ${sc}"></div>
+      <div class="offline-row-text">
+        <button type="button" class="card-title-btn" aria-label="${escAttr(`${printer.name}, Offline. Open printer controls`)}">${escHtml(printer.name)}</button>
+        <span class="offline-row-reason">Offline · not responding at ${escHtml(printer.ip)}</span>
+      </div>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="openPrinterDashboard('${escAttr(printer.id)}')" aria-label="Open ${escAttr(printer.name || "printer")} to reconnect">Open</button>`;
+    _restoreCardFocus(card, focusKey);
+    return;
+  }
   card.innerHTML = `
     <!-- Header -->
     <div class="card-header">
@@ -683,17 +696,17 @@ function renderPrinter(printer) {
     <div class="card-temps">
       <div class="temp-block">
         <div class="temp-label">Nozzle</div>
-        <div class="temp-value ${tempColor(nozzle)}">${nozzle ? nozzle.toFixed(0) : "--"}<span style="font-size:12px;font-weight:400">°C</span></div>
+        <div class="temp-value ${tempColor(nozzle)}">${nozzle ? nozzle.toFixed(0) : "--"}<span class="temp-unit">°C</span></div>
         <div class="temp-target">Target: ${nozzleTgt ? nozzleTgt.toFixed(0) + "°C" : "--"}</div>
       </div>
       <div class="temp-block">
         <div class="temp-label">Bed</div>
-        <div class="temp-value ${tempColor(bed)}">${bed ? bed.toFixed(0) : "--"}<span style="font-size:12px;font-weight:400">°C</span></div>
+        <div class="temp-value ${tempColor(bed)}">${bed ? bed.toFixed(0) : "--"}<span class="temp-unit">°C</span></div>
         <div class="temp-target">Target: ${bedTgt ? bedTgt.toFixed(0) + "°C" : "--"}</div>
       </div>
       <div class="temp-block">
         <div class="temp-label">Chamber</div>
-        <div class="temp-value ${tempColor(chamber)}">${chamber ? chamber.toFixed(0) : "--"}<span style="font-size:12px;font-weight:400">°C</span></div>
+        <div class="temp-value ${tempColor(chamber)}">${chamber ? chamber.toFixed(0) : "--"}<span class="temp-unit">°C</span></div>
         <div class="temp-target">Target: ${chamberTgt ? chamberTgt.toFixed(0) + "°C" : "--"}</div>
       </div>
     </div>
@@ -701,9 +714,7 @@ function renderPrinter(printer) {
     <!-- Controls -->
     <div class="card-controls">
       ${connected && !printing && !paused && bedClearedWaiting(printer.id) ? `
-        <button class="btn btn-primary btn-sm" onclick="confirmBedCleared('${escAttr(printer.id)}')" title="Confirm the printed plate is off the bed; releases the next queued job when auto-start is on">
-          Printed OK · Bed cleared
-        </button>
+        <span class="card-waiting">Waiting for bed clear</span>
         ${bedClearedNext(printer)}
       ` : ""}
       ${printing ? `
@@ -1348,7 +1359,7 @@ function _openSettings() {
   if (tog) tog.checked = document.body.classList.contains("light-mode");
   if (_settingsModal) openOperatorDialog(_settingsModal);
   _settingsFeedback("");
-  _settingsMenu.querySelector("h3")?.focus();
+  _settingsModal?.focus();   // the dialog itself, so no focus box lands on the heading
 }
 function _showSettingsPage(pageEl) {
   _settingsPageReturnTargets.set(pageEl, document.activeElement);
@@ -2741,10 +2752,10 @@ function renderSpoolPanel() {
   else stateBlock(status, _spoolLoadState, _spoolLoadMessage, fetchSpools, "Retry inventory");
   if (!spools.length) {
     list.innerHTML = "";
-    empty.style.display = _spoolLoadState === "ready" ? "" : "none";
+    empty.hidden = _spoolLoadState !== "ready";
     return;
   }
-  empty.style.display = "none";
+  empty.hidden = true;
   list.innerHTML = spools.map(s => {
     const pct        = spoolPct(s);
     const remaining  = spoolRemaining(s);

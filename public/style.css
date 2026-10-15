@@ -32,6 +32,8 @@
   --hit-min:     44px;  /* touch target floor: coarse pointers and widths up to 1100px */
   --hit-fine:    32px;  /* fine-pointer desktop floor, with --hit-gap between neighbours */
   --hit-gap:     8px;
+  --fs-secondary: 13px; /* floor for secondary dashboard text */
+  --fs-page-title: 20px; /* the one page title; section headings stay smaller */
 }
 
 body.light-mode {
@@ -553,6 +555,7 @@ main {
   padding: 12px 18px;
   flex-wrap: wrap;
 }
+.card-waiting { font-size: var(--fs-secondary); font-weight: 600; color: var(--text); }
 .card-next { flex-basis: 100%; font-size: 12px; color: var(--text-muted); }
 .card-next strong { color: var(--text); font-weight: 600; }
 .controls-spacer { flex: 1; }
@@ -1034,7 +1037,7 @@ body.panel-open { overflow: hidden; }
   padding: 2px 6px;
   border-radius: 4px;
   background: rgba(59,130,246,.15);
-  color: var(--blue);
+  color: var(--link);
   flex-shrink: 0;
   text-transform: uppercase;
   letter-spacing: .3px;
@@ -1688,7 +1691,17 @@ body.panel-open { overflow: hidden; }
 .review-check-detail { font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
 .review-nozzle { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
 .modal-box .review-nozzle select { width: auto; padding: 5px 8px; font-size: 12px; }
-.modal-box label.review-ack { flex-direction: row; align-items: center; gap: 8px; color: var(--text); font-size: 13px; }
+.review-gate { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 4px 12px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); min-width: 0; }
+.review-gate legend { padding: 0 6px; font-weight: 600; color: var(--text); }
+.modal-box label.review-ack { flex-direction: row; align-items: center; gap: 10px; min-height: var(--hit-min); color: var(--text); font-size: 15px; }
+.review-start-reason { flex: 1 1 14rem; min-width: 0; margin: 0; align-self: center; text-align: left; color: var(--text-muted); overflow-wrap: anywhere; }
+/* Phone: the reason and Start share the first rows of the action row; secondary buttons follow */
+@media (max-width: 640px) {
+  #modal-review .review-start-reason { flex-basis: 100%; }
+  #modal-review #btn-review-start { order: 1; flex: 1 1 100%; }
+  #modal-review .modal-actions > .btn-secondary { order: 2; flex: 1 1 auto; }
+}
+.review-body:has(> .review-preview[hidden]) { grid-template-columns: minmax(0, 1fr); }
 .modal-box label.review-ack input { width: auto; accent-color: var(--accent); }
 
 @media (max-width: 860px) {
@@ -1976,7 +1989,6 @@ input[aria-invalid="true"] { border-color: var(--red) !important; }
 
 /* ─── Dashboard: Needs you, up next, active projects; in-app Projects page ──── */
 .dash-section { margin-bottom: 22px; }
-#dash-projects { margin-top: 22px; }
 .dash-section h2, .dash-bar h1 { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
 .dash-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .dash-bar h1 { margin: 0; }
@@ -2145,7 +2157,7 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
 }
 .state-block p { margin: 0; max-width: 46ch; }
 .state-block[data-state="error"] p { color: var(--text); }
-.state-block[data-state="error"] { border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 55%, var(--border)); border-radius: 8px; }
+.state-block[data-state="error"] { border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border)); border-radius: var(--radius-sm); }
 .state-block[data-state="loading"] { animation: state-in .2s ease .3s backwards; }   /* a quick answer never flashes the block */
 .state-spinner {
   width: 22px; height: 22px; border-radius: 50%;
@@ -2178,6 +2190,7 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
   label:has(> input[type="checkbox"]), label:has(> input[type="radio"]) { min-height: var(--hit-min); display: flex; align-items: center; gap: 8px; }
   input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; }
   .file-actions { flex-wrap: wrap; }
+  .modal-box select { min-height: var(--hit-min); }
 }
 
 /* ─── Outcome status badges (status-badge.js): icon + label, own colours ──────── */
@@ -2264,3 +2277,21 @@ body.light-mode { --st-completed: #0f766e; --st-failed: #be123c; --st-cancelled:
 .settings-toggle-text .settings-item-note { margin-left: 0; }
 .notif-param .input-hint, .notif-param .field-error { margin-top: 2px; font-size: 12px; }
 .notif-param .input-hint { color: var(--text-muted); }
+
+/* Offline printers: one compact row after the live cards, full width of the grid */
+.printer-card.printer-card-offline { grid-column: 1 / -1; order: 1; flex-direction: row; align-items: center; gap: 12px; padding: 10px 14px; }
+.offline-row-text { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.offline-row-text .card-title-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.offline-row-reason { color: var(--text-muted); }
+.printer-card-offline > .btn { flex: none; min-height: var(--hit-min); }
+
+#modal-app-settings:focus { outline: none; }   /* focus lands on the dialog itself; its controls keep their own rings */
+
+/* ─── Dashboard hierarchy: printer state leads, one title level, secondary text >= 13px ─ */
+.dash-bar h1 { font-size: var(--fs-page-title); line-height: 1.2; }
+.needs-you { border: 1px solid var(--border); border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.needs-you.needs-you-empty { border-left-width: 1px; }
+.needs-count, .needs-sub, .dash-project-count, .card-subtitle, .card-next, .card-upnext, .offline-row-reason,
+#dash-bar .sidenav-badge, #printer-grid .temp-label, #printer-grid .temp-target, #printer-grid .status-badge,
+#printer-grid .toggle-state, #printer-grid .camera-view-toggle, #printer-grid .btn-sm, #dash-bar #btn-queue { font-size: var(--fs-secondary); }
+.temp-unit { font-size: var(--fs-secondary); font-weight: 400; }

@@ -122,6 +122,7 @@
   <main id="main" tabindex="-1">
     <div id="needs-you-status" class="sr-only" role="status" aria-live="polite"></div>
     <section id="needs-you" class="dash-section needs-you" aria-label="Needs you"></section>
+    <section id="dash-projects" class="dash-section" hidden aria-label="Active projects"></section>
     <div id="dash-bar" class="dash-bar">
       <h1>Printers</h1>
       <button id="btn-queue" class="btn btn-secondary btn-sm" type="button" title="Every waiting job across all projects">
@@ -140,7 +141,6 @@
     </div>
     <div id="printer-grid" class="printer-grid" style="display:none"></div>
     <section id="printer-detail" class="printer-detail" hidden aria-live="polite"></section>
-    <section id="dash-projects" class="dash-section" hidden aria-label="Active projects"></section>
     <section id="projects-view" class="projects-view" hidden aria-label="Projects">
       <h1 class="sr-only">Projects</h1>
       <iframe id="projects-frame" title="Projects" loading="lazy"></iframe>
@@ -268,7 +268,7 @@
     <div class="side-panel-body">
       <div id="spools-status" aria-live="polite" hidden></div>
       <div id="spools-list"></div>
-      <p id="spools-empty" style="display:none;text-align:center;color:var(--text-muted);padding:40px">No spools yet. Click <strong>Add Spool</strong> to get started.</p>
+      <div id="spools-empty" class="state-block" data-state="empty" role="status" hidden><p>No spools yet. Click <strong>Add Spool</strong> to get started.</p></div>
     </div>
   </div>
 
@@ -472,7 +472,7 @@
   </footer>
 
   <!-- Settings modal -->
-  <div id="modal-app-settings" class="modal operator-dialog" role="dialog" aria-modal="true" aria-label="Settings">
+  <div id="modal-app-settings" class="modal operator-dialog" tabindex="-1" role="dialog" aria-modal="true" aria-label="Settings">
     <div class="modal-box">
       <!-- Main settings menu -->
       <div id="settings-menu">
@@ -786,9 +786,9 @@
             <span id="review-layer-label"></span>
           </div>
           <div id="review-legend" class="review-legend"></div>
-          <p id="review-no-preview" class="queue-empty" hidden>No toolpath preview — this file is stored on the printer.</p>
         </div>
         <div class="review-checks">
+          <p id="review-no-preview" class="queue-empty" hidden>No toolpath preview — this file is stored on the printer.</p>
           <label>
             Printer
             <select id="review-printer"></select>
@@ -812,11 +812,16 @@
           </div>
         </div>
       </div>
-      <label class="review-ack">
-        <input type="checkbox" id="review-ack" />
-        <span id="review-ack-text">The build plate is clear and the right filament is loaded</span>
-      </label>
+      <fieldset class="review-gate">
+        <legend>Before you start</legend>
+        <label class="review-ack" id="review-warnings-label" hidden><input type="checkbox" id="review-warnings-ack"> I have reviewed the preflight warnings (this does not confirm the bed is clear)</label>
+        <label class="review-ack">
+          <input type="checkbox" id="review-ack" />
+          <span id="review-ack-text">The build plate is clear and the right filament is loaded</span>
+        </label>
+      </fieldset>
       <div class="modal-actions">
+        <p id="review-start-reason" class="review-start-reason" role="status"></p>
         <button id="btn-review-close" class="btn btn-secondary">Close</button>
         <button id="btn-review-recheck" class="btn btn-secondary">Check again</button>
         <button id="btn-review-accept" class="btn btn-secondary" hidden title="Accept the warnings now so Bed cleared can start this job without asking again">Accept warnings for later</button>

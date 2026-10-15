@@ -22,13 +22,14 @@ const ISO_POINT_BUDGET_BYTES = 1_600_000; // ~400k points drawn per frame in the
 let _review = null; // { job, report, toolpath: DataView | null, layer, view }
 let _reviewFrame = 0;
 let _reviewRequest = 0;
+let _reviewWarningsBound = false;
 
 // ─── Open / check / start ─────────────────────────────────────────────────────
 async function openReview(job) {
   _review = { job, report: null, toolpath: null, layer: 0, view: "3d" };
   const opener = document.activeElement;
-  if (!document.getElementById("review-warnings-ack")) {
-    document.querySelector("#modal-review .review-ack").insertAdjacentHTML("beforebegin", '<label class="review-ack" id="review-warnings-label" hidden><input type="checkbox" id="review-warnings-ack"> I have reviewed the preflight warnings (this does not confirm the bed is clear)</label><p id="review-start-reason" role="status"></p>');
+  if (!_reviewWarningsBound) {
+    _reviewWarningsBound = true;
     document.getElementById("review-warnings-ack").addEventListener("change", _updateReviewStart);
   }
   const preview = document.getElementById("review-canvas");
@@ -243,6 +244,7 @@ function _drawReviewNow() {
   const canvas = document.getElementById("review-canvas");
   const ready = !!(preview && review.toolpath && preview.layers.length);
   document.getElementById("review-no-preview").hidden = ready || !review?.report;
+  document.querySelector("#modal-review .review-preview").hidden = !ready;
   for (const id of ["review-canvas", "review-layer-row", "review-legend", "review-view-toggle"]) {
     document.getElementById(id).hidden = !ready;
   }

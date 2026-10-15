@@ -129,6 +129,43 @@ async function open(browser, { projects = PROJECTS, search = '', setup } = {}) {
       await page.close();
     }
 
+    // The row-wide Open overlay never covers Delete: clicking Delete asks first, it does not open the Project
+    for (const width of [1280, 390]) {
+      const { page } = await open(browser);
+      await page.setViewportSize({ width, height: 800 });
+      const row = page.locator('#project-list .slicer-project-row', { hasText: 'Bracket set' });
+      await row.waitFor({ timeout: 8000 });
+      const del = row.getByRole('button', { name: 'Delete' });
+      await del.scrollIntoViewIfNeeded();
+      const box = await del.boundingBox();
+      const hit = await page.evaluate(([x, y]) => (e => e && (e.closest("button")?.textContent.trim() || e.tagName + "." + e.className))(document.elementFromPoint(x, y)), [box.x + box.width / 2, box.y + box.height / 2]);
+      assert.equal(hit, 'Delete', `at ${width} the point over Delete hits ${hit}, not Delete`);
+      await del.click();
+      await page.getByRole('dialog', { name: /Delete the Project Bracket set/ }).waitFor();
+      assert.equal(await page.evaluate(() => location.search), '', `at ${width} Delete did not open the Project`);
+      await page.close();
+    }
+    console.log('PASS: Delete is clickable beside the row-wide Open at desktop and phone width');
+
+    // Open is the primary action on a row; Delete is a quiet text action (UCF-07), in both themes at desktop and phone width
+    for (const light of [false, true]) for (const width of [1280, 390]) {
+      const { page } = await open(browser);
+      await page.setViewportSize({ width, height: 800 });
+      await page.evaluate(light => document.body.classList.toggle('light-mode', light), light);
+      const row = page.locator('#project-list .slicer-project-row', { hasText: 'Garden chair' });
+      await row.waitFor({ timeout: 8000 });
+      const look = el => el.evaluate(node => { const c = getComputedStyle(node), r = node.getBoundingClientRect(); return { bg: c.backgroundColor, border: c.borderTopWidth, h: r.height }; });
+      const openBtn = await look(row.getByRole('button', { name: 'Open' }));
+      const del = await look(row.getByRole('button', { name: 'Delete' }));
+      const label = `${light ? 'light' : 'dark'} ${width}`;
+      assert.notEqual(openBtn.bg, 'rgba(0, 0, 0, 0)', `${label}: Open is filled`);
+      assert.equal(del.bg, 'rgba(0, 0, 0, 0)', `${label}: Delete is not filled`);
+      assert.equal(del.border, '0px', `${label}: Delete has no outline box`);
+      if (width < 700) for (const [name, box] of [['Open', openBtn], ['Delete', del]]) assert.ok(box.h >= 44, `${label}: ${name} is ${box.h}px tall`);
+      await page.close();
+    }
+    console.log('PASS: Open is the filled primary action and Delete is a quiet text action');
+
     // No projects: one sentence and one button
     {
       const { page } = await open(browser, { projects: [] });
