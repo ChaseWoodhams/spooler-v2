@@ -5,7 +5,7 @@ import json
 import unittest
 
 import datapaths
-import profile_read
+import project_read
 import projects
 from tests import test_assistant_proposals as proposals
 from tests.fake_claude import read_record
@@ -26,6 +26,10 @@ class SettingsApiCase(proposals.ProposalCase):
         record = json.loads(manifest.read_text(encoding="utf-8"))
         record["presets"]["process"]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
         manifest.write_text(json.dumps(record), encoding="utf-8")
+        # The print fingerprint cache assumes a locked profile is content-addressed. Editing one in place (as this test must) breaks that,
+        # so empty the cache now and again afterwards, or another test could read a fingerprint of the edited preset.
+        project_read._print_fingerprints.clear()
+        self.addCleanup(project_read._print_fingerprints.clear)
 
     def settings_call(self, scope="project", changes=None, scope_id=None, revision=None, **extra):
         arguments = {"revision": self.project["revision"] if revision is None else revision, "scope": scope, "changes": changes or {}, **extra}
