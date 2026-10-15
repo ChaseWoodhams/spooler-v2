@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 import assistant
+import assistant_runner
 import database
 import jobs
 import projects
@@ -74,6 +75,13 @@ class AssistantStatusTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(body["available"])
         self.assertIsNone(body["reason"])
+
+    def test_the_status_carries_the_limits_the_panel_shows_so_it_does_not_hard_code_them(self):
+        self.use_cli()
+        with mock.patch.object(assistant, "probe_jev", return_value=None), mock.patch.object(assistant_runner, "DEADLINE_SECONDS", 7):
+            _, body = self.status()
+        self.assertEqual(body["limits"], {"deadline_seconds": 7, "history_turns": assistant_runner.MAX_HISTORY_TURNS,
+                                          "history_chars": assistant_runner.MAX_HISTORY_CHARS, "turn_chars": assistant_runner.MAX_TURN_CHARS})
 
     def test_a_missing_cli_is_unavailable_with_the_reason(self):
         self.use_cli(str(self.dir / "nope" / "claude.exe"))

@@ -21,7 +21,7 @@ const card = (token, over = {}) => ({
   diff: rows.map(r => ({ label: `${r.key}:`, text: `${r.old} → ${r.new} (was ${{ preset: "the profile's value", project: 'set for the project', plate: 'set on the plate' }[r.layer]})`, key: r.key, layer: r.layer })),
   notes: ['support_threshold_angle: no effect because supports are off'], pinned: [], problems: ['Not proposed: nozzle_temperature: nozzle_temperature is a temperature. Temperatures come from the printer and filament profile and are never proposed'], ...over,
 });
-const review = c => ({ ...c, revision: c.base_revision, summary: c.scope, outcome: c.scope, kept: [], refused: null, settings: rows });
+const review = c => ({ ...c, revision: c.base_revision, summary: c.scope, kept: [], refused: null, settings: rows });
 
 async function stubAssistant(page, s) {
   Object.assign(s, { asks: [], accepts: [], dismisses: [], patches: [], reviews: [], acceptStatus: 200 });

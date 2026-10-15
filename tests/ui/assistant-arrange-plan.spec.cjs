@@ -18,11 +18,11 @@ const card = (token, kind, over = {}) => ({
 });
 
 const object = (id, at, plate) => ({ id, name: `Bracket part ${id}`, model: 11, position: at, rotation: [0, 0, 0], pinned: false, outline: BOX(at[0], at[1], 40, 40), plate });
-const plate = (id, objects) => ({ id, name: `Plate ${id}`, new: false, filament: null, parts: objects.length, turned: 0, time_estimate: null, objects });
+const plate = (id, objects) => ({ id, name: `Plate ${id}`, new: false, filament: null, turned: 0, time_estimate: null, objects });
 const review = c => {
   const before = [plate(1, [object(1, [60, 60])]), plate(2, [object(2, [60, 60])]), plate(3, [object(3, [60, 60])])];
   const after = [plate(1, [object(1, [60, 60]), object(2, [120, 60]), object(3, [180, 60])])];
-  return { ...c, revision: c.base_revision, summary: c.scope, outcome: c.scope, kept: [], refused: null, settings: null,
+  return { ...c, revision: c.base_revision, summary: c.scope, kept: [], refused: null, settings: null,
     bed: [0, 0, 256, 256], pack: { preset: 'normal', gap: 6 }, before: { plates: before }, after: { plates: after }, plates: after };
 };
 

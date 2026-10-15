@@ -509,7 +509,7 @@ def propose_orientation(ctx: Context, revision: int, object_ids=None, mode=None,
         notes.append("Weighting: " + (f"{mode} as asked" if mode else "from each Model's Purpose (" + ", ".join(
             f"{name} for {count}" for name, count in sorted(modes.items())) + ")"))
     if no_face:
-        notes.append(f"{no_face} Display part{'s' if no_face != 1 else ''} had no favoured side to weigh, so least-support was used")
+        notes.append(f"{_plural(no_face, 'Display object')} had no favoured side to weigh, so least-support was used")
     if unchanged:
         notes.append(f"{len(unchanged)} object{'s were' if len(unchanged) != 1 else ' was'} already on a good face")
     if not rotations:
@@ -532,7 +532,7 @@ def propose_orientation(ctx: Context, revision: int, object_ids=None, mode=None,
         targets={"objects": sorted(rotations), "plates": plate_ids})
 
 
-# ── Arrange and plan Proposals (ticket 16) ────────────────────────────────────
+# ── Arrange and plan Proposals ────────────────────────────────────────────────
 # Positions come from Spooler's own non-saving helpers (`arrange_layout` + `_place_layout`, `_plan_data`); the model never chooses
 # one. Both stage through `stage_proposal`, so review, Accept (one revision), Superseded, sweeps and the cap are the pipeline's.
 
@@ -627,7 +627,7 @@ def propose_arrange(ctx: Context, revision: int, plate_ids=None, reason=None) ->
     scope = f"{_plural(count, 'object')} on " + ", ".join(names[i] for i in order[:3]) + (" and more" if len(order) > 3 else "")
     return stage_proposal(
         ctx, record, kind="arrange", title=f"Arrange {_plural(count, 'object')}", scope=scope,
-        reason=one_line(reason) or f"Lays the parts out again onto {_plural(len(used), 'plate')}.", review="placement", data=resulting,
+        reason=one_line(reason) or f"Lays the objects out again onto {_plural(len(used), 'plate')}.", review="placement", data=resulting,
         emptied=emptied, diff=diff, notes=notes, pinned=pinned, problems=problems,
         targets={"objects": sorted({line["object"] for line in lines}), "plates": sorted(set(order) | set(used))})
 
@@ -636,7 +636,7 @@ def propose_arrange(ctx: Context, revision: int, plate_ids=None, reason=None) ->
       "and orders the Plates longest first; you never choose rotations or positions. Plates that are queued, printing, have a Print on "
       "record or hold a Model still importing are kept as they are. density is an optional packing preset (tight, normal, roomy); "
       "omit it to keep the project's density, and accepting a preset also sets it. allow_tilt (default false) lets the planner lean "
-      "parts onto angled faces. Pass the project revision you read. A behind revision returns {superseded: true}. A plan Spooler would "
+      "Objects onto angled faces. Pass the project revision you read. A behind revision returns {superseded: true}. A plan Spooler would "
       "refuse comes back as {refused: true, refused_quoted} with proposal null and nothing staged; so does a plan with nothing to "
       "change. Returns the Proposal token, a readable diff, notes and problems, never the resulting data. At most 3 Proposals per run.",
       {"revision": {"type": "integer"}, "density": {"type": "string", "enum": ["tight", "normal", "roomy"]},
@@ -665,11 +665,11 @@ def propose_plan(ctx: Context, revision: int, density=None, allow_tilt=False, re
     plate_names = {p["id"]: p.get("name") or f"Plate {p['id']}" for p in data["plates"]}
     for entry in planned["plates"]:
         diff.append({"label": plate_names.get(entry["id"], f"Plate {entry['id']}"), "plate": entry["id"],
-                     "text": f"{_plural(len(entry['objects']), 'part')}, {entry['turned']} turned" + (" (new plate)" if entry["new"] else "")})
+                     "text": f"{_plural(len(entry['objects']), 'object')}, {entry['turned']} turned" + (" (new plate)" if entry["new"] else "")})
     if kept:
         notes.append(f"{_plural(len(kept), 'plate')} kept as they are (queued, printing, printed or importing)")
     if planned.get("tilts_withheld"):
-        notes.append(f"{_plural(planned['tilts_withheld'], 'tilt')} withheld: parts would lean on an angled face (allow_tilt lets them)")
+        notes.append(f"{_plural(planned['tilts_withheld'], 'tilt')} withheld: objects would lean on an angled face (allow_tilt lets them)")
     if planned.get("too_big"):
         notes.append(f"{_plural(len(planned['too_big']), 'object')} bigger than the bed, left on a plate of its own")
     if planned.get("tippy"):
@@ -684,13 +684,13 @@ def propose_plan(ctx: Context, revision: int, density=None, allow_tilt=False, re
     pinned = [{"object": o["id"], "label": o.get("name") or f"Object {o['id']}"} for o in data["objects"] if o.get("pinned")]
     return stage_proposal(
         ctx, record, kind="plan", title=f"Plan {_plural(plates, 'plate')}", scope=f"{_plural(count, 'object')} across {_plural(plates, 'plate')}",
-        reason=one_line(reason) or f"Orients and packs the parts onto {_plural(plates, 'plate')}, longest first.", review="placement",
+        reason=one_line(reason) or f"Orients and packs the objects onto {_plural(plates, 'plate')}, longest first.", review="placement",
         data=data, emptied=emptied, diff=diff, notes=notes, pinned=pinned,
         targets={"objects": sorted(o["id"] for e in planned["plates"] for o in e["objects"]),
                  "plates": sorted({e["id"] for e in planned["plates"]} | set(emptied))})
 
 
-# ── Settings tools (ticket 17): get_settings, describe_setting, propose_settings ─────────────────────────────────────
+# ── Settings tools: get_settings, describe_setting, propose_settings ──────────────────────────────────────────────────
 # The logic lives in settings_read.py (socket-free) and proposable_settings.py (the allow-list); these are the tool faces.
 
 def _settings(call, *args):

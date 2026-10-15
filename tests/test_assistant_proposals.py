@@ -279,9 +279,11 @@ class ProposalRouteTests(ProposalCase):
         self.assertEqual(review["after"]["plates"], after)
         self.assertEqual([p["id"] for p in before], [1])
         self.assertEqual([p["id"] for p in after], [1])
+        self.assertNotIn("outcome", review, "scope is already there; Outcome is a print term")
         for plate in before + after:
-            self.assertEqual(set(plate) >= {"id", "name", "new", "filament", "parts", "turned", "objects"}, True)
-            self.assertEqual(plate["parts"], 3, "the whole plate is drawn so the change is seen in place")
+            self.assertEqual(set(plate) >= {"id", "name", "new", "filament", "turned", "objects"}, True)
+            self.assertNotIn("parts", plate)
+            self.assertEqual(len(plate["objects"]), 3, "the whole plate is drawn so the change is seen in place")
             self.assertTrue(all(len(o["outline"]) > 2 for o in plate["objects"]))
         self.assertEqual([o["rotation"] for o in before[0]["objects"]], [[180, 0, 0], [180, 0, 0], [0, 0, 0]])
         self.assertNotEqual(after[0]["objects"][0]["rotation"], [180, 0, 0])
