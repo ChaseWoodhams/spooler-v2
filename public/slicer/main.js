@@ -10,7 +10,7 @@ import { newProject } from "./new-project.js?v=10";
 import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
 import { showExport } from "./export-plan.js?v=2";
 import { Viewport, featureColor } from "./viewport.js?v=5";
-import { assistantPanel } from "./assistant.js?v=2";
+import { assistantPanel } from "./assistant.js?v=4";
 import { reviewHtml, reviewTitle, blockers, acknowledgements } from "./review.js?v=1";
 
 const $ = id => document.getElementById(id);
@@ -51,12 +51,25 @@ const state = {
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
-function toast(message, error = false) {
+// `action` {label, onClick} adds a button to the toast (Undo after an accepted Proposal) and keeps it up longer.
+function toast(message, error = false, { action = null } = {}) {
   const el = document.createElement("div");
-  el.className = `toast${error ? " toast-error" : ""}`;
-  el.textContent = message;
+  el.className = `toast${error ? " toast-error" : ""}${action ? " toast-action" : ""}`;
+  if (action) {
+    const text = document.createElement("span");
+    text.className = "toast-msg";
+    text.textContent = message;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "toast-btn";
+    button.textContent = action.label;
+    button.addEventListener("click", () => { el.remove(); action.onClick(); });
+    el.append(text, button);
+  } else {
+    el.textContent = message;
+  }
   $("toast-area").appendChild(el);
-  setTimeout(() => el.remove(), error ? 6000 : 3500);
+  setTimeout(() => el.remove(), action ? 10000 : error ? 6000 : 3500);
 }
 
 // Every wait is bounded (net.js fetchWithTimeout): reads give up after 20 s and retry once; writes get 2 minutes because
@@ -2450,6 +2463,7 @@ async function showPlan() {
 }
 
 async function acceptPlan() {
+  if (state.review) return acceptReview();   // the sheet is showing an Assistant Proposal, not a plan
   const plan = state.plan;
   if (!plan) return;
   await withButton($("plan-accept"), async () => {
@@ -2467,6 +2481,70 @@ async function acceptPlan() {
       $("plan-error").textContent = err.message;   // "changed elsewhere" or "The plan changed, review it again"
       state.plan = null;   // nothing to accept any more: Accept does nothing until the sheet is opened again
     }
+  });
+}
+
+// ── Assistant Proposals in the Plan plates review sheet ──
+// The sheet is the one every accepted change goes through: placement shows each touched plate before and after, settings a table
+// of key, before, after and layer. Accept is the panel's (it owns the card); the sheet only asks it and shows a refusal.
+function proposalSheetHtml(view) {
+  const list = (items, cls) => items.length ? `<ul class="${cls}">${items.map(item => `<li>${item}</li>`).join("")}</ul>` : "";
+  const diff = list((view.diff || []).map(line => `<b>${esc(line.label)}</b> ${esc(line.text)}`), "assistant-diff");
+  const pinned = view.pinned?.length ? `<p class="slicer-muted">Pinned, left alone: ${view.pinned.map(p => esc(p.label)).join(", ")}</p>` : "";
+  const notes = list([...(view.notes || []), ...(view.problems || [])].map(esc), "assistant-notes slicer-muted");
+  let body = "";
+  if (view.before && view.after) {
+    const now = new Map(view.before.plates.map(plate => [plate.id, plate]));
+    const next = new Map(view.after.plates.map(plate => [plate.id, plate]));
+    const ids = [...new Set([...view.after.plates.map(plate => plate.id), ...view.before.plates.map(plate => plate.id)])];
+    const card = (plate, label) => plate
+      ? `<div class="plan-card" data-side="${label.toLowerCase()}"><div class="plan-card-head"><b>${esc(plate.name)}</b> <span class="slicer-muted">${label}</span></div>
+          ${planMap(plate)}
+          <div class="slicer-muted">${plural(plate.parts, "object")}${plate.turned ? ` · ${plate.turned} turned` : ""}</div></div>`
+      : `<div class="plan-card slicer-muted" data-side="${label.toLowerCase()}">${label === "Now" ? "Not on a plate yet" : "Plate removed"}</div>`;
+    body = `<div class="proposal-pairs">${ids.map(id => `<div class="proposal-pair">${card(now.get(id), "Now")}${card(next.get(id), "After")}</div>`).join("")}</div>`;
+  } else if (view.settings?.length) {
+    body = `<table class="proposal-table"><thead><tr><th>Setting</th><th>Now</th><th>After</th><th>Layer</th></tr></thead><tbody>${view.settings.map(row =>
+      `<tr><td>${esc(row.label || row.key)}<div class="slicer-muted">${esc(row.key)}</div></td><td>${esc(row.old)}</td><td><b>${esc(row.new)}</b></td><td>${esc(row.layer)}</td></tr>${row.note ? `<tr class="proposal-note"><td colspan="4" class="slicer-muted">${esc(row.note)}</td></tr>` : ""}`).join("")}</tbody></table>`;
+  }
+  return `<p class="slicer-muted">${esc(view.scope)}. ${esc(view.reason)}</p>${diff}${pinned}${notes}${body}`;
+}
+
+function openProposalReview(view, { accept }) {
+  state.review = { view, accept };
+  $("plan-title").textContent = view.title;
+  $("plan-body").innerHTML = proposalSheetHtml(view);
+  $("plan-error").textContent = "";
+  $("plan-accept").disabled = false;
+  $("dlg-plan").showModal();
+}
+
+async function acceptReview() {
+  const review = state.review;
+  if (!review) return;
+  let refused = null;
+  await withButton($("plan-accept"), async () => {
+    const outcome = await review.accept();
+    if (outcome.ok) { $("dlg-plan").close(); return; }
+    refused = outcome.message;
+    $("plan-error").textContent = outcome.message;
+  });
+  if (refused) $("plan-accept").disabled = true;   // Superseded: nothing to accept any more
+}
+
+// The page takes the project an accepted Proposal produced: one revision, one Undo step, and an Undo button on the toast.
+function proposalApplied(result, card) {
+  const { proposal, ...project } = result;
+  applyProject(project);
+  recordEdit();
+  const after = editLog.current;
+  renderAll();
+  state.viewport?.fit(state.viewport.objectsBox());
+  toast(`${card.title}: applied`, false, {
+    action: { label: "Undo", onClick: () => {
+      if (editLog.current === after) undo();
+      else toast("More has changed since. Use Undo in the toolbar to step back", true);
+    } },
   });
 }
 
@@ -2982,7 +3060,7 @@ function bindUi() {
   setDefer(phone.matches);
   phone.addEventListener('change', e => setDefer(e.matches));
   $('btn-mobile-edit').addEventListener('click', () => setDefer(!document.body.classList.contains('defer-edit')));
-  assistantPanel.attach({ api, project: () => state.project });
+  assistantPanel.attach({ api, project: () => state.project, flush: flushSave, openReview: openProposalReview, applied: proposalApplied });
   $('btn-sidebar').addEventListener('click', e => {
     const hidden = document.body.classList.toggle('sidebar-collapsed');
     e.currentTarget.textContent = hidden ? 'Show sidebar' : 'Hide sidebar';
@@ -3387,6 +3465,7 @@ function bindUi() {
   $("btn-orient-all").addEventListener("click", e => orientAll(e.shiftKey));
   $("btn-plan-plates").addEventListener("click", planPlates);
   $("plan-accept").addEventListener("click", acceptPlan);
+  $("dlg-plan").addEventListener("close", () => { state.review = null; $("plan-title").textContent = "Plan plates"; });
   $("merge-plate").addEventListener("change", e => {
     const target = Number(e.target.value);
     e.target.value = "";
