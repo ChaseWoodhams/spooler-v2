@@ -52,6 +52,20 @@ def superseded(token: str) -> None:
     proposal_store.remove(_root(), token)
 
 
+def pending(project_id: int) -> dict:
+    """Proposals waiting for this project that no app-started run owns (staged from a terminal session), as card summaries. One
+    made for another revision is Superseded: swept, not offered. Never carries the resulting data."""
+    import projects
+    revision = projects.get_project(project_id)["revision"]            # 404 for an unknown project
+    cards = []
+    for proposal in proposal_store.terminal_pending(_root(), project_id):
+        if proposal.get("base_revision") != revision:
+            superseded(proposal["token"])
+        else:
+            cards.append(proposal_store.summary(proposal))
+    return {"proposals": cards}
+
+
 # ── Review ────────────────────────────────────────────────────────────────────
 
 def _changed_plates(before: dict, after: dict) -> list:

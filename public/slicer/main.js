@@ -10,7 +10,7 @@ import { newProject } from "./new-project.js?v=10";
 import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
 import { showExport } from "./export-plan.js?v=2";
 import { Viewport, featureColor } from "./viewport.js?v=5";
-import { assistantPanel } from "./assistant.js?v=4";
+import { assistantPanel } from "./assistant.js?v=5";
 import { reviewHtml, reviewTitle, blockers, acknowledgements } from "./review.js?v=1";
 
 const $ = id => document.getElementById(id);

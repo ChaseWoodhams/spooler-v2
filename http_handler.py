@@ -1060,6 +1060,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._assistant_status(project_id)
             elif len(parts) == 7 and parts[4] == "assistant" and parts[5] == "runs":
                 self._assistant_call(lambda runner: runner.get(project_id, parts[6]))
+            elif len(parts) == 6 and parts[4] == "assistant" and parts[5] == "proposals":
+                self._assistant_proposal_call(lambda proposals: proposals.pending(project_id))
             elif len(parts) == 7 and parts[4] == "assistant" and parts[5] == "proposals":
                 self._assistant_proposal_call(lambda proposals: proposals.review(project_id, parts[6]))
             elif len(parts) == 5 and parts[4] == "jobs":
