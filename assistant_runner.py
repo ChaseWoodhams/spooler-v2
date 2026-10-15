@@ -149,8 +149,8 @@ def _inside_profile(path: Path) -> bool:
 
 # ── The recipe ────────────────────────────────────────────────────────────────
 
-def build_argv(cli: str, mcp_config: Path, system_prompt: Path, max_turns: int) -> list:
-    return [cli, "-p", "--bare", "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--mcp-config", str(mcp_config),
+def build_argv(cli: str, mcp_config: Path, system_prompt: Path, max_turns: int, model: str = "") -> list:
+    return [cli, *(["--model", model] if model else []), "-p", "--bare", "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--mcp-config", str(mcp_config),
             "--tools", "", "--allowedTools", *ALLOWED_TOOLS, "--permission-mode", "dontAsk", "--permission-prompts", "none",
             "--no-session-persistence", "--max-turns", str(max_turns), "--disable-slash-commands", "--system-prompt-file", str(system_prompt)]
 
@@ -436,7 +436,7 @@ def _execute(run: Run, cli: str, jev_url: str, prompt: str) -> None:
         mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir(), run.id, run.tuning["limits"]["proposals_per_run"])), encoding="utf-8")
         prompt_path.write_text(system_prompt(run.tuning), encoding="utf-8")
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
-        proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path, run.tuning["limits"]["max_turns"]), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path, run.tuning["limits"]["max_turns"], run.tuning["model"]["name"]), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=str(cwd), env=build_env(jev_url), creationflags=flags)
         run.proc = proc
         if run.reason:                               # cancelled while it was starting

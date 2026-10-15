@@ -1846,16 +1846,17 @@ function _renderAssistantTuning(tuning) {
       const id = `assistant-tuning-${group}-${key}`;
       const label = document.createElement("label");
       label.htmlFor = id;
-      label.textContent = `${field.label} (${field.unit})`;
+      label.textContent = field.type === "str" ? field.label : `${field.label} (${field.unit})`;
       const input = document.createElement("input");
-      Object.assign(input, { type: "number", id, step: 1, min: field.min, max: field.max, value: tuning.values?.[group]?.[key] ?? field.default });
+      if (field.type === "str") Object.assign(input, { type: "text", id, maxLength: field.max, value: tuning.values?.[group]?.[key] ?? field.default, placeholder: "CLI default", autocomplete: "off", spellcheck: false });
+      else Object.assign(input, { type: "number", id, step: 1, min: field.min, max: field.max, value: tuning.values?.[group]?.[key] ?? field.default });
       input.dataset.group = group;
       input.dataset.key = key;
       input.addEventListener("input", _markAssistantTuningDirty);
       const help = document.createElement("small");
       help.className = "input-hint";
       help.id = `${id}-hint`;
-      help.textContent = `${field.hint} Allowed ${field.min} to ${field.max}; default ${field.default}.`;
+      help.textContent = field.type === "str" ? field.hint : `${field.hint} Allowed ${field.min} to ${field.max}; default ${field.default}.`;
       input.setAttribute("aria-describedby", help.id);
       row.append(label, input, help);
       box.append(row);
@@ -1874,6 +1875,10 @@ function _assistantTuningEdits() {
   document.querySelectorAll("#assistant-tuning-groups input[data-key]").forEach(input => {
     const { group, key } = input.dataset;
     const saved = _assistantTuning?.values?.[group]?.[key];
+    if (input.type === "text") {
+      if (input.value.trim() !== (saved ?? "")) (edits[group] ||= {})[key] = input.value;
+      return;
+    }
     const typed = input.value.trim() === "" ? NaN : Number(input.value);
     if (typed !== saved) (edits[group] ||= {})[key] = Number.isNaN(typed) ? input.value : typed;
   });
