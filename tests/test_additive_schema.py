@@ -53,9 +53,6 @@ class AdditiveSchemaTests(unittest.TestCase):
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
         state.loop = self.loop
-        patcher = mock.patch("http_handler._auth_ok", return_value=True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self.addCleanup(self.loop.call_soon_threadsafe, self.loop.stop)
 
     def tearDown(self):

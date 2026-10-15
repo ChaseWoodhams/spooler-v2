@@ -2,6 +2,9 @@
 // through respondWith(fetch(...)) cached nothing, delayed each request, and turned any dropped connection into
 // "Failed to fetch". Without one, the browser loads pages and API calls directly.
 
+// Bump this when the shell changes so installed PWAs fetch the new service worker (it keeps no caches of its own).
+const SW_VERSION = "2026-10-14-no-login";
+
 // A new version takes over open pages at once instead of waiting for every tab to close.
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
@@ -37,7 +40,7 @@ self.addEventListener("notificationclick", (e) => {
         body: JSON.stringify(extra.bed_cleared.body),
       }).then((r) => {
         if (r.ok) return;
-        // Signed out, or refused (409: a newer print has ended since this notification): open the printer to answer there.
+        // Refused (409: a newer print has ended since this notification): open the printer to answer there.
         return clients.openWindow(extra.url || "/");
       }).catch(() => clients.openWindow(extra.url || "/"))
     );

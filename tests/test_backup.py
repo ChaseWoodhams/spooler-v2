@@ -67,11 +67,26 @@ class BackupTests(unittest.TestCase):
             printers_json = zf.read("data/printers.json")
         self.assertTrue({"data/printers.json", "app/.env", "sqlite/spooler/spooler.db",
                          "sqlite/spoolman/spoolman.db", "manifest.json"} <= names)
-        self.assertNotIn("data/sessions.json", names)
         recorded = {f["path"]: f["sha256"] for f in manifest["files"]}
         self.assertEqual(recorded["data/printers.json"], hashlib.sha256(printers_json).hexdigest())
         self.assertTrue(all(db["integrity"] == "ok" for db in manifest["databases"]))
         self.assertEqual(count_rows(self.extract(result["path"], "sqlite/spoolman/spoolman.db")), 5)
+
+    def test_account_and_session_files_left_by_an_older_install_are_not_archived(self):
+        (self.data / "auth.json").write_text('{"username": "admin", "pw_hash": "x"}')
+        (self.data / "sessions.json").write_text("{}")
+
+        result = self.make_backup()
+
+        self.assertEqual(result["errors"], [])
+        with zipfile.ZipFile(result["path"]) as zf:
+            names = set(zf.namelist())
+            manifest = json.loads(zf.read("manifest.json"))
+        self.assertIn("data/printers.json", names)
+        self.assertNotIn("data/auth.json", names)
+        self.assertNotIn("data/sessions.json", names)
+        self.assertNotIn("data/auth.json", {f["path"] for f in manifest["files"]})
+        self.assertTrue((self.data / "auth.json").exists(), "leftover files stay on disk")
 
     def test_snapshot_is_consistent_while_a_writer_holds_a_transaction(self):
         writer = sqlite3.connect(self.spoolman_db, isolation_level=None)

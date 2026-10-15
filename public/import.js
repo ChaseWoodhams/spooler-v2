@@ -25,7 +25,6 @@
         location.hash = `#projects=${body.id}`; // the Project opens inside the app shell, on the stepper
         return;
       }
-      if (xhr.status === 401) { location.replace("/login"); return; }
       say(body.error || `Couldn't add the model (HTTP ${xhr.status})`, true);
     };
     xhr.onerror = () => say("Couldn't add the model: the server couldn't be reached", true);

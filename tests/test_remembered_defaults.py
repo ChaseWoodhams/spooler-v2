@@ -33,9 +33,6 @@ class RememberedDefaultsApiTests(unittest.TestCase):
         projects.init()
         self._saved_printers = state.printers
         state.printers = {"p1": FakePrinter(), "p2": FakePrinter()}
-        patcher = mock.patch("http_handler._auth_ok", return_value=True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), SPHandler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"

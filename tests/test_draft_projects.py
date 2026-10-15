@@ -39,9 +39,6 @@ class DraftProjectTests(unittest.TestCase):
         projects.configure(self.dir)
         projects.init()
         state.printers = {"p1": FakePrinter("p1", "Printer 1")}
-        patcher = mock.patch("http_handler._auth_ok", return_value=True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self.clock = T0
         clock = mock.patch.object(projects.time, "time", side_effect=lambda: self.clock)
         clock.start()

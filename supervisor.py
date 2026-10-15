@@ -28,6 +28,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(APP_DIR))
+from bind_address import probe_host as spooler_probe_host_for  # noqa: E402
 
 CHECK_INTERVAL_S    = 10
 HEALTH_TIMEOUT_S    = 5
@@ -148,12 +150,13 @@ def build_services(app_dir: Path = APP_DIR, base_env: dict | None = None) -> tup
     )
 
     http_port = int(setting("HTTP_PORT", "8080"))
+    spooler_probe_host = spooler_probe_host_for(setting("BIND_HOST"))
     spooler = Service(
         name="spooler",
         command=[str(venv_python(app_dir)), "server.py"],
         cwd=app_dir,
         env={**base_env, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"},
-        health_url=f"http://127.0.0.1:{http_port}/api/health",
+        health_url=f"http://{spooler_probe_host}:{http_port}/api/health",
         port=http_port,
         log_file=log_dir / "spooler.log",
     )

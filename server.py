@@ -47,7 +47,6 @@ except ImportError:
     except ImportError:
         ws_serve = None  # type: ignore
 
-import auth
 import backup
 import health
 import jobs
@@ -57,8 +56,7 @@ import projects
 import slicer
 import splits
 import state
-from auth import AUTH_ENABLED, BCRYPT_AVAILABLE, session_cleanup_loop
-from http_handler import run_http, run_https
+from http_handler import bind_host, bind_warning, run_http, run_https
 from persistence import DATA_DIR, load_printers, load_tray_map
 from printers import PRINTER_TYPES, make_printer
 from push import init_vapid
@@ -87,9 +85,6 @@ WS_PORT       = int(os.getenv("WS_PORT",   "8765"))
 WSS_PORT      = int(os.getenv("WSS_PORT",  "8766"))
 HTTPS_ENABLED = os.getenv("HTTPS_ENABLED", "true").lower() != "false"
 
-# Wire the auth file path now that DATA_DIR is resolved
-auth.set_auth_file(DATA_DIR / "auth.json")
-
 
 async def main() -> None:
     if ws_serve is None:
@@ -97,15 +92,10 @@ async def main() -> None:
         print("  python3 -m venv venv && . venv/bin/activate && pip install websockets")
         sys.exit(1)
 
-    if not AUTH_ENABLED:
-        print("[Auth] WARNING: AUTH_ENABLED=false – Spooler is open to everyone on the network!")
-    elif not BCRYPT_AVAILABLE:
-        print("[Auth] WARNING: 'bcrypt' package not installed – authentication will not work.")
-        print("       Install it: pip install bcrypt")
-    elif not auth._has_password():
-        print("[Auth] No password configured – first-time setup required via the web UI")
-    else:
-        print(f"[Auth] Authentication enabled (user: {auth._get_username()})")
+    host = bind_host()
+    warning = bind_warning()
+    if warning:
+        print(warning)
 
     init_vapid()
 
@@ -145,7 +135,6 @@ async def main() -> None:
         asyncio.create_task(splits.worker_loop()),
         asyncio.create_task(projects.worker_loop()),
         asyncio.create_task(projects.draft_sweep_loop()),
-        asyncio.create_task(session_cleanup_loop()),
         asyncio.create_task(health.loop_lag_monitor()),
         asyncio.create_task(health.spoolman_monitor_loop()),
         asyncio.create_task(health.status_broadcast_loop()),
@@ -174,17 +163,17 @@ async def main() -> None:
         https_thread = threading.Thread(target=run_https, args=(HTTPS_PORT,), daemon=True)
         https_thread.start()
 
-    print(f"[WS]   Browser WebSocket on ws://0.0.0.0:{WS_PORT}")
+    print(f"[WS]   Browser WebSocket on ws://{host}:{WS_PORT}")
     if ssl_ctx:
-        print(f"[WSS]  Browser WebSocket on wss://0.0.0.0:{WSS_PORT}")
+        print(f"[WSS]  Browser WebSocket on wss://{host}:{WSS_PORT}")
 
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(
-            ws_serve(browser_handler, "0.0.0.0", WS_PORT, ping_interval=20, ping_timeout=10)
+            ws_serve(browser_handler, host, WS_PORT, ping_interval=20, ping_timeout=10)
         )
         if ssl_ctx:
             await stack.enter_async_context(
-                ws_serve(browser_handler, "0.0.0.0", WSS_PORT, ssl=ssl_ctx, ping_interval=20, ping_timeout=10)
+                ws_serve(browser_handler, host, WSS_PORT, ssl=ssl_ctx, ping_interval=20, ping_timeout=10)
             )
         print("\n" + "─" * 50)
         print("  Spooler is running!")
@@ -198,20 +187,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    if "--hash-password" in sys.argv:
-        if not BCRYPT_AVAILABLE:
-            print("Error: bcrypt is not installed. Run: pip install bcrypt")
-            sys.exit(1)
-        import getpass
-        import bcrypt as _bcrypt  # type: ignore
-        pw  = getpass.getpass("Password: ")
-        pw2 = getpass.getpass("Confirm:  ")
-        if pw != pw2:
-            print("Passwords do not match.")
-            sys.exit(1)
-        print(_bcrypt.hashpw(pw.encode(), _bcrypt.gensalt()).decode())
-        sys.exit(0)
-
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
