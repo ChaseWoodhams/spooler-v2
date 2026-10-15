@@ -157,6 +157,34 @@ def has_thumbnail(path: Path) -> bool:
         return "thumbnail begin" in fh.read(64 * 1024)
 
 
+_THUMB_BEGIN = re.compile(r"^; thumbnail begin (\d+)x(\d+) \d+\s*$")
+PNG_SIGNATURE = bytes([137]) + b"PNG" + bytes([13, 10, 26, 10])
+EXTRACT_BYTES = 4 * 1024 * 1024   # embedded pictures sit near the top of the file; never read all of a big one
+
+
+def extract(path: Path) -> bytes | None:
+    """The largest PNG embedded in a G-code file's thumbnail comment blocks, or None when it has none."""
+    best, size, collecting = None, 0, None
+    with Path(path).open("r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read(EXTRACT_BYTES)
+    for line in text.splitlines():
+        if collecting is None:
+            if m := _THUMB_BEGIN.match(line):
+                collecting = (int(m.group(1)) * int(m.group(2)), [])
+        elif line.startswith("; thumbnail end"):
+            area, parts = collecting
+            collecting = None
+            try:
+                png = base64.b64decode("".join(parts), validate=True)
+            except ValueError:
+                continue
+            if png.startswith(PNG_SIGNATURE) and area > size:
+                best, size = png, area
+        else:
+            collecting[1].append(line[2:].strip() if line.startswith("; ") else line.strip(";").strip())
+    return best
+
+
 def inject(path: Path, blocks: str) -> bool:
     """Put `blocks` right after the header block (or at the top) of a G-code file, streaming it so large files stay cheap.
     Returns False when the file already has a thumbnail."""

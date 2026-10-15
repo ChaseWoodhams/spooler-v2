@@ -335,6 +335,41 @@ class PlateStatusTests(unittest.TestCase):
         self.assertEqual(body[:4], bytes([137]) + b"PNG")
         self.assertGreater(len(body), 300)
 
+    def slice_thumbnail(self, plate_id):
+        with _opener.open(f"{self.base}/api/projects/{self.project_id}/plates/{plate_id}/slice-thumbnail.png", timeout=20) as resp:
+            return resp.headers["Content-Type"], resp.read()
+
+    def write_gcode(self, plate_id, text):
+        import projects
+        folder = projects.plate_dir(self.project_id, plate_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "plate.gcode").write_text(text)
+
+    def test_a_sliced_plate_serves_the_picture_embedded_in_its_gcode(self):
+        import numpy as np
+        import projects
+        import thumbnails
+        projects.configure(self.dir)
+        cube = np.array([(x, y, z) for x in (0, 20) for y in (0, 20) for z in (0, 20)], float)
+        tris = np.array([(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1), (2, 3, 7), (2, 7, 6), (0, 2, 6), (0, 6, 4), (1, 5, 7), (1, 7, 3)])
+        self.write_gcode(4, "; HEADER_BLOCK_START\n; HEADER_BLOCK_END\n\nG28\n")
+        thumbnails.add_to_gcode(projects.plate_dir(self.project_id, 4) / "plate.gcode", {"thumbnails": ["48x48"], "thumbnails_format": "PNG"}, [(cube, tris)])
+        self.slice_plate(4)
+        kind, body = self.slice_thumbnail(4)
+        self.assertEqual(kind, "image/png")
+        self.assertEqual(body[:4], bytes([137]) + b"PNG")
+        self.assertEqual(int.from_bytes(body[16:20], "big"), 48)
+
+    def test_a_slice_without_an_embedded_picture_or_a_plate_not_sliced_is_404(self):
+        import projects
+        projects.configure(self.dir)
+        self.write_gcode(4, "G28\n")
+        self.slice_plate(4)
+        for plate in (4, 3):   # 3 was never sliced
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                self.slice_thumbnail(plate)
+            self.assertEqual(caught.exception.code, 404)
+
     def test_a_preview_for_a_missing_plate_is_404(self):
         import projects
         projects.configure(self.dir)

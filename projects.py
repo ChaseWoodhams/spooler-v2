@@ -4344,6 +4344,14 @@ def plate_file(project_id: int, plate_id: int, kind: str) -> Path:
     return path
 
 
+def plate_slice_thumbnail(project_id: int, plate_id: int) -> bytes:
+    """The picture embedded in the plate's current Slice (the one its printer shows), or a 404 saying why there is none."""
+    png = thumbnails.extract(plate_file(project_id, plate_id, "gcode"))
+    if png is None:
+        raise jobs.JobError("This Slice has no picture embedded in its G-code", 404)
+    return png
+
+
 _previews: dict = {}  # (project, plate) → (fingerprint, PNG), so the page's polling doesn't render again
 PREVIEW_SIZE = (320, 240)
 

@@ -75,7 +75,11 @@ MESH_MAGIC = b"SPV1"
 
 
 class EngineError(Exception):
-    """A problem with the model or the settings, shown to the user as is."""
+    """A problem with the model or the settings, shown to the user as is. `parts` are the Part numbers it is about, if any."""
+
+    def __init__(self, message: str = "", parts: list | None = None):
+        super().__init__(message)
+        self.parts = list(parts or [])
 
 
 # ── Small geometry helpers ─────────────────────────────────────────────────────
@@ -431,6 +435,20 @@ def move_cuts_hint(cut_ids: list) -> str:
     if not cut_ids:
         return "check the printer size, since this part was never cut"
     return f"move cut{'s' if len(cut_ids) != 1 else ''} {', '.join(map(str, cut_ids))}"
+
+
+def part_names(numbers: list) -> str:
+    names = [f"Part {n}" for n in numbers]
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def cuts_to_change(described: list) -> list:
+    """The cuts to move or remove for the too-small parts in a check: the cut that made each, else the cuts that apply to it."""
+    ids = set()
+    for p in described:
+        if p.get("tiny"):
+            ids.update([p["made_by_cut"]] if p.get("made_by_cut") is not None else p.get("cuts") or [])
+    return sorted(ids)
 
 
 def describe_pieces(pieces: list, limits: dict) -> list:
@@ -1091,13 +1109,17 @@ def split(work: Path) -> None:
     stage.progress(2, "Loading the model")
     model = load_model(work / "model.npz")
     pieces, events = apply_cuts(model, cuts, stage, 3, 22)
-    tiny = sum(d["tiny"] for d in describe_pieces(pieces, limits))
+    described = describe_pieces(pieces, limits)
+    tiny = [i + 1 for i, d in enumerate(described) if d["tiny"]]
     if tiny:
-        raise EngineError(f"{tiny} part{'s are' if tiny != 1 else ' is'} too small to print — move the cut that makes {'them' if tiny != 1 else 'it'} or remove it")
-    too_big = [p for p in pieces if not part_fits(p["man"], p["normals"], limits)]
+        change = cuts_to_change(described)
+        what = (f"move or remove {'Cut' if len(change) == 1 else 'Cuts'} {', '.join(map(str, change))}" if change
+                else "this is the whole model, so check its scale and units")
+        raise EngineError(f"{part_names(tiny)} {'is' if len(tiny) == 1 else 'are'} too small to print — {what}", tiny)
+    too_big = [(i + 1, p) for i, p in enumerate(pieces) if not part_fits(p["man"], p["normals"], limits)]
     if too_big:
-        raise EngineError(f"{len(too_big)} part{'s are' if len(too_big) != 1 else ' is'} still too big for the printer — "
-                          f"{move_cuts_hint(sorted({cid for p in too_big for cid, _ in p['member']}))}, or use Auto-fix")
+        raise EngineError(f"{part_names([n for n, _ in too_big])} {'is' if len(too_big) == 1 else 'are'} still too big for the printer — "
+                          f"{move_cuts_hint(sorted({cid for _, p in too_big for cid, _ in p['member']}))}, or use Auto-fix", [n for n, _ in too_big])
 
     # holes, placed once every cut is known so no cut can go through a hole
     pins, islands = [], []
@@ -1208,7 +1230,7 @@ def split(work: Path) -> None:
         stage.progress(65 + 30 * (number - 1) / len(parts), f"Orienting and saving part {number} of {len(parts)}")
         placed, surface = choose_orientation(part["man"], part["normals"], limits)
         if placed is None:
-            raise EngineError(f"Part {number} has no orientation that fits the printer — {move_cuts_hint(sorted({cid for cid, _ in part['member']}))}")
+            raise EngineError(f"Part {number} has no orientation that fits the printer — {move_cuts_hint(sorted({cid for cid, _ in part['member']}))}", [number])
         oriented = rotate(part["man"], placed["R"])
         obb = oriented.bounding_box()
         oriented = oriented.translate([-obb[0], -obb[1], -obb[2]])
@@ -1307,7 +1329,7 @@ def main(argv: list) -> int:
     try:
         STAGES[argv[1]](work)
     except EngineError as e:
-        write_json(work / "error.json", {"stage": argv[1], "error": str(e)})
+        write_json(work / "error.json", {"stage": argv[1], "error": str(e), "parts": e.parts})
         return 2
     except MemoryError:
         write_json(work / "error.json", {"stage": argv[1], "error": "Ran out of memory — try a model with fewer triangles"})

@@ -160,6 +160,43 @@ class SplitWorkflowTests(unittest.IsolatedAsyncioTestCase):
             splits.get_split(record["id"])
         self.assertEqual(gone.exception.status, 404)
 
+    async def test_a_failed_auto_fix_is_a_note_and_leaves_the_split_ready_with_its_cuts(self):
+        record = self.upload()
+        await self.run_stages()
+        before = (splits.work_dir(record["id"]) / "cuts.json").read_text()
+        message = "Auto-fix couldn't remove the parts that are too small to print. The cuts are unchanged: move or remove the cut that makes them."
+        splits.request_plan(record["id"], {"mode": "smart", "keep_cuts": True})
+        with mock.patch.object(splits, "_run_stage", side_effect=jobs.JobError(message)):
+            await self.run_stages()
+        detail = splits.get_split(record["id"], detail=True)
+        self.assertEqual(detail["state"], splits.READY, "the split is not failed")
+        self.assertIsNone(detail["error"])
+        self.assertEqual(detail["plan_note"], message)
+        self.assertEqual((splits.work_dir(record["id"]) / "cuts.json").read_text(), before)
+        # the next edit clears the note
+        splits.save_cuts(record["id"], {"cuts": detail["cuts"]["cuts"]})
+        self.assertIsNone(splits.get_split(record["id"], detail=True)["plan_note"])
+
+    async def test_a_failed_plan_without_auto_fix_is_still_a_failed_split(self):
+        record = self.upload()
+        await self.run_stages()
+        splits.request_plan(record["id"], {"mode": "smart"})
+        with mock.patch.object(splits, "_run_stage", side_effect=jobs.JobError("boom")):
+            await self.run_stages()
+        detail = splits.get_split(record["id"], detail=True)
+        self.assertEqual((detail["state"], detail["error"]), (splits.FAILED, "boom"))
+        self.assertIsNone(detail["plan_note"])
+
+    async def test_a_failed_split_reports_the_parts_it_is_about(self):
+        record = self.upload()
+        await self.run_stages()
+        work = splits.work_dir(record["id"])
+        (work / "error.json").write_text(json.dumps({"stage": "split", "error": "Part 2 is too small to print — move or remove Cut 1", "parts": [2]}))
+        splits._set_state(record["id"], splits.FAILED, stage="split", error="Part 2 is too small to print — move or remove Cut 1")
+        self.assertEqual(splits.get_split(record["id"], detail=True)["error_parts"], [2])
+        splits.retry(record["id"])
+        self.assertEqual(splits.get_split(record["id"], detail=True)["error_parts"], [], "nothing to highlight once it is retried")
+
     async def test_new_scale_analyses_again(self):
         record = self.upload(data=self.model_bytes(channel(52.0)), name="small.stl", scale=1)
         await self.run_stages()

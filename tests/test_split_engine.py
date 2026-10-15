@@ -222,6 +222,56 @@ class EngineTests(unittest.TestCase):
         self.assertEqual({p["made_by_cut"] for p in slivers}, {cuts[0]["id"]})
         self.assertTrue(all(p["made_by_cut"] is not None for p in pieces))  # every part came from some cut
 
+    def _raised(self, call):
+        with self.assertRaises(engine.EngineError) as caught:
+            call(self.work)
+        return caught.exception
+
+    def test_a_refused_split_for_a_sliver_names_the_part_and_its_cut_and_carries_the_part_numbers(self):
+        self.job(channel(), planner={"mode": "grid", "balanced": True})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        cuts = self.read("cuts.json")["cuts"]
+        cuts[0]["offset"] = 1.0  # leaves a 1 mm slab
+        (self.work / "cuts.json").write_text(json.dumps({"mode": "grid", "cuts": cuts}))
+        engine.check(self.work)
+        pieces = self.read("check.json")["pieces"]
+        numbers = [i + 1 for i, p in enumerate(pieces) if p["tiny"]]
+        error = self._raised(engine.split)
+        self.assertEqual(error.parts, numbers)
+        self.assertIn(f"Cut {cuts[0]['id']}", str(error))
+        self.assertIn(f"Part {numbers[0]}", str(error))
+
+    def test_a_refused_split_for_a_part_too_big_carries_the_part_numbers(self):
+        self.job(channel(), planner={"mode": "grid", "balanced": True})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        cuts = self.read("cuts.json")["cuts"]
+        cuts[0]["offset"] = 20.0
+        (self.work / "cuts.json").write_text(json.dumps({"mode": "grid", "cuts": cuts}))
+        engine.check(self.work)
+        pieces = self.read("check.json")["pieces"]
+        numbers = [i + 1 for i, p in enumerate(pieces) if not p["fits"]]
+        error = self._raised(engine.split)
+        self.assertEqual(error.parts, numbers)
+        self.assertIn(f"Part {numbers[0]}", str(error))
+
+    def test_error_json_records_the_parts_to_highlight(self):
+        self.job(channel(), planner={"mode": "grid", "balanced": True})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        cuts = self.read("cuts.json")["cuts"]
+        cuts[0]["offset"] = 1.0
+        (self.work / "cuts.json").write_text(json.dumps({"mode": "grid", "cuts": cuts}))
+        self.assertEqual(engine.main(["split_engine.py", "split", str(self.work)]), 2)
+        self.assertTrue(self.read("error.json")["parts"])
+
+    def test_a_sliver_with_no_creating_cut_names_the_cuts_that_apply_to_it(self):
+        pieces = [{"fits": True, "tiny": True, "made_by_cut": None, "cuts": [3, 5], "size": [1, 2, 3]}]
+        self.assertEqual(engine.cuts_to_change(pieces), [3, 5])
+        self.assertEqual(engine.cuts_to_change([{"tiny": True, "made_by_cut": 4, "cuts": [3, 4]}]), [4])
+        self.assertEqual(engine.cuts_to_change([{"tiny": True, "made_by_cut": None, "cuts": []}]), [])
+
     def _sliver_plan(self):
         self.job(channel(), planner={"mode": "grid", "balanced": True})
         engine.analyze(self.work)

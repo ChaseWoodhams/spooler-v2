@@ -92,7 +92,7 @@ const css=(page,sel,prop)=>page.locator(sel).first().evaluate((el,p)=>getCompute
 (async () => {
   const browser = await chromium.launch();
   try {
-    // PS-46 Select all and Orient all are on the bar; the More panel scrolls instead of clipping
+    // Select all and Orient all are on the bar; the More panel scrolls instead of clipping
     {
       const { page } = await open(browser, { view: { width: 1400, height: 700 } });
       assert.equal(await page.locator('#btn-select-all').isVisible(), true, 'Select all is visible without opening More');
@@ -106,7 +106,7 @@ const css=(page,sel,prop)=>page.locator(sel).first().evaluate((el,p)=>getCompute
       await page.close();
     }
 
-    // PS-45 an open Print settings fold grows to its content
+    // An open Print settings fold grows to its content
     {
       const { page } = await open(browser);
       await page.locator('#fold-settings > summary').click();
@@ -116,7 +116,7 @@ const css=(page,sel,prop)=>page.locator(sel).first().evaluate((el,p)=>getCompute
       await page.close();
     }
 
-    // PS-47 the object panel is not pushed away by a long object list; Duplicate is apart from the orientation actions; filaments grouped by brand
+    // The object panel is not pushed away by a long object list; Duplicate is apart from the orientation actions; filaments grouped by brand
     {
       const { page } = await open(browser, { view: { width: 1400, height: 800 } });
       assert.ok(await page.locator('#object-list').evaluate(el => el.getBoundingClientRect().height <= innerHeight * 0.3 + 1), 'object list is capped');
@@ -130,7 +130,7 @@ const css=(page,sel,prop)=>page.locator(sel).first().evaluate((el,p)=>getCompute
       await page.close();
     }
 
-    // PS-44 the stepper stays put between steps at 1000 px
+    // The stepper stays put between steps at 1000 px
     {
       const { page } = await open(browser, { view: { width: 1000, height: 800 } });
       const pos = async () => page.locator('#step-bar').evaluate(el => { const r = el.getBoundingClientRect(); return [Math.round(r.top), Math.round(r.height)]; });
@@ -142,7 +142,7 @@ const css=(page,sel,prop)=>page.locator(sel).first().evaluate((el,p)=>getCompute
       await page.close();
     }
 
-    // PS-42 and PS-43 phone: compact header, canvas gets at least half the screen, no plate add/remove while editing is deferred
+    // Phone: compact header, canvas gets at least half the screen, no plate add/remove while editing is deferred
     {
       const { page } = await open(browser, { view: { width: 390, height: 844 } });
       assert.equal(await page.evaluate(() => document.body.classList.contains('defer-edit')), true);
@@ -159,7 +159,7 @@ const css=(page,sel,prop)=>page.locator(sel).first().evaluate((el,p)=>getCompute
     }
 
 
-    // PS-48 a finished Slice step reads as a status, Slice again is a normal button, and the header button names its effect
+    // A finished Slice step reads as a status, Slice again is a normal button, and the header button names its effect
     {
       const done = { state: 'sliced', outdated: false, layers: 10, estimate_s: 600, estimate_g: 5 };
       const { page, server } = await open(browser, { slices: { 1: done, 2: done }, bundle: 'b1' });
@@ -171,7 +171,7 @@ const css=(page,sel,prop)=>page.locator(sel).first().evaluate((el,p)=>getCompute
       assert.match(await page.locator('#slicing-list [data-slice-plate="1"]').innerText(), /Slice again/);
       assert.match(await page.locator('[data-send-this-plate]').innerText(), /^Send Plate 1 to /);
       check('Slice step: status line, Slice again enabled, named header action', true);
-      // SWU-08 the forward action is "Print →" and sends nothing; the direct send is secondary and confirms
+      // The forward action is "Print →" and sends nothing; the direct send is secondary and confirms
       assert.equal(await page.locator('#step-actions .btn-primary').innerText(), 'Print →');
       assert.equal(await page.locator('[data-send-this-plate]').evaluate(b => b.classList.contains('btn-secondary') && !b.classList.contains('btn-primary')), true, 'direct send is secondary');
       await page.locator('#step-actions [data-go="print"]').click();

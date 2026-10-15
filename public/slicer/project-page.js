@@ -334,10 +334,17 @@ function detail() {
     <ul>${warnPanel.titles.map(t => `<li>${esc(t)}</li>`).join("")}</ul>
     <div class="slicer-muted">${warnPanel.canStart ? "Accept them now and Bed cleared can start this plate without asking again." : "Other checks are failing: open Review &amp; start to see them."}</div>
     <div class="pp-actions">${btn("accept-warnings", "Accept warnings", true, "", warnPanel.canStart ? "" : "Fix the failing checks first")}${btn("dismiss-warnings", "Not now", false)}</div></div>` : "";
-  const picture = `/api/projects/${host.projectId()}/plates/${plate.id}/preview.png?v=${plate.layout}`;
+  // The picture the printer will show (embedded in the Slice's G-code) comes first; a Plate with no current Slice, or a
+  // Slice without a picture, shows the Plate as laid out; with neither, the card says why there is no preview.
+  const base = `/api/projects/${host.projectId()}/plates/${plate.id}`;
+  const pictures = [
+    ...(plate.status !== "unsliced" && !plate.outdated ? [{ src: `${base}/slice-thumbnail.png?v=${plate.layout}-${plate.estimate_s ?? ""}`, alt: `${plate.name}, the sliced model` }] : []),
+    { src: `${base}/preview.png?v=${plate.layout}`, alt: `${plate.name} as laid out` },
+  ].filter(p => !failedPictures.has(p.src));
+  const picture = pictures[0];
   return `<div class="pp-card"><div><b>${esc(plate.name)}</b> ${chip(plate.status)}</div>
-    ${!plate.parts ? noPreview("this Plate has no objects") : failedPictures.has(picture) ? noPreview("the picture could not be loaded")
-      : `<img class="pp-preview" src="${picture}" alt="${esc(plate.name)} as laid out" width="320" height="240">`}
+    ${!plate.parts ? noPreview("this Plate has no objects") : !picture ? noPreview("the picture could not be loaded")
+      : `<img class="pp-preview" src="${picture.src}" alt="${esc(picture.alt)}" width="320" height="240">`}
     <div class="slicer-muted">${facts || "No slice yet"}</div>
     ${plate.status === "waiting" ? '<div class="slicer-muted">Waiting on another plate to print OK first</div>' : ""}
     ${plate.outcome_unknown ? '<p role="status">The latest Print has an unknown Outcome. Review its record in History before treating this Plate as completed.</p>' : ''}

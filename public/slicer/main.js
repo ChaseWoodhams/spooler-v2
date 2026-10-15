@@ -4,12 +4,13 @@
    them). Projects without an uploaded model start at Plates. Talks to /api/projects, /api/splits and /api/jobs. */
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
-import { splitStep } from "./split-step.js?v=5";
-import { projectPage } from "./project-page.js?v=10";
+import { splitStep } from "./split-step.js?v=6";
+import { projectPage } from "./project-page.js?v=11";
 import { newProject } from "./new-project.js?v=10";
 import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
 import { showExport } from "./export-plan.js?v=2";
 import { Viewport, featureColor } from "./viewport.js?v=5";
+import { showWhyBlocked } from "./reasons.js?v=1";
 import { reviewHtml, reviewTitle, blockers, acknowledgements } from "./review.js?v=1";
 
 const $ = id => document.getElementById(id);
@@ -386,8 +387,9 @@ function fitWarningsHtml(fit) {
   const seen = new Set();
   return fit.warnings.filter(w => !seen.has(w.text) && seen.add(w.text)).map(w => {
     if (!/^No spool is assigned to /.test(w.text)) return `<div class="fit ${esc(w.level)}">${esc(w.text)}</div>`;
-    const href = fit.printer_id ? `/#printer=${encodeURIComponent(fit.printer_id)}` : "/";
-    return `<div class="fit ${esc(w.level)} fit-labelled">${WARNING_ICON}<span><strong>Warning:</strong> ${esc(w.text)}. This does not block sending. <a href="${href}" target="_blank" rel="noopener">Assign a spool</a></span></div>`;
+    // The printer's own page has no spool control; the Spools panel lists each spool with "Assign to <printer>"
+    const href = "/#spools";
+    return `<div class="fit ${esc(w.level)} fit-labelled">${WARNING_ICON}<span><strong>Warning:</strong> ${esc(w.text)}. This does not block sending. <a href="${href}" target="_blank" rel="noopener">Assign a spool in Spools</a></span></div>`;
   }).join("");
 }
 
@@ -1299,7 +1301,7 @@ function plateStatus(plateId) {
   if (!plateObjects(plateId).length) return { text: "Empty", cls: "" };
   if (plateImporting(plateId)) return { text: "Importing models…", cls: "" };
   if (!entry) return { text: `Not sliced yet · Estimate: about ${slicingEstimateSeconds(plateId)} s to slice`, cls: "" };
-  if (entry.state === "queued") return { text: `Slice in progress — waiting for the slicer · position ${queuePosition(plateId)} in line`, cls: "" };
+  if (entry.state === "queued") return { text: `Waiting for the slicer · position ${queuePosition(plateId)} in line`, cls: "" };
   if (entry.state === "slicing") return { text: `Slice in progress — ${slicingText(entry)}`, cls: "" };
   if (entry.state === "failed") return { text: `Failed Slice: ${entry.error || 'The slicer could not finish'}. Retry slicing this Plate.`, cls: "bad" };
   if (entry.outdated) return { text: "Outdated Slice — objects, placement or relevant settings changed. Slice this Plate again before sending it.", cls: "warn" };
@@ -1656,9 +1658,11 @@ function renderSlicing() {
   const seconds = done.reduce((sum, p) => sum + (sliceEntry(p.id).estimate_s || 0), 0);
   const grams = done.reduce((sum, p) => sum + (sliceEntry(p.id).estimate_g || 0), 0);
   const failedText = failed.length ? ` · ${failed.length} failed` : "";
-  $("slicing-totals").textContent = !plates.length ? "" : done.length
+  const totals = !plates.length ? "" : done.length
     ? `${done.length} of ${plural(plates.length, "plate")} sliced${failedText} · ${duration(seconds)} of printing · ${Math.round(grams)} g of filament`
     : `0 of ${plural(plates.length, "plate")} sliced${failedText}`;
+  // A live region: rewriting it with the same text would have screen readers read it out again on every refresh
+  if ($("slicing-totals").textContent !== totals) $("slicing-totals").textContent = totals;
 }
 
 function plateFilamentLabel(id) {
@@ -3016,6 +3020,7 @@ function bindUi() {
   $("step-bar").addEventListener("click", e => {
     const btn = e.target.closest("[data-step]");
     if (btn && btn.getAttribute("aria-disabled") !== "true") setStep(btn.dataset.step);
+    else if (btn) showWhyBlocked(btn);
   });
   $("slice-state").addEventListener("click", e => {
     if (e.target.closest("[data-show-problem]")) showProblem();
@@ -3025,8 +3030,10 @@ function bindUi() {
     if (btn && !btn.disabled) setStep(btn.dataset.go);
     const fwd = e.target.closest("[data-split-forward]");
     if (fwd && fwd.getAttribute("aria-disabled") !== "true") withButton(fwd, () => splitStep.perform(fwd.dataset.splitForward));
+    else if (fwd) showWhyBlocked(fwd);
     const send = e.target.closest("[data-send-this-plate]");
     if (send && !send.disabled && send.getAttribute("aria-disabled") !== "true") withButton(send, sendThisPlate);
+    else if (send?.getAttribute("aria-disabled") === "true") showWhyBlocked(send);
   });
 
   $("project-name").addEventListener("keydown", e => {   // Enter saves (through change), Escape puts the saved name back

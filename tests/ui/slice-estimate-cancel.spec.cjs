@@ -23,11 +23,11 @@ const { chromium } = require('playwright');
 
     // Queue position, and cancel through the API
     const cancelled = [];
-    const writes = (method, path, project) => {
+    const onWrite = ({ method, path, project }) => {
       const m = path.match(/^\/api\/projects\/1\/plates\/(\d+)\/cancel-slice$/);
       if (method === 'POST' && m) { cancelled.push(Number(m[1])); delete project.slices[m[1]]; return project; }
     };
-    ({ page, context } = await sf.openSlicer(browser, server.baseUrl, { step: 'slice', writes,
+    ({ page, context } = await sf.openSlicer(browser, server.baseUrl, { step: 'slice', onWrite,
       slices: { 1: { state: 'slicing', started_at: 1 }, 2: { state: 'queued', queued_at: 2 } } }));
     await row(page, 2).waitFor();
     assert.match(await row(page, 2).innerText(), /position 1 in line/i, 'queued Plate shows its place in the line');

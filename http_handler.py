@@ -1055,6 +1055,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json(farm.plate_fit(projects.get_project(project_id), int(parts[5]), (query.get("printer_id") or [None])[0]))
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "preview.png":
                 self._send_bytes(projects.plate_preview(project_id, int(parts[5])), "image/png", cache="private, max-age=86400")
+            elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "slice-thumbnail.png":
+                self._send_bytes(projects.plate_slice_thumbnail(project_id, int(parts[5])), "image/png")
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "analysis":
                 self._json(projects.plate_analysis(project_id, int(parts[5])))
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] in ("toolpath", "gcode"):

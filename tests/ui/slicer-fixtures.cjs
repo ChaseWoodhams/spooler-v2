@@ -1,10 +1,14 @@
 // Slicer workspace fixture: a Project with a Split (two Parts), models, two Plates and a current Slice on Plate 1.
-// openSlicer(browser, baseUrl, { width, height, theme, step }) opens slicer.html?project=1 on that step with /api/** stubbed
-// (reads only; any write fails the test) and never reaches a real printer. The 3D viewport, toolpath and layer slider
+// openSlicer(browser, baseUrl, { width, height, theme, step, onWrite, ... }) opens slicer.html?project=1 on that step with
+// /api/** stubbed (reads only; a write fails with HTTP 500 unless onWrite({ method, path, body, project, split }) returns
+// a JSON reply for it) and never reaches a real printer. openStep also waits for the step to be on screen. The 3D viewport, toolpath and layer slider
 // render from stubbed data and are not judged by anything here.
 const fx = require('./fixtures.cjs');
 
 const SPLIT_ID = 1;
+// A cut plane and a checked piece, as the Split step's check result lists them (override any field)
+const cut = (id, offset, extra = {}) => ({ id, parent: null, normal: [1, 0, 0], offset, scope: null, ...extra });
+const piece = (extra = {}) => ({ fits: true, tiny: false, bbox: [0, 0, 0, 100, 60, 30], size: [30, 60, 100], volume_cm3: 180, made_by_cut: 1, cuts: [1], ...extra });
 const part = (id, n) => ({ id, name: `Bracket part ${n}`, file: `bracket-part-${n}.stl`, state: 'ready', size: [180, 60, 30], split: { id: SPLIT_ID, part: n, supports: n === 2 } });
 const makeProject = () => ({
   id: 1, name: 'Bracket assembly', revision: 3, split_id: SPLIT_ID, split_ids: [SPLIT_ID], server_time: Date.now() / 1000,
@@ -60,7 +64,7 @@ const EXPECT = {
   print: ['0 of 2 plates completed', 'needs slicing'],
 };
 
-async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model', plateFit = null, mutate = null, slices = null, splitOverride = null, writes = null, onPost = null, statusOverride = null } = {}) {
+async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model', plateFit = null, mutate = null, slices = null, splitOverride = null, onWrite = null, statusOverride = null } = {}) {
   const project = makeProject(), split = { ...makeSplit(), ...(splitOverride || {}) };
   if (slices) project.slices = slices;
   if (mutate) mutate(project, split);
@@ -71,10 +75,11 @@ async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme 
   await page.routeWebSocket(/.*/, () => {});
   await page.route('**/api/**', route => {
     const url = new URL(route.request().url());
-    if (route.request().method() !== 'GET' && writes) { const out = writes(route.request().method(), new URL(route.request().url()).pathname, project); if (out !== undefined) return route.fulfill({ json: out }); }
     if (route.request().method() !== 'GET') {
-      const reply = onPost && onPost(url.pathname, route.request().postDataJSON?.() ?? null, split);
-      return reply ? route.fulfill({ json: reply }) : route.fulfill({ status: 500, json: { detail: 'fixture is read-only' } });
+      let body = null;
+      try { body = route.request().postDataJSON(); } catch (_) { /* not JSON */ }
+      const reply = onWrite ? onWrite({ method: route.request().method(), path: url.pathname, body, project, split }) : undefined;
+      return reply !== undefined ? route.fulfill({ json: reply }) : route.fulfill({ status: 500, json: { detail: 'fixture is read-only' } });
     }
     const p = url.pathname;
     const json = p === '/api/projects/1' ? project : p === `/api/splits/${SPLIT_ID}` ? split
@@ -95,4 +100,85 @@ async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme 
   return { page, context, split };
 }
 
-module.exports = { openSlicer, makeProject, makeSplit, EXPECT };
+// openSlicer, then wait for the step to be on screen (and for `ready`, a selector inside it, when given)
+async function openStep(browser, baseUrl, options = {}) {
+  const opened = await openSlicer(browser, baseUrl, options);
+  const step = options.step || 'model';
+  await opened.page.waitForSelector(`.slicer-step.active[data-step="${step}"]`, { timeout: 10000 });
+  if (options.ready) await opened.page.waitForSelector(options.ready, { timeout: 10000 });
+  return opened;
+}
+
+// ─── In-page measurements: pass one to page.evaluate (each is self-contained and runs in the page) ───
+// measure(controlsSelector) -> { small, tiny }: controls under 24 x 24 px and visible text under 12 px
+// overflow() -> list of elements that make the page scroll sideways; contrast() -> text/background contrast findings
+function measure(controlsSelector) {
+  const visible = el => {
+    const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0' && !el.closest('[hidden], canvas, dialog:not([open])');
+  };
+  const small = [], tiny = [];
+  const label = el => `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).join('.') : ''} "${(el.innerText || el.getAttribute('aria-label') || el.value || '').trim().slice(0, 30)}"`;
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n; (n = walker.nextNode());) {
+    if (!n.nodeValue.trim()) continue;
+    const el = n.parentElement;
+    if (!el || ['SCRIPT', 'STYLE', 'OPTION'].includes(el.tagName) || !visible(el)) continue;
+    const px = parseFloat(getComputedStyle(el).fontSize);
+    if (px < 12) tiny.push(`${px}px ${label(el)}`);
+  }
+  for (const el of document.querySelectorAll(controlsSelector)) {
+    if (!visible(el)) continue;
+    const box = el.matches('input[type=checkbox], input[type=radio]') && el.closest('label') ? el.closest('label') : el;
+    const r = box.getBoundingClientRect();
+    if (r.width < 24 || r.height < 24) small.push(`${Math.round(r.width)}x${Math.round(r.height)} ${label(el)}`);
+  }
+  return { small, tiny };
+}
+
+function overflow() {
+  const vw = document.documentElement.clientWidth, bad = [];
+  const name = el => `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/).join('.') : ''}`;
+  const doc = document.documentElement;
+  if (doc.scrollWidth > vw) bad.push(`document scrollWidth ${doc.scrollWidth} > ${vw}`);
+  if (document.body.scrollWidth > vw) bad.push(`body scrollWidth ${document.body.scrollWidth} > ${vw}`);
+  const clipped = el => { for (let n = el.parentElement; n; n = n.parentElement) { const o = getComputedStyle(n).overflowX; if (o !== 'visible') return n; } return null; };
+  for (const el of document.querySelectorAll('body *')) {
+    const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+    if (r.width <= 1 || s.display === 'none' || s.visibility === 'hidden' || el.closest('[hidden], canvas, dialog:not([open])')) continue;
+    if (el.scrollWidth > el.clientWidth + 1 && el.clientWidth > 0 && ['visible', 'hidden'].includes(s.overflowX) && s.display !== 'inline' && s.textOverflow !== 'ellipsis') bad.push(`${name(el)} content ${el.scrollWidth} > box ${el.clientWidth}`);
+    if (r.right > vw + 1 && !clipped(el)) bad.push(`${name(el)} right edge ${Math.round(r.right)} > ${vw}`);
+  }
+  return [...new Set(bad)].slice(0, 15);
+}
+
+function contrast() {
+  const parse = c => { const p = c.match(/[\d.]+/g)?.map(Number) || [0, 0, 0, 0]; return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1]; };
+  const over = (t, b) => [0, 1, 2].map(i => t[i] * t[3] + b[i] * (1 - t[3])).concat(1);
+  const lum = c => { const [r, g, b] = c.slice(0, 3).map(v => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return r * .2126 + g * .7152 + b * .0722; };
+  const name = el => `${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''}${typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/).join('.') : ''}`;
+  const fails = [], seen = new Set(); let checked = 0, skipped = 0;
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n; (n = walker.nextNode());) {
+    const el = n.parentElement;
+    if (!n.nodeValue.trim() || !el || seen.has(el) || ['SCRIPT', 'STYLE', 'OPTION', 'NOSCRIPT'].includes(el.tagName)) continue;
+    seen.add(el);
+    const s = getComputedStyle(el), r = el.getBoundingClientRect();
+    if (!r.width || !r.height || s.visibility === 'hidden' || s.display === 'none' || el.closest('[hidden], canvas, dialog:not([open])') || el.closest(':disabled, [aria-disabled=true]')) continue;
+    const layers = []; let stops = null;
+    for (let a = el; a; a = a.parentElement) { const cs = getComputedStyle(a), own = parse(cs.backgroundColor); if (cs.backgroundImage !== 'none' && !stops) stops = cs.backgroundImage.startsWith('url(') ? [] : [...cs.backgroundImage.matchAll(/rgba?([^)]*)/g)].map(m => parse(m[0])); layers.unshift(own); if (own[3] === 1) break; }
+    if (stops && !stops.length) { skipped++; continue; }
+    const base = layers.reduce((b, t) => over(t, b), [255, 255, 255, 1]);
+    // a gradient/image behind the text: judge against its worst colour stop (an image is skipped)
+    const bgs = stops ? stops.map(t => over(t, base)) : [base];
+    let op = 1; for (let a = el; a; a = a.parentElement) op *= parseFloat(getComputedStyle(a).opacity);
+    let ratio = Infinity;
+    for (const bg of bgs) { const t = parse(s.color), fgc = over([t[0], t[1], t[2], t[3] * op], bg); const [x, y] = [lum(fgc), lum(bg)]; ratio = Math.min(ratio, (Math.max(x, y) + .05) / (Math.min(x, y) + .05)); }
+    const px = parseFloat(s.fontSize), large = px >= 24 || (px >= 18.66 && parseInt(s.fontWeight) >= 700);
+    checked++;
+    if (ratio < (large ? 3 : 4.5)) fails.push(`${ratio.toFixed(2)}:1 ${name(el)} "${n.nodeValue.trim().slice(0, 24)}"`);
+  }
+  return { fails, checked, skipped };
+}
+
+module.exports = { openSlicer, openStep, makeProject, makeSplit, cut, piece, measure, overflow, contrast, EXPECT };

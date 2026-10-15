@@ -5,8 +5,7 @@ const fx = require('./fixtures.cjs');
 const sf = require('./slicer-fixtures.cjs');
 const { chromium } = require('playwright');
 
-const cut = (id, offset) => ({ id, parent: null, normal: [1, 0, 0], offset, scope: null });
-const piece = () => ({ fits: true, tiny: false, bbox: [0, 0, 0, 100, 60, 30], size: [30, 60, 100], volume_cm3: 180, made_by_cut: 1 });
+const { cut, piece } = sf;
 const running = (state, message) => ({ state, result: null, stage: state, progress: { message, percent: null },
   cuts: { cuts: [cut(1, 100)] }, check: { cuts: [cut(1, 100)], pieces: [piece(), piece()] } });
 const ready = () => ({ state: 'ready', result: null, stage: 'ready', progress: null,
@@ -16,12 +15,7 @@ const ready = () => ({ state: 'ready', result: null, stage: 'ready', progress: n
   const server = await fx.startServer();
   const browser = await chromium.launch({ headless: true });
   try {
-    const open = async override => {
-      const { page, context } = await sf.openSlicer(browser, server.baseUrl, { step: 'split', splitOverride: override });
-      await page.waitForSelector('.slicer-step.active[data-step="split"]', { timeout: 10000 });
-      await page.waitForSelector('[data-action="plan"]', { timeout: 10000 });
-      return { page, context };
-    };
+    const open = splitOverride => sf.openStep(browser, server.baseUrl, { step: 'split', ready: '[data-action="plan"]', splitOverride });
 
     const a = await open(running('checking', 'Checking the cuts'));
     try {
