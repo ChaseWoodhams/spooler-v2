@@ -786,9 +786,9 @@
             <span id="review-layer-label"></span>
           </div>
           <div id="review-legend" class="review-legend"></div>
-          <p id="review-no-preview" class="queue-empty" hidden>No toolpath preview — this file is stored on the printer.</p>
         </div>
         <div class="review-checks">
+          <p id="review-no-preview" class="queue-empty" hidden>No toolpath preview — this file is stored on the printer.</p>
           <label>
             Printer
             <select id="review-printer"></select>
@@ -812,11 +812,16 @@
           </div>
         </div>
       </div>
-      <label class="review-ack">
-        <input type="checkbox" id="review-ack" />
-        <span id="review-ack-text">The build plate is clear and the right filament is loaded</span>
-      </label>
+      <fieldset class="review-gate">
+        <legend>Before you start</legend>
+        <label class="review-ack" id="review-warnings-label" hidden><input type="checkbox" id="review-warnings-ack"> I have reviewed the preflight warnings (this does not confirm the bed is clear)</label>
+        <label class="review-ack">
+          <input type="checkbox" id="review-ack" />
+          <span id="review-ack-text">The build plate is clear and the right filament is loaded</span>
+        </label>
+      </fieldset>
       <div class="modal-actions">
+        <p id="review-start-reason" class="review-start-reason" role="status"></p>
         <button id="btn-review-close" class="btn btn-secondary">Close</button>
         <button id="btn-review-recheck" class="btn btn-secondary">Check again</button>
         <button id="btn-review-accept" class="btn btn-secondary" hidden title="Accept the warnings now so Bed cleared can start this job without asking again">Accept warnings for later</button>
