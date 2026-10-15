@@ -714,6 +714,8 @@ function sideCuts() {
   const s = current.settings, c = s.connectors, p = s.printer;
   const busy = RUNNING.has(current.state);
   const oversize = (current.check?.pieces || []).filter(x => !x.fits).length;
+  const tiny = (current.check?.pieces || []).filter(x => x.tiny).length;
+  const grid = s.planner.mode === "grid";
   const preset = CONNECTOR_PRESETS.find(x => x.kind === c.kind && (x.kind === "none" || (x.diameter === c.diameter && x.kind === c.kind)))?.id || "custom";
   return `${viewToggle()}${failedBlock()}
   ${fold("split-printer", "Printer", `${p.bed_x} × ${p.bed_y} × ${p.height} mm`, `
@@ -724,13 +726,14 @@ function sideCuts() {
     <div class="split-seg">
       <label class="split-inline"><input type="radio" name="split-mode" value="smart"${s.planner.mode !== "grid" ? " checked" : ""}> Smart</label>
       <label class="split-inline"><input type="radio" name="split-mode" value="grid"${s.planner.mode === "grid" ? " checked" : ""}> Grid</label>
-      <label class="split-inline"><input type="checkbox" id="split-balanced"${s.planner.balanced ? " checked" : ""}> Even grid</label>
+      <label class="split-inline" id="split-balanced-label"${grid ? "" : ' title="Even grid only applies to Grid cuts"'}><input type="checkbox" id="split-balanced"${s.planner.balanced ? " checked" : ""}${grid ? "" : " disabled"} aria-describedby="split-balanced-why"> Even grid</label>
     </div>
     <p class="split-hint">Smart cuts follow the shape and turn pieces to fit the bed. Grid cuts slice the whole model into bed-sized blocks.</p>
+    <p class="split-hint" id="split-balanced-why"${grid ? " hidden" : ""}>Even grid only applies to Grid cuts.</p>
     <div class="split-actions-row">
       <button class="btn btn-secondary btn-sm" data-action="plan"${busy ? " disabled" : ""}>${cuts.length ? "Plan again" : "Plan cuts"}</button>
-      <button class="btn btn-secondary btn-sm" data-action="autofix"${busy || !oversize || checkDirty ? " disabled" : ""}
-        title="Keep these cuts and add more where parts are still too big">Auto-fix</button>
+      <button class="btn btn-secondary btn-sm" data-action="autofix"${busy || !(oversize || tiny) || checkDirty ? " disabled" : ""}
+        title="Keep these cuts, remove any that leave a part too small to print, and add more where parts are still too big">Auto-fix</button>
     </div>
     <div id="split-check" class="split-check" role="status">${checkText()}</div>
     <div id="split-cut-list" class="split-cut-list">${cutListHtml()}</div>
@@ -1009,6 +1012,11 @@ function bindEvents() {
     } else if (t.id === "split-edit-move") {
       const step = stepById(editStep);
       if (step && t.value) sendEdit({ op: "move", parts: step.parts, to: t.value.split(",").map(Number) });
+    } else if (t.name === "split-mode") {
+      const grid = t.value === "grid";
+      $("split-balanced").disabled = !grid;
+      $("split-balanced-why").hidden = grid;
+      $("split-balanced-label").title = grid ? "" : "Even grid only applies to Grid cuts";
     } else if (t.id === "split-guide-paper") {
       paperChoice = t.value;
     } else if (t.id === "split-conn-preset") {

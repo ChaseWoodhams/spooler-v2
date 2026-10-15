@@ -365,7 +365,9 @@ def request_plan(split_id: int, body: dict) -> dict:
     planner = {k: body[k] for k in ("mode", "balanced") if k in body}
     settings = normalize_settings({"planner": planner, **{k: body[k] for k in ("printer", "connectors") if k in body}},
                                   record["settings"])
-    settings["planner"]["keep_cuts"] = bool(body.get("keep_cuts")) and settings["planner"]["mode"] == "smart"
+    settings["planner"]["keep_cuts"] = bool(body.get("keep_cuts"))
+    if settings["planner"]["keep_cuts"]:  # Auto-fix: only smart cuts can keep the current cuts and add to them
+        settings["planner"]["mode"] = "smart"
     with database.transaction() as conn:
         conn.execute("UPDATE splits SET settings = ?, updated_at = ? WHERE id = ?", (json.dumps(settings), time.time(), split_id))
     _write_job(split_id, {"source_file": record["source_file"], "settings": settings})

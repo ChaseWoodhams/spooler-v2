@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -138,10 +140,103 @@ class EngineTests(unittest.TestCase):
 
     def test_grid_is_even_or_bed_sized(self):
         model = m3d.Manifold.cube([520, 100, 40])
-        limits = dict(engine.DEFAULT_PRINTER)
+        limits = engine.part_limits({})  # the bed less the default margin
         self.assertEqual([c["offset"] for c in engine.plan_grid(model, limits, balanced=True)], [173.333, 346.667])
-        self.assertEqual([c["offset"] for c in engine.plan_grid(model, limits, balanced=False)], [240.0, 480.0])
+        self.assertEqual([c["offset"] for c in engine.plan_grid(model, limits, balanced=False)], [238.0, 476.0])
         self.assertTrue(all(c["parent"] is None for c in engine.plan_grid(model, limits, True)))
+
+    def test_parts_keep_the_margin_inside_the_bed(self):
+        for planner in ({"mode": "grid", "balanced": False}, {"mode": "smart"}):
+            with self.subTest(planner=planner):
+                self.job(channel(), planner=planner)
+                engine.analyze(self.work)
+                engine.plan(self.work)
+                engine.split(self.work)
+                margin = engine.DEFAULT_MARGIN_MM
+                for part in self.read("result.json")["parts"]:
+                    w, d, h = part["print_size"]
+                    self.assertLessEqual(max(w, d), 240 - margin + 0.01, part["print_size"])
+                    self.assertLessEqual(h, 250 - margin + 0.01, part["print_size"])
+
+    def test_a_model_that_fits_the_whole_bed_needs_no_margin(self):
+        self.job(m3d.Manifold.cube([239, 100, 40]), planner={"mode": "smart"})
+        engine.analyze(self.work)
+        self.assertTrue(self.read("analysis.json")["fits_whole"])
+        engine.plan(self.work)
+        self.assertEqual(self.read("cuts.json")["cuts"], [])
+
+    def test_a_part_that_fits_only_when_turned_on_the_bed_is_split(self):
+        # a 320 mm wall standing 245 mm tall, turned 45 degrees: its 233 mm square footprint fits a 240 mm bed,
+        # but the smallest-area rectangle around it is 320 x 10 mm, which doesn't
+        wall = m3d.Manifold.cube([320, 10, 245]).rotate([0, 0, 45])
+        self.job(wall, planner={"mode": "smart"})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        self.assertEqual(self.read("cuts.json")["cuts"], [])
+        self.assertTrue(all(p["fits"] for p in self.read("check.json")["pieces"]))
+        engine.split(self.work)
+        self.assertEqual(self.read("result.json")["summary"]["parts"], 1)
+
+    def test_every_piece_the_check_says_fits_can_be_split(self):
+        self.job(channel(), planner={"mode": "grid", "balanced": False})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        check = self.read("check.json")
+        self.assertTrue(all(p["fits"] for p in check["pieces"]))
+        engine.split(self.work)
+        self.assertEqual(self.read("result.json")["summary"]["parts"], len(check["pieces"]))
+
+    def test_a_grid_line_that_clips_a_sliver_is_moved(self):
+        M = m3d.Manifold
+        bar = M.batch_boolean([M.cube([470, 100, 40]), M.cube([10, 10, 10]).translate([470, 45, 15])], m3d.OpType.Add)
+        self.job(bar, planner={"mode": "grid", "balanced": False})  # a line at 476 mm would leave a 4 mm tip of the tab
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        pieces = self.read("check.json")["pieces"]
+        self.assertFalse([p for p in pieces if p["tiny"] or not p["fits"]], pieces)
+        engine.split(self.work)
+
+    def test_auto_fix_removes_a_cut_that_leaves_a_sliver(self):
+        self.job(channel(), planner={"mode": "grid", "balanced": True})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        cuts = self.read("cuts.json")["cuts"]
+        cuts.append({"id": 99, "parent": None, "normal": [1.0, 0.0, 0.0], "offset": 1.0, "scope": None})  # a 1 mm slab
+        (self.work / "cuts.json").write_text(json.dumps({"mode": "grid", "cuts": cuts}))
+        engine.check(self.work)
+        self.assertTrue(any(p["tiny"] for p in self.read("check.json")["pieces"]))
+
+        self.job(channel(), planner={"mode": "smart", "keep_cuts": True})  # what Auto-fix asks for
+        engine.plan(self.work)
+        check = self.read("check.json")
+        self.assertNotIn(99, [c["id"] for c in check["cuts"]])
+        self.assertFalse(any(p["tiny"] for p in check["pieces"]))
+        self.assertTrue(all(p["fits"] for p in check["pieces"]))
+        engine.split(self.work)
+
+    def test_part_numbers_match_the_check(self):
+        self.job(channel(), planner={"mode": "smart"})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        pieces = self.read("check.json")["pieces"]
+        engine.split(self.work)
+        parts = self.read("result.json")["parts"]
+        self.assertEqual(len(parts), len(pieces))
+        for piece, part in zip(pieces, parts):
+            centre = lambda b: [(b[i] + b[i + 3]) / 2 for i in range(3)]
+            for a, b in zip(centre(piece["bbox"]), centre(part["bbox"])):
+                self.assertAlmostEqual(a, b, delta=2.0, msg=(part["number"], piece["bbox"], part["bbox"]))
+
+    @unittest.skipUnless(os.environ.get("SPOOLER_SEAT_STL"), "set SPOOLER_SEAT_STL to the SEAT model to run this slow case")
+    def test_seat_plans_without_slivers_and_every_part_splits(self):
+        shutil.copy(os.environ["SPOOLER_SEAT_STL"], self.work / "source" / "model.stl")
+        (self.work / "job.json").write_text(json.dumps({"source": "source/model.stl", "planner": {"mode": "smart"}}))
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        pieces = self.read("check.json")["pieces"]
+        self.assertFalse([p for p in pieces if p["tiny"] or not p["fits"]])
+        engine.split(self.work)
+        self.assertEqual(self.read("result.json")["summary"]["parts"], len(pieces))
 
     def test_a_model_that_fits_is_one_part(self):
         self.job(m3d.Manifold.cube([60, 40, 30]), planner={"mode": "smart"})
