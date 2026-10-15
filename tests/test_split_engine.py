@@ -177,6 +177,26 @@ class EngineTests(unittest.TestCase):
         with self.assertRaisesRegex(engine.EngineError, "too small"):
             engine.split(self.work)
 
+    def test_a_sliver_names_the_cut_that_made_it(self):
+        self.job(channel(), planner={"mode": "grid", "balanced": True})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        cuts = self.read("cuts.json")["cuts"]
+        cuts[0]["offset"] = 1.0  # leaves a 1 mm slab
+        (self.work / "cuts.json").write_text(json.dumps({"mode": "grid", "cuts": cuts}))
+        engine.check(self.work)
+        pieces = self.read("check.json")["pieces"]
+        slivers = [p for p in pieces if p["tiny"]]
+        self.assertTrue(slivers)
+        self.assertEqual({p["made_by_cut"] for p in slivers}, {cuts[0]["id"]})
+        self.assertTrue(all(p["made_by_cut"] is not None for p in pieces))  # every part came from some cut
+
+    def test_a_model_with_no_cuts_has_no_creating_cut(self):
+        self.job(channel(60.0), planner={"mode": "grid", "balanced": True})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        self.assertEqual([p["made_by_cut"] for p in self.read("check.json")["pieces"]], [None])
+
     def test_meshes_are_repaired(self):
         box = trimesh.creation.box((40, 40, 40))
         open_box = trimesh.Trimesh(vertices=box.vertices, faces=box.faces[:-2], process=False)
