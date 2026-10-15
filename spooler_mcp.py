@@ -91,6 +91,29 @@ class Context:
                 raise
 
 
+def check_arguments(schema: dict, arguments) -> dict:
+    """The tool's arguments, checked against its schema: an object, no unknown names, every required name present, each value of
+    its declared type (a boolean is not an integer). A bad argument is a ToolError the model can read."""
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        raise ToolError("The arguments must be an object")
+    properties = schema.get("properties") or {}
+    for name in arguments:
+        if name not in properties:
+            raise ToolError(f"Unknown argument {str(name)[:40]!r}")
+    for name in schema.get("required") or []:
+        if name not in arguments:
+            raise ToolError(f"Missing argument {name!r}")
+    kinds = {"integer": int, "string": str, "boolean": bool, "number": (int, float)}
+    for name, value in arguments.items():
+        kind = properties[name].get("type")
+        expected = kinds.get(kind)
+        if expected and (not isinstance(value, expected) or (kind in ("integer", "number") and isinstance(value, bool))):
+            raise ToolError(f"Argument {name!r} must be {'an' if kind == 'integer' else 'a'} {kind}")
+    return arguments
+
+
 # ── Shaping what the model sees ───────────────────────────────────────────────
 
 def quoted(text, cap: int) -> str:
@@ -162,6 +185,194 @@ def get_project(ctx: Context) -> dict:
     return fit_to_cap(result, ("models", "plates"))
 
 
+def _plate_of(record: dict, plate_id: int) -> dict:
+    plate = next((p for p in (record.get("data") or {}).get("plates") or [] if p["id"] == plate_id), None)
+    if plate is None:
+        raise ToolError(f"Plate {plate_id} not found in this project")
+    return plate
+
+
+def _rounded(values, places: int = 2):
+    return [round(float(v), places) for v in values] if values is not None else None
+
+
+def _slice_view(entry: dict | None) -> dict:
+    if not entry:
+        return {"state": "none", "outdated": False}
+    view = {"state": entry.get("state"), "outdated": bool(entry.get("outdated")), "estimate_s": entry.get("estimate_s"),
+            "estimate_g": entry.get("estimate_g"), "layers": entry.get("layers")}
+    if entry.get("outdated_reason"):
+        view["outdated_reason"] = entry["outdated_reason"]
+    return view
+
+
+def _analysis_findings(project_id: int, plate_id: int, datapaths) -> list:
+    """The G-code checks of a plate's current Slice: which command and why, never the G-code itself."""
+    analysis = datapaths.read_json(datapaths.plate_dir(project_id, plate_id), "analysis.json") or {}
+    return [{"level": f.get("level"), "command": quoted(f.get("command"), 20), "reason": quoted(f.get("reason"), 160)}
+            for f in analysis.get("findings") or []]
+
+
+@tool("get_plate", "Read one Plate of this project: its Objects (Model, position in mm, rotation in degrees, scale, Pinned, per-Object "
+      "setting overrides, whether supports are needed), plate setting overrides, plate features and time estimate, placement "
+      "problems (off the bed, overlaps, too close) and the findings of its current Slice. Names are quoted user text. "
+      "Carries the project revision.", {"plate_id": {"type": "integer"}}, required=["plate_id"])
+def get_plate(ctx: Context, plate_id: int) -> dict:
+    datapaths, project_read, placement_read, _ = ctx.core()
+    record = ctx.record()
+    plate = _plate_of(record, plate_id)
+    data = record["data"]
+    entry = (record.get("slices") or {}).get(str(plate_id)) or {}
+    try:
+        process = placement_read._plate_process(record, plate)
+    except Exception:
+        process = None
+    objects = []
+    for obj in (o for o in data.get("objects") or [] if o.get("plate") == plate_id):
+        supports = None
+        if process is not None:
+            try:
+                verts, tris = placement_read.load_mesh(ctx.project_id, obj["model"], preview=True)
+                supports = placement_read._needs_supports(process, verts, tris, obj)
+            except Exception:
+                supports = None                       # the Model's geometry is not ready: not known, which is not "no"
+        overrides = obj.get("overrides") or {}
+        objects.append({"id": obj["id"], "model": obj["model"], "name_quoted": quoted(obj.get("name"), NAME_CAP),
+                        "position_mm": _rounded(obj.get("position") or []), "rotation_deg": _rounded(obj.get("rotation") or []),
+                        "scale": _rounded(obj.get("scale") or [], 4), "pinned": bool(obj.get("pinned")),
+                        "overrides": {str(k): quoted(v, 80) for k, v in list(overrides.items())[:40]},
+                        "needs_supports": supports})
+    try:
+        features = placement_read.plate_features(ctx.project_id, record, plate_id)
+    except Exception:
+        features = None
+    try:
+        time = placement_read.plate_time(ctx.project_id, record, plate_id, entry)
+    except Exception:
+        time = None
+    try:
+        problems = [{"object": p["key"], "other_object": p["other"], "kind": p["problem"], "warning_only": bool(p["soft"])}
+                    for p in placement_read.plate_problems(ctx.project_id, record, [plate_id])]
+    except Exception:
+        problems = None                               # cannot be judged right now (no profile, geometry missing)
+    findings = []
+    if entry.get("state") == project_read.SLICED and not entry.get("outdated"):
+        findings = _analysis_findings(ctx.project_id, plate_id, datapaths)
+    result = {"revision": record["revision"],
+              "plate": {"id": plate_id, "name_quoted": quoted(plate.get("name"), NAME_CAP),
+                        "overrides": {str(k): quoted(v, 80) for k, v in list((plate.get("overrides") or {}).items())[:40]}},
+              "objects": objects, "features": features, "time_estimate": time, "slice": _slice_view(entry),
+              "placement_problems": problems, "slice_findings": findings}
+    return fit_to_cap(result, ("objects", "slice_findings", "placement_problems"))
+
+
+@tool("get_model_geometry", "Read the geometry of one Model: size in mm, volume, surface, triangle count, the footprint it makes on "
+      "the bed as it stands, and the orientations Spooler would suggest (least-support and strength modes) with their scores "
+      "(support, bed contact, height, overhang area). Never the mesh itself. Carries the project revision.",
+      {"model_id": {"type": "integer"}}, required=["model_id"])
+def get_model_geometry(ctx: Context, model_id: int) -> dict:
+    datapaths, project_read, placement_read, _ = ctx.core()
+    record = ctx.record()
+    model = next((m for m in record.get("models") or [] if m["id"] == model_id), None)
+    if model is None:
+        raise ToolError(f"Model {model_id} not found in this project")
+    result = {"revision": record["revision"], "model": {"id": model_id, "name_quoted": quoted(model.get("name"), NAME_CAP),
+                                                         "import_state": model.get("state")}}
+    if model.get("state") != project_read.READY:
+        result["geometry"] = None
+        return result
+    analysis = datapaths.read_json(datapaths.model_dir(ctx.project_id, model_id), "analysis.json") or {}
+    obj = next((o for o in record["data"].get("objects") or [] if o.get("model") == model_id), None)
+    scale = obj["scale"] if obj else [1.0, 1.0, 1.0]
+    rotation = obj["rotation"] if obj else [0.0, 0.0, 0.0]
+    geometry = {"size_mm": analysis.get("size") or model.get("size"), "volume_cm3": analysis.get("volume_cm3"),
+                "surface_cm2": analysis.get("surface_cm2"), "triangles": analysis.get("triangles"),
+                "repairs": len(analysis.get("repairs") or [])}
+    verts = tris = None
+    try:
+        verts, tris = placement_read.load_mesh(ctx.project_id, model_id, preview=True)
+        placed = placement_read.place(verts, {"scale": scale, "rotation": rotation, "position": [0.0, 0.0]})
+        extent = placed.max(axis=0) - placed.min(axis=0)
+        geometry["as_placed"] = {"scale": _rounded(scale, 4), "rotation_deg": _rounded(rotation),
+                                 "footprint_mm": [round(float(extent[0]), 2), round(float(extent[1]), 2)],
+                                 "footprint_cm2": round(float(extent[0] * extent[1]) / 100, 2), "height_mm": round(float(extent[2]), 2)}
+    except Exception:
+        geometry["as_placed"] = None
+    candidates = []
+    for mode in ("least-support", "strength"):
+        try:
+            import orientation
+            options = placement_read._orient_options(record, {"mode": mode})
+            found = orientation.suggest(verts, tris, scale, rotation, **options)
+        except Exception:
+            candidates.append({"mode": mode, "available": False})
+            continue
+        candidates.append({"mode": mode, "available": True, "rotation_deg": _rounded(found["rotation"]), "changes_current": found["changed"],
+                           "current_score": {k: round(float(v), 2) for k, v in found["current"].items()},
+                           "suggested_score": {k: round(float(v), 2) for k, v in found["suggested"].items()}})
+    result["geometry"] = geometry
+    result["orientation_candidates"] = candidates
+    return fit_to_cap(result, ("orientation_candidates",))
+
+
+@tool("get_printer_capabilities", "Read the limits of the printer this project is locked to, from the locked profile's machine preset: "
+      "bed rectangle in mm, build height, the excluded (purge) area and nozzle diameter. Never live printer state. "
+      "Carries the project revision.")
+def get_printer_capabilities(ctx: Context) -> dict:
+    _, _, _, profile_read = ctx.core()
+    record = ctx.record()
+    bundle_id = (record["data"].get("profile") or {}).get("bundle_id")
+    if not bundle_id:
+        raise ToolError("No profile is locked for this project yet, so the printer limits are not known")
+    try:
+        machine = profile_read.bundle_settings(bundle_id)["machine"]
+    except Exception as e:
+        if getattr(e, "status", None):
+            raise ToolError("The locked profile cannot be read right now") from None
+        raise
+    limits = profile_read.machine_limits(machine)
+    x0, y0, x1, y1 = limits["bed"]
+    nozzle = machine.get("nozzle_diameter")
+    nozzle = nozzle[0] if isinstance(nozzle, list) and nozzle else nozzle
+    try:
+        nozzle = float(nozzle)
+    except (TypeError, ValueError):
+        nozzle = None
+    return {"revision": record["revision"], "bed_mm": {"x_min": x0, "y_min": y0, "x_max": x1, "y_max": y1, "width": x1 - x0, "depth": y1 - y0},
+            "height_mm": limits["height"],
+            "exclusion_area_mm": dict(zip(("x_min", "y_min", "x_max", "y_max"), limits["exclude"])) if limits["exclude"] else None,
+            "nozzle_mm": nozzle, "bed_surface": record["data"].get("bed")}
+
+
+@tool("get_slice_summary", "Read the numbers and labels of one Plate's current Slice: print time, filament, layers, time and length "
+      "per feature, bounds and the G-code checks. Never the G-code. An Outdated Slice comes back with outdated: true and what "
+      "changed, not its numbers. Carries the project revision.", {"plate_id": {"type": "integer"}}, required=["plate_id"])
+def get_slice_summary(ctx: Context, plate_id: int) -> dict:
+    datapaths, project_read, _, _ = ctx.core()
+    record = ctx.record()
+    _plate_of(record, plate_id)
+    entry = (record.get("slices") or {}).get(str(plate_id))
+    result = {"revision": record["revision"], "plate_id": plate_id, **_slice_view(entry)}
+    if not entry or entry.get("state") != project_read.SLICED:
+        return result
+    if entry.get("outdated"):
+        result["changed"] = ("The profile or filament can no longer be resolved, so the Slice cannot be checked against the project"
+                             if entry.get("outdated_reason") == "inputs-unresolved" else
+                             "Objects, plate layout, settings, profile or filament changed since this Plate was sliced; slice it again")
+        for key in ("estimate_s", "estimate_g", "layers"):
+            result.pop(key, None)
+        return result
+    analysis = datapaths.read_json(datapaths.plate_dir(ctx.project_id, plate_id), "analysis.json") or {}
+    result.update({
+        "slicer": quoted(analysis.get("slicer"), 60), "estimates": analysis.get("estimates") or {},
+        "layer_count": len(analysis.get("layers") or []),
+        "features": [{"feature": quoted(n, 40), **v} for n, v in (analysis.get("feature_stats") or {}).items()],
+        "model_bounds_mm": (analysis.get("bounds") or {}).get("model"), "stats": analysis.get("stats") or {},
+        "temperatures": {k: {"max": v.get("max"), "first": v.get("first")} for k, v in (analysis.get("temperatures") or {}).items() if v},
+        "findings": _analysis_findings(ctx.project_id, plate_id, datapaths)})
+    return fit_to_cap(result, ("features", "findings"))
+
+
 # ── The protocol ──────────────────────────────────────────────────────────────
 
 def _reply(message_id, result=None, error=None) -> dict:
@@ -193,7 +404,8 @@ def handle(message: dict, ctx: Context):
         if entry is None:
             return _reply(message_id, error={"code": -32602, "message": f"Unknown tool {str(params.get('name'))[:60]!r}"})
         try:
-            text, failed = json.dumps(entry["fn"](ctx), ensure_ascii=False), False
+            arguments = check_arguments(entry["inputSchema"], params.get("arguments"))
+            text, failed = json.dumps(entry["fn"](ctx, **arguments), ensure_ascii=False), False
         except ToolError as e:
             text, failed = str(e), True
         except Exception as e:                # a bug or unreadable data is an error result, never a dead server
