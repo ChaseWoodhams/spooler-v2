@@ -327,6 +327,32 @@ class AskTests(unittest.TestCase):
         view = self.finished("again")
         self.assertNotIn("pelican", json.dumps(view))
 
+    def test_progress_steps_name_the_model_or_plate_a_tool_call_names_and_fall_back_to_the_generic_label(self):
+        model = self.project["models"][0]
+        plate = self.project["data"]["plates"][0]
+        self.scenario({"calls": [{"tool": "get_model_geometry", "arguments": {"model_id": model["id"]}},
+                                 {"tool": "get_plate", "arguments": {"plate_id": plate["id"]}},
+                                 {"tool": "get_slice_summary", "arguments": {"plate_id": plate["id"]}},
+                                 {"tool": "get_model_geometry", "arguments": {"model_id": 99999}}],
+                       "answer": "Done."})
+        labels = [s["label"] for s in self.finished()["steps"]]
+        self.assertEqual(labels, [f"Reading {model['name']} geometry", f"Reading {plate['name']}", f"Reading {plate['name']} slice",
+                                  "Reading model geometry"])
+
+    def test_a_name_in_a_step_label_is_one_short_line_and_never_reaches_the_log(self):
+        project = self.make_project("Long", ["Zork   " + "q" * 200 + ".stl"])
+        model = project["models"][0]
+        self.scenario({"calls": [{"tool": "get_model_geometry", "arguments": {"model_id": model["id"]}}]})
+        logged = io.StringIO()
+        with mock.patch("sys.stdout", logged):
+            status, run = self.ask(project=project)
+            view = self.poll(run)
+        label = view["steps"][0]["label"]
+        self.assertTrue(label.startswith("Reading Zork q"), label)
+        self.assertLess(len(label), 100)
+        self.assertNotIn("Zork", logged.getvalue())
+        self.assertIn("[Assistant]", logged.getvalue())
+
     # ── only this project ──
     def test_the_assistant_sees_only_the_project_it_was_asked_about(self):
         self.make_project("Secret other project", ["other.stl"])

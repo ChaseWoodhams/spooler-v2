@@ -56,6 +56,14 @@ STEP_LABELS = {
     "propose_plan": "Writing proposal", "propose_settings": "Writing proposal",
 }
 
+# Tools whose call names a Model or Plate: (argument, whose name, label with the name in it). The name is user data: one short
+# line, shown in the panel only (which escapes it) and never written to the log.
+NAMED_STEPS = {
+    "get_plate": ("plate_id", "plates", "Reading {}"), "get_model_geometry": ("model_id", "models", "Reading {} geometry"),
+    "get_slice_summary": ("plate_id", "plates", "Reading {} slice"),
+}
+MAX_STEP_NAME = 40
+
 SYSTEM_PROMPT = """You are the Spooler Assistant, built into a 3D print farm manager. You help one person with one project.
 
 What you can do
@@ -99,7 +107,8 @@ class Run:
         self.proc = None                   # the CLI process, kept so Cancel and the deadline can end its tree
         self.reason = None                 # "cancelled" or "timeout" once either has been asked for
         self.tool_calls = 0                # every tool_use seen (steps are capped, this is not)
-        self.proposals: list = []          # Proposal tokens (tickets 15 onwards fill this; the log line carries them)
+        self.proposals: list = []          # Proposal tokens; the log line carries them
+        self.names: dict = {"models": {}, "plates": {}}    # id -> name, to word the progress steps
         self.done = threading.Event()      # set by _finish
         self.stop = threading.Event()      # set when the run is over, to release the deadline watcher
 
@@ -223,6 +232,7 @@ def ask(project_id: int, message, history=None) -> dict:
     if not cli:
         raise AskError("AI unavailable: no claude CLI found", 503)
     run = Run(project_id)
+    run.names = _names(record)
     with _lock:
         if int(project_id) in _active:
             raise AskError("The assistant is already working on this project", 409)
@@ -233,6 +243,25 @@ def ask(project_id: int, message, history=None) -> dict:
     _sweep_staging()
     threading.Thread(target=_execute, args=(run, cli, settings["jev_url"], prompt), name=f"assistant-run-{run.id[:8]}", daemon=True).start()
     return with_summaries(run.view())
+
+
+def _names(record: dict) -> dict:
+    data = record.get("data") or {}
+    return {"models": {m["id"]: m.get("name") or m.get("file") for m in record.get("models") or []},
+            "plates": {p["id"]: p.get("name") or f"Plate {p['id']}" for p in data.get("plates") or []}}
+
+
+def step_label(run: Run, tool: str, arguments) -> str:
+    """The progress label for a tool call: the Model or Plate it names when the project has one, else the generic label."""
+    named = NAMED_STEPS.get(tool)
+    if named and isinstance(arguments, dict):
+        argument, whose, template = named
+        key = arguments.get(argument)
+        found = run.names[whose].get(key) if isinstance(key, int) else None
+        name = " ".join(str(found or "").split())
+        if name:
+            return template.format(name if len(name) <= MAX_STEP_NAME else name[: MAX_STEP_NAME - 1] + "…")
+    return STEP_LABELS.get(tool, "Working")
 
 
 def get(project_id: int, run_id: str) -> dict:
@@ -486,7 +515,7 @@ def _consume(run: Run, proc) -> tuple:
                     name = str(block.get("name") or "")
                     tool = name[len(f"mcp__{SERVER_NAME}__"):] if name.startswith(f"mcp__{SERVER_NAME}__") else name
                     run.tool_calls += 1
-                    _step(run, STEP_LABELS.get(tool, "Working"), tool)
+                    _step(run, step_label(run, tool, block.get("input")), tool)
         elif kind == "result":
             if not run.init_ok:
                 _terminate(proc)
