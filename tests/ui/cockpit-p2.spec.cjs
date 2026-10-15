@@ -113,6 +113,7 @@ async function open(browser, base, { width = 1098, height = 507, camera = false,
     {
       const fx = await open(browser, base, { status: printingStatus });
       const { page } = fx;
+      await page.getByRole('tab', { name: 'Motion', exact: true }).click();   // a Print opens on Temperatures; step-1 lives on Motion
       for (const key of ['pause', 'stop', 'step-1', 'back']) {
         await page.locator(`[data-focus-key=${key}]`).focus();
         fx.update({ status: { ...printingStatus, TempOfNozzle: 200 + Math.random() } });

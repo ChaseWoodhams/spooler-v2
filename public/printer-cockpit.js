@@ -21,11 +21,12 @@
   };
   // #printer=<id>[&tab=<tab>]: the URL names the tab, so a reload or a shared link lands on it; without one the last tab for this printer
   const routeParams = () => (location.hash.startsWith("#printer=") ? new URLSearchParams(location.hash.slice(1)) : null);
+  let printInProgress = false;   // set on each render: jog is locked during a Print, so Temperatures is the useful first tab
   const currentTab = printerId => {
     const fromUrl = routeParams()?.get("tab");
     if (TAB_KEYS.includes(fromUrl)) return fromUrl;
     const remembered = window.cockpitPref(printerId, "tab");
-    return TAB_KEYS.includes(remembered) ? remembered : "motion";
+    return TAB_KEYS.includes(remembered) ? remembered : printInProgress ? "temps" : "motion";
   };
   // Keep the URL in step with the tab without adding a history entry (no hashchange, so nothing re-renders)
   const syncTabUrl = (printerId, t) => {
@@ -200,6 +201,7 @@
 
   // ── Cockpit ────────────────────────────────────────────────────────────────
   window.cockpitPrinterHtml = c => {
+    printInProgress = !!(c.printing || c.paused);
     const tab = currentTab(c.printer.id);
     syncTabUrl(c.printer.id, tab);
     if (tab === "files") loadRecent(c.printer.id);

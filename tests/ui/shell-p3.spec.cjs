@@ -137,6 +137,37 @@ async function queueEntry(browser, base) {
   console.log('PASS: The Queue entry is a full-size target with a count that is always visible');
 }
 
+async function smallShellFixes(browser, base) {
+  // UCF-09: at 390 the health pill shows an icon, not a bare dot
+  const fx = await open(browser, base, { width: 390 });
+  await fx.page.locator('#card-shell-fixture').waitFor();
+  const pill = await fx.page.evaluate(() => {
+    const button = document.getElementById('btn-system-health'), icon = document.getElementById('health-pill-icon');
+    const box = icon.getBoundingClientRect();
+    return { iconW: box.width, iconH: box.height, paths: icon.children.length, name: button.getAttribute('aria-label') };
+  });
+  assert.ok(pill.iconW > 0 && pill.iconH > 0 && pill.paths > 0, 'the pill shows an icon at 390: ' + JSON.stringify(pill));
+  assert.match(pill.name, /^System health: .+/, 'and keeps an accessible name');
+  // UCF-09: Settings opens with focus on the dialog, no focus ring on the heading; focus stays trapped; Escape closes
+  await fx.page.locator('#btn-mobile-more').click();
+  await fx.page.locator('#btn-mobile-settings').click();
+  await fx.page.locator('#modal-app-settings').waitFor();
+  const focus = await fx.page.evaluate(() => {
+    const el = document.activeElement, style = getComputedStyle(el);
+    return { id: el.id, tag: el.tagName, noRing: style.outlineStyle === 'none' || parseFloat(style.outlineWidth) === 0 };
+  });
+  assert.equal(focus.id, 'modal-app-settings', 'focus is on the dialog: ' + JSON.stringify(focus));
+  assert.ok(focus.noRing, 'no focus ring on the dialog container');
+  for (let i = 0; i < 12; i++) {
+    await fx.page.keyboard.press('Tab');
+    assert.equal(await fx.page.evaluate(() => !!document.activeElement.closest('#modal-app-settings')), true, 'Tab stays inside Settings');
+  }
+  await fx.page.keyboard.press('Escape');
+  await fx.page.waitForFunction(() => !document.getElementById('modal-app-settings').classList.contains('open'));
+  await fx.context.close();
+  console.log('PASS: The health pill keeps an icon at 390 and Settings opens with focus on the dialog');
+}
+
 (async () => {
   const server = http.createServer(async (request, response) => {
     try {
@@ -151,7 +182,7 @@ async function queueEntry(browser, base) {
   const base = `http://127.0.0.1:${server.address().port}`;
   const browser = await chromium.launch();
   try {
-    for (const scenario of [cardTabStop, lightToggle, panelRoutes, queueEntry]) {
+    for (const scenario of [cardTabStop, lightToggle, panelRoutes, queueEntry, smallShellFixes]) {
       if (process.env.ONLY && scenario.name !== process.env.ONLY) continue;
       await scenario(browser, base);
     }
