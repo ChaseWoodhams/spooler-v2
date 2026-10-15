@@ -31,7 +31,9 @@ SPOOLMAN_DB_FILE  = os.getenv("SPOOLMAN_DB_FILE", "").strip()
 ARCHIVE_PREFIX  = "spooler-backup-"
 CONFIG_SUFFIXES = {".json", ".pem"}
 # Runtime state that should not be restored onto another install
-EXCLUDED_FILES  = {"sessions.json", "supervisor_status.json"}
+EXCLUDED_FILES  = {"supervisor_status.json"}
+# Files an older, login-protected install left in DATA_DIR; nothing reads them any more
+LEFTOVER_FILES  = {"auth.json", "sessions.json"}
 
 
 class BackupInProgress(Exception):
@@ -73,7 +75,7 @@ def _config_files(data_dir: Path, app_dir: Path):
     if data_dir.is_dir():
         candidates = [
             (p, f"data/{p.name}") for p in sorted(data_dir.iterdir())
-            if p.is_file() and p.suffix in CONFIG_SUFFIXES and p.name not in EXCLUDED_FILES
+            if p.is_file() and p.suffix in CONFIG_SUFFIXES and p.name not in EXCLUDED_FILES | LEFTOVER_FILES
         ]
     candidates += [(app_dir / ".env", "app/.env"), (data_dir / ".env", "data/.env")]
     seen = set()

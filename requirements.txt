@@ -1,6 +1,5 @@
 websockets
 aiomqtt
-bcrypt
 pywebpush
 # splitting large models (split_engine.py)
 manifold3d>=3.5.3
