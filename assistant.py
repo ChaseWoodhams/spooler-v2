@@ -55,27 +55,43 @@ def _settings_file() -> Path:
     return _data_dir / SETTINGS_NAME
 
 
-def load_settings() -> dict:
-    """The saved Settings with working defaults filled in. Never raises."""
+def read_raw() -> dict:
+    """The settings file as saved ({} when missing or damaged). Never raises. Connection settings and the tuning section share it."""
     try:
         raw = json.loads(_settings_file().read_text(encoding="utf-8"))
     except Exception:
-        raw = {}
-    if not isinstance(raw, dict):
-        raw = {}
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def write_raw(raw: dict) -> None:
+    _settings_file().parent.mkdir(parents=True, exist_ok=True)
+    tmp = _settings_file().with_suffix(".tmp")
+    tmp.write_text(json.dumps(raw), encoding="utf-8")
+    os.replace(tmp, _settings_file())
+    _clear_cache()
+
+
+def load_settings() -> dict:
+    """The saved connection Settings (CLI path, Jev address) with working defaults filled in. Never raises."""
+    raw = read_raw()
     cli = raw.get("cli_path") if isinstance(raw.get("cli_path"), str) else ""
     url = raw.get("jev_url") if isinstance(raw.get("jev_url"), str) else ""
     return {"cli_path": cli.strip(), "jev_url": url.strip().rstrip("/") or DEFAULT_JEV_URL}
 
 
 def settings_view() -> dict:
-    return {**load_settings(), "defaults": {"cli_path": "", "jev_url": DEFAULT_JEV_URL}, "cli_found": resolve_cli(load_settings())}
+    import assistant_tuning                      # lazy: it imports this module
+    return {**load_settings(), "defaults": {"cli_path": "", "jev_url": DEFAULT_JEV_URL}, "cli_found": resolve_cli(load_settings()),
+            "tuning": assistant_tuning.view()}
 
 
 def save_settings(body) -> dict:
-    """Merge the given keys into the saved Settings. A blank value goes back to its default."""
+    """Merge the given keys into the saved Settings. A blank value goes back to its default. `tuning` ({group: {key: value}}) and
+    `reset_tuning` (a group name or "all") change the tuning section; everything is checked before anything is written."""
     if not isinstance(body, dict):
         raise AssistantError("Settings must be an object")
+    import assistant_tuning
     current = load_settings()
     if "cli_path" in body:
         value = body["cli_path"]
@@ -92,11 +108,9 @@ def save_settings(body) -> dict:
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
                 raise AssistantError("The Jev address must start with http:// or https://")
         current["jev_url"] = value or DEFAULT_JEV_URL
-    _settings_file().parent.mkdir(parents=True, exist_ok=True)
-    tmp = _settings_file().with_suffix(".tmp")
-    tmp.write_text(json.dumps(current), encoding="utf-8")
-    os.replace(tmp, _settings_file())
-    _clear_cache()
+    if "tuning" in body or "reset_tuning" in body:
+        assistant_tuning.save(body.get("tuning"), body.get("reset_tuning"))      # validates, then writes the file with the old connection keys
+    write_raw({**read_raw(), **current})
     return settings_view()
 
 
