@@ -447,7 +447,10 @@ async function loadGuide() {
     guide = { ...loaded, split_id: id };
   } catch (err) {
     if (!current || current.id !== id) return;
-    guide = { state: "failed", error: err.message, blocked: "", has_pdf: false, split_id: id };
+    // A not-found reply means no guide has been made yet; anything else is a real failure.
+    guide = err.status === 404
+      ? { state: "none", blocked: "", has_pdf: false, split_id: id }
+      : { state: "failed", error: err.message, blocked: "", has_pdf: false, split_id: id };
   }
   clearTimeout(guideTimer);
   if (guide.state === "generating") guideTimer = setTimeout(loadGuide, 1500);
@@ -473,8 +476,9 @@ function guidePanel() {
     <div class="split-actions-row">
       <label class="split-inline">Paper <select id="split-guide-paper"${working ? " disabled" : ""}>
         ${["a4", "letter"].map(v => `<option value="${v}"${paper === v ? " selected" : ""}>${v === "a4" ? "A4" : "Letter"}</option>`).join("")}</select></label>
-      <button class="btn btn-primary btn-sm" data-action="guide"${disabled ? " disabled" : ""}${why ? ' aria-describedby="split-guide-why"' : ""}>${g.has_pdf ? "Generate again" : "Generate"}</button>
+      <button class="btn btn-primary btn-sm" data-action="guide"${disabled ? " disabled" : ""}${why ? ' aria-describedby="split-guide-why"' : ""}>${g.has_pdf ? "Generate again" : g.state === "failed" ? "Retry" : "Generate"}</button>
     </div>
+    ${g.state === "none" && !g.has_pdf && !why ? '<small class="reason-line">No guide has been made for this split yet.</small>' : ""}
     ${why ? `<small class="reason-line" id="split-guide-why">${esc(why)}</small>` : ""}
     ${working ? `<div class="split-progress" role="status"><progress max="100" value="${g.percent || 0}"></progress> ${esc(g.stage || "Working")}</div>` : ""}
     ${g.state === "failed" && g.error ? `<div class="job-error" role="alert">${esc(g.error)}</div>` : ""}
@@ -639,10 +643,8 @@ function sideModel() {
   const hint = Math.max(...a.size) > 3000 ? 'Check the units: a dimension exceeds 3000 mm. If millimetres were treated as metres, enter scale 1 and analyse again; for oversized source coordinates, try scale 0.001.' : raw < 5 && s.scale === 1 ? "This model looks like it's in metres — try ×1000."
              : raw < 60 && s.scale === 1 ? "This is small — if it was modelled in centimetres use ×10, or ×25.4 for inches." : "";
   const blocked = RUNNING.has(current.state) || current.state === 'failed';
-  const next = a.fits_whole
-    ? `<button class="btn btn-secondary" data-action="go-split"${blocked ? ' disabled' : ''}>Split it anyway</button>
-       <button class="btn btn-primary" data-action="whole"${blocked ? ' disabled' : ''}>Put it on a plate →</button>`
-    : `<button class="btn btn-primary" data-action="go-split"${blocked ? ' disabled' : ''}>Plan the cuts →</button>`;
+  // The forward action ("Plan the cuts →", "Put it on a plate →") lives in the workspace header, the same place on every step
+  const next = a.fits_whole ? `<button class="btn btn-secondary" data-action="go-split"${blocked ? ' disabled' : ''}>Split it anyway</button>` : "";
   return `${failedBlock()}
   <section class="split-section"><h4>${esc(current.source_name)}</h4>
     ${hint ? `<p class="split-hint split-bad">${esc(hint)}</p>` : ""}
@@ -785,8 +787,7 @@ function sideParts() {
       </tr>`).join("")}</tbody>
     </table></div>
   </section>
-  ${guidePanel()}
-  <div class="split-actions"><button class="btn btn-primary" data-action="layout">Lay out on plates →</button></div>`;
+  ${guidePanel()}`;
 }
 
 // ─── Actions ──────────────────────────────────────────────────────────────────
@@ -1047,6 +1048,24 @@ export const splitStep = {
   attach(options) {
     host = options;
     bindEvents();
+  },
+
+  /** The forward action for the step on screen, shown in the workspace header: { label, action, why } or null.
+   *  `why` is set while it can't be used yet. */
+  forward() {
+    if (!current || !view || current.state === "failed") return null;
+    const why = RUNNING.has(current.state) ? "Wait for the check to finish" : "";
+    if (view === "model") {
+      if (!current.analysis) return null;
+      return current.analysis.fits_whole ? { label: "Put it on a plate →", action: "whole", why } : { label: "Plan the cuts →", action: "go-split", why };
+    }
+    return current.result ? { label: "Lay out on plates →", action: "layout", why } : null;
+  },
+
+  async perform(action) {
+    if (action === "go-split") host.onStep("split");
+    else if (action === "whole") await host.onWhole();
+    else if (action === "layout") await host.onLayout();
   },
 
   get split() {
