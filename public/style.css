@@ -2264,3 +2264,5 @@ body.light-mode { --st-completed: #0f766e; --st-failed: #be123c; --st-cancelled:
 .settings-toggle-text .settings-item-note { margin-left: 0; }
 .notif-param .input-hint, .notif-param .field-error { margin-top: 2px; font-size: 12px; }
 .notif-param .input-hint { color: var(--text-muted); }
+
+#modal-app-settings:focus { outline: none; }   /* focus lands on the dialog itself; its controls keep their own rings */
