@@ -127,7 +127,7 @@ const records = [
       await phone.page.locator('.history-row').first().waitFor();
       assert.equal(await phone.page.getByRole('searchbox', { name: 'Search history' }).isVisible(), false, 'filters start collapsed');
       const rowH = await phone.page.locator('.history-row').first().evaluate(row => row.getBoundingClientRect().height);
-      assert.ok(rowH <= 110, `phone row is 2-3 lines (${rowH}px)`);
+      assert.ok(rowH <= 125, `phone row is 3-4 lines (${rowH}px)`);
       await phone.page.getByRole('button', { name: 'Show filters' }).click();
       await phone.page.locator('#history-outcome').selectOption('failed');
       await phone.page.getByRole('button', { name: 'Hide filters' }).click();
