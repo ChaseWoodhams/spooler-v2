@@ -129,6 +129,24 @@ async function open(browser, { projects = PROJECTS, search = '', setup } = {}) {
       await page.close();
     }
 
+    // The row-wide Open overlay never covers Delete: clicking Delete asks first, it does not open the Project
+    for (const width of [1280, 390]) {
+      const { page } = await open(browser);
+      await page.setViewportSize({ width, height: 800 });
+      const row = page.locator('#project-list .slicer-project-row', { hasText: 'Bracket set' });
+      await row.waitFor({ timeout: 8000 });
+      const del = row.getByRole('button', { name: 'Delete' });
+      await del.scrollIntoViewIfNeeded();
+      const box = await del.boundingBox();
+      const hit = await page.evaluate(([x, y]) => (e => e && (e.closest("button")?.textContent.trim() || e.tagName + "." + e.className))(document.elementFromPoint(x, y)), [box.x + box.width / 2, box.y + box.height / 2]);
+      assert.equal(hit, 'Delete', `at ${width} the point over Delete hits ${hit}, not Delete`);
+      await del.click();
+      await page.getByRole('dialog', { name: /Delete the Project Bracket set/ }).waitFor();
+      assert.equal(await page.evaluate(() => location.search), '', `at ${width} Delete did not open the Project`);
+      await page.close();
+    }
+    console.log('PASS: Delete is clickable beside the row-wide Open at desktop and phone width');
+
     // Open is the primary action on a row; Delete is a quiet text action (UCF-07), in both themes at desktop and phone width
     for (const light of [false, true]) for (const width of [1280, 390]) {
       const { page } = await open(browser);

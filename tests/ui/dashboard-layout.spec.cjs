@@ -4,9 +4,7 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fx = require('./fixtures.cjs');
 
-const dashboard = { needs_you: { printers: [], prints: [] },
-  projects: [{ id: 7, name: 'Bracket set', percent: 40, printed_ok: 2, total: 5 }] };
-const api = url => url.pathname === '/api/dashboard' ? { json: dashboard } : undefined;
+const api = fx.dashboardApi(fx.dashboard({ printers: [fx.bedClearedItem()] }));
 
 (async () => {
   const server = await fx.startServer();
@@ -24,6 +22,11 @@ const api = url => url.pathname === '/api/dashboard' ? { json: dashboard } : und
         const firstCard = await page.locator('#card-fx-1').boundingBox();
         assert.ok(p.y + p.height <= 800, `Active projects is visible without scrolling (${tag}): bottom ${p.y + p.height}`);
         assert.ok(p.y < firstCard.y, `Active projects comes before the printer cards (${tag})`);
+        // ...and by position, not just DOM order: directly under Needs-you, above the first printer card
+        await page.locator('#needs-you .needs-row').waitFor();
+        const ny = await page.locator('#needs-you').boundingBox();
+        assert.ok(ny.y + ny.height <= p.y + 1, `Active projects is below Needs-you (${tag}): Needs-you bottom ${ny.y + ny.height}, projects top ${p.y}`);
+        assert.ok(p.y + p.height <= firstCard.y + 1, `Active projects ends above the first printer card (${tag})`);
 
         // Offline printer: one compact row with name, reason and an open action
         const off = page.locator('#card-fx-5');

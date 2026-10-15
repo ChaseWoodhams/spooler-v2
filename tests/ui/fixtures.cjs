@@ -45,6 +45,20 @@ function awaitingOutcome(over = {}) {
     duration_s: 5400, estimate_s: 5100, snapshot: null, ...over };
 }
 
+/** A GET /api/dashboard body: Needs-you items (waiting printers, finished prints) and one active Project. */
+function dashboard({ printers = [], prints = [], projects = [{ id: 7, name: 'Bracket set', percent: 40, printed_ok: 2, total: 5 }] } = {}) {
+  return { needs_you: { printers, prints }, projects };
+}
+
+/** A Needs-you printer item: a finished Print waiting on Bed cleared, with the next Job that confirming releases. */
+function bedClearedItem(over = {}) {
+  return { printer_id: 'fx-2', printer_name: LONG_NAMES[1], kind: 'bed_cleared', print: { id: 5, file_name: 'lid.gcode', project_name: 'Lid', outcome: 'completed' },
+    auto_start: true, next_job: { id: 3, file_name: 'lid.gcode' }, ...over };
+}
+
+/** An openApp `api` option that serves the given GET /api/dashboard body and leaves every other route alone. */
+function dashboardApi(body) { return url => url.pathname === '/api/dashboard' ? { json: body } : undefined; }
+
 /** A queued Job as the Review job modal takes it (openReview(job)). */
 function job(over = {}) {
   return { id: 'job-1', name: 'Fixture job', file_name: 'fixture.gcode', source: 'upload', printer_id: null, state: 'queued', print_opts: {}, ...over };
@@ -185,4 +199,4 @@ async function openApp(browser, baseUrl, opts = {}) {
   return { page, context, calls };
 }
 
-module.exports = { startServer, openApp, files, spools, filamentMeta, systemStatus, quickPrintApi, printers, awaitingOutcome, job, preflightReport, items, historyRecords, publicDir };
+module.exports = { startServer, openApp, files, spools, filamentMeta, systemStatus, quickPrintApi, printers, awaitingOutcome, dashboard, bedClearedItem, dashboardApi, job, preflightReport, items, historyRecords, publicDir };

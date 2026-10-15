@@ -4,20 +4,24 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fx = require('./fixtures.cjs');
 
-const dashboard = { needs_you: { prints: [], printers: [{ printer_id: 'fx-2', printer_name: 'Prototype farm printer number three', kind: 'bed_cleared',
-  print: { id: 5, file_name: 'lid.gcode', project_name: 'Lid' }, auto_start: true, next_job: { id: 3, file_name: 'lid.gcode' } }] },
-  projects: [{ id: 7, name: 'Bracket set', percent: 40, printed_ok: 2, total: 5 }] };
-const api = url => url.pathname === '/api/dashboard' ? { json: dashboard } : undefined;
+// What is waiting on the operator. Each Needs-you row carries its own primary button, so the cap has to hold with several.
+const pendingPrint = fx.awaitingOutcome({ printer_name: 'Workshop Centauri Carbon', outcome: 'completed' });
+const CASES = {
+  'bed cleared': fx.dashboard({ printers: [fx.bedClearedItem()] }),
+  'outcome awaiting': fx.dashboard({ prints: [pendingPrint] }),
+  'bed cleared and outcome awaiting': fx.dashboard({ printers: [fx.bedClearedItem()], prints: [pendingPrint] }),
+};
+
 
 (async () => {
   const server = await fx.startServer();
   const browser = await chromium.launch();
   try {
-    for (const theme of ['dark', 'light']) {
+    for (const [name, body] of Object.entries(CASES)) for (const theme of ['dark', 'light']) {
       for (const width of [1280, 390]) {
-        const { page, context } = await fx.openApp(browser, server.baseUrl, { width, height: 800, theme, printers: fx.printers(5), api });
-        await page.locator('#needs-you .needs-row').waitFor();
-        const tag = `${theme} ${width}`;
+        const { page, context } = await fx.openApp(browser, server.baseUrl, { width, height: 800, theme, printers: fx.printers(5), awaiting: body.needs_you.prints, api: fx.dashboardApi(body) });
+        await page.locator('#needs-you .needs-row').first().waitFor();
+        const tag = `${name} ${theme} ${width}`;
         const m = await page.evaluate(() => {
           const visible = e => { const r = e.getBoundingClientRect(); const x = Math.min(Math.max(r.left + r.width / 2, 0), innerWidth - 1), y = r.top + r.height / 2;
             return r.width > 0 && r.height > 0 && r.top < innerHeight && r.left < innerWidth && r.right > 0 && !e.closest('[hidden]') && e.contains(document.elementFromPoint(x, y)); };
@@ -49,8 +53,10 @@ const api = url => url.pathname === '/api/dashboard' ? { json: dashboard } : und
         assert.ok(m.bgAlpha <= 0.05, `Needs-you tint is subtle (${tag}): alpha ${m.bgAlpha}`);
         const accent = await page.evaluate(() => { const s = document.createElement('i'); s.style.color = getComputedStyle(document.body).getPropertyValue('--accent'); document.body.append(s); const c = getComputedStyle(s).color; s.remove(); return c; });
         assert.notEqual(m.border, accent, `Needs-you top/right/bottom border is not the full accent (${tag})`);
-        assert.ok(/Prototype farm printer/.test(m.text) && /bed/i.test(m.text), `Needs-you row keeps decision and reason (${tag}): ${m.text}`);
+        if (name === 'bed cleared') {
+        assert.ok(/Spare Elegoo Centauri/.test(m.text) && /bed/i.test(m.text), `Needs-you row keeps decision and reason (${tag}): ${m.text}`);
         assert.ok(await page.locator('#needs-you .needs-row').getByRole('button', { name: /Bed cleared/ }).isVisible(), `Needs-you row keeps its button (${tag})`);
+        }
 
         // One page title level: the h1 is larger than every section heading, and only one h1 is on screen
         assert.equal(m.headings, 1, `one visible page title (${tag})`);

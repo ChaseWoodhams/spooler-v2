@@ -1,42 +1,15 @@
-// Ticket 08 · History polish: no ellipsized dates/metrics, chips on one line, status dot visible or gone.
+// History polish: dates and metrics are never ellipsized or spill sideways (long-metric fixture), chips share one line, the status dot is visible or gone.
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
-const http = require('node:http');
-const fs = require('node:fs/promises');
-const path = require('node:path');
-const root = path.resolve(__dirname, '../..');
-const now = Math.floor(Date.now() / 1000);
-const records = [
-  { id: 1, file_name: 'benchy-in-two-colours.gcode', printer_name: 'Printer One', printer_id: 'p1', started_at: now - 3600 * 5, ended_at: now - 60,
-    outcome: 'unknown', outcome_unconfirmed: true, duration_s: 13 * 3600 + 3500, filament_g: 123.4, filament_mm: null, cost: 12.34, estimate_s: 3400, estimate_g: 11, notes: '', color_hex: 'ff0000' },
-  { id: 2, file_name: 'older.gcode', printer_name: 'Printer One', printer_id: 'p1', started_at: now - 400 * 86400, ended_at: now - 400 * 86400 + 600,
-    outcome: 'completed', outcome_unconfirmed: false, duration_s: 600, filament_g: 2, filament_mm: null, cost: 0.5, estimate_s: 900, estimate_g: 3, notes: '', color_hex: 'ffffff' },
-];
+const fx = require('./fixtures.cjs');
+// The first record carries long metrics (13 h, 123.4 g, 12.34) and a colour dot.
+const records = fx.historyRecords().map((r, i) => i ? r : { ...r, duration_s: 13 * 3600 + 3500, filament_g: 123.4, filament_mm: null, cost: 12.34, color_hex: 'ff0000' });
 (async () => {
-  const server = http.createServer(async (req, res) => {
-    try {
-      const rel = new URL(req.url, 'http://localhost').pathname;
-      const content = await fs.readFile(path.join(root, 'public', rel === '/' ? 'index.html' : rel));
-      res.setHeader('Content-Type', rel.endsWith('.js') ? 'text/javascript; charset=utf-8' : rel.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/html; charset=utf-8');
-      res.end(content);
-    } catch { res.writeHead(404).end(); }
-  });
-  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const server = await fx.startServer();
   const browser = await chromium.launch();
   try {
     for (const theme of ['dark', 'light']) for (const width of [1280, 1024, 768, 390]) {
-      const page = await browser.newPage({ viewport: { width, height: 900 } });
-      await page.addInitScript(t => localStorage.setItem('theme', t), theme);
-      await page.routeWebSocket(/.*/, ws => ws.onMessage(m => {
-        if (JSON.parse(m).action === 'list_printers') ws.send(JSON.stringify({ type: 'printer_update', printer: { id: 'p1', name: 'Printer One', connected: false, printer_type: 'cc1', status: {}, camera_url: null } }));
-      }));
-      await page.route('**/api/**', route => {
-        const url = new URL(route.request().url());
-        if (url.pathname === '/api/prints') return route.fulfill({ json: { prints: records, total: 2, summary: { prints: 2, duration_s: 0, filament_g: 0, cost: 0 } } });
-        return route.fulfill({ json: {} });
-      });
-      await page.goto(`http://127.0.0.1:${server.address().port}`);
-      await page.locator('#card-p1').waitFor();
+      const { page, context } = await fx.openApp(browser, server.baseUrl, { width, height: 900, theme, printers: fx.printers(2), prints: records });
       await page.evaluate(() => openHistory());
       await page.locator('.history-row').first().waitFor();
       const label = `${theme} ${width}`;
@@ -58,9 +31,10 @@ const records = [
         const s = getComputedStyle(el); return { bg: s.backgroundColor, border: s.borderTopColor, w: s.width };
       }).catch(() => null);
       if (dot) assert.notEqual(dot.border, 'rgba(0, 0, 0, 0)', `dot has an edge at ${label}`);
-      assert.equal(await page.locator('#panel-history').evaluate(el => el.scrollWidth <= el.clientWidth), true, `no h-scroll at ${label}`);
-      await page.close();
+      assert.equal(await page.locator('#panel-history').evaluate(el => el.scrollWidth <= el.clientWidth), true, `no h-scroll in the drawer at ${label}`);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `no h-scroll on the page at ${label}`);
+      await context.close();
     }
     console.log('history polish ok');
-  } finally { await browser.close(); server.close(); }
+  } finally { await browser.close(); await server.close(); }
 })().catch(e => { console.error(e); process.exit(1); });
