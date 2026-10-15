@@ -15,7 +15,9 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import locale
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +26,8 @@ import threading
 import time
 from pathlib import Path
 
+import assembly_edits as edits
+import assembly_plan as planner
 import database
 import jobs  # used as a module: jobs.JobError, …
 import slicer
@@ -38,6 +42,8 @@ MODEL_SUFFIXES  = (".stl", ".obj", ".3mf")
 RECENT_LIMIT    = 30
 NO_WINDOW       = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 REQUIRED_MODULES = ("manifold3d", "trimesh", "numpy", "scipy", "networkx")
+GUIDE_MODULES    = ("reportlab",)          # only the Assembly guide needs these; without them only Generate is off
+PAPER_SIZES      = ("a4", "letter")
 
 ANALYZING, PLANNING, READY, CHECKING = "analyzing", "planning", "ready", "checking"
 SPLITTING, SPLIT, QUEUED, FAILED     = "splitting", "split", "queued", "failed"
@@ -52,6 +58,8 @@ DEFAULT_SETTINGS = {
     "planner":    {"mode": "smart", "balanced": True},
     "connectors": {"kind": "rod", "diameter": 2.0, "fallback_diameter": 1.0, "clearance": 0.15, "depth": 6.5,
                    "spacing": 100.0, "max_per_joint": 8},
+    "labels":     {"enabled": True},      # Part numbers debossed into each part
+    "guide":      {"heavy_kg": 2.0, "heavy_mm": 400.0},   # Assembly guide: warn when a join moves more than this weight or length
 }
 
 _data_dir: Path = DATA_DIR
@@ -85,6 +93,21 @@ def missing_modules() -> list:
     return [name for name in REQUIRED_MODULES if importlib.util.find_spec(name) is None]
 
 
+def missing_guide_modules() -> list:
+    return [name for name in GUIDE_MODULES if importlib.util.find_spec(name) is None]
+
+
+def system_locale() -> str | None:
+    """The machine's language and region, e.g. "en_US" or "English_United States" (patched in tests)."""
+    return locale.getlocale()[0] or os.environ.get("LC_ALL") or os.environ.get("LANG")
+
+
+def default_paper() -> str:
+    """Letter for a US locale, A4 for everything else."""
+    name = (system_locale() or "").replace("-", "_")
+    return "letter" if name.startswith("en_US") or "United States" in name else "a4"
+
+
 def init() -> None:
     database.migrate()
     missing = missing_modules()
@@ -94,7 +117,10 @@ def init() -> None:
 
 def status() -> dict:
     missing = missing_modules()
-    return {"available": not missing, "missing": missing, "defaults": DEFAULT_SETTINGS,
+    guide_missing = missing_guide_modules()
+    guide = {"available": not guide_missing, "missing": guide_missing, "default_paper": default_paper(), "papers": list(PAPER_SIZES),
+             "hint": f"Install {', '.join(guide_missing)} to make the Assembly guide (pip install -r requirements.txt)" if guide_missing else ""}
+    return {"available": not missing, "missing": missing, "guide": guide, "defaults": DEFAULT_SETTINGS,
             "model_types": list(MODEL_SUFFIXES), "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024)}
 
 
@@ -117,6 +143,8 @@ def normalize_settings(raw: dict | None, base: dict | None = None) -> dict:
     if not isinstance(raw, dict):
         raise jobs.JobError("Settings must be an object")
     out = base
+    out.setdefault("labels", dict(DEFAULT_SETTINGS["labels"]))   # splits saved before part numbers existed
+    out.setdefault("guide", dict(DEFAULT_SETTINGS["guide"]))     # ... or before the guide's warnings
     if "scale" in raw:
         out["scale"] = _number(raw["scale"], "Scale", 1e-4, 1e5)
     if "up" in raw:
@@ -152,6 +180,16 @@ def normalize_settings(raw: dict | None, base: dict | None = None) -> dict:
         out["connectors"]["spacing"] = _number(connectors["spacing"], "Spacing", 20, 1000)
     if "max_per_joint" in connectors:
         out["connectors"]["max_per_joint"] = int(_number(connectors["max_per_joint"], "Rods per joint", 1, 50))
+    labels = raw.get("labels") or {}
+    if "enabled" in labels:
+        if not isinstance(labels["enabled"], bool):
+            raise jobs.JobError("Part numbers must be on or off")
+        out["labels"]["enabled"] = labels["enabled"]
+    guide = raw.get("guide") or {}
+    if "heavy_kg" in guide:
+        out["guide"]["heavy_kg"] = _number(guide["heavy_kg"], "Heavy join weight", 0.1, 1000)
+    if "heavy_mm" in guide:
+        out["guide"]["heavy_mm"] = _number(guide["heavy_mm"], "Heavy join length", 10, 10000)
     return out
 
 
@@ -383,6 +421,7 @@ def delete_split(split_id: int) -> None:
         conn.execute("DELETE FROM splits WHERE id = ?", (split_id,))
     shutil.rmtree(work_dir(split_id), ignore_errors=True)
     _progress.pop(split_id, None)
+    _guide_progress.pop(split_id, None)
 
 
 def file_path(split_id: int, kind: str) -> Path:
@@ -401,6 +440,293 @@ def part_path(split_id: int, number: int) -> tuple:
     if not path or not path.is_file():
         raise jobs.JobError("Part not found", 404)
     return path, f"{Path(record['source_name']).stem}_part{number:02d}.stl"
+
+
+# ── The assembly plan ──────────────────────────────────────────────────────────
+
+_plans: dict = {}   # split id → (files' modification times, planning record)
+
+
+def _planning(split_id: int) -> dict:
+    """The model, the automatic plan and the plan to use (edits applied when they are valid). Cached; read-only."""
+    get_split(split_id)
+    work = work_dir(split_id)
+    result = _read(work, "result.json")
+    if not result:
+        raise jobs.JobError("Split the model first", 409)
+    limits = {**DEFAULT_SETTINGS["guide"], **(get_split(split_id)["settings"].get("guide") or {})}
+    stamp = (limits["heavy_kg"], limits["heavy_mm"]) + tuple((work / name).stat().st_mtime_ns if (work / name).is_file() else 0
+                                                              for name in ("result.json", "cuts.json", "parts_preview.bin", edits.FILE))
+    cached = _plans.get(split_id)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    cuts = result.get("cuts") or (_read(work, "cuts.json") or {}).get("cuts") or []
+    model = planner.SplitModel(result, cuts, planner.read_preview(work / "parts_preview.bin"))
+    auto = planner.build_plan(model, heavy_kg=limits["heavy_kg"], heavy_mm=limits["heavy_mm"])
+    record = {"model": model, "auto": auto, "plan": auto.to_dict(), "edits": [], "state": "none", "reason": "", "failed": None}
+    saved = edits.load(work)
+    if saved and saved["edits"]:
+        record["edits"] = saved["edits"]
+        record["state"], record["reason"] = "outdated", "The cuts or parts have changed since these edits were made."
+        if auto.ok and saved.get("fingerprint") == model.fingerprint:
+            done = edits.replay(model, auto.plan, saved["edits"])
+            if done.ok:
+                record["state"], record["reason"] = "applied", ""
+                record["plan"] = planner.add_warnings(model, planner.PlanResult(plan=done.plan), limits["heavy_kg"], limits["heavy_mm"]).to_dict()
+            else:
+                index, _edit, refused = done.dropped[0]
+                record["failed"], record["reason"] = index, f"Edit {index + 1} no longer works: {refused}"
+    if auto.ok:
+        record["plan"]["edits"] = {"state": record["state"], "count": len(record["edits"]), "reason": record["reason"], "failed": record["failed"]}
+    _plans[split_id] = (stamp, record)
+    return record
+
+
+def assembly_plan(split_id: int) -> dict:
+    """How the split goes together (Sections, steps), or why it cannot be assembled as cut. Read-only and cached.
+    Saved edits are applied when they still match the split and pass the validator; otherwise the automatic plan is
+    served and `edits.state` says "outdated"."""
+    return _planning(split_id)["plan"]
+
+
+def assembly_edits(split_id: int) -> dict:
+    """The saved edit list, whether it applies, and the plan it gives."""
+    record = _planning(split_id)
+    return {"state": record["state"], "count": len(record["edits"]), "edits": record["edits"], "reason": record["reason"],
+            "failed": record["failed"], "plan": record["plan"]}
+
+
+def _edit_base(split_id: int) -> dict:
+    _require(split_id, (SPLIT, QUEUED), "edit the plan")
+    record = _planning(split_id)
+    if not record["auto"].ok:
+        raise jobs.JobError("The plan has to work as cut before it can be edited.", 409)
+    if record["state"] == "outdated":
+        raise jobs.JobError("Your edits no longer match this split. Discard them or try to keep them first.", 409)
+    return record
+
+
+def edit_plan(split_id: int, body: dict | None = None) -> dict:
+    """Apply one edit ({"op": "move"|"reorder"|"reset"}) and save the edit list with the split, or refuse it with the reason."""
+    body = body or {}
+    work = work_dir(split_id)
+    if body.get("op") == "reset":
+        get_split(split_id)
+        edits.reset(work)
+        _plans.pop(split_id, None)
+        return assembly_edits(split_id)
+    if body.get("op") in ("discard", "keep"):
+        return _settle_outdated(split_id, body["op"])
+    record = _edit_base(split_id)
+    edit = body
+    if body.get("op") == "reorder" and "order" not in body:
+        edit = edits.reorder_for_step(record["model"], record["auto"].plan, record["edits"], body.get("parts") or [], str(body.get("direction")))
+    _plan, stored = edits.apply_edit(record["model"], record["auto"].plan, record["edits"], edit)
+    edits.save(work, record["model"].fingerprint, record["edits"] + [stored])
+    _plans.pop(split_id, None)
+    return assembly_edits(split_id)
+
+
+def _settle_outdated(split_id: int, op: str) -> dict:
+    """Discard (delete the override) or Try to keep (replay each edit, keep those that still pass, stamp the split's
+    fingerprint) for edits marked outdated. `dropped` lists what Try to keep could not keep."""
+    _require(split_id, (SPLIT, QUEUED), "settle the edits")
+    record = _planning(split_id)
+    if record["state"] != "outdated":
+        raise jobs.JobError("There are no outdated edits to settle.", 409)
+    work = work_dir(split_id)
+    dropped = []
+    if op == "discard":
+        edits.reset(work)
+    else:
+        if not record["auto"].ok:
+            raise jobs.JobError("The plan has to work as cut before edits can be kept.", 409)
+        done = edits.replay(record["model"], record["auto"].plan, record["edits"], keep_going=True)
+        dropped = [{"index": i, "edit": edit, "parts": list(refused.parts), "kind": refused.kind, "reason": str(refused)}
+                   for i, edit, refused in done.dropped]
+        if done.kept:
+            edits.save(work, record["model"].fingerprint, done.kept)
+        else:
+            edits.reset(work)
+    _plans.pop(split_id, None)
+    return {**assembly_edits(split_id), "dropped": dropped}
+
+
+def edit_receivers(split_id: int, parts) -> dict:
+    """Where a part or finished Section can be moved to; only receivers the step validator accepts are listed."""
+    record = _edit_base(split_id)
+    try:
+        parts = sorted({int(p) for p in parts if str(p).strip()})
+    except ValueError:
+        raise jobs.JobError("Part numbers must be numbers") from None
+    found = edits.valid_receivers(record["model"], record["auto"].plan, record["edits"], parts)
+    return {"parts": parts, "receivers": found}
+
+
+# ── The Assembly guide ─────────────────────────────────────────────────────────
+#
+# A guide is a background job tracked apart from the split's own state: guide.json holds a small status record
+# (generating, ready or failed, with the stage text), guide.pdf the finished PDF, guide_meta.json when it was made, for
+# which plan code and paper size, and guide_plan.json the plan it was made from. A new try replaces them only once it
+# has succeeded; a failed try keeps the PDF from before.
+
+_guide_progress: dict = {}   # split id → {"stage": text, "percent": n} while a guide is being made
+
+
+def _guide_file(split_id: int, name: str) -> Path:
+    return work_dir(split_id) / name
+
+
+def _write_json(path: Path, record: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(record, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _guide_blocker(split_id: int) -> str:
+    """Why a guide cannot be made right now ("" when it can)."""
+    missing = missing_guide_modules()
+    if missing:
+        return f"The PDF library is not installed. Install {', '.join(missing)} (pip install -r requirements.txt)."
+    if get_split(split_id)["state"] not in (SPLIT, QUEUED):
+        return "Split the model first."
+    try:
+        plan = assembly_plan(split_id)
+    except jobs.JobError as e:
+        return str(e)
+    if not plan["ok"]:
+        return f"{plan['headline']}: {plan['failure']['message']}"
+    if not planner.read_preview(work_dir(split_id) / "parts_preview.bin"):
+        return "The part previews are missing, so the guide cannot be drawn. Split the model again."
+    return ""
+
+
+def guide_status(split_id: int) -> dict:
+    """The guide job's state, the PDF on disk (date, plan code, paper, out of date) and why Generate is off, if it is."""
+    get_split(split_id)
+    work = work_dir(split_id)
+    record = _read(work, "guide.json") or {}
+    meta = _read(work, "guide_meta.json")
+    has_pdf = bool(meta) and (work / "guide.pdf").is_file()
+    state_name = record.get("state") or ("ready" if has_pdf else "none")
+    status = {"state": state_name, "stage": None, "percent": None, "error": record.get("error"),
+              "has_pdf": has_pdf, "paper": None, "generated_at": None, "plan_code": None,
+              "out_of_date": False, "blocked": _guide_blocker(split_id)}
+    if state_name == "generating":
+        progress = _guide_progress.get(split_id) or {}
+        status["stage"] = progress.get("stage") or record.get("stage") or "Waiting to start"
+        status["percent"] = progress.get("percent", 0)
+        status["paper"] = record.get("paper")
+    if has_pdf:
+        status.update(paper=meta["paper"], generated_at=meta["generated_at"], plan_code=meta["plan_code"])
+        try:
+            current = assembly_plan(split_id)
+            status["out_of_date"] = not current["ok"] or current["code"] != meta["plan_code"]
+        except jobs.JobError:
+            status["out_of_date"] = True
+    return status
+
+
+def start_guide(split_id: int, body: dict | None = None) -> dict:
+    """Queue the Assembly guide for a finished split. Never changes the split's own state."""
+    body = body or {}
+    _require(split_id, (SPLIT, QUEUED), "make the Assembly guide")
+    paper = str(body.get("paper") or default_paper()).lower()
+    if paper not in PAPER_SIZES:
+        raise jobs.JobError("Paper must be A4 or Letter")
+    blocked = _guide_blocker(split_id)
+    if blocked:
+        raise jobs.JobError(blocked, 409)
+    if (_read(work_dir(split_id), "guide.json") or {}).get("state") == "generating":
+        raise jobs.JobError("The guide is already being made", 409)
+    _write_json(_guide_file(split_id, "guide.json"), {"state": "generating", "paper": paper, "stage": "Waiting to start",
+                                                    "started_at": time.time()})
+    _guide_progress[split_id] = {"stage": "Waiting to start", "percent": 0}
+    notify_worker()
+    return guide_status(split_id)
+
+
+def guide_path(split_id: int) -> tuple:
+    """The stored PDF and its download name: "<model name> - assembly guide.pdf"."""
+    record = get_split(split_id)
+    path = _guide_file(split_id, "guide.pdf")
+    if not path.is_file():
+        raise jobs.JobError("The guide hasn't been made yet", 404)
+    name = re.sub(r'[^ -~]|["\\/:*?<>|]', "_", Path(record["source_name"]).stem).strip() or "model"
+    return path, f"{name} - assembly guide.pdf"
+
+
+def _part_plates(split_id: int) -> dict:
+    """Part number -> plate name for the parts of this split already laid out on plates (the guide's inventory shows a dash for the rest)."""
+    import projects   # projects imports this module
+    try:
+        return projects.part_plates(split_id)
+    except Exception:   # a plate lookup is never worth failing the guide for
+        return {}
+
+
+def _make_guide(split_id: int) -> None:
+    """Build the guide PDF for a split whose guide.json says generating. Blocking."""
+    import assembly_bom
+    import assembly_pdf   # imports reportlab, so only when a guide is really made
+    import assembly_render
+
+    def progress(stage: str, percent: int) -> None:
+        _guide_progress[split_id] = {"stage": stage, "percent": percent}
+
+    work = work_dir(split_id)
+    record = _read(work, "guide.json") or {}
+    paper = record.get("paper") if record.get("paper") in PAPER_SIZES else default_paper()
+    progress("Planning the build", 2)
+    plan = assembly_plan(split_id)
+    if not plan["ok"]:
+        raise jobs.JobError(plan["headline"])
+    progress("Preparing the parts", 4)
+    result = _read(work, "result.json") or {}
+    scene = assembly_render.Scene.from_split(result, planner.read_preview(work / "parts_preview.bin"))
+    bom = assembly_bom.build_bom(result.get("pins") or [], plan)   # refuses when counts disagree
+    data = assembly_pdf.GuideData(model_name=Path(get_split(split_id)["source_name"]).stem, split_id=split_id,
+                                  plan=plan, paper=paper, bom=bom, plan_line=edits.plan_line(plan.get("edits")), scene=scene,
+                                  labels={p["number"]: p.get("label") for p in result.get("parts") or []},
+                                  plates=_part_plates(split_id))
+    tmp = work / "guide.pdf.tmp"
+    pages = assembly_pdf.render_guide(tmp, data, progress)
+    os.replace(tmp, work / "guide.pdf")
+    _write_json(work / "guide_plan.json", plan)
+    _write_json(work / "guide_meta.json", {"plan_code": plan["code"], "paper": paper, "generated_at": time.time(),
+                                           "pages": pages, "bytes": (work / "guide.pdf").stat().st_size})
+
+
+def _next_guide_job() -> int | None:
+    root = splits_dir()
+    if not root.is_dir():
+        return None
+    for folder in sorted((p for p in root.iterdir() if p.name.isdigit()), key=lambda p: int(p.name)):
+        if (_read(folder, "guide.json") or {}).get("state") == "generating":
+            return int(folder.name)
+    return None
+
+
+async def process_next_guide() -> bool:
+    """Make one waiting Assembly guide. Returns False when none is waiting. A guide interrupted by a restart runs again."""
+    split_id = _next_guide_job()
+    if split_id is None:
+        return False
+    _guide_progress[split_id] = {"stage": "Starting", "percent": 1}
+    await broadcast()
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, _make_guide, split_id)
+    except Exception as e:
+        message = str(e) or type(e).__name__
+        if work_dir(split_id).is_dir():
+            _write_json(_guide_file(split_id, "guide.json"), {"state": "failed", "error": message, "failed_at": time.time()})
+        print(f"[Split] #{split_id} guide failed: {message}")
+    else:
+        _write_json(_guide_file(split_id, "guide.json"), {"state": "ready"})
+    _guide_progress.pop(split_id, None)
+    await broadcast()
+    return True
 
 
 # ── Sending parts to the queue ─────────────────────────────────────────────────
@@ -494,7 +820,7 @@ async def process_next() -> bool:
         row = conn.execute(f"SELECT id, state, created_at FROM splits WHERE state IN ({', '.join('?' * len(STAGE_FOR))}) "
                            "ORDER BY updated_at, id LIMIT 1", tuple(STAGE_FOR)).fetchone()
     if row is None:
-        return False
+        return await process_next_guide()
     split_id, current, created_at = row["id"], row["state"], row["created_at"]
     stage = STAGE_FOR[current]
     _progress[split_id] = {"stage": stage, "percent": 0, "message": "Starting…"}

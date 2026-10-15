@@ -47,7 +47,7 @@ from pathlib import Path
 import manifold3d as m3d
 import numpy as np
 import trimesh
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import binary_erosion, distance_transform_edt
 
 M = m3d.Manifold
 OK = m3d.Error.NoError
@@ -717,6 +717,161 @@ def containing_part(parts: list, point, exclude: set = frozenset()):
     return None
 
 
+# ── Part numbers ───────────────────────────────────────────────────────────────
+
+LABEL_HEIGHTS   = (7.0, 6.5, 6.0, 5.5)   # text height in mm, tried largest first
+LABEL_STROKE    = 1.0                    # stroke and underline width (at least two 0.4 mm perimeters)
+LABEL_DEPTH     = 0.6                    # three layers of 0.2 mm
+LABEL_WALL      = 0.8                    # solid kept between the pocket and any hole or edge
+LABEL_GAP       = 0.8                    # between the digits and the underline
+LABEL_CELL      = 0.6                    # digit width as a fraction of the text height
+LABEL_SPACING   = 0.25                   # space between digits as a fraction of the text height
+LABEL_TRIES     = 25                     # positions tried on one face before moving on
+# segments of a seven-segment digit: a top, b top right, c bottom right, d bottom, e bottom left, f top left, g middle
+DIGIT_SEGMENTS = {"0": "abcdef", "1": "bc", "2": "abged", "3": "abgcd", "4": "fgbc", "5": "afgcd",
+                  "6": "afgedc", "7": "abc", "8": "abcdefg", "9": "abcdfg"}
+
+
+def label_shape(text: str, height: float):
+    """The label as a 2D shape centred on its middle, reading along +x with +y up: bold digits and an underline.
+    Returns (shape, width, box height)."""
+    sw, cell = LABEL_STROKE, LABEL_CELL * height
+    pitch = cell + LABEL_SPACING * height
+    width = len(text) * cell + (len(text) - 1) * LABEL_SPACING * height
+    box = height + LABEL_GAP + sw
+    w, h = cell - sw, height - sw     # the stroke centre lines
+    ends = {"a": ((0, h), (w, h)), "b": ((w, h), (w, h / 2)), "c": ((w, h / 2), (w, 0)), "d": ((0, 0), (w, 0)),
+            "e": ((0, h / 2), (0, 0)), "f": ((0, h), (0, h / 2)), "g": ((0, h / 2), (w, h / 2))}
+    dot = m3d.CrossSection.circle(sw / 2, 16)
+    pieces = [m3d.CrossSection.square([width, sw])]
+    for i, char in enumerate(text):
+        ox, oy = i * pitch + sw / 2, sw + LABEL_GAP + sw / 2
+        for seg in DIGIT_SEGMENTS[char]:
+            (x0, y0), (x1, y1) = ends[seg]
+            pieces.append(m3d.CrossSection.batch_hull([dot.translate([ox + x0, oy + y0]), dot.translate([ox + x1, oy + y1])]))
+    shape = m3d.CrossSection.batch_boolean(pieces, m3d.OpType.Add)
+    return shape.translate([-width / 2, -box / 2]), width, box
+
+
+def label_faces(part, number: int, R, shift, islands: list, events: list) -> list:
+    """Every face of an oriented part (print frame, bed at z = 0) a number could go on, best first.
+    Each is a flat piece of the part's surface: a cut face, which is hidden once glued, or the bed face."""
+    normal_of = {e["cut"]: e["n"] for e in events}
+    groups = {}  # (cut, outward normal) → [(probe in print frame, neighbour)]
+    for island in islands:
+        if len(island.get("parts", [])) != 2 or number not in island["parts"] or island["cut"] not in normal_of:
+            continue
+        n = normal_of[island["cut"]]
+        first = number == island["parts"][0]   # the first part is on the +normal side of the cut
+        n_o = unit(R @ (-n if first else n))
+        probe = R @ np.asarray(island["probe"], float) - shift
+        groups.setdefault((island["cut"], tuple(np.round(n_o, 4))), []).append((probe, island["parts"][1 if first else 0]))
+    bed = np.array([0.0, 0.0, -1.0])
+    wanted = [("bed", None, bed, [p for (c, n), v in groups.items() if float(np.dot(n, bed)) > 0.9999 for p in v])]
+    wanted += [("cut", cut, np.array(n), v) for (cut, n), v in sorted(groups.items()) if float(np.dot(n, bed)) <= 0.9999]
+    faces = []
+    for kind, cut, n_o, probes in wanted:
+        Rf = to_z(n_o)
+        rot = rotate(part, Rf)
+        top = float(rot.bounding_box()[5])  # the part lies on one side of its plane, so the face is the highest thing in this frame
+        for index, comp in enumerate(rot.slice(top - 0.05).decompose()):
+            if comp.area() < 1.0:
+                continue
+            polys = [np.asarray(p) for p in comp.to_polygons()]
+            neighbours = [nb for probe, nb in probes if inside_mask(polys, (Rf @ probe)[None, :2])[0]]
+            if kind == "cut" and not neighbours:
+                continue
+            clear = comp.offset(-LABEL_WALL, m3d.JoinType.Round)
+            if clear.is_empty():
+                continue
+            tier = 2 if kind == "bed" else (1 if n_o[2] > -OVERHANG_SIN else 3)
+            faces.append({"kind": kind, "cut": cut, "neighbour": min(neighbours) if neighbours else None, "tier": tier, "n": n_o,
+                          "Rf": Rf, "rot": rot, "top": top, "clear": clear, "room": round(clear.area()), "index": index})
+    return sorted(faces, key=lambda f: (f["tier"], -f["room"], f["neighbour"] or 10 ** 9, f["cut"] or 0, f["index"]))
+
+
+def reading_angle(face: dict) -> float:
+    """Angle (radians, in the face's frame seen from outside) of the label's reading direction:
+    along the longest clear direction of the face, upright where the face is upright."""
+    pts = np.vstack([np.asarray(p) for p in face["clear"].to_polygons()])
+    axis = np.array([1.0, 0.0])
+    try:
+        transform, extents = trimesh.bounds.oriented_bounds_2D(pts)
+        axis = np.asarray(transform)[:2, :2][int(np.argmax(extents))]
+    except Exception:
+        pass
+    theta = math.atan2(float(axis[1]), float(axis[0]))
+    u = face["Rf"].T @ [math.cos(theta), math.sin(theta), 0.0]
+    v = face["Rf"].T @ [-math.sin(theta), math.cos(theta), 0.0]
+    for value in (v[2], u[2], u[0], u[1]):
+        if abs(value) > 1e-6:
+            return theta if value > 0 else theta + math.pi
+    return theta
+
+
+def label_positions(face: dict, theta: float, width: float, box: float) -> list:
+    """Centres, in the face's own frame, where a label turned by theta fits inside the clear area, middle of the face first."""
+    c, s = math.cos(theta), math.sin(theta)
+    to_label = np.array([[c, -s], [s, c]])          # face frame → label frame (rows are points)
+    polys = [np.asarray(p) @ to_label for p in face["clear"].to_polygons()]
+    lo, hi = np.min([p.min(axis=0) for p in polys], axis=0), np.max([p.max(axis=0) for p in polys], axis=0)
+    step = max(0.25, math.sqrt(float(np.prod(hi - lo)) / 40000))
+    gx, gy = np.meshgrid(np.arange(lo[0], hi[0] + 1e-9, step), np.arange(lo[1], hi[1] + 1e-9, step))
+    mask = inside_mask(polys, np.column_stack([gx.ravel(), gy.ravel()])).reshape(gx.shape)
+    nx, ny = math.ceil(width / 2 / step), math.ceil(box / 2 / step)
+    fit = binary_erosion(mask, np.ones((2 * ny + 1, 2 * nx + 1), bool), border_value=0)
+    if not fit.any():
+        return []
+    centre = np.array([gx[mask].mean(), gy[mask].mean()])
+    spots = np.column_stack([gx[fit], gy[fit]])
+    order = np.lexsort((spots[:, 1], spots[:, 0], np.round(np.linalg.norm(spots - centre, axis=1), 3)))
+    return [tuple(float(x) for x in spots[i] @ to_label.T) for i in order]
+
+
+def solid_around(face: dict, shape) -> bool:
+    """True when the label placed as `shape` (face frame) opens onto the face and keeps LABEL_WALL of solid
+    around and under it: no hole, no hole sleeve, no edge, checked on the real part."""
+    rot, top = face["rot"], face["top"]
+    below = M.extrude(shape.offset(LABEL_WALL, m3d.JoinType.Round), LABEL_DEPTH + LABEL_WALL - 0.02
+                      ).translate([0, 0, top - LABEL_DEPTH - LABEL_WALL])
+    above = M.extrude(shape, 0.48).translate([0, 0, top + 0.02])
+    return bool((rot ^ below).volume() >= below.volume() - 0.02 and (rot ^ above).volume() <= 0.02)
+
+
+def label_part(part, number: int, R, shift, islands: list, events: list) -> tuple:
+    """Deboss `number` into an oriented part. Returns (part, label record), or (part, None) when nothing fits."""
+    faces = label_faces(part, number, R, shift, islands, events)
+    angles = {}
+    for height in LABEL_HEIGHTS:
+        shape, width, box = label_shape(str(number), height)
+        for face in faces:
+            theta = angles.setdefault(id(face), reading_angle(face))
+            tried = []
+            for spot in label_positions(face, theta, width, box):
+                if len(tried) >= LABEL_TRIES:
+                    break
+                if any(math.hypot(spot[0] - t[0], spot[1] - t[1]) < 1.5 for t in tried):
+                    continue
+                tried.append(spot)
+                placed = shape.rotate(math.degrees(theta)).translate(list(spot))
+                if not solid_around(face, placed):
+                    continue
+                pocket = rotate(M.extrude(placed, LABEL_DEPTH + 0.1).translate([0, 0, face["top"] - LABEL_DEPTH]), face["Rf"].T)
+                cut = part - pocket
+                if cut.status() != OK or part.volume() - cut.volume() <= 0:
+                    continue
+                up = face["Rf"].T @ [-math.sin(theta), math.cos(theta), 0.0]
+                where = face["Rf"].T @ [spot[0], spot[1], face["top"]]
+                label = {"text": str(number), "face": face["kind"], "cut": face["cut"], "neighbour": face["neighbour"],
+                         "tier": face["tier"], "height_mm": height, "depth_mm": LABEL_DEPTH,
+                         "position": [round(float(x), 3) for x in R.T @ (where + shift)],      # centre of the label, model frame
+                         "position_print": [round(float(x), 3) for x in where],                 # same point in the printed part's frame
+                         "normal": [round(float(x), 6) for x in R.T @ face["n"]],               # out of the part, model frame
+                         "up": [round(float(x), 6) for x in R.T @ up]}                          # which way is up when reading, model frame
+                return cut, label
+    return part, None
+
+
 # ── Orientation ────────────────────────────────────────────────────────────────
 
 def choose_orientation(man, cut_normals: list, limits: dict):
@@ -982,6 +1137,7 @@ def split(work: Path) -> None:
     out_dir.mkdir(exist_ok=True)
     for old in out_dir.glob("part_*.stl"):
         old.unlink()
+    labelling = (job.get("labels") or {}).get("enabled", True)
     result_parts, previews = [], []
     total_triangles = sum(part["body"].num_tri() for part in parts) or 1
     for number, part in enumerate(parts, start=1):
@@ -992,6 +1148,12 @@ def split(work: Path) -> None:
         oriented = rotate(part["man"], placed["R"])
         obb = oriented.bounding_box()
         oriented = oriented.translate([-obb[0], -obb[1], -obb[2]])
+        label = None
+        if labelling:  # after the orientation is chosen, before the part is saved; nothing here changes which parts touch
+            try:
+                oriented, label = label_part(oriented, number, np.asarray(placed["R"], float), np.array(obb[:3], float), islands, events)
+            except Exception:  # a number is never worth failing the split for
+                label = None
         verts, tris = arrays(oriented)
         name = f"part_{number:02d}.stl"
         trimesh.Trimesh(vertices=verts, faces=tris, process=False).export(out_dir / name)
@@ -1015,6 +1177,7 @@ def split(work: Path) -> None:
             "rotation":        np.round(placed["R"], 6).tolist(),
             "holes":           sum(number in pin["parts"] for pin in pins),
             "neighbours":      neighbours,
+            "label":           label,
         })
 
     assembly = []
@@ -1043,10 +1206,13 @@ def split(work: Path) -> None:
     result = {
         "parts":    result_parts,
         "joints":   joint_list,
+        "cuts":     cuts,   # the cuts these parts were made with: the assembly plan replays them
         "assembly": assembly,
+        "unlabelled": [p["number"] for p in result_parts if not p["label"]],
         "pins":     [{k: pin[k] for k in ("p", "axis", "connector", "diameter", "hole_diameter", "depth", "parts")} for pin in pins],
         "summary": {
             "parts":                  len(result_parts),
+            "labels":                 labelling,
             "cuts":                   len(cuts),
             "rods":                   dict(rods),
             "rod_lengths_mm":         {spec["label"]: round(2 * spec["depth"] - 1, 1) for spec in specs},

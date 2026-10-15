@@ -969,7 +969,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             else:
                 result = fn()
         except jobs.JobError as e:
-            self._json({"error": str(e)}, e.status)
+            self._json({"error": str(e), **getattr(e, "extra", {})}, e.status)
             return
         if broadcast and not coroutine:
             jobs.broadcast_threadsafe()
@@ -1094,6 +1094,19 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json(splits.get_split(split_id, detail=True))
             elif len(parts) == 5 and parts[4] in ("preview", "parts-preview"):
                 self._send_file(splits.file_path(split_id, parts[4]), "application/octet-stream")
+            elif len(parts) == 5 and parts[4] == "assembly-plan":
+                self._json(splits.assembly_plan(split_id))
+            elif len(parts) == 5 and parts[4] == "plan-edits":
+                query = urllib.parse.parse_qs(self.path.partition("?")[2])
+                if query.get("receivers_for"):
+                    self._json(splits.edit_receivers(split_id, query["receivers_for"][0].split(",")))
+                else:
+                    self._json(splits.assembly_edits(split_id))
+            elif len(parts) == 5 and parts[4] == "guide":
+                self._json(splits.guide_status(split_id))
+            elif len(parts) == 5 and parts[4] == "guide.pdf":
+                path, name = splits.guide_path(split_id)
+                self._send_file(path, "application/pdf", download_name=name)
             elif len(parts) == 6 and parts[4] == "parts" and parts[5].endswith(".stl") and parts[5][:-4].isdigit():
                 path, name = splits.part_path(split_id, int(parts[5][:-4]))
                 self._send_file(path, "model/stl", download_name=name)
@@ -1138,6 +1151,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             "split":    lambda: splits.request_split(self._job_id()),
             "retry":    lambda: splits.retry(self._job_id()),
             "queue":    lambda: splits.queue_parts(self._job_id(), self._json_body()),
+            "guide":    lambda: splits.start_guide(self._job_id(), self._json_body()),
+            "plan-edits": lambda: splits.edit_plan(self._job_id(), self._json_body()),
         }
         action = parts[4] if len(parts) == 5 else None
         if action not in actions:
@@ -1157,6 +1172,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
                 self._json(projects.plate_status(project_id))
+            elif len(parts) == 5 and parts[4] == "guides":
+                self._json({"guides": projects.guides(project_id)})
             elif len(parts) == 5 and parts[4] == "intake":
                 self._json(projects.intake(project_id))
             elif len(parts) == 5 and parts[4] == "intake-files":

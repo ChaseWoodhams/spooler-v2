@@ -87,6 +87,10 @@ class SplitWorkflowTests(unittest.IsolatedAsyncioTestCase):
         parts = detail["result"]["parts"]
         self.assertEqual((detail["state"], detail["parts"]), (splits.SPLIT, len(parts)))
         self.assertEqual(list(detail["result"]["summary"]["rods"]), ["1.75 mm pin"])
+        self.assertEqual([c["id"] for c in detail["result"]["cuts"]], [c["id"] for c in detail["check"]["cuts"]])
+        plan = splits.assembly_plan(record["id"])   # the real engine's result plans cleanly
+        self.assertTrue(plan["ok"], plan.get("failure"))
+        self.assertEqual(plan["summary"]["parts"], len(parts))
         path, name = splits.part_path(record["id"], 1)
         self.assertTrue(path.is_file())
         self.assertEqual(name, "channel_part01.stl")
