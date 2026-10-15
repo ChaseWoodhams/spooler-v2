@@ -129,6 +129,8 @@ def main(argv) -> int:
     spec = (config.get("mcpServers") or {}).get("spooler")
     if spec and not scenario.get("skip_server"):
         server = ServerClient(spec)
+        record["server_pid"] = server.proc.pid          # lets a test prove the whole tree is gone after Cancel or the deadline
+        save()
         server.request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "fake-claude", "version": "0"}})
         server.notify("notifications/initialized")
         listed = [t["name"] for t in server.request("tools/list")["result"]["tools"]]
