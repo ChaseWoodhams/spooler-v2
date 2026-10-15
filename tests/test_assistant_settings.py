@@ -374,6 +374,21 @@ class ProposeSettingsTests(SettingsCase):
         self.assertIn("id", self.error("propose_settings", {"revision": 7, "scope": "plate", "changes": {"wall_loops": 4}}))
         self.assertEqual(self.staging(), [])
 
+    def test_an_object_of_a_model_still_importing_cannot_be_targeted(self):
+        models = [{"id": 11, "name": "Arm", "file": "arm.stl", "state": "importing", "size": [80, 20, 10], "volume_cm3": 12.5}]
+        self.add_project(5, "Importing", 3, project_data(), models)
+        session = McpSession(self.dir, 5)
+        try:
+            session.start()
+            reply = session.call("propose_settings", {"revision": 3, "scope": "object", "id": 1, "changes": {"wall_loops": 4}})
+            plate = session.call("propose_settings", {"revision": 3, "scope": "plate", "id": 1, "changes": {"top_shell_layers": 6}})
+        finally:
+            session.close()
+        self.assertTrue(reply["result"]["isError"])
+        self.assertIn("Object 1 cannot be targeted: its Model is still importing", reply["result"]["content"][0]["text"])
+        self.assertFalse(plate["result"].get("isError"), "plate and project scope are not about one Object's Model")
+        self.assertEqual(len(self.staging()), 1, "only the plate proposal was staged")
+
     def test_four_proposals_in_one_run_are_too_many(self):
         session = McpSession(self.dir, 1, command=[sys.executable, str(SERVER), "--project", "1", "--data-dir", str(self.dir), "--run", "one-run"])
         try:

@@ -8,6 +8,7 @@ nothing here saves. The MCP tools `get_settings`, `describe_setting` and `propos
   get_settings(record, scope, scope_id, keys=None)    the rows get_settings returns (readable keys only)
   describe(record, key)                               what describe_setting returns (a readable key only)
   plan(record, scope, scope_id, changes)              check proposed {key: value}, drop no-ops, return the resulting data and the rows
+                                                      (an Object of a Model still importing is refused)
 
 Scopes are "project", "plate" and "object". Layers, lowest to highest: preset (the locked profile), project, plate, object; `bed` and
 `bricklayers` are enforced layers nobody edits. Layers are the names `effective_settings.resolve` records as provenance."""
@@ -16,6 +17,7 @@ from collections import namedtuple
 
 import effective_settings
 import profile_read
+import project_read
 import proposable_settings as ps
 import setting_rules
 from errors import JobError
@@ -254,6 +256,11 @@ def plan(record: dict, scope: str, scope_id, changes: dict) -> Plan:
     stays but carries a note saying why. Returns Plan(data, rows, refused, unchanged, notes, scope_label); `data` is None when no
     change is left. Rows are {key, label, old, new, layer, notes}, `layer` being the layer the old value comes from."""
     c = chain(record, scope, scope_id)
+    if scope == "object":
+        obj = _find(record["data"].get("objects"), scope_id, "Object")
+        model = next((m for m in record.get("models") or [] if m["id"] == obj["model"]), None)
+        if model and model.get("state") == project_read.IMPORTING:
+            raise JobError(f"Object {scope_id} cannot be targeted: its Model is still importing", 409)
     refused, unchanged, accepted = [], [], {}
     for key, value in changes.items():
         reason = ps.refusal(key, value, scope, profile_value=_profile_value(c, key), nozzle=c.nozzle)
