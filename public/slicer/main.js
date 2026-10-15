@@ -2489,9 +2489,9 @@ async function acceptPlan() {
 // of key, before, after and layer. Accept is the panel's (it owns the card); the sheet only asks it and shows a refusal.
 function proposalSheetHtml(view) {
   const list = (items, cls) => items.length ? `<ul class="${cls}">${items.map(item => `<li>${item}</li>`).join("")}</ul>` : "";
-  const diff = list((view.diff || []).map(line => `<b>${esc(line.label)}</b> ${esc(line.text)}`), "assistant-diff");
+  const diff = view.settings?.length ? "" : list((view.diff || []).map(line => `<b>${esc(line.label)}</b> ${esc(line.text)}`), "assistant-diff");
   const pinned = view.pinned?.length ? `<p class="slicer-muted">Pinned, left alone: ${view.pinned.map(p => esc(p.label)).join(", ")}</p>` : "";
-  const notes = list([...(view.notes || []), ...(view.problems || [])].map(esc), "assistant-notes slicer-muted");
+  const notes = list([...(view.settings?.length ? [] : view.notes || []), ...(view.problems || [])].map(esc), "assistant-notes slicer-muted");   // a settings table carries its own notes
   let body = "";
   if (view.before && view.after) {
     const now = new Map(view.before.plates.map(plate => [plate.id, plate]));
@@ -2504,8 +2504,12 @@ function proposalSheetHtml(view) {
       : `<div class="plan-card slicer-muted" data-side="${label.toLowerCase()}">${label === "Now" ? "Not on a plate yet" : "Plate removed"}</div>`;
     body = `<div class="proposal-pairs">${ids.map(id => `<div class="proposal-pair">${card(now.get(id), "Now")}${card(next.get(id), "After")}</div>`).join("")}</div>`;
   } else if (view.settings?.length) {
-    body = `<table class="proposal-table"><thead><tr><th>Setting</th><th>Now</th><th>After</th><th>Layer</th></tr></thead><tbody>${view.settings.map(row =>
-      `<tr><td>${esc(row.label || row.key)}<div class="slicer-muted">${esc(row.key)}</div></td><td>${esc(row.old)}</td><td><b>${esc(row.new)}</b></td><td>${esc(row.layer)}</td></tr>${row.note ? `<tr class="proposal-note"><td colspan="4" class="slicer-muted">${esc(row.note)}</td></tr>` : ""}`).join("")}</tbody></table>`;
+    // Setting, Now, After and the layer the old value comes from; a change that would have no effect carries its note under the row
+    const layers = { preset: "Profile", project: "Project", plate: "Plate", object: "Object", bed: "Bed type", bricklayers: "BrickLayers" };
+    body = `<table class="proposal-table" data-table="settings"><thead><tr><th>Setting</th><th>Now</th><th>After</th><th>Layer</th></tr></thead><tbody>${view.settings.map(row => {
+      const rowNotes = row.notes || (row.note ? [row.note] : []);
+      return `<tr data-key="${esc(row.key)}"><td>${esc(row.label || row.key)}<div class="slicer-muted">${esc(row.key)}</div></td><td>${esc(row.old)}</td><td><b>${esc(row.new)}</b></td><td>${esc(layers[row.layer] || row.layer)}</td></tr>${rowNotes.length ? `<tr class="proposal-note"><td colspan="4" class="slicer-muted">${rowNotes.map(esc).join(" ")}</td></tr>` : ""}`;
+    }).join("")}</tbody></table>`;
   }
   return `<p class="slicer-muted">${esc(view.scope)}. ${esc(view.reason)}</p>${diff}${pinned}${notes}${body}`;
 }
