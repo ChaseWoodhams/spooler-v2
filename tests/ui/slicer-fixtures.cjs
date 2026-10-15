@@ -60,7 +60,7 @@ const EXPECT = {
   print: ['0 of 2 plates completed', 'needs slicing'],
 };
 
-async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model', plateFit = null, mutate = null, slices = null, splitOverride = null } = {}) {
+async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model', plateFit = null, mutate = null, slices = null, splitOverride = null, onPost = null } = {}) {
   const project = makeProject(), split = { ...makeSplit(), ...(splitOverride || {}) };
   if (slices) project.slices = slices;
   if (mutate) mutate(project, split);
@@ -71,7 +71,10 @@ async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme 
   await page.routeWebSocket(/.*/, () => {});
   await page.route('**/api/**', route => {
     const url = new URL(route.request().url());
-    if (route.request().method() !== 'GET') return route.fulfill({ status: 500, json: { detail: 'fixture is read-only' } });
+    if (route.request().method() !== 'GET') {
+      const reply = onPost && onPost(url.pathname, route.request().postDataJSON?.() ?? null, split);
+      return reply ? route.fulfill({ json: reply }) : route.fulfill({ status: 500, json: { detail: 'fixture is read-only' } });
+    }
     const p = url.pathname;
     const json = p === '/api/projects/1' ? project : p === `/api/splits/${SPLIT_ID}` ? split
       : /\/plates\/\d+\/analysis$/.test(p) ? analysis()
@@ -88,7 +91,7 @@ async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme 
     return route.fulfill({ json });
   });
   await page.goto(`${baseUrl}/slicer.html?project=1`);
-  return { page, context };
+  return { page, context, split };
 }
 
 module.exports = { openSlicer, makeProject, makeSplit, EXPECT };

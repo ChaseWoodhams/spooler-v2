@@ -992,6 +992,29 @@ def analyze(work: Path) -> None:
     stage.progress(100, "Analysed")
 
 
+def without_cuts(cuts: list, drop: set) -> list:
+    """The cuts minus `drop` and every cut made inside one of them."""
+    drop = set(drop)
+    while True:
+        more = {c["id"] for c in cuts if c["parent"] and c["parent"][0] in drop and c["id"] not in drop}
+        if not more:
+            return [c for c in cuts if c["id"] not in drop]
+        drop |= more
+
+
+def auto_fix(model, limits: dict, room: float, base: list, stage: Stage, rounds: int = 3) -> tuple:
+    """Keep the cuts, but rework any that make a part too small to print, then split what is still too big."""
+    cuts = base
+    for _ in range(rounds):
+        pieces, _ = apply_cuts(model, cuts)
+        slivers = {d["made_by_cut"] for d in describe_pieces(pieces, limits) if d["tiny"] and d["made_by_cut"] is not None}
+        cuts = without_cuts(cuts, slivers)
+        cuts, pieces = plan_smart(model, limits, room, cuts, stage)
+        if not any(d["tiny"] for d in describe_pieces(pieces, limits)):
+            return cuts, pieces
+    raise EngineError("Auto-fix couldn't remove the parts that are too small to print. The cuts are unchanged: move or remove the cut that makes them.")
+
+
 def plan(work: Path) -> None:
     job = read_json(work / "job.json")
     stage = Stage(work, "plan")
@@ -1008,7 +1031,10 @@ def plan(work: Path) -> None:
     elif mode == "smart":
         base = validate_cuts(read_json(work / "cuts.json")["cuts"]) if planner.get("keep_cuts") and (work / "cuts.json").is_file() else []
         room = keepout(specs[0]) if specs else 2.75
-        cuts, pieces = plan_smart(model, limits, room, base, stage)
+        if planner.get("keep_cuts"):
+            cuts, pieces = auto_fix(model, limits, room, base, stage)
+        else:
+            cuts, pieces = plan_smart(model, limits, room, base, stage)
     else:
         raise EngineError("Planner must be smart or grid")
     write_json(work / "cuts.json", {"mode": mode, "cuts": cuts})

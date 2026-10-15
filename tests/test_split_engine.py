@@ -191,6 +191,37 @@ class EngineTests(unittest.TestCase):
         self.assertEqual({p["made_by_cut"] for p in slivers}, {cuts[0]["id"]})
         self.assertTrue(all(p["made_by_cut"] is not None for p in pieces))  # every part came from some cut
 
+    def _sliver_plan(self):
+        self.job(channel(), planner={"mode": "grid", "balanced": True})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        cuts = self.read("cuts.json")["cuts"]
+        cuts[0]["offset"] = 1.0  # leaves a 1 mm slab
+        (self.work / "cuts.json").write_text(json.dumps({"mode": "grid", "cuts": cuts}))
+        engine.check(self.work)
+        self.assertTrue(any(p["tiny"] for p in self.read("check.json")["pieces"]))
+        (self.work / "job.json").write_text(json.dumps({**self.read("job.json"), "planner": {"mode": "smart", "keep_cuts": True}}))
+        return cuts
+
+    def test_auto_fix_reworks_the_cut_that_makes_a_sliver(self):
+        self._sliver_plan()
+        engine.plan(self.work)
+        pieces = self.read("check.json")["pieces"]
+        self.assertFalse(any(p["tiny"] for p in pieces))
+        self.assertTrue(all(p["fits"] for p in pieces))
+
+    def test_auto_fix_that_cannot_fix_the_plan_says_so_and_leaves_the_cuts(self):
+        self._sliver_plan()
+        before = (self.work / "cuts.json").read_text()
+        original, same = engine.plan_smart, self.read("cuts.json")["cuts"]
+        engine.plan_smart = lambda model, limits, room, base, stage: (same, engine.apply_cuts(model, same)[0])
+        try:
+            with self.assertRaisesRegex(engine.EngineError, "Auto-fix couldn't"):
+                engine.plan(self.work)
+        finally:
+            engine.plan_smart = original
+        self.assertEqual((self.work / "cuts.json").read_text(), before)
+
     def test_a_model_with_no_cuts_has_no_creating_cut(self):
         self.job(channel(60.0), planner={"mode": "grid", "balanced": True})
         engine.analyze(self.work)
