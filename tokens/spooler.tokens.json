@@ -25,6 +25,7 @@
       "blue": { "$value": "#3b82f6", "$extensions": { "mode": { "light": "#1d4ed8" } } },
       "text": { "$value": "#e8eaf0", "$extensions": { "mode": { "light": "#1a1c2a" } } },
       "text-muted": { "$value": "#9ca3af", "$extensions": { "mode": { "light": "#525b6a" } } },
+      "text-muted-on-dark": { "$value": "#9ca3af", "$description": "muted text on the always-dark 3D viewport; same in both themes (7.4:1 on #262a35)" },
       "placeholder": {
         "$value": "#8a92a2",
         "$description": ">=4.5:1 on the input fills; one token for every placeholder",

@@ -24,6 +24,7 @@
   --blue: #3b82f6;
   --text: #e8eaf0;
   --text-muted: #9ca3af;
+  --text-muted-on-dark: #9ca3af; /* muted text on the always-dark 3D viewport; same in both themes (7.4:1 on #262a35) */
   --placeholder: #8a92a2; /* >=4.5:1 on the input fills; one token for every placeholder */
   --link: #7db3ff; /* 9.3:1 on --bg, 8.2:1 on --surface (light: 6.0:1 on --surface2, 6.7:1 on white) */
   --check-size: 16px;
