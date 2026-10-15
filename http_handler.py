@@ -1329,6 +1329,9 @@ class SPHandler(SimpleHTTPRequestHandler):
                 return runner.ask(self._job_id(), body.get("message"), body.get("history"))
             self._assistant_call(ask)
             return
+        if len(parts) == 8 and parts[4] == "assistant" and parts[5] == "runs" and parts[7] == "cancel":
+            self._assistant_call(lambda runner: runner.cancel(self._job_id(), parts[6]))
+            return
         if len(parts) == 8 and parts[4] == "assistant" and parts[5] == "proposals" and parts[7] in ("accept", "dismiss"):
             token, accepting = parts[6], parts[7] == "accept"
             self._assistant_proposal_call(lambda proposals: proposals.accept(self._job_id(), token, self._json_body()) if accepting

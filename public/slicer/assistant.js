@@ -21,6 +21,9 @@ const CARD_STATUS = {
   dismissed: "Dismissed. Nothing was changed.",
   replaced: "Replaced by a newer proposal of the same kind. Nothing was changed.",
 };
+const GIVE_UP_MS = 90000;              // the server stops a run after 60 s; if its answer still has not come, stop waiting (never a spinner forever)
+const END_STATES = ["timeout", "cancelled", "usage_limit", "error"];
+const END_TITLES = { timeout: "No answer in 60 s", cancelled: "Cancelled", usage_limit: "AI unavailable", error: "The assistant could not answer" };
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const remembered = () => { try { return localStorage.getItem(OPEN_KEY) === "1"; } catch { return false; } };
@@ -113,6 +116,8 @@ export const assistantPanel = {
       this.draftChanged();
       input.focus();
     } else if (action === "send") this.send();
+    else if (action === "cancel") this.cancel(target);
+    else if (action === "retry") this.retry();
     else if (action === "clear") this.clear();
     else if (action === "review" || action === "dismiss" || action === "ask-again") {
       const entry = this.entryFor(target.dataset.token);
@@ -147,8 +152,31 @@ export const assistantPanel = {
     return kept;
   },
 
-  // `again` is a question to ask once more (a Superseded card's "Ask again"); otherwise the composer's text is sent.
-  async send(again = null) {
+  // Try again: the failed question goes back out as a fresh ask, without the failed attempt in the thread or the history.
+  retry() {
+    if (this.busy) return;
+    const last = this.thread.at(-1);
+    if (!last || !END_STATES.includes(last.kind)) return;
+    const question = this.thread.at(-2);
+    if (question?.kind !== "user") return;
+    this.thread.splice(-2, 2);
+    this.send(question.text);
+  },
+
+  async cancel(button) {
+    const run = this.run;
+    if (!run || !this.busy) return;
+    if (button) { button.disabled = true; button.textContent = "Cancelling…"; }
+    try {
+      const view = await this.hooks.api("POST", `/api/projects/${run.project}/assistant/runs/${run.id}/cancel`);
+      if (this.run === run && view.state !== "thinking") this.finish(view);
+    } catch (error) {                      // polling carries on and shows however the run ends
+      if (button) { button.disabled = false; button.textContent = "Cancel"; }
+    }
+  },
+
+  // `again` is a question to ask once more (Try again, or a Superseded card's "Ask again"); otherwise the composer's text is sent.
+  async send(again) {
     const input = this.panel.querySelector(".assistant-input");
     const text = again ?? input?.value.trim();
     if (!text || this.busy || !this.hooks.project() || !this.status?.available) return;
@@ -164,17 +192,17 @@ export const assistantPanel = {
     }
     const project = this.hooks.project();
     const history = this.history();
-    if (again === null) input.value = "";
+    if (again === undefined) input.value = "";
     this.thread.push({ kind: "user", text });
     this.renderThread();
     try {
       const run = await this.hooks.api("POST", `/api/projects/${project.id}/assistant/ask`, { message: text, history });
-      this.run = { id: run.id, project: project.id, steps: run.steps || [], failures: 0, question: text };
+      this.run = { id: run.id, project: project.id, steps: run.steps || [], failures: 0, startedAt: Date.now(), question: text };
     } catch (error) {                       // refused: nothing started, so the question goes back to be sent again
       this.thread.pop();
       this.busy = false;
       this.notice = { text: error.message };
-      if (again === null) input.value = text;
+      if (again === undefined) input.value = text;
       this.renderThread();
       return;
     }
@@ -191,6 +219,7 @@ export const assistantPanel = {
     const run = this.run;
     if (!run || !this.busy) return;
     if (document.hidden) return;            // resumes on visibilitychange
+    if (Date.now() - run.startedAt > GIVE_UP_MS) { this.finish({ state: "error", error: "The assistant did not report back in time." }); return; }
     try {
       const view = await this.hooks.api("GET", `/api/projects/${run.project}/assistant/runs/${run.id}`);
       if (this.run !== run) return;
@@ -205,16 +234,20 @@ export const assistantPanel = {
     }
   },
 
-  // A run ended. Later tickets add states here: timeout, cancelled, usage_limit.
+  // A run ended: answer, proposal, or one of the end states.
   finish(view) {
     const question = this.run?.question;
     this.run = null;
     this.busy = false;
+    clearTimeout(this.pollTimer);
     if (view.state === "answer") this.thread.push({ kind: "answer", text: view.answer || "" });
     else if (view.state === "proposal") {
       if (view.answer) this.thread.push({ kind: "answer", text: view.answer });
       for (const card of view.proposals || []) this.addCard(card, question);
-    } else this.thread.push({ kind: "error", text: view.error || "The assistant did not answer.", view });
+    } else {
+      const kind = END_STATES.includes(view.state) ? view.state : "error";
+      this.thread.push({ kind, text: view.error || "The assistant did not answer.", view });
+    }
     this.renderThread();
     this.panel.querySelector(".assistant-input")?.focus({ preventScroll: true });
   },
@@ -343,12 +376,15 @@ export const assistantPanel = {
   },
 
   // One renderer per kind of thread entry. Later tickets add proposal, timeout, cancelled and usage_limit here.
-  entryHtml(entry) {
+  entryHtml(entry, isLast) {
     if (entry.kind === "user") return `<div class="assistant-msg me">${esc(entry.text)}</div>`;
     if (entry.kind === "answer") return `<div class="assistant-msg answer">${esc(entry.text)}</div>`;
     if (entry.kind === "proposal") return this.cardHtml(entry);
-    return `<div class="assistant-notice warn" role="alert"><b>The assistant could not answer</b>
-        <div>${esc(entry.text)}</div><div class="slicer-muted">Nothing was changed.</div></div>`;
+    const retry = isLast ? `<div class="assistant-actions"><button type="button" class="btn btn-secondary btn-sm" data-action="retry">Try again</button></div>` : "";
+    const quiet = entry.kind === "cancelled" ? "" : " warn";
+    const reassure = entry.kind === "error" ? `<div class="slicer-muted">Nothing was changed.</div>` : "";
+    return `<div class="assistant-notice${quiet}" role="alert" data-end="${esc(entry.kind)}"><b>${esc(END_TITLES[entry.kind] || END_TITLES.error)}</b>
+        <div>${esc(entry.text)}</div>${reassure}${retry}</div>`;
   },
 
   thinkingHtml() {
@@ -356,7 +392,9 @@ export const assistantPanel = {
     const list = steps.length
       ? `<ol class="assistant-steps">${steps.map((step, n) => `<li class="${n === steps.length - 1 ? "on" : "done"}">${esc(step.label)}</li>`).join("")}</ol>`
       : `<ol class="assistant-steps"><li class="on">Starting</li></ol>`;
-    return `<div class="assistant-notice" role="status"><div class="assistant-working"><span class="assistant-spin" aria-hidden="true"></span><b>Working…</b></div>${list}</div>`;
+    return `<div class="assistant-notice" role="status"><div class="assistant-working"><span class="assistant-spin" aria-hidden="true"></span><b>Working…</b><span class="assistant-grow"></span>
+      <button type="button" class="btn btn-secondary btn-sm" data-action="cancel">Cancel</button></div>${list}
+      <div class="slicer-muted">Stops by itself after 60 s.</div></div>`;
   },
 
   threadHtml() {
@@ -377,7 +415,7 @@ export const assistantPanel = {
           <div class="assistant-chips" role="group" aria-label="Example prompts">${CHIPS.map(c => `<button type="button" class="assistant-chip" data-action="chip" data-text="${esc(c)}">${esc(c)}</button>`).join("")}</div>
         </div>${notice}`;
     }
-    return this.thread.map(entry => this.entryHtml(entry)).join("") + (this.busy ? this.thinkingHtml() : "") + notice;
+    return this.thread.map((entry, n) => this.entryHtml(entry, n === this.thread.length - 1 && !this.busy)).join("") + (this.busy ? this.thinkingHtml() : "") + notice;
   },
 
   // Redraws the thread and the controls that depend on it, leaving the composer (draft and focus) alone.
