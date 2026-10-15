@@ -629,8 +629,7 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .slicer-viewport-message .state-block p { color: #fff; }
 .slicer-viewport-message .state-spinner { border-color: rgba(255,255,255,.3); border-top-color: #fff; }
 
-/* ─── Hit targets (ticket 08): see the matching block at the end of style.css ─── */
-:root { --hit-min: 44px; --hit-fine: 32px; --hit-gap: 8px; }
+/* ─── Hit targets (ticket 08): the --hit-* tokens come from tokens/spooler.tokens.json via style.css ─── */
 .slicer-icon-btn, .slicer-pages button, .scope-toggle button, .preset-btn, .set-reset,
 .slicer-tabs .btn, .pp-fold, .slicer-toolbar .btn, .slicer-toolbar-select { min-height: var(--hit-fine); }
 .slicer-icon-btn { min-width: var(--hit-fine); }

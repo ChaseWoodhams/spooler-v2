@@ -7,7 +7,9 @@
     "test": "tests"
   },
   "scripts": {
-    "test:ui": "node tests/ui/run.cjs"
+    "test:ui": "node tests/ui/run.cjs",
+    "tokens:build": "node scripts/build-tokens.cjs",
+    "tokens:check": "node scripts/build-tokens.cjs --check"
   },
   "repository": {
     "type": "git",

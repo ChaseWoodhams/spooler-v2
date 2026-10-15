@@ -1,0 +1,76 @@
+{
+  "$description": "Spooler design tokens (DTCG). Source of truth for the CSS variables in public/style.css. Edit here, then run `npm run tokens:build`. The key of each token is its CSS variable name without the leading dashes. $extensions.mode.light is the value under body.light-mode; a token with no light value keeps its dark value. An alias such as {color.accent} is emitted as var(--accent), not resolved, because a var() alias resolves per theme.",
+  "base": {
+    "color": {
+      "$type": "color",
+      "bg": { "$value": "#0d0e12", "$extensions": { "mode": { "light": "#f4f5f9" } } },
+      "surface": { "$value": "#16181f", "$extensions": { "mode": { "light": "#ffffff" } } },
+      "surface2": { "$value": "#1e2028", "$extensions": { "mode": { "light": "#eaecf2" } } },
+      "border": { "$value": "#2a2d38", "$extensions": { "mode": { "light": "#d0d3de" } } },
+      "accent": { "$value": "#ff6b2b", "$extensions": { "mode": { "light": "#a63808" } } },
+      "accent-dim": { "$value": "#b64210", "$extensions": { "mode": { "light": "#8e2e06" } } },
+      "focus-ring": {
+        "$value": "{color.accent}",
+        "$description": "keyboard focus ring colour; every :focus-visible rule uses it",
+        "$extensions": { "mode": { "light": "{color.accent}" } }
+      },
+      "accent-fill": {
+        "$value": "#b64210",
+        "$description": "paints the accent behind text; white on it is 5.56:1 (raw --accent is 2.84:1)",
+        "$extensions": { "mode": { "light": "#a63808" } }
+      },
+      "green": { "$value": "#22c55e", "$extensions": { "mode": { "light": "#166534" } } },
+      "yellow": { "$value": "#eab308", "$extensions": { "mode": { "light": "#854d0e" } } },
+      "red": { "$value": "#ff6470", "$extensions": { "mode": { "light": "#b91c1c" } } },
+      "blue": { "$value": "#3b82f6", "$extensions": { "mode": { "light": "#1d4ed8" } } },
+      "text": { "$value": "#e8eaf0", "$extensions": { "mode": { "light": "#1a1c2a" } } },
+      "text-muted": { "$value": "#9ca3af", "$extensions": { "mode": { "light": "#525b6a" } } },
+      "placeholder": {
+        "$value": "#8a92a2",
+        "$description": ">=4.5:1 on the input fills; one token for every placeholder",
+        "$extensions": { "mode": { "light": "#5f6877" } }
+      },
+      "link": {
+        "$value": "#7db3ff",
+        "$description": "9.3:1 on --bg, 8.2:1 on --surface (light: 6.0:1 on --surface2, 6.7:1 on white)",
+        "$extensions": { "mode": { "light": "#1d4ed8" } }
+      }
+    },
+    "dimension": {
+      "$type": "dimension",
+      "check-size": { "$value": "16px" },
+      "radius": { "$value": "12px" },
+      "radius-sm": { "$value": "8px" },
+      "hit-min": { "$value": "44px", "$description": "touch target floor: coarse pointers and widths up to 1100px" },
+      "hit-fine": { "$value": "32px", "$description": "fine-pointer desktop floor, with --hit-gap between neighbours" },
+      "hit-gap": { "$value": "8px" },
+      "fs-secondary": { "$value": "13px", "$description": "floor for secondary dashboard text" },
+      "fs-page-title": { "$value": "20px", "$description": "the one page title; section headings stay smaller" }
+    },
+    "shadow": {
+      "$type": "shadow",
+      "shadow": {
+        "$value": { "color": "rgba(0,0,0,.5)", "offsetX": "0px", "offsetY": "4px", "blur": "24px", "spread": "0px" },
+        "$extensions": { "mode": { "light": { "color": "rgba(0,0,0,.1)", "offsetX": "0px", "offsetY": "4px", "blur": "24px", "spread": "0px" } } }
+      }
+    }
+  },
+  "status": {
+    "$description": "Outcome status badges (status-badge.js) and the settings toggle: own colours, icon plus label.",
+    "color": {
+      "$type": "color",
+      "st-completed": { "$value": "#2dd4bf", "$extensions": { "mode": { "light": "#0f766e" } } },
+      "st-failed": { "$value": "#fb7185", "$extensions": { "mode": { "light": "#be123c" } } },
+      "st-cancelled": { "$value": "#94a3b8", "$extensions": { "mode": { "light": "#475569" } } },
+      "st-unconfirmed": { "$value": "#c4b5fd", "$extensions": { "mode": { "light": "#6d28d9" } } },
+      "st-unknown": { "$value": "#cbd5e1", "$extensions": { "mode": { "light": "#334155" } } },
+      "st-printing": { "$value": "#7dd3fc", "$extensions": { "mode": { "light": "#0369a1" } } },
+      "toggle-on": { "$value": "#38bdf8", "$extensions": { "mode": { "light": "#0369a1" } } },
+      "toggle-tick": {
+        "$value": "#ffffff",
+        "$description": "light mode only; dark mode never reads it",
+        "$extensions": { "mode": { "dark": null, "light": "#fff" } }
+      }
+    }
+  }
+}
