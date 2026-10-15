@@ -100,6 +100,7 @@ class AskTests(unittest.TestCase):
 
     def ask(self, message="Make the brackets stronger", history=None, project=None):
         project = project or self.project
+        self.call("GET", f"/api/projects/{project['id']}/assistant/status")        # the panel has read the status before anyone asks
         return self.call("POST", f"/api/projects/{project['id']}/assistant/ask", {"message": message, "history": history or []})
 
     def poll(self, run, timeout=30):
@@ -161,6 +162,30 @@ class AskTests(unittest.TestCase):
             self.assertIn("error", body)
         self.assertEqual(self.call("POST", f"/api/projects/{self.project['id']}/assistant/ask", {"message": "hi", "history": "no"})[0], 400)
         self.assertEqual(self.call("POST", "/api/projects/9999/assistant/ask", {"message": "hi"})[0], 404)
+
+    def test_an_ask_during_a_cold_availability_check_is_refused_fast_not_held_for_the_check(self):
+        gate = threading.Event()
+        path = f"/api/projects/{self.project['id']}/assistant/ask"
+        with mock.patch.object(assistant, "probe_jev", side_effect=lambda *a, **k: gate.wait(20)):
+            started = time.monotonic()
+            status, body = self.call("POST", path, {"message": "hi"})
+            elapsed = time.monotonic() - started
+            gate.set()
+        self.assertEqual(status, 503, body)
+        self.assertIn("still checking", body["error"].lower())
+        self.assertLess(elapsed, 1.5, "the request thread must not wait for the check")
+
+    def test_an_ask_uses_the_last_result_while_a_new_check_runs(self):
+        self.call("GET", f"/api/projects/{self.project['id']}/assistant/status")
+        gate = threading.Event()
+        with mock.patch.object(assistant, "CACHE_S", 0), mock.patch.object(assistant, "probe_jev", side_effect=lambda *a, **k: gate.wait(20)):
+            started = time.monotonic()
+            status, body = self.call("POST", f"/api/projects/{self.project['id']}/assistant/ask", {"message": "hi"})
+            elapsed = time.monotonic() - started
+            gate.set()
+            self.poll(body)
+        self.assertEqual(status, 200, body)
+        self.assertLess(elapsed, 1.5)
 
     def test_an_unavailable_assistant_refuses_the_ask_and_the_rest_of_the_api_still_answers(self):
         self.call("POST", "/api/assistant/settings", {"cli_path": str(self.dir / "missing" / "claude.exe")})

@@ -224,7 +224,9 @@ def ask(project_id: int, message, history=None) -> dict:
     turns = clean_history(history)
     import projects                                   # lazy, like assistant.purpose_summary: the app's own record, 404 when unknown
     record = projects.get_project(int(project_id))
-    status = assistant.status()
+    status = assistant.status(wait=False)               # the request thread never waits for a check
+    if status.get("checking"):
+        raise AskError("The assistant is still checking whether it is available. Try again in a moment", 503)
     if not status.get("available"):
         raise AskError("AI unavailable: " + (status.get("reason") or "the assistant did not answer"), 503)
     settings = assistant.load_settings()

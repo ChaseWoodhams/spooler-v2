@@ -115,6 +115,7 @@ class ProposalCase(unittest.TestCase):
         self.assertEqual(status, 200)
 
     def ask(self, message="Orient these better"):
+        self.call("GET", f"/api/projects/{self.project['id']}/assistant/status")
         status, run = self.call("POST", f"/api/projects/{self.project['id']}/assistant/ask", {"message": message, "history": []})
         self.assertEqual(status, 200, run)
         return run
