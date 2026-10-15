@@ -32,6 +32,8 @@
   --hit-min:     44px;  /* touch target floor: coarse pointers and widths up to 1100px */
   --hit-fine:    32px;  /* fine-pointer desktop floor, with --hit-gap between neighbours */
   --hit-gap:     8px;
+  --fs-secondary: 13px; /* floor for secondary dashboard text */
+  --fs-page-title: 20px; /* the one page title; section headings stay smaller */
 }
 
 body.light-mode {
@@ -2284,3 +2286,12 @@ body.light-mode { --st-completed: #0f766e; --st-failed: #be123c; --st-cancelled:
 .printer-card-offline > .btn { flex: none; min-height: 44px; }
 
 #modal-app-settings:focus { outline: none; }   /* focus lands on the dialog itself; its controls keep their own rings */
+
+/* ─── Dashboard hierarchy: printer state leads, one title level, secondary text >= 13px ─ */
+.dash-bar h1 { font-size: var(--fs-page-title); line-height: 1.2; }
+.needs-you { border: 1px solid var(--border); border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.needs-you.needs-you-empty { border-left-width: 1px; }
+.needs-count, .needs-sub, .dash-project-count, .card-subtitle, .card-next, .card-upnext, .offline-row-reason,
+#dash-bar .sidenav-badge, #printer-grid .temp-label, #printer-grid .temp-target, #printer-grid .status-badge,
+#printer-grid .toggle-state, #printer-grid .camera-view-toggle, #printer-grid .btn-sm, #dash-bar #btn-queue { font-size: var(--fs-secondary); }
+.temp-unit { font-size: var(--fs-secondary); font-weight: 400; }

@@ -696,17 +696,17 @@ function renderPrinter(printer) {
     <div class="card-temps">
       <div class="temp-block">
         <div class="temp-label">Nozzle</div>
-        <div class="temp-value ${tempColor(nozzle)}">${nozzle ? nozzle.toFixed(0) : "--"}<span style="font-size:12px;font-weight:400">°C</span></div>
+        <div class="temp-value ${tempColor(nozzle)}">${nozzle ? nozzle.toFixed(0) : "--"}<span class="temp-unit">°C</span></div>
         <div class="temp-target">Target: ${nozzleTgt ? nozzleTgt.toFixed(0) + "°C" : "--"}</div>
       </div>
       <div class="temp-block">
         <div class="temp-label">Bed</div>
-        <div class="temp-value ${tempColor(bed)}">${bed ? bed.toFixed(0) : "--"}<span style="font-size:12px;font-weight:400">°C</span></div>
+        <div class="temp-value ${tempColor(bed)}">${bed ? bed.toFixed(0) : "--"}<span class="temp-unit">°C</span></div>
         <div class="temp-target">Target: ${bedTgt ? bedTgt.toFixed(0) + "°C" : "--"}</div>
       </div>
       <div class="temp-block">
         <div class="temp-label">Chamber</div>
-        <div class="temp-value ${tempColor(chamber)}">${chamber ? chamber.toFixed(0) : "--"}<span style="font-size:12px;font-weight:400">°C</span></div>
+        <div class="temp-value ${tempColor(chamber)}">${chamber ? chamber.toFixed(0) : "--"}<span class="temp-unit">°C</span></div>
         <div class="temp-target">Target: ${chamberTgt ? chamberTgt.toFixed(0) + "°C" : "--"}</div>
       </div>
     </div>
