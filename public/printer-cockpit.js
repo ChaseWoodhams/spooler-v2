@@ -233,7 +233,7 @@
   // ── styles ─────────────────────────────────────────────────────────────────
   const css = `
   .pv{max-width:1200px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
-  .pv button{font:inherit;color:inherit;cursor:pointer}
+  .pv button{font:inherit;cursor:pointer}.pv button:not(.btn){color:inherit}
   .pv button:disabled{opacity:.4;cursor:not-allowed}
   .pv-back{background:none;border:0;color:var(--text-muted)}
   .pv-title{display:flex;align-items:center;gap:8px}.pv-title small{color:var(--text-muted)}
@@ -269,7 +269,7 @@
   .pv-hud>*{pointer-events:auto}
   .pv-hud.top{top:0;background:linear-gradient(#000a,transparent)}.pv-hud.bot{bottom:0;background:linear-gradient(transparent,#000c);justify-content:space-between;align-items:flex-end}
   .pv-hud .pv-back{color:#fff}
-  .pv-back{display:inline-flex;align-items:center;gap:4px;min-width:44px}.pv-back svg{width:18px;height:18px;flex:none}.pv-hud .live-chip{margin-left:auto}
+  .pv-back{display:inline-flex;align-items:center;gap:4px;min-width:44px}.pv-back svg{width:18px;height:18px;flex:none}.pv-hud .live-chip{margin-left:auto;color:#fff}
   .pv-pills{display:flex;gap:8px;flex-wrap:wrap}.pv-pill{display:inline-flex;align-items:center;gap:5px;background:#000a;border-radius:99px;padding:4px 12px;backdrop-filter:blur(6px);font-size:13px;font-variant-numeric:tabular-nums}.pv-pill svg{width:14px;height:14px;flex:none}.pv-pill small{font-size:12px;opacity:.85}.pv-pill-label{font-size:12px;opacity:.9}
   .pv-hudjob{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#000a;border-radius:var(--radius-sm);padding:8px 12px;backdrop-filter:blur(6px);flex:1;max-width:620px}
   .pv-hudjob .pv-bar{flex:1}.pv-hudjob.idle{flex:0 0 auto}
