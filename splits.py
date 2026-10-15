@@ -398,9 +398,11 @@ def request_split(split_id: int) -> dict:
     tiny = sum(bool(p.get("tiny")) for p in check["pieces"])
     if tiny:
         raise jobs.JobError(f"{tiny} part{'s are' if tiny != 1 else ' is'} too small to print — move the cut that makes {'them' if tiny != 1 else 'it'} or remove it", 409)
-    oversize = sum(not p["fits"] for p in check["pieces"])
-    if oversize:
-        raise jobs.JobError(f"{oversize} part{'s are' if oversize != 1 else ' is'} still too big — use Auto-fix or move the cuts", 409)
+    big = [p for p in check["pieces"] if not p["fits"]]
+    if big:
+        ids = sorted({c for p in big for c in p.get("cuts", [])})
+        hint = f"move cut{'s' if len(ids) != 1 else ''} {', '.join(map(str, ids))}" if ids else "check the printer size"
+        raise jobs.JobError(f"{len(big)} part{'s are' if len(big) != 1 else ' is'} still too big — {hint}, or use Auto-fix", 409)
     _set_state(split_id, SPLITTING, stage="split", error=None)
     notify_worker()
     return get_split(split_id)

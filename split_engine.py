@@ -426,6 +426,13 @@ def apply_cuts(model, cuts: list, stage: Stage | None = None, start: float = 0, 
     return pieces, events
 
 
+def move_cuts_hint(cut_ids: list) -> str:
+    """What to change when a part will not fit: the cuts that made it, or the printer size when it was never cut."""
+    if not cut_ids:
+        return "check the printer size, since this part was never cut"
+    return f"move cut{'s' if len(cut_ids) != 1 else ''} {', '.join(map(str, cut_ids))}"
+
+
 def describe_pieces(pieces: list, limits: dict) -> list:
     out = []
     for piece in pieces:
@@ -437,7 +444,8 @@ def describe_pieces(pieces: list, limits: dict) -> list:
             "bbox":       [round(float(x), 2) for x in piece["man"].bounding_box()],
             "volume_cm3": round(volume / 1000, 2),
             "size":       size,
-            "fits":       parts_needed(pts, limits) == 1,
+            "fits":       part_fits(piece["man"], piece["normals"], limits, pts),
+            "cuts":       sorted({cid for cid, _ in piece["member"]}),
             "tiny":       volume < TINY_PART_MM3 or size[0] < TINY_PART_MM,
             "made_by_cut": piece["last"][0] if piece.get("last") else None,  # the cut that last split this part off; None when never cut
         })
@@ -880,23 +888,18 @@ def label_part(part, number: int, R, shift, islands: list, events: list) -> tupl
 
 # ── Orientation ────────────────────────────────────────────────────────────────
 
-def choose_orientation(man, cut_normals: list, limits: dict):
-    """Pick a print orientation that fits, keeps overhangs low and stands on a big flat face."""
-    verts, tris = arrays(man)
-    tri = verts[tris].astype(float)
-    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-    doubled = np.linalg.norm(cross, axis=1)
-    keep = doubled > 1e-12
-    normals, areas, centres = cross[keep] / doubled[keep, None], doubled[keep] / 2, tri[keep].mean(axis=1)
-    surface = float(areas.sum())
-    hull = hull_points(man)
+def fitting_orientations(man, cut_normals: list, limits: dict, hull=None) -> list:
+    """Every way up the part can stand on the bed: [{"R", "height", "footprint", "hp"}], R turning the part so its footprint lies
+    along the bed. This is the one test of whether a part fits the printer: the plan's "fits" (describe_pieces), the Split's
+    size check and choose_orientation all use it, so a plan that says everything fits always splits."""
+    hull = hull_points(man) if hull is None else hull
     dirs = [np.asarray(c, float) for c in cut_normals] + list(np.eye(3))
     try:
         dirs += list(trimesh.bounds.oriented_bounds(hull)[0][:3, :3])
     except Exception:
         pass
     bed = sorted([limits["bed_x"], limits["bed_y"]])
-    options, tried = [], []
+    found, tried = [], []
     for v in dirs:
         v = unit(v)
         for sign in (1.0, -1.0):
@@ -911,16 +914,41 @@ def choose_orientation(man, cut_normals: list, limits: dict):
                 continue
             T2, ext2 = trimesh.bounds.oriented_bounds_2D(hp[:, :2])
             footprint = sorted(float(x) for x in ext2)
-            if footprint[0] > bed[0] or footprint[1] > bed[1]:
-                continue
-            nz = normals @ R[2]
-            z = centres @ R[2] - float(hp[:, 2].min())
-            contact = float(areas[(nz < -0.985) & (z < 0.3)].sum())
-            overhang = float(areas[(nz < -OVERHANG_SIN) & (z >= 0.3)].sum())
-            rot2 = np.asarray(T2)[:2, :2]
-            if np.linalg.det(rot2) > 0:
-                R = np.block([[rot2, np.zeros((2, 1))], [np.zeros((1, 2)), np.ones((1, 1))]]) @ R
-            options.append({"R": R, "contact": contact, "overhang": overhang, "height": height, "footprint": footprint})
+            if footprint[0] <= bed[0] and footprint[1] <= bed[1]:
+                rot2 = np.asarray(T2)[:2, :2]
+                if np.linalg.det(rot2) > 0:
+                    R = np.block([[rot2, np.zeros((2, 1))], [np.zeros((1, 2)), np.ones((1, 1))]]) @ R
+            else:  # the tightest box is too long for the bed, but the part may still lie corner to corner
+                footprint = sorted(float(x) for x in np.ptp(hp[:, :2], axis=0))
+                if footprint[0] > bed[0] or footprint[1] > bed[1]:
+                    continue
+            found.append({"R": R, "height": height, "footprint": footprint})
+    return found
+
+
+def part_fits(man, cut_normals: list, limits: dict, hull=None) -> bool:
+    return bool(fitting_orientations(man, cut_normals, limits, hull))
+
+
+def choose_orientation(man, cut_normals: list, limits: dict):
+    """Pick a print orientation that fits, keeps overhangs low and stands on a big flat face."""
+    verts, tris = arrays(man)
+    tri = verts[tris].astype(float)
+    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    doubled = np.linalg.norm(cross, axis=1)
+    keep = doubled > 1e-12
+    normals, areas, centres = cross[keep] / doubled[keep, None], doubled[keep] / 2, tri[keep].mean(axis=1)
+    surface = float(areas.sum())
+    hull = hull_points(man)
+    options = []
+    for fit in fitting_orientations(man, cut_normals, limits, hull):
+        R = fit["R"]
+        hp = hull @ np.asarray(R).T
+        nz = normals @ R[2]
+        z = centres @ R[2] - float(hp[:, 2].min())
+        contact = float(areas[(nz < -0.985) & (z < 0.3)].sum())
+        overhang = float(areas[(nz < -OVERHANG_SIN) & (z >= 0.3)].sum())
+        options.append({"R": R, "contact": contact, "overhang": overhang, "height": fit["height"], "footprint": fit["footprint"]})
     if not options:
         return None, surface
     best_contact = max(o["contact"] for o in options)
@@ -1066,9 +1094,10 @@ def split(work: Path) -> None:
     tiny = sum(d["tiny"] for d in describe_pieces(pieces, limits))
     if tiny:
         raise EngineError(f"{tiny} part{'s are' if tiny != 1 else ' is'} too small to print — move the cut that makes {'them' if tiny != 1 else 'it'} or remove it")
-    oversize = sum(parts_needed(hull_points(p["man"]), limits) > 1 for p in pieces)
-    if oversize:
-        raise EngineError(f"{oversize} part{'s are' if oversize != 1 else ' is'} still too big for the printer — use Auto-fix or move the cuts")
+    too_big = [p for p in pieces if not part_fits(p["man"], p["normals"], limits)]
+    if too_big:
+        raise EngineError(f"{len(too_big)} part{'s are' if len(too_big) != 1 else ' is'} still too big for the printer — "
+                          f"{move_cuts_hint(sorted({cid for p in too_big for cid, _ in p['member']}))}, or use Auto-fix")
 
     # holes, placed once every cut is known so no cut can go through a hole
     pins, islands = [], []
@@ -1101,7 +1130,7 @@ def split(work: Path) -> None:
                 man = man - cutter
             # body and cutter are kept so the preview can be simplified before the holes go in (see parts_preview.bin)
             built.append({"man": man, "body": piece["man"], "cutter": cutter,
-                          "bb": np.asarray(man.bounding_box(), float), "normals": piece["normals"]})
+                          "bb": np.asarray(man.bounding_box(), float), "normals": piece["normals"], "member": piece["member"]})
         built.sort(key=lambda p: (round((p["bb"][2] + p["bb"][5]) / 100), round((p["bb"][1] + p["bb"][4]) / 100), (p["bb"][0] + p["bb"][3]) / 2))
         return built
 
@@ -1179,7 +1208,7 @@ def split(work: Path) -> None:
         stage.progress(65 + 30 * (number - 1) / len(parts), f"Orienting and saving part {number} of {len(parts)}")
         placed, surface = choose_orientation(part["man"], part["normals"], limits)
         if placed is None:
-            raise EngineError(f"Part {number} has no orientation that fits the printer")
+            raise EngineError(f"Part {number} has no orientation that fits the printer — {move_cuts_hint(sorted({cid for cid, _ in part['member']}))}")
         oriented = rotate(part["man"], placed["R"])
         obb = oriented.bounding_box()
         oriented = oriented.translate([-obb[0], -obb[1], -obb[2]])
