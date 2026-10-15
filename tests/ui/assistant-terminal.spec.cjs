@@ -11,7 +11,7 @@ const card = (token, over = {}) => ({
   token, kind: 'orientation', project_id: 1, base_revision: 3, review: 'placement', title: 'Better orientation for 1 object', scope: '1 object on Plate 1',
   reason: 'From a terminal session', diff: [{ label: 'Bracket part 1', text: 'rotation 0, 0, 0 → 90, 0, 0 degrees' }], notes: [], pinned: [], problems: [], ...over,
 });
-const plate = (rotation, outline) => ({ id: 1, name: 'Plate 1', new: false, filament: null, parts: 1, turned: 0, time_estimate: null,
+const plate = (rotation, outline) => ({ id: 1, name: 'Plate 1', new: false, filament: null, turned: 0, time_estimate: null,
   objects: [{ id: 1, name: 'Bracket part 1', model: 11, position: [120, 120], rotation, pinned: false, outline }] });
 
 async function open(browser, baseUrl, s) {
@@ -24,7 +24,7 @@ async function open(browser, baseUrl, s) {
     if (route.request().method() === 'GET') {
       s.reviews.push(parts.pop());
       const before = [plate([0, 0, 0], BOX(120, 120, 180, 60))], after = [plate([90, 0, 0], BOX(120, 120, 180, 30))];
-      return route.fulfill({ json: { ...s.listed[0], revision: 3, summary: 'x', outcome: 'x', kept: [], refused: null, settings: null, bed: [0, 0, 256, 256],
+      return route.fulfill({ json: { ...s.listed[0], revision: 3, summary: 'x', kept: [], refused: null, settings: null, bed: [0, 0, 256, 256],
         pack: { preset: 'normal', gap: 6 }, before: { plates: before }, after: { plates: after }, plates: after } });
     }
     s.dismisses.push(parts[parts.length - 2]);
@@ -70,12 +70,12 @@ async function open(browser, baseUrl, s) {
       assert.equal(await panel.locator('.assistant-card[data-token="term1"]').count(), 1);
 
       // a Proposal made for another revision is Superseded rather than shown, and has no Ask again (no question to repeat)
-      s.listed = [card('stale', { base_revision: 1 })];
+      s.listed = [card('superseded', { base_revision: 1 })];
       await page.waitForTimeout(500);
-      assert.equal(await panel.locator('.assistant-card[data-token="stale"]').count(), 0);
+      assert.equal(await panel.locator('.assistant-card[data-token="superseded"]').count(), 0);
       const other = panel.locator('.assistant-card[data-token="term2"]');
       await other.getByRole('button', { name: 'Dismiss' }).click();
-      console.log('PASS: review hand-off, later arrivals, no duplicates, Dismiss, stale ones not shown');
+      console.log('PASS: review hand-off, later arrivals, no duplicates, Dismiss, superseded ones not shown');
     } finally { await context.close(); }
   } finally {
     await browser.close();

@@ -21,6 +21,10 @@ FILAMENT = {"name": "PETG", "filament_type": ["PETG"], "nozzle_temperature": ["2
 MACHINE = {"name": "Elegoo Centauri Carbon 0.4 nozzle", "printable_area": ["0x0", "256x256"], "printable_height": "250", "nozzle_diameter": ["0.4"]}
 
 
+PRIVATE_KEYS = ("machine_start_gcode", "machine_end_gcode", "layer_change_gcode", "time_lapse_gcode", "post_process", "print_host",
+                "printhost_apikey", "printhost_password", "printhost_user", "printhost_cafile", "filename_format")
+
+
 def write_profile(data_dir, process=None, filament=None, machine=None):
     write_bundle(data_dir, machine or MACHINE)
     folder = Path(data_dir) / "profiles" / BUNDLE
@@ -131,7 +135,30 @@ class GetSettingsTests(SettingsCase):
         rows = {r["key"]: r for r in result["settings"]}
         self.assertEqual(sorted(rows), ["default_acceleration", "wall_loops"])
         self.assertIs(rows["default_acceleration"]["proposable"], False)
-        self.assertEqual(result["unknown"], ["no_such_setting"])
+        self.assertEqual(result["not_available"], ["no_such_setting"])
+
+    def test_private_keys_are_not_available_by_name_or_in_the_default_listing(self):
+        secret = "SECRET-SENTINEL"
+        write_profile(self.dir, process={**PROCESS, "post_process": secret, "filename_format": secret},
+                      machine={**MACHINE, **{key: secret for key in PRIVATE_KEYS if key not in ("post_process", "filename_format")}})
+        asked = self.result("get_settings", {"scope": "project", "keys": ["wall_loops", *PRIVATE_KEYS]})
+        self.assertEqual([r["key"] for r in asked["settings"]], ["wall_loops"])
+        self.assertEqual(asked["not_available"], list(PRIVATE_KEYS))
+        self.assertNotIn(secret, json.dumps(asked))
+        listed = self.result("get_settings", {"scope": "project"})
+        self.assertFalse({r["key"] for r in listed["settings"]} & set(PRIVATE_KEYS))
+        self.assertNotIn(secret, json.dumps(listed))
+
+    def test_a_private_key_a_layer_overrides_is_still_left_out_of_the_default_listing(self):
+        self.add_project(4, "Odd", 1, project_data(profile={"bundle_id": BUNDLE, "process": {"post_process": "SECRET-SENTINEL"}, "filament": {}}))
+        session = McpSession(self.dir, 4)
+        try:
+            session.start()
+            text = session.call("get_settings", {"scope": "project"})["result"]["content"][0]["text"]
+        finally:
+            session.close()
+        self.assertNotIn("post_process", text)
+        self.assertNotIn("SECRET-SENTINEL", text)
 
     def test_bad_scope_or_id_is_a_tool_error(self):
         self.assertIn("scope", self.error("get_settings", {"scope": "printer"}))
@@ -185,7 +212,13 @@ class DescribeSettingTests(SettingsCase):
         self.assertTrue(any("support" in line for line in got["depends_on"]), got["depends_on"])
 
     def test_an_unknown_key_is_a_tool_error(self):
-        self.assertIn("Unknown setting", self.error("describe_setting", {"key": "no_such_setting"}))
+        self.assertIn("not available", self.error("describe_setting", {"key": "no_such_setting"}))
+
+    def test_a_private_key_is_not_available_and_its_description_is_not_given(self):
+        for key in PRIVATE_KEYS:
+            text = self.error("describe_setting", {"key": key})
+            self.assertIn("not available", text, key)
+            self.assertNotIn("tooltip", text, key)
 
 
 class ProposeSettingsTests(SettingsCase):
@@ -326,9 +359,9 @@ class ProposeSettingsTests(SettingsCase):
         got = json.loads(reply["result"]["content"][0]["text"])
         self.assertTrue(any("own Filament choice" in n for n in got["notes"]), got)
 
-    def test_a_stale_revision_returns_stale_and_stages_nothing(self):
+    def test_a_behind_revision_returns_superseded_and_stages_nothing(self):
         got = self.propose(changes={"wall_loops": 4}, revision=6)
-        self.assertIs(got["stale"], True)
+        self.assertIs(got["superseded"], True)
         self.assertEqual(got["revision"], 7)
         self.assertEqual(self.staging(), [])
 
@@ -340,6 +373,21 @@ class ProposeSettingsTests(SettingsCase):
         self.assertIn("object", self.error("propose_settings", {**arguments, "id": 1, "changes": ["wall_loops"]}))
         self.assertIn("id", self.error("propose_settings", {"revision": 7, "scope": "plate", "changes": {"wall_loops": 4}}))
         self.assertEqual(self.staging(), [])
+
+    def test_an_object_of_a_model_still_importing_cannot_be_targeted(self):
+        models = [{"id": 11, "name": "Arm", "file": "arm.stl", "state": "importing", "size": [80, 20, 10], "volume_cm3": 12.5}]
+        self.add_project(5, "Importing", 3, project_data(), models)
+        session = McpSession(self.dir, 5)
+        try:
+            session.start()
+            reply = session.call("propose_settings", {"revision": 3, "scope": "object", "id": 1, "changes": {"wall_loops": 4}})
+            plate = session.call("propose_settings", {"revision": 3, "scope": "plate", "id": 1, "changes": {"top_shell_layers": 6}})
+        finally:
+            session.close()
+        self.assertTrue(reply["result"]["isError"])
+        self.assertIn("Object 1 cannot be targeted: its Model is still importing", reply["result"]["content"][0]["text"])
+        self.assertFalse(plate["result"].get("isError"), "plate and project scope are not about one Object's Model")
+        self.assertEqual(len(self.staging()), 1, "only the plate proposal was staged")
 
     def test_four_proposals_in_one_run_are_too_many(self):
         session = McpSession(self.dir, 1, command=[sys.executable, str(SERVER), "--project", "1", "--data-dir", str(self.dir), "--run", "one-run"])

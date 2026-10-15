@@ -100,6 +100,7 @@ class AskTests(unittest.TestCase):
 
     def ask(self, message="Make the brackets stronger", history=None, project=None):
         project = project or self.project
+        self.call("GET", f"/api/projects/{project['id']}/assistant/status")        # the panel has read the status before anyone asks
         return self.call("POST", f"/api/projects/{project['id']}/assistant/ask", {"message": message, "history": history or []})
 
     def poll(self, run, timeout=30):
@@ -161,6 +162,30 @@ class AskTests(unittest.TestCase):
             self.assertIn("error", body)
         self.assertEqual(self.call("POST", f"/api/projects/{self.project['id']}/assistant/ask", {"message": "hi", "history": "no"})[0], 400)
         self.assertEqual(self.call("POST", "/api/projects/9999/assistant/ask", {"message": "hi"})[0], 404)
+
+    def test_an_ask_during_a_cold_availability_check_is_refused_fast_not_held_for_the_check(self):
+        gate = threading.Event()
+        path = f"/api/projects/{self.project['id']}/assistant/ask"
+        with mock.patch.object(assistant, "probe_jev", side_effect=lambda *a, **k: gate.wait(20)):
+            started = time.monotonic()
+            status, body = self.call("POST", path, {"message": "hi"})
+            elapsed = time.monotonic() - started
+            gate.set()
+        self.assertEqual(status, 503, body)
+        self.assertIn("still checking", body["error"].lower())
+        self.assertLess(elapsed, 1.5, "the request thread must not wait for the check")
+
+    def test_an_ask_uses_the_last_result_while_a_new_check_runs(self):
+        self.call("GET", f"/api/projects/{self.project['id']}/assistant/status")
+        gate = threading.Event()
+        with mock.patch.object(assistant, "CACHE_S", 0), mock.patch.object(assistant, "probe_jev", side_effect=lambda *a, **k: gate.wait(20)):
+            started = time.monotonic()
+            status, body = self.call("POST", f"/api/projects/{self.project['id']}/assistant/ask", {"message": "hi"})
+            elapsed = time.monotonic() - started
+            gate.set()
+            self.poll(body)
+        self.assertEqual(status, 200, body)
+        self.assertLess(elapsed, 1.5)
 
     def test_an_unavailable_assistant_refuses_the_ask_and_the_rest_of_the_api_still_answers(self):
         self.call("POST", "/api/assistant/settings", {"cli_path": str(self.dir / "missing" / "claude.exe")})
@@ -327,6 +352,32 @@ class AskTests(unittest.TestCase):
         view = self.finished("again")
         self.assertNotIn("pelican", json.dumps(view))
 
+    def test_progress_steps_name_the_model_or_plate_a_tool_call_names_and_fall_back_to_the_generic_label(self):
+        model = self.project["models"][0]
+        plate = self.project["data"]["plates"][0]
+        self.scenario({"calls": [{"tool": "get_model_geometry", "arguments": {"model_id": model["id"]}},
+                                 {"tool": "get_plate", "arguments": {"plate_id": plate["id"]}},
+                                 {"tool": "get_slice_summary", "arguments": {"plate_id": plate["id"]}},
+                                 {"tool": "get_model_geometry", "arguments": {"model_id": 99999}}],
+                       "answer": "Done."})
+        labels = [s["label"] for s in self.finished()["steps"]]
+        self.assertEqual(labels, [f"Reading {model['name']} geometry", f"Reading {plate['name']}", f"Reading {plate['name']} slice",
+                                  "Reading model geometry"])
+
+    def test_a_name_in_a_step_label_is_one_short_line_and_never_reaches_the_log(self):
+        project = self.make_project("Long", ["Zork   " + "q" * 200 + ".stl"])
+        model = project["models"][0]
+        self.scenario({"calls": [{"tool": "get_model_geometry", "arguments": {"model_id": model["id"]}}]})
+        logged = io.StringIO()
+        with mock.patch("sys.stdout", logged):
+            status, run = self.ask(project=project)
+            view = self.poll(run)
+        label = view["steps"][0]["label"]
+        self.assertTrue(label.startswith("Reading Zork q"), label)
+        self.assertLess(len(label), 100)
+        self.assertNotIn("Zork", logged.getvalue())
+        self.assertIn("[Assistant]", logged.getvalue())
+
     # ── only this project ──
     def test_the_assistant_sees_only_the_project_it_was_asked_about(self):
         self.make_project("Secret other project", ["other.stl"])
@@ -340,6 +391,13 @@ class AskTests(unittest.TestCase):
         view = self.finished()
         self.assertEqual(view["state"], "error")
         self.assertTrue(view["error"])
+        self.assertIsNone(view["answer"])
+
+    def test_a_non_zero_exit_after_a_good_result_is_still_an_error(self):
+        self.scenario({"calls": [], "answer": "Looks fine.", "exit_code": 3})
+        view = self.finished()
+        self.assertEqual(view["state"], "error")
+        self.assertIn("3", view["error"])
         self.assertIsNone(view["answer"])
 
     def test_a_run_that_ends_without_a_result_is_an_error(self):

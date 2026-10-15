@@ -2,17 +2,15 @@
 // assistant can and can't do, the Purpose summary, example prompts), and the conversation of this visit: ask, progress
 // steps while a run works, then the plain-text answer. The thread lives only in this object: reload or Clear empties it
 // and nothing is stored. Each ask sends the earlier turns (capped), because the server keeps no conversation.
-// Proposal cards (ticket 15) are thread entries {kind: "proposal", card, status, question}: pending, accepted, dismissed,
-// superseded (the project changed) or replaced (a newer Proposal of the same kind). Later tickets add timeout, cancelled and
-// usage limit to entryHtml() and finish().
+// Proposal cards are thread entries {kind: "proposal", card, status, question}: pending, accepted, dismissed, superseded
+// (the project changed) or replaced (a newer Proposal of the same kind).
 // Nothing here runs until the person opens the panel, so the page loads and works the same without an assistant.
 const OPEN_KEY = "slicer.assistant.open";
-const CHIPS = ["Make these parts stronger", "Fit more on this plate", "Why is this plate so slow?"];
+const CHIPS = ["Make these models stronger", "Fit more on this plate", "Why is this plate so slow?"];
 const PURPOSE_NAMES = { general: "General", functional: "Functional", display: "Display", draft: "Draft" };
 const MAX_LISTED = 5;
-const MAX_HISTORY_TURNS = 12;          // keep in step with assistant_runner.py
-const MAX_HISTORY_CHARS = 6000;
-const MAX_TURN_CHARS = 1500;
+const LIMITS = { deadline_seconds: 60, history_turns: 12, history_chars: 6000, turn_chars: 1500 };   // used until the server's own (status.limits) arrive
+const GIVE_UP_EXTRA_MS = 30000;        // the server stops a run at its deadline; if its answer still has not come this long after, stop waiting
 const POLL_FIRST_MS = 400;
 const POLL_MS = 900;
 const POLL_FAILURES = 3;
@@ -22,9 +20,8 @@ const CARD_STATUS = {
   replaced: "Replaced by a newer proposal of the same kind. Nothing was changed.",
 };
 const TERMINAL_POLL_MS = 5000;          // how often an open panel looks for Proposals staged from a terminal session
-const GIVE_UP_MS = 90000;              // the server stops a run after 60 s; if its answer still has not come, stop waiting (never a spinner forever)
 const END_STATES = ["timeout", "cancelled", "usage_limit", "error"];
-const END_TITLES = { timeout: "No answer in 60 s", cancelled: "Cancelled", usage_limit: "AI unavailable", error: "The assistant could not answer" };
+const END_TITLES = { cancelled: "Cancelled", usage_limit: "AI unavailable", error: "The assistant could not answer" };
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const remembered = () => { try { return localStorage.getItem(OPEN_KEY) === "1"; } catch { return false; } };
@@ -79,8 +76,12 @@ export const assistantPanel = {
   },
 
   // Called whenever the page re-renders: read the (cached, cheap) status again when the saved project changed.
+  limits() {
+    return { ...LIMITS, ...(this.status?.limits || {}) };
+  },
+
   update() {
-    this.supersedeStale();
+    this.supersedeOnEdit();
     if (!this.open) return;
     const project = this.hooks.project();
     if (project && this.fetched !== `${project.id}:${project.revision}` && !this.loading) this.refresh();
@@ -139,16 +140,17 @@ export const assistantPanel = {
 
   // The earlier turns of this visit for the next ask: what was said and answered, newest kept, capped like the server does.
   history() {
+    const limits = this.limits();
     const turns = this.thread.flatMap(entry => {
       if (entry.kind === "user") return [{ role: "user", text: entry.text }];
       if (entry.kind === "answer") return [{ role: "assistant", text: entry.text }];
       if (entry.kind === "proposal") return [{ role: "assistant", text: this.proposalTurn(entry) }];
       return [];
-    }).map(turn => ({ ...turn, text: turn.text.slice(0, MAX_TURN_CHARS) }));
+    }).map(turn => ({ ...turn, text: turn.text.slice(0, limits.turn_chars) }));
     const kept = [];
     let used = 0;
     for (const turn of turns.reverse()) {
-      if (kept.length >= MAX_HISTORY_TURNS || used + turn.text.length > MAX_HISTORY_CHARS) break;
+      if (kept.length >= limits.history_turns || used + turn.text.length > limits.history_chars) break;
       kept.unshift(turn);
       used += turn.text.length;
     }
@@ -222,7 +224,7 @@ export const assistantPanel = {
     const run = this.run;
     if (!run || !this.busy) return;
     if (document.hidden) return;            // resumes on visibilitychange
-    if (Date.now() - run.startedAt > GIVE_UP_MS) { this.finish({ state: "error", error: "The assistant did not report back in time." }); return; }
+    if (Date.now() - run.startedAt > this.limits().deadline_seconds * 1000 + GIVE_UP_EXTRA_MS) { this.finish({ state: "error", error: "The assistant did not report back in time." }); return; }
     try {
       const view = await this.hooks.api("GET", `/api/projects/${run.project}/assistant/runs/${run.id}`);
       if (this.run !== run) return;
@@ -309,7 +311,7 @@ export const assistantPanel = {
   },
 
   // Called as the page re-renders: a Proposal is only good for the revision it was made at, so any edit supersedes it.
-  supersedeStale() {
+  supersedeOnEdit() {
     const project = this.hooks?.project();
     if (!project) return;
     let changed = false;
@@ -406,7 +408,7 @@ export const assistantPanel = {
       <div>Project default: <b>${esc(name(purpose.default.value))}</b>${note}</div>${rest}</div>`;
   },
 
-  // One renderer per kind of thread entry. Later tickets add proposal, timeout, cancelled and usage_limit here.
+  // One renderer per kind of thread entry.
   entryHtml(entry, isLast) {
     if (entry.kind === "user") return `<div class="assistant-msg me">${esc(entry.text)}</div>`;
     if (entry.kind === "answer") return `<div class="assistant-msg answer">${esc(entry.text)}</div>`;
@@ -414,8 +416,13 @@ export const assistantPanel = {
     const retry = isLast ? `<div class="assistant-actions"><button type="button" class="btn btn-secondary btn-sm" data-action="retry">Try again</button></div>` : "";
     const quiet = entry.kind === "cancelled" ? "" : " warn";
     const reassure = entry.kind === "error" ? `<div class="slicer-muted">Nothing was changed.</div>` : "";
-    return `<div class="assistant-notice${quiet}" role="alert" data-end="${esc(entry.kind)}"><b>${esc(END_TITLES[entry.kind] || END_TITLES.error)}</b>
+    return `<div class="assistant-notice${quiet}" role="alert" data-end="${esc(entry.kind)}"><b>${esc(this.endTitle(entry.kind))}</b>
         <div>${esc(entry.text)}</div>${reassure}${retry}</div>`;
+  },
+
+  endTitle(kind) {
+    if (kind === "timeout") return `No answer in ${this.limits().deadline_seconds} s`;
+    return END_TITLES[kind] || END_TITLES.error;
   },
 
   thinkingHtml() {
@@ -425,7 +432,7 @@ export const assistantPanel = {
       : `<ol class="assistant-steps"><li class="on">Starting</li></ol>`;
     return `<div class="assistant-notice" role="status"><div class="assistant-working"><span class="assistant-spin" aria-hidden="true"></span><b>Working…</b><span class="assistant-grow"></span>
       <button type="button" class="btn btn-secondary btn-sm" data-action="cancel">Cancel</button></div>${list}
-      <div class="slicer-muted">Stops by itself after 60 s.</div></div>`;
+      <div class="slicer-muted">Stops by itself after ${this.limits().deadline_seconds} s.</div></div>`;
   },
 
   threadHtml() {

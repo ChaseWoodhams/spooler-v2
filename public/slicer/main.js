@@ -2398,7 +2398,7 @@ function planMap(plate) {
     const [x, y] = object.position, cy = y1 - y + y0;
     return `<rect class="plan-object${object.pinned ? " pinned" : ""}" x="${(x - half[0]).toFixed(1)}" y="${(cy - half[1]).toFixed(1)}" width="${(half[0] * 2).toFixed(1)}" height="${(half[1] * 2).toFixed(1)}" transform="rotate(${(-turn).toFixed(1)} ${x.toFixed(1)} ${cy.toFixed(1)})"><title>${esc(object.name)}</title></rect>`;
   }).join("");
-  return `<svg class="plan-map" viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" role="img" aria-label="${esc(plate.name)}: ${plural(plate.parts, "object")}"><rect class="plan-bed" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}"/>${objects}</svg>`;
+  return `<svg class="plan-map" viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" role="img" aria-label="${esc(plate.name)}: ${plural(plate.objects.length, "object")}"><rect class="plan-bed" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}"/>${objects}</svg>`;
 }
 
 function planSheetHtml(plan) {
@@ -2406,7 +2406,7 @@ function planSheetHtml(plan) {
   const cards = plan.plates.map(plate => `<div class="plan-card">
       <div class="plan-card-head"><b>${esc(plate.name)}</b>${plate.new ? ' <span class="slicer-muted">new</span>' : ""}</div>
       ${planMap(plate)}
-      <div class="slicer-muted">${plural(plate.parts, "object")} · ${esc(plate.filament)}${plate.turned ? ` · ${plate.turned} turned` : ""}</div>
+      <div class="slicer-muted">${plural(plate.objects.length, "object")} · ${esc(plate.filament)}${plate.turned ? ` · ${plate.turned} turned` : ""}</div>
       ${SHOW_PLAN_SECONDS && plate.time_estimate?.seconds ? `<div class="slicer-muted">${planTime(plate.time_estimate.seconds)}</div>` : ""}
     </div>`).join("");
   const kept = plan.kept.length ? `<h4>Kept as they are</h4><ul class="plan-kept">${plan.kept.map(k => `<li><b>${esc(k.name)}</b> <span class="slicer-muted">${esc(k.reason)}</span></li>`).join("")}</ul>` : "";
@@ -2500,7 +2500,7 @@ function proposalSheetHtml(view) {
     const card = (plate, label) => plate
       ? `<div class="plan-card" data-side="${label.toLowerCase()}"><div class="plan-card-head"><b>${esc(plate.name)}</b> <span class="slicer-muted">${label}</span></div>
           ${planMap(plate)}
-          <div class="slicer-muted">${plural(plate.parts, "object")}${plate.turned ? ` · ${plate.turned} turned` : ""}</div></div>`
+          <div class="slicer-muted">${plural(plate.objects.length, "object")}${plate.turned ? ` · ${plate.turned} turned` : ""}</div></div>`
       : `<div class="plan-card slicer-muted" data-side="${label.toLowerCase()}">${label === "Now" ? "Not on a plate yet" : "Plate removed"}</div>`;
     body = `<div class="proposal-pairs">${ids.map(id => `<div class="proposal-pair">${card(now.get(id), "Now")}${card(next.get(id), "After")}</div>`).join("")}</div>`;
   } else if (view.settings?.length) {

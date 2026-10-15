@@ -140,6 +140,29 @@ class BoundsTests(unittest.TestCase):
         self.assertIn("Quick print", self.refusal("layer_height", 0.15, "object"))
 
 
+class ReadableTests(unittest.TestCase):
+    def test_nothing_private_is_readable(self):
+        for key in ("machine_start_gcode", "machine_end_gcode", "before_layer_change_gcode", "post_process", "print_host", "printhost_apikey",
+                    "printhost_password", "printhost_cafile", "printhost_user", "print_host_webui", "filename_format", "host_type"):
+            self.assertTrue(ps.is_private(key), key)
+            self.assertFalse(ps.is_readable(key), key)
+
+    def test_the_proposable_and_read_only_keys_are_readable(self):
+        for key in (*ps.PROPOSABLE_SETTINGS, *ps.READ_ONLY_SETTINGS, *ps.READABLE_EXTRA):
+            self.assertTrue(ps.is_readable(key), key)
+
+    def test_no_key_of_the_schema_that_is_readable_looks_private(self):
+        import profile_read
+        schema = profile_read.settings_schema()
+        for key in {*schema["options"], *schema["definitions"]}:
+            if ps.is_readable(key):
+                for word in ("gcode", "post_process", "host", "apikey", "password", "filename", "path"):
+                    self.assertNotIn(word, key)
+
+    def test_an_unknown_key_is_not_readable(self):
+        self.assertFalse(ps.is_readable("no_such_setting"))
+
+
 class BoundsReportTests(unittest.TestCase):
     def test_bounds_describe_what_would_be_accepted(self):
         self.assertEqual(ps.bounds("wall_loops", "project"), {"type": "int", "min": 1, "max": 20})

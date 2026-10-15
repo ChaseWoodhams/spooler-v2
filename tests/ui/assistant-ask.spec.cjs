@@ -10,7 +10,7 @@ const PURPOSE = { default: { value: 'general', note: '' }, models: [{ id: 11, na
 // Stubs the assistant routes. `hold`: keep every run thinking until the test sets hold = false.
 async function stubAssistant(page, s) {
   s.asks = []; s.polls = 0; s.hold = false; s.refuse = null; s.final = { state: 'answer', answer: 'Plate 1 holds both brackets.', error: null };
-  await page.route('**/api/projects/1/assistant/status**', route => route.fulfill({ json: { available: true, reason: null, purpose: PURPOSE } }));
+  await page.route('**/api/projects/1/assistant/status**', route => route.fulfill({ json: { available: true, reason: null, purpose: PURPOSE, limits: s.limits } }));
   await page.route('**/api/projects/1/assistant/ask', route => {
     s.asks.push(route.request().postDataJSON());
     if (s.refuse) return route.fulfill({ status: s.refuse.status, json: { error: s.refuse.error } });
@@ -111,6 +111,27 @@ async function historyCap(browser, baseUrl) {
   } finally { await context.close(); }
 }
 
+async function serverLimits(browser, baseUrl) {
+  const s = { limits: { deadline_seconds: 45, history_turns: 4, history_chars: 6000, turn_chars: 1500 } };
+  const { context, panel } = await openPanel(browser, baseUrl, s);
+  try {
+    const send = panel.getByRole('button', { name: 'Send' });
+    for (let n = 1; n <= 5; n++) {
+      s.final = { state: 'answer', answer: `answer ${n}`, error: null };
+      await panel.locator('.assistant-input').fill(`question ${n}`);
+      await send.click();
+      await panel.locator('.assistant-msg.answer', { hasText: `answer ${n}` }).waitFor();
+    }
+    s.hold = true;
+    await panel.locator('.assistant-input').fill('question 6');
+    await send.click();
+    await panel.locator('.assistant-steps').waitFor();
+    assert.equal(s.asks.at(-1).history.length, 4, 'the history cap is the one the server sent');
+    assert.match(await panel.locator('.assistant-notice').innerText(), /Stops by itself after 45 s/);
+    console.log('PASS: deadline and history caps come from the status route');
+  } finally { await context.close(); }
+}
+
 async function failures(browser, baseUrl) {
   const s = {};
   const { context, panel } = await openPanel(browser, baseUrl, s);
@@ -148,6 +169,7 @@ async function failures(browser, baseUrl) {
   try {
     await askAndAnswer(browser, server.baseUrl);
     await historyCap(browser, server.baseUrl);
+    await serverLimits(browser, server.baseUrl);
     await failures(browser, server.baseUrl);
   } finally { await browser.close(); await server.close(); }
 })().catch(error => { console.error(error); process.exit(1); });

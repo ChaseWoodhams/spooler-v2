@@ -755,7 +755,8 @@ class SPHandler(SimpleHTTPRequestHandler):
         fresh = "fresh=1" in urllib.parse.urlparse(self.path).query.split("&")
         try:
             import assistant
-            self._json(assistant.project_status(record, fresh) if record else assistant.status(fresh))
+            import assistant_runner
+            self._json({**assistant.project_status(record, fresh), "limits": assistant_runner.limits()} if record else assistant.status(fresh))
         except Exception as e:
             self._json({"available": False, "reason": f"The assistant could not start: {e}", "purpose": None})
 

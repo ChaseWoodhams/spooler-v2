@@ -43,13 +43,18 @@ def _current(project_id: int, proposal: dict, revision=None) -> dict:
     import projects
     record = projects.get_project(project_id)
     if record["revision"] != proposal["base_revision"] or (revision is not None and revision != record["revision"]):
-        superseded(proposal["token"])
-        raise ProposalGone("The project changed since this proposal was made, so it was not applied. Ask again", 409, superseded=True)
+        discard_superseded(proposal["token"])
+        raise _superseded_error()
     return record
 
 
-def superseded(token: str) -> None:
+def discard_superseded(token: str) -> None:
+    """Delete a Proposal's staging because the project has left the revision it was made for."""
     proposal_store.remove(_root(), token)
+
+
+def _superseded_error() -> ProposalGone:
+    return ProposalGone("The project changed since this proposal was made, so it was not applied. Ask again", 409, superseded=True)
 
 
 def pending(project_id: int) -> dict:
@@ -60,7 +65,7 @@ def pending(project_id: int) -> dict:
     cards = []
     for proposal in proposal_store.terminal_pending(_root(), project_id):
         if proposal.get("base_revision") != revision:
-            superseded(proposal["token"])
+            discard_superseded(proposal["token"])
         else:
             cards.append(proposal_store.summary(proposal))
     return {"proposals": cards}
@@ -102,7 +107,7 @@ def _side(project_id: int, record: dict, data: dict, plate_ids: list, moved: set
         objects = [o for o in data.get("objects") or [] if o["plate"] == plate_id]
         found = project_read.plate_filaments(data, plate_id)
         plates.append({"id": plate_id, "name": names[plate_id], "new": plate_id not in existing, "filament": project_read.choice_label(found[0]) if found else None,
-                       "parts": len(objects), "turned": sum(1 for o in objects if o["id"] in moved), "time_estimate": None,
+                       "turned": sum(1 for o in objects if o["id"] in moved), "time_estimate": None,
                        "objects": [{"id": o["id"], "name": o.get("name"), "model": o["model"], "position": o["position"], "rotation": o["rotation"],
                                     "pinned": bool(o.get("pinned")), "outline": outline(o)} for o in objects]})
     return plates
@@ -115,7 +120,7 @@ def review(project_id: int, token) -> dict:
     import projects
     proposal = _load(project_id, token)
     record = _current(project_id, proposal)
-    view = {**proposal_store.summary(proposal), "revision": proposal["base_revision"], "summary": proposal.get("scope"), "outcome": proposal.get("scope"),
+    view = {**proposal_store.summary(proposal), "revision": proposal["base_revision"], "summary": proposal.get("scope"),
             "kept": [], "refused": None, "settings": proposal.get("settings")}
     if proposal.get("review") == "placement":
         before, after = record["data"], proposal["data"]
@@ -152,8 +157,8 @@ def accept(project_id: int, token, body: dict) -> dict:
         projects.save_data(project_id, record, data, proposal.get("emptied") or [])
     except JobError as e:
         if e.status == 409:                                    # an edit landed between the check and the write
-            superseded(token)
-            raise ProposalGone("The project changed since this proposal was made, so it was not applied. Ask again", 409, superseded=True) from None
+            discard_superseded(token)
+            raise _superseded_error() from None
         raise
     proposal_store.remove(_root(), token)
     return {**projects.get_project(project_id), "proposal": proposal_store.summary(proposal)}

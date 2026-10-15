@@ -7,6 +7,8 @@ import unittest
 from unittest import mock
 
 import assistant_runner
+import datapaths
+import proposal_store
 from tests.fake_claude import read_record
 from tests import test_assistant_ask as base          # a module, so its tests are not collected twice
 
@@ -157,16 +159,17 @@ class CancelTests(unittest.TestCase):
         self.assertIn("state=cancelled", lines[0])
         self.assertIn("state=timeout", lines[1])
 
-    # ── seam for ticket 15 ──
+    # ── staged Proposals ──
     def test_a_run_that_did_not_end_in_a_proposal_has_its_staged_proposals_discarded(self):
         self.scenario({"calls": [], "hang_after_init": 60})
-        with mock.patch.object(assistant_runner, "discard_staged") as discard:
-            status, run = self.ask()
-            self.wait_for_server()
-            self.cancel(run)
-            self.poll(run)
-            discard.assert_called_once()
-            self.assertEqual(discard.call_args.args[0].id, run["id"])
+        status, run = self.ask()
+        self.wait_for_server()
+        root = datapaths.projects_dir()
+        proposal_store.write(root, {"project_id": self.project["id"], "run": run["id"], "kind": "orientation", "base_revision": 1})
+        self.assertEqual(len(proposal_store.listing(root, run=run["id"])), 1)
+        self.cancel(run)
+        self.assertEqual(self.poll(run)["state"], "cancelled")
+        self.assertEqual(proposal_store.listing(root, run=run["id"]), [])
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """Arrange and plan Proposals (ticket 16), through the project HTTP API with the fake `claude` that starts the real Spooler MCP
 server: the staged data is exactly what the deterministic, non-saving helpers return; a plan Spooler would refuse stages nothing;
-stale, Superseded, Accept (one revision) and Undo go through the generic pipeline."""
+Superseded, Accept (one revision) and Undo go through the generic pipeline."""
 import copy
 import json
 import unittest
@@ -84,10 +84,10 @@ class ArrangeProposalTests(PlacementProposalCase):
         self.assertIsNone(result["proposal"])
         self.assertEqual(self.staging(), [])
 
-    def test_a_behind_revision_is_stale_and_stages_nothing(self):
+    def test_a_behind_revision_is_superseded_and_stages_nothing(self):
         self.spread()
         _, _, result = self.propose("propose_arrange", revision=self.project["revision"] - 1)
-        self.assertIs(result["stale"], True)
+        self.assertIs(result["superseded"], True)
         self.assertEqual(self.staging(), [])
 
     def test_bad_plate_ids_are_an_error_the_model_can_read(self):
@@ -102,8 +102,8 @@ class ArrangeProposalTests(PlacementProposalCase):
         status, review = self.call("GET", self.path(result["token"]))
         self.assertEqual(status, 200, review)
         self.assertEqual([p["id"] for p in review["before"]["plates"]], [1, 2, 3])
-        self.assertEqual([p["parts"] for p in review["before"]["plates"]], [1, 1, 1])
-        self.assertEqual(sum(p["parts"] for p in review["after"]["plates"]), 3)
+        self.assertEqual([len(p["objects"]) for p in review["before"]["plates"]], [1, 1, 1])
+        self.assertEqual(sum(len(p["objects"]) for p in review["after"]["plates"]), 3)
         self.assertEqual(review["plates"], review["after"]["plates"])
         prior = self.current()
         status, accepted = self.accept(result["token"])
@@ -161,10 +161,10 @@ class PlanProposalTests(PlacementProposalCase):
         self.assertTrue(is_error)
         self.assertEqual(self.staging(), [])
 
-    def test_a_behind_revision_is_stale(self):
+    def test_a_behind_revision_is_superseded(self):
         self.spread()
         _, _, result = self.propose("propose_plan", revision=self.project["revision"] - 1)
-        self.assertIs(result["stale"], True)
+        self.assertIs(result["superseded"], True)
         self.assertEqual(self.staging(), [])
 
     def test_accept_moves_objects_across_plates_as_one_save_with_one_undo_and_the_sheet_renders_it(self):

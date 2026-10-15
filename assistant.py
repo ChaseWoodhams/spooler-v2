@@ -1,4 +1,4 @@
-"""Assistant: availability and Settings (runs, cancel and the MCP server arrive in later tickets).
+"""Assistant: availability and Settings.
 
 Everything here is optional and contained: nothing in core imports it at startup in a way that can wait on it,
 the availability check runs on its own thread (never the request thread's own work) with a short timeout, and a
@@ -152,13 +152,18 @@ def _run_check(job: dict, settings: dict) -> None:
     job["done"].set()
 
 
-def status(fresh: bool = False) -> dict:
+CHECKING = {"available": False, "reason": "Still checking the assistant.", "checking": True}
+
+
+def status(fresh: bool = False, wait: bool = True) -> dict:
     """Availability: cached for CACHE_S, checked on a worker thread. If the check outlasts WAIT_S the answer is
-    {"available": False, "checking": True} and the next call has the result."""
+    {"available": False, "checking": True} and the next call has the result. With wait=False nothing waits: the last result for
+    these settings is returned even when it has expired (a new check starts behind it), else the checking answer."""
     settings = load_settings()
     key = (settings["cli_path"], settings["jev_url"])
     with _lock:
-        if not fresh and _cache.get("key") == key and time.monotonic() - _cache["at"] < CACHE_S:
+        have = _cache.get("key") == key
+        if not fresh and have and time.monotonic() - _cache["at"] < CACHE_S:
             return _cache["result"]
         job = _inflight if _inflight.get("key") == key else None
         if job is None:
@@ -167,12 +172,14 @@ def status(fresh: bool = False) -> dict:
             job = _inflight
             threading.Thread(target=_run_check, args=(dict(_inflight), settings), daemon=True).start()
         done = job["done"]
+        if not wait:
+            return _cache["result"] if have else CHECKING
     if done.wait(WAIT_S):
         with _lock:
             result = _cache.get("result") if _cache.get("key") == key else None
         if result:
             return result
-    return {"available": False, "reason": "Still checking the assistant.", "checking": True}
+    return CHECKING
 
 
 def purpose_summary(record: dict) -> dict:
