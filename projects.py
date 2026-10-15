@@ -1130,7 +1130,7 @@ def _orca_profile(project: dict | None, notes: list, blockers: list | None = Non
                 else:
                     names["filament"] = chosen[1]
         bundle = slicer.create_bundle(**names, filament_values=imported)
-        base = slicer.with_orca_defaults(slicer.bundle_settings(bundle["id"]))   # unstated keys compare with what Orca would use
+        base = slicer.with_orca_defaults(slicer.bundle_settings(bundle["id"]))   # keys the presets leave out compare with what Orca would use
         allowed = {kind: slicer._tab_keys(kind) - slicer.BLOCKED_SETTINGS for kind in ("process", "filament")}
         wanted = orca_3mf.settings_changes(project, base, allowed)
         changes = {}
@@ -1187,7 +1187,7 @@ def _append_settings(project: dict, record: dict, base: dict, ctx: dict, notes: 
             blockers.append({"code": code, "scope": "project", "name": name, "requested": requested, "proposed": proposed,
                              "options": ["separate-project", "convert"],
                              "message": message + " Import it as a separate Project, or convert it to this Project's printer and bed after reviewing the difference."})
-    resolved = slicer.with_orca_defaults(base)   # unstated keys compare with what Orca would use
+    resolved = slicer.with_orca_defaults(base)
     effective = {**resolved, "process": {**resolved["process"], **(profile.get("process") or {})}}
     allowed = {"process": slicer._tab_keys("process") - slicer.BLOCKED_SETTINGS}
     for key, value in orca_3mf.settings_changes(project, effective, allowed)["process"].items():
@@ -1828,13 +1828,13 @@ def export_plan(project_id: int, *, record: dict | None = None) -> dict:
 def _export_template(project_id: int, review: dict) -> dict:
     """Orca's complete project configuration for the effective machine/process/filament: what OrcaSlicer itself writes when it
     exports a 3MF with these inputs. Isolated data directory; an unreadable result is an error, never a thinner file."""
-    problem = "OrcaSlicer could not write the project configuration"
-    if slicer.orca_executable() is None:
-        raise _export_error("export-template-unavailable", "OrcaSlicer is needed to write the project configuration, and it was not found")
     with tempfile.TemporaryDirectory(prefix=".export-", dir=project_dir(project_id)) as tmp:
         template, code, text = slicer.orca_project_config({kind: review[kind] for kind in export_planner.KINDS}, Path(tmp),
                                                           _data_dir / "slicer-data-export")
+    if code is None:
+        raise _export_error("export-template-unavailable", "OrcaSlicer is needed to write the project configuration, and it was not found")
     if template is None:
+        problem = "OrcaSlicer could not write the project configuration"
         raise _export_error("export-template-unavailable", f"{problem} (exit code {code - (1 << 32) if code >= (1 << 31) else code})", log=(text or "")[-1500:])
     return template
 
@@ -3857,6 +3857,7 @@ def write_plate_3mf(path: Path, project_id: int, objects: list, limits: dict) ->
                 check_fit(obj["name"], placed, limits)
                 fh.write(f'<object id="{index}" name={escape_attr(obj["name"])} type="model"><mesh><vertices>\n'.encode())
                 for chunk in np.array_split(placed, max(1, len(placed) // 50000)):
+                    # 9 significant figures, like the export: 4 decimals moved a turned Object enough to shift Orca's time estimate
                     fh.write("".join(f'<vertex x="{x:.9g}" y="{y:.9g}" z="{z:.9g}"/>' for x, y, z in chunk).encode())
                 fh.write(b"\n</vertices><triangles>\n")
                 for chunk in np.array_split(tris, max(1, len(tris) // 50000)):

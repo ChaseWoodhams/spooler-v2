@@ -324,6 +324,28 @@ class UnstatedSettingsTests(SettingsCase):
                 projects.cancel_import(self.prepare(archive(project=self.FILE, **CUBES), name)["token"])
         self.assertEqual(len([call for call in runner.calls if "--export-3mf" in call]), 1)
 
+    async def test_a_different_orca_works_its_resolved_values_out_again(self):
+        """Orca's defaults belong to the Orca that reported them: another executable must not reuse them."""
+        patch, runner = self.with_orca()
+        with patch:
+            projects.cancel_import(self.prepare(archive(project=self.FILE, **CUBES), "a.3mf")["token"])
+            with mock.patch.object(slicer, "orca_identity", return_value="OrcaSlicer-9.9.10"):
+                projects.cancel_import(self.prepare(archive(project=self.FILE, **CUBES), "b.3mf")["token"])
+        self.assertEqual(len([call for call in runner.calls if "--export-3mf" in call]), 2)
+
+    async def test_an_orca_run_that_fails_is_not_kept_even_if_it_left_a_readable_file(self):
+        written = test_projects.template_runner(extras=self.DEFAULTS)
+        def failing(args, timeout):
+            written(args, timeout)
+            return 1, "crashed after writing"
+        failing.calls = written.calls
+        with mock.patch.object(slicer, "runner", failing):
+            review = self.prepare(archive(project=self.FILE, **CUBES), "a.3mf")
+            self.assertIn("uncompared-settings", [d["code"] for d in review["report"]["differences"]])
+            projects.cancel_import(review["token"])
+            projects.cancel_import(self.prepare(archive(project=self.FILE, **CUBES), "b.3mf")["token"])
+        self.assertEqual(len([call for call in written.calls if "--export-3mf" in call]), 2, "nothing was cached")
+
     async def test_without_orcas_resolved_values_unstated_settings_are_still_listed_and_acknowledged(self):
         patch, _ = self.with_orca(code=1)
         with patch:

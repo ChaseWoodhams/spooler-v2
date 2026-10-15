@@ -879,23 +879,32 @@ def bundle_settings(bundle_id: str) -> dict:
         raise jobs.JobError(f"The files of “{manifest['label']}” are missing — lock the profile again", 409)
 
 
-_TEMPLATE_CORNERS = [(x, y, z) for x in (0, 10) for y in (0, 10) for z in (0, 10)]
-_TEMPLATE_FACES = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1), (2, 3, 7), (2, 7, 6), (0, 2, 6), (0, 6, 4), (1, 5, 7), (1, 7, 3)]
+_CUBE_CORNERS = [(x, y, z) for x in (0, 10) for y in (0, 10) for z in (0, 10)]
+_CUBE_FACES = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1), (2, 3, 7), (2, 7, 6), (0, 2, 6), (0, 6, 4), (1, 5, 7), (1, 7, 3)]
+
+
+def orca_identity() -> str | None:
+    """Which OrcaSlicer answers (its folder, e.g. OrcaSlicer-2.4.2), or None when there is none."""
+    orca = orca_executable()
+    return orca.parent.name if orca else None
 
 
 def orca_project_config(settings: dict, workdir: Path, datadir: Path) -> tuple:
     """(config, exit code, log): Orca's complete project configuration for `settings` ({machine, process, filament} values), as
-    OrcaSlicer itself writes it when exporting a 3MF of a 10 mm cube with those inputs. `config` is None when Orca wrote nothing
-    readable. Keys the presets leave out come back with Orca's own resolved value."""
+    OrcaSlicer itself writes it when exporting a 3MF of a 10 mm cube with those inputs. Keys the presets leave out come back with
+    Orca's own resolved value. `config` is None when Orca is missing (exit code None) or wrote nothing readable."""
+    orca = orca_executable()
+    if orca is None:
+        return None, None, "OrcaSlicer was not found"
     workdir = Path(workdir)
     for kind in PRESET_KINDS:
         (workdir / f"{kind}.json").write_text(json.dumps(settings[kind], sort_keys=True), encoding="utf-8")
-    # ASCII: Orca's STL reader refuses the binary files write_stl makes, and a bare tetrahedron
+    # A closed ASCII cube: Orca's STL reader refuses the binary files write_stl makes, and rejected the bare tetrahedron used before
     (workdir / "template.stl").write_text("solid template\n" + "".join(
-        "facet normal 0 0 0\n outer loop\n" + "".join(f"  vertex {x} {y} {z}\n" for x, y, z in (_TEMPLATE_CORNERS[i] for i in face)) + " endloop\nendfacet\n"
-        for face in _TEMPLATE_FACES) + "endsolid template\n", encoding="ascii")
+        "facet normal 0 0 0\n outer loop\n" + "".join(f"  vertex {x} {y} {z}\n" for x, y, z in (_CUBE_CORNERS[i] for i in face)) + " endloop\nendfacet\n"
+        for face in _CUBE_FACES) + "endsolid template\n", encoding="ascii")
     out = workdir / "template.3mf"
-    code, text = runner([str(orca_executable()), "--datadir", str(datadir), "--arrange", "0",
+    code, text = runner([str(orca), "--datadir", str(datadir), "--arrange", "0",
                          "--load-settings", f"{workdir / 'machine.json'};{workdir / 'process.json'}",
                          "--load-filaments", str(workdir / "filament.json"), "--export-3mf", str(out), str(workdir / "template.stl")], 120)
     try:
@@ -908,23 +917,27 @@ def orca_project_config(settings: dict, workdir: Path, datadir: Path) -> tuple:
 
 def orca_resolved(bundle_id: str) -> dict | None:
     """Every value Orca resolves for a locked profile, including those its presets do not state, or None when Orca is missing or
-    could not say. A locked profile never changes, so the answer is kept beside it after the first run."""
+    could not say. The answer depends on the profile (which never changes) and on the Orca that gave it, so it is kept beside the
+    profile under that Orca's name; a failed run is never kept."""
+    identity = orca_identity()
+    if identity is None:
+        return None
     folder = profiles_dir() / load_bundle(bundle_id)["id"]
-    cached = folder / "orca-resolved.json"
+    cached = folder / f"orca-resolved-{re.sub(r'[^A-Za-z0-9._-]+', '_', identity)}.json"
     try:
         return json.loads(cached.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
-    if orca_executable() is None:
-        return None
     try:
         with tempfile.TemporaryDirectory(prefix=".resolve-", dir=folder) as tmp:
-            config, _, _ = orca_project_config(bundle_settings(bundle_id), Path(tmp), _data_dir / "slicer-data-resolve")
+            config, code, _ = orca_project_config(bundle_settings(bundle_id), Path(tmp), _data_dir / "slicer-data-resolve")
     except OSError:                     # Orca could not be started: the caller falls back to listing what it cannot compare
         return None
-    if config is None:
+    if config is None or code != 0:
         return None
-    cached.write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
+    partial = cached.with_name(f".{cached.name}.{os.getpid()}.tmp")
+    partial.write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
+    os.replace(partial, cached)         # whole or not at all, even when two imports race to write it
     return config
 
 
@@ -935,7 +948,7 @@ def with_orca_defaults(settings: dict) -> dict:
     if not resolved:
         return settings
     filled = dict(settings)
-    for kind in ("process", "filament"):
+    for kind in USER_PRESET_KINDS:
         filled[kind] = {**{k: resolved[k] for k in _tab_keys(kind) if k in resolved}, **settings[kind]}
     return filled
 
