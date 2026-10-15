@@ -701,9 +701,7 @@ function renderPrinter(printer) {
     <!-- Controls -->
     <div class="card-controls">
       ${connected && !printing && !paused && bedClearedWaiting(printer.id) ? `
-        <button class="btn btn-primary btn-sm" onclick="confirmBedCleared('${escAttr(printer.id)}')" title="Confirm the printed plate is off the bed; releases the next queued job when auto-start is on">
-          Printed OK · Bed cleared
-        </button>
+        <span class="card-waiting">Waiting for bed clear</span>
         ${bedClearedNext(printer)}
       ` : ""}
       ${printing ? `
@@ -1348,7 +1346,7 @@ function _openSettings() {
   if (tog) tog.checked = document.body.classList.contains("light-mode");
   if (_settingsModal) openOperatorDialog(_settingsModal);
   _settingsFeedback("");
-  _settingsMenu.querySelector("h3")?.focus();
+  _settingsModal?.focus();   // the dialog itself, so no focus box lands on the heading
 }
 function _showSettingsPage(pageEl) {
   _settingsPageReturnTargets.set(pageEl, document.activeElement);
@@ -2741,10 +2739,10 @@ function renderSpoolPanel() {
   else stateBlock(status, _spoolLoadState, _spoolLoadMessage, fetchSpools, "Retry inventory");
   if (!spools.length) {
     list.innerHTML = "";
-    empty.style.display = _spoolLoadState === "ready" ? "" : "none";
+    empty.hidden = _spoolLoadState !== "ready";
     return;
   }
-  empty.style.display = "none";
+  empty.hidden = true;
   list.innerHTML = spools.map(s => {
     const pct        = spoolPct(s);
     const remaining  = spoolRemaining(s);
