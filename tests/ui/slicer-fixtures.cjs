@@ -60,8 +60,8 @@ const EXPECT = {
   print: ['0 of 2 plates completed', 'needs slicing'],
 };
 
-async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model' } = {}) {
-  const project = makeProject(), split = makeSplit();
+async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model', splitOverride = null } = {}) {
+  const project = makeProject(), split = { ...makeSplit(), ...(splitOverride || {}) };
   const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
   await context.addInitScript(([t, s]) => { try { localStorage.setItem('theme', t); localStorage.setItem('slicer.step.1', s); } catch (_) { /* ignore */ } }, [theme, step]);
   const page = await context.newPage();

@@ -264,12 +264,16 @@ class SplitViewer {
 
   showPieces(pieces) {
     this.clear(this.boxGroup);
+    let flagged = 0;
     for (const piece of pieces || []) {
       if (piece.fits && !piece.tiny) continue;
       const b = piece.bbox;
       const box = new THREE.Box3(new THREE.Vector3(b[0], b[1], b[2]), new THREE.Vector3(b[3], b[4], b[5]));
-      this.boxGroup.add(new THREE.Box3Helper(box, piece.fits ? 0xf59e0b : 0xef4444));
+      // a part too small to print is red whether or not it fits the bed; a part that is only too big stays amber
+      this.boxGroup.add(new THREE.Box3Helper(box, piece.tiny || !piece.fits ? 0xef4444 : 0xf59e0b));
+      if (piece.tiny) flagged++;
     }
+    this.renderer.domElement.dataset.flaggedParts = String(flagged);
   }
 
   setRay(event) {
@@ -679,6 +683,37 @@ function canSplit() {
   return !!pieces.length && !pieces.some(p => !p.fits || p.tiny) && !checkDirty && !pendingSave && !RUNNING.has(current.state);
 }
 
+// One entry per Part the cuts make that is too small to print: Part numbers follow the order of the check.
+function tinyParts() {
+  if (checkDirty || current.state === "checking") return [];
+  return (current.check?.pieces || []).map((p, i) => ({ number: i + 1, cut: p.made_by_cut, tiny: p.tiny, size: p.size })).filter(p => p.tiny);
+}
+
+function splitWhyHtml() {
+  const tiny = tinyParts();
+  if (!tiny.length) return "";
+  return `<small class="reason-line split-bad" id="split-why">${tiny.map(p => p.cut == null
+    ? `<span>Part ${p.number} is too small to print, use fewer cuts</span>`
+    : `<span>Part ${p.number} is too small to print, move or remove Cut ${p.cut}</span> <button type="button" class="btn btn-secondary btn-sm" data-action="select-cut" data-cut="${p.cut}">Select cut</button>`).join("<br>")}</small>`;
+}
+
+function splitButtonHtml() {
+  const blocked = !canSplit();
+  const why = !!splitWhyHtml();
+  return `<button class="btn btn-primary" data-action="split"${blocked ? " disabled" : ""}${why ? ' aria-describedby="split-why"' : ""}>${current.result ? "Split again" : "Split the model"}</button>${splitWhyHtml()}`;
+}
+
+function checkPartsHtml() {
+  const pieces = current.check?.pieces || [];
+  if (!pieces.length || checkDirty || current.state === "checking") return "";
+  const tinyNumbers = new Set(tinyParts().map(p => p.number));
+  if (!tinyNumbers.size) return "";
+  return `<ul class="split-check-parts" aria-label="Parts these cuts make">${pieces.map((p, i) => {
+    const n = i + 1, bad = tinyNumbers.has(n);
+    return `<li data-check-part="${n}"${bad ? " data-tiny" : ""}>Part ${n}${bad ? ` <span class="split-bad">too small to print${p.made_by_cut != null ? ` · made by Cut ${p.made_by_cut}` : ""}</span>` : ""}</li>`;
+  }).join("")}</ul>`;
+}
+
 function checkText() {
   if (current.state === "checking" || checkDirty) return '<span class="split-muted">Checking the cutsâ€¦</span>';
   const pieces = current.check?.pieces || [];
@@ -733,6 +768,7 @@ function sideCuts() {
         title="Keep these cuts and add more where parts are still too big">Auto-fix</button>
     </div>
     <div id="split-check" class="split-check" role="status">${checkText()}</div>
+    <div id="split-check-parts">${checkPartsHtml()}</div>
     <div id="split-cut-list" class="split-cut-list">${cutListHtml()}</div>
     <p class="split-hint">Select a numbered cut and type its position in mm, or drag its plane in the preview. The Remove button deletes that cut and any cuts inside it.</p>
   </section>
@@ -749,7 +785,7 @@ function sideCuts() {
     <label class="split-inline"><input type="checkbox" id="split-labels"${s.labels?.enabled === false ? "" : " checked"}> Number the parts</label>
     <p class="split-hint">Cuts each part's number into a face that is hidden once glued, so you can tell the parts apart on the bench. Turn it off to keep every face clean.</p>
   `)}
-  <div class="split-actions"><button class="btn btn-primary" data-action="split"${canSplit() ? "" : " disabled"}>${current.result ? "Split again" : "Split the model"}</button></div>`;
+  <div class="split-actions" id="split-actions">${splitButtonHtml()}</div>`;
 }
 
 function listText(numbers) {
@@ -856,6 +892,8 @@ function cutsEdited() {
   checkDirty = true;
   if ($("split-cut-list")) $("split-cut-list").innerHTML = cutListHtml();
   if ($("split-check")) $("split-check").innerHTML = checkText();
+  if ($("split-check-parts")) $("split-check-parts").innerHTML = checkPartsHtml();
+  if ($("split-actions")) $("split-actions").innerHTML = splitButtonHtml();
   viewer?.showCuts(cuts, selectedCut);
   viewer?.showPieces(null);
   renderProgress();
