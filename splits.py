@@ -32,6 +32,7 @@ import database
 import jobs  # used as a module: jobs.JobError, …
 import slicer
 import state
+from datapaths import read_json as _read
 from persistence import DATA_DIR
 
 APP_DIR         = Path(__file__).parent
@@ -194,13 +195,6 @@ def normalize_settings(raw: dict | None, base: dict | None = None) -> dict:
 
 
 # ── Records ────────────────────────────────────────────────────────────────────
-
-def _read(work: Path, name: str):
-    try:
-        return json.loads((work / name).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
 
 def _write_job(split_id: int, record: dict) -> None:
     work = work_dir(split_id)
