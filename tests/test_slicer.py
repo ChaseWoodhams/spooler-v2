@@ -162,6 +162,29 @@ class ProfileTests(SlicerTestCase):
         self.assertEqual(stock["processes"][machine], ["0.20mm Standard @Elegoo CC 0.4 nozzle"])
         self.assertEqual(stock["filaments"][machine], ["Elegoo PLA @ECC"])
 
+    def test_a_07_nozzle_is_derived_from_the_08(self):
+        folder = next((self.dir / "tools").rglob("profiles")) / "Elegoo"
+        wide = "Elegoo Centauri Carbon 0.8 nozzle"
+        extra = {"machine": [{"name": wide, "inherits": "fdm_machine_common", "nozzle_diameter": ["0.8"]}],
+                 "process": [{"name": "0.40mm Standard @Elegoo CC 0.8 nozzle", "inherits": "fdm_process_common",
+                              "layer_height": "0.4", "outer_wall_line_width": "0.88", "compatible_printers": [wide]},
+                             {"name": "0.24mm Fine @Elegoo CC 0.8 nozzle", "inherits": "fdm_process_common",
+                              "layer_height": "0.24", "compatible_printers": [wide]}],
+                 "filament": [{"name": "Elegoo PLA @ECC 0.8", "inherits": "fdm_filament_common", "compatible_printers": [wide]}]}
+        for kind, items in extra.items():
+            for item in items:
+                (folder / kind / "ECC" / f"{item['name']}.json").write_text(json.dumps({"type": kind, "from": "system", "instantiation": "true", **item}))
+        slicer._preset_cache.clear()
+        stock = slicer.stock_presets()
+        machine = "Elegoo Centauri Carbon 0.7 nozzle"
+        self.assertIn(machine, stock["machines"])
+        self.assertEqual(stock["processes"][machine], ["0.21mm Fine @Elegoo CC 0.7 nozzle", "0.35mm Standard @Elegoo CC 0.7 nozzle"])
+        self.assertEqual(stock["filaments"][machine], ["Elegoo PLA @ECC 0.8"])
+        bundle = slicer.create_bundle(machine, "0.35mm Standard @Elegoo CC 0.7 nozzle", "Elegoo PLA @ECC 0.8")
+        settings = slicer.bundle_settings(bundle["id"])
+        self.assertEqual(settings["machine"]["nozzle_diameter"], ["0.7"])
+        self.assertEqual((settings["process"]["layer_height"], settings["process"]["outer_wall_line_width"]), ("0.35", "0.77"))
+
 
 class UserPresetTests(SlicerTestCase):
     PROCESS = "0.20mm Standard @Elegoo CC 0.4 nozzle"

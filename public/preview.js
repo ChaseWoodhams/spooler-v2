@@ -367,8 +367,9 @@ document.getElementById("btn-review-nozzle-save").addEventListener("click", asyn
   e.currentTarget.disabled = true;
   try {
     await jobsApi("POST", `/api/printers/${encodeURIComponent(printerId)}/hardware`,
-      { nozzle_diameter: Number(document.getElementById("review-nozzle-size").value) });
-    toast("Nozzle size saved");
+      { nozzle_diameter: Number(document.getElementById("review-nozzle-size").value),
+        nozzle_material: document.getElementById("review-nozzle-material").value });
+    toast("Nozzle saved");
     runReview();
   } catch (err) {
     toast(err.message, true);

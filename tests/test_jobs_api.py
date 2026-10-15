@@ -171,7 +171,7 @@ class JobsApiTests(unittest.TestCase):
             self.assertEqual(resp.headers["Content-Type"], "application/octet-stream")
             self.assertGreater(len(resp.read()), 0)
 
-        self.assertEqual(self.call("GET", "/api/printers/p1/hardware"), (200, {"nozzle_diameter": None}))
+        self.assertEqual(self.call("GET", "/api/printers/p1/hardware"), (200, {"nozzle_diameter": None, "nozzle_material": None}))
         status, hardware = self.call("POST", "/api/printers/p1/hardware", {"nozzle_diameter": 0.6})
         self.assertEqual((status, hardware["nozzle_diameter"]), (200, 0.6))
         self.assertEqual(self.call("POST", "/api/printers/p1/hardware", {"nozzle_diameter": 0.5})[0], 400)

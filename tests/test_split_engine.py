@@ -164,6 +164,19 @@ class EngineTests(unittest.TestCase):
         with self.assertRaisesRegex(engine.EngineError, "too big"):
             engine.split(self.work)
 
+    def test_a_cut_that_leaves_a_sliver_is_flagged_and_refused(self):
+        self.job(channel(), planner={"mode": "grid", "balanced": True})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        self.assertFalse(any(p["tiny"] for p in self.read("check.json")["pieces"]))
+        cuts = self.read("cuts.json")["cuts"]
+        cuts[0]["offset"] = 1.0  # leaves a 1 mm slab
+        (self.work / "cuts.json").write_text(json.dumps({"mode": "grid", "cuts": cuts}))
+        engine.check(self.work)
+        self.assertTrue(any(p["tiny"] for p in self.read("check.json")["pieces"]))
+        with self.assertRaisesRegex(engine.EngineError, "too small"):
+            engine.split(self.work)
+
     def test_meshes_are_repaired(self):
         box = trimesh.creation.box((40, 40, 40))
         open_box = trimesh.Trimesh(vertices=box.vertices, faces=box.faces[:-2], process=False)

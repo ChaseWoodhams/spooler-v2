@@ -181,6 +181,13 @@ class PreflightTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(analyze.call_count, 1)
         self.assertGreater(preflight.toolpath_file(job["id"]).stat().st_size, 0)
 
+    def test_hardened_steel_nozzles(self):
+        for size in (0.4, 0.6, 0.7, 0.8):
+            hardware = preflight.set_printer_hardware("p2", size, "hardened steel")
+            self.assertEqual((hardware["nozzle_diameter"], hardware["nozzle_material"]), (size, "hardened steel"))
+        with self.assertRaises(JobError):
+            preflight.set_printer_hardware("p2", 0.4, "unobtainium")
+
     def test_nozzle_setting_validation(self):
         self.assertEqual(preflight.set_printer_hardware("p2", "0.8")["nozzle_diameter"], 0.8)
         with self.assertRaises(JobError):
