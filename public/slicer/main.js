@@ -1301,7 +1301,7 @@ function plateStatus(plateId) {
   if (!plateObjects(plateId).length) return { text: "Empty", cls: "" };
   if (plateImporting(plateId)) return { text: "Importing models…", cls: "" };
   if (!entry) return { text: `Not sliced yet · Estimate: about ${slicingEstimateSeconds(plateId)} s to slice`, cls: "" };
-  if (entry.state === "queued") return { text: `Slice in progress — waiting for the slicer · position ${queuePosition(plateId)} in line`, cls: "" };
+  if (entry.state === "queued") return { text: `Waiting for the slicer · position ${queuePosition(plateId)} in line`, cls: "" };
   if (entry.state === "slicing") return { text: `Slice in progress — ${slicingText(entry)}`, cls: "" };
   if (entry.state === "failed") return { text: `Failed Slice: ${entry.error || 'The slicer could not finish'}. Retry slicing this Plate.`, cls: "bad" };
   if (entry.outdated) return { text: "Outdated Slice — objects, placement or relevant settings changed. Slice this Plate again before sending it.", cls: "warn" };
@@ -1658,9 +1658,11 @@ function renderSlicing() {
   const seconds = done.reduce((sum, p) => sum + (sliceEntry(p.id).estimate_s || 0), 0);
   const grams = done.reduce((sum, p) => sum + (sliceEntry(p.id).estimate_g || 0), 0);
   const failedText = failed.length ? ` · ${failed.length} failed` : "";
-  $("slicing-totals").textContent = !plates.length ? "" : done.length
+  const totals = !plates.length ? "" : done.length
     ? `${done.length} of ${plural(plates.length, "plate")} sliced${failedText} · ${duration(seconds)} of printing · ${Math.round(grams)} g of filament`
     : `0 of ${plural(plates.length, "plate")} sliced${failedText}`;
+  // A live region: rewriting it with the same text would have screen readers read it out again on every refresh
+  if ($("slicing-totals").textContent !== totals) $("slicing-totals").textContent = totals;
 }
 
 function plateFilamentLabel(id) {

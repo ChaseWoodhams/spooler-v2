@@ -587,7 +587,7 @@ main {
   gap: 4px;
   padding: 3px 8px;
   border-radius: 99px;
-  font-size: 11px;
+  font-size: var(--fs-small);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .5px;
@@ -2182,7 +2182,7 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
 .toggle-switch input:disabled { cursor: not-allowed; }
 .toggle-switch input:disabled + .toggle-slider { opacity: .5; cursor: not-allowed; }
 #needs-you .state-block, #dash-projects .state-block { border: 0; }   /* the section already has its own frame */
-/* ─── Hit targets (ticket 08) ─────────────────────────────────────────────────
+/* ─── Hit targets ─────────────────────────────────────────────────
    Fine-pointer desktop: every control is at least --hit-fine (32px) with --hit-gap (8px) between neighbours.
    Coarse pointers and anything up to 1100px wide (tablets, touch laptops): --hit-min (44px). The phone
    breakpoints above already do this; this block carries it up to 1100px and to the small controls they miss. */

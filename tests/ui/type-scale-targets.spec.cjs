@@ -18,6 +18,22 @@ for (const file of ['slicer.css', 'split.css']) {
   const bad = [...css.matchAll(/font-size:\s*([^;}]+)/g)].map(m => m[1].trim()).filter(v => !/^(var\(--fs-[a-z-]+\)|inherit|[\d.]+(em|rem|%))$/.test(v));
   assert.deepEqual([...new Set(bad)], [], `${file} has one-off font sizes`);
 }
+// Static: style.css is shared with the dashboard. Its 9-11 px rules (queue, spools, temperatures, quick-print settings...) are
+// fine only where the slicer page never renders them: no class they target may appear in what slicer.html loads.
+{
+  const css = fs.readFileSync(path.join(root, 'public/style.css'), 'utf8');
+  const assets = ['slicer.html', 'status-badge.js', 'outcome-prompt.js', 'folder-import.js', 'modal.js', 'confirm-dialog.js', 'net.js',
+    ...fs.readdirSync(path.join(root, 'public/slicer')).filter(f => f.endsWith('.js')).map(f => `slicer/${f}`)]
+    .map(f => fs.readFileSync(path.join(root, 'public', f), 'utf8')).join(' ');
+  const used = name => new RegExp(String.raw`(?<![\w-])${name}(?![\w-])`).test(assets);
+  const clash = [];
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*font-size:\s*(?:9|10|11)px[^{}]*)\}/g)) {
+    const selector = m[1].replace(/\/\*[\s\S]*?\*\//g, '').trim();
+    if (/\.qp-more(?![\w-])/.test(selector)) continue;  // inside the Quick print modal, which the slicer page does not have
+    for (const [, name] of selector.matchAll(/\.([A-Za-z][\w-]*)/g)) if (used(name)) clash.push(`${selector} (.${name})`);
+  }
+  assert.deepEqual(clash, [], 'style.css has 9-11 px rules for classes the slicer page uses');
+}
 const tokens = JSON.parse(fs.readFileSync(path.join(root, 'tokens/spooler.tokens.json'), 'utf8')).base.dimension;
 const sizes = Object.entries(tokens).filter(([k]) => k.startsWith('fs-'));
 assert.ok(tokens['fs-body'] && tokens['fs-small'], 'fs-body and fs-small tokens exist');

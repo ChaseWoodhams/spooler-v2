@@ -633,7 +633,7 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .slicer-viewport-message .state-block p { color: #fff; }
 .slicer-viewport-message .state-spinner { border-color: rgba(255,255,255,.3); border-top-color: #fff; }
 
-/* ─── Hit targets (ticket 08): the --hit-* tokens come from tokens/spooler.tokens.json via style.css ─── */
+/* ─── Hit targets: the --hit-* tokens come from tokens/spooler.tokens.json via style.css ─── */
 .slicer-icon-btn, .slicer-pages button, .scope-toggle button, .preset-btn, .set-reset,
 .slicer-tabs .btn, .pp-fold, .slicer-toolbar .btn, .slicer-toolbar-select { min-height: var(--hit-fine); }
 .slicer-icon-btn { min-width: var(--hit-fine); }
@@ -655,7 +655,7 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
   .slicer-toolbar { flex-wrap: wrap; }
 }
 
-/* Ticket 22 · Projects list: the name is one real button stretched over the whole row, Delete sits above it */
+/* Projects list: the name is one real button stretched over the whole row, Delete sits above it */
 .slicer-project-row { position: relative; }
 .pd-main { display: flex; gap: 12px; align-items: flex-start; min-width: 0; }
 .pd-info { min-width: 0; flex: 1; }
@@ -671,7 +671,7 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .pd-chip.sb-unknown { color: var(--st-unknown); border-color: var(--st-unknown); }
 .slicer-tag { font-size: var(--fs-small); }
 
-/* Ticket 22 · Print step: count chips, shared auto-start note, a real switch with a 44 px hit area */
+/* Print step: count chips, shared auto-start note, a real switch with a 44 px hit area */
 .pp-counts { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .pp-chip { font-size: var(--fs-small); }
 .project-page .slicer-muted { font-size: var(--fs-secondary); }
@@ -683,13 +683,13 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .pp-autostart input[role="switch"]:checked::after { background: #fff; transform: translateX(18px); }
 .pp-autostart-state { font-size: var(--fs-secondary); min-width: 2.2em; }
 @media (prefers-reduced-motion: reduce) { .pp-autostart input[role="switch"]::after { transition: none; } }
-/* Ticket 22 · nothing to edit on Print, so no sidebar toggle and no editing note there (or on the model views) */
+/* Nothing to edit on Print, so no sidebar toggle and no editing note there (or on the model views) */
 body[data-workflow-step="print"] #btn-sidebar, body[data-workflow-step="print"] .slicer-small-screen-note,
 body[data-workflow-step="model"] .slicer-small-screen-note, body[data-workflow-step="split"] .slicer-small-screen-note { display: none; }
 .slicer-dropzone:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .slicer-dialog-actions .plan-reason { flex: 1 1 100%; text-align: right; }
 .slicer-dialog-actions .plan-reason:empty { display: none; }
-/* Ticket 22 · at phone and tablet widths the body scrolls under the sticky head, so the Print page flows with it instead of scrolling inside a 70vh box */
+/* At phone and tablet widths the body scrolls under the sticky head, so the Print page flows with it instead of scrolling inside a 70vh box */
 @media (max-width: 900px) {
   body.print-step .slicer-main { height: auto; }
   body.print-step .project-page { overflow: visible; }
@@ -697,20 +697,20 @@ body[data-workflow-step="model"] .slicer-small-screen-note, body[data-workflow-s
   body.print-step .pp-sendbar { bottom: 0; }   /* it sticks to the screen edge now, not to an inner scroll box */
 }
 
-/* ─── Ticket 23: editor layout (PS-42 to PS-48) ─── */
-/* PS-46: the More panel scrolls inside the window instead of running off it */
+/* ─── Editor layout ─── */
+/* The More panel scrolls inside the window instead of running off it */
 .tool-more-panel { max-height: min(70vh, calc(100dvh - 120px)); overflow-y: auto; overscroll-behavior: contain; }
-/* PS-45: an open Print settings fold grows to its content, as a closed one does */
+/* An open Print settings fold grows to its content, as a closed one does */
 .slicer-settings, .slicer-settings[open] { flex: none; min-height: 0; }
-/* PS-47: a long object list is capped so the object panel below it stays in reach; the panel's actions are in two groups */
+/* A long object list is capped so the object panel below it stays in reach; the panel's actions are in two groups */
 .slicer-object-list { max-height: clamp(120px, 28vh, 260px); }
 .slicer-object-panel .slicer-actions-row + .slicer-actions-row { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
-/* PS-43: phones that defer 3D editing do not add or remove plates; Fit view and Undo stay */
+/* Phones that defer 3D editing do not add or remove plates; Fit view and Undo stay */
 .defer-edit [data-plate="new"], .defer-edit [data-plate="remove"] { display: none; }
 
 /* The header's two halves behave as one row above 640 px; on phones only the stepper half sticks */
 .slicer-id, .slicer-nav { display: contents; }
-/* PS-44: header zones keep their size from step to step; long status text is cut with an ellipsis (its title has the whole text) */
+/* Header zones keep their size from step to step; long status text is cut with an ellipsis (its title has the whole text) */
 @media (max-width: 1100px) {
   .slicer-slice-state { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: min(320px, 38vw); min-width: 0; }
   .slicer-top-actions { flex-wrap: nowrap; min-width: 0; }
@@ -718,9 +718,9 @@ body[data-workflow-step="model"] .slicer-small-screen-note, body[data-workflow-s
   .slicer-step-actions small { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .slicer-steps { flex: none; }
 }
-/* PS-48: a finished state reads as a status, not a disabled button */
+/* A finished state reads as a status, not a disabled button */
 .slicer-all-sliced { color: var(--green); font-size: var(--fs-secondary); font-weight: 600; }
-/* PS-42: phone header is the stepper and its action; the project name scrolls away; the 3D view gets over half the screen */
+/* Phone header is the stepper and its action; the project name scrolls away; the 3D view gets over half the screen */
 @media (max-width: 640px) {
   .slicer-top { display: contents; }
   .slicer-id { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px 10px; padding: 8px 12px;
@@ -742,7 +742,7 @@ body[data-workflow-step="model"] .slicer-small-screen-note, body[data-workflow-s
 .tool-more-head, .split-section h4 { font-size: var(--fs-small); }
 .slicer-page small, .slicer-page .preset-btn { font-size: var(--fs-small); }
 
-/* Ticket 28 · a Plate row says its status once, then what it will take */
+/* A Plate row says its status once, then what it will take */
 .pp-meta { font-size: var(--fs-secondary); white-space: nowrap; }
 .quality-buttons { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 auto; }
 .quality-buttons button { background: var(--surface2, var(--bg)); color: var(--text); border: 1px solid var(--border);
@@ -766,7 +766,7 @@ body[data-workflow-step="model"] .slicer-small-screen-note, body[data-workflow-s
 .slicer-import-progress { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-small); color: var(--text-muted); }
 .slicer-import-progress progress { width: 72px; height: 8px; }
 
-/* Ticket 09: Ready list sort, and the card that says why there is no picture */
+/* Ready list sort, and the card that says why there is no picture */
 .pp-sort { display: inline-flex; align-items: center; gap: 6px; }
 .pp-sort select { min-height: 32px; }
 .pp-nopreview { display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 120px; border: 1px dashed var(--border, #555); border-radius: 8px; padding: 12px; text-align: center; }

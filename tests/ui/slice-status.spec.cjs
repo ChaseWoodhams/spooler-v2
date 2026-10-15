@@ -30,6 +30,16 @@ const cases = {
     assert.match(await r.page.locator('#slice-state').innerText(), /Slice in progress/);
     assert.match(await r.page.locator('#slicing-list [data-select-plate="1"]').innerText(), /Slice in progress/);
     assert.ok(await r.page.locator('#slicing-list [data-select-plate="1"] .dot.busy').count(), 'sidebar dot shows busy');
+    // A merely queued Plate says it is waiting, not that its Slice is in progress
+    const queued = r.page.locator('#slicing-list [data-select-plate="2"]');
+    assert.match(await queued.innerText(), /Waiting for the slicer.*position 1 in line/);
+    assert.doesNotMatch(await queued.innerText(), /in progress/i);
+    // The live region is only touched when what it says changes: re-rendering the list leaves it alone
+    await r.page.evaluate(() => { window.__totalsWrites = 0; new MutationObserver(m => { window.__totalsWrites += m.length; }).observe(document.getElementById('slicing-totals'), { childList: true, characterData: true, subtree: true }); });
+    await r.page.locator('#slicing-list [data-select-plate="2"]').click();
+    await r.page.locator('#slicing-list [data-select-plate="1"]').click();
+    await r.page.waitForTimeout(300);
+    assert.equal(await r.page.evaluate(() => window.__totalsWrites), 0, 'the totals live region was not rewritten with the same text');
     await r.context.close();
     console.log('PASS: all slicing reads 0 of 2, no success message, header and list agree');
 
