@@ -54,10 +54,10 @@ class CancelTests(unittest.TestCase):
     def test_the_deadline_ends_a_stalled_run_as_timeout_and_leaves_no_process(self):
         self.scenario({"calls": [{"tool": "get_project"}], "hang_after_init": 60, "answer": "partial"})
         before = self.revision()
-        with mock.patch.object(assistant_runner, "DEADLINE_SECONDS", 5):
-            status, run = self.ask()
-            record = self.wait_for_server()
-            view = self.poll(run)
+        self.call("POST", "/api/assistant/settings", {"tuning": {"limits": {"deadline_seconds": 5}}})
+        status, run = self.ask()
+        record = self.wait_for_server()
+        view = self.poll(run)
         self.assertEqual(status, 200)
         self.assertEqual(view["state"], "timeout")
         self.assertIsNone(view["answer"])
@@ -68,8 +68,9 @@ class CancelTests(unittest.TestCase):
         self.assertEqual(self.finished()["answer"], "back")
 
     def test_the_default_deadline_is_sixty_seconds_and_the_notice_says_so(self):
-        self.assertEqual(assistant_runner.DEADLINE_SECONDS, 60)
-        self.assertEqual(assistant_runner.timeout_message(), "No answer in 60 s; nothing was changed")
+        _, body = self.call("GET", f"/api/projects/{self.project['id']}/assistant/status")
+        self.assertEqual(body["limits"]["deadline_seconds"], 60)
+        self.assertEqual(assistant_runner.timeout_message(60), "No answer in 60 s; nothing was changed")
 
     # ── cancel ──
     def test_cancel_ends_the_run_at_once_discards_partial_output_and_leaves_no_process(self):
@@ -151,8 +152,8 @@ class CancelTests(unittest.TestCase):
             self.cancel(run)
             self.assertEqual(self.poll(run)["state"], "cancelled")
             time.sleep(0.3)
-            with mock.patch.object(assistant_runner, "DEADLINE_SECONDS", 1):
-                self.assertEqual(self.finished()["state"], "timeout")
+            self.call("POST", "/api/assistant/settings", {"tuning": {"limits": {"deadline_seconds": 5}}})
+            self.assertEqual(self.finished()["state"], "timeout")
             time.sleep(0.3)
         lines = [line for line in out.getvalue().splitlines() if line.startswith("[Assistant]")]
         self.assertEqual(len(lines), 2, out.getvalue())

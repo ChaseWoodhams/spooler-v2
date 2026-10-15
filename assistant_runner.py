@@ -29,22 +29,20 @@ import uuid
 from pathlib import Path
 
 import assistant
+import assistant_tuning
 import datapaths
 import proposal_store
 import spooler_mcp
 from errors import JobError
 
-MAX_MESSAGE = 2000
 MAX_HISTORY_TURNS = 12
 MAX_HISTORY_CHARS = 6000
 MAX_TURN_CHARS = 1500
 MAX_STEPS = 30
-DEADLINE_SECONDS = 60                      # wall clock per run, enforced here; tests patch it
 CANCEL_WAIT = 15                           # how long the cancel route waits for the run to finish ending
 USAGE_LIMIT_ERROR = "AI unavailable: usage limit reached"
 MAX_ERROR = 300
 KEEP_RUNS = 40
-CLI_MAX_TURNS = "12"
 DUMMY_KEY = "sk-ant-dummy-not-real"        # --bare never reads OAuth; Jev accepts any key
 SERVER_NAME = spooler_mcp.SERVER_NAME
 ALLOWED_TOOLS = tuple(f"mcp__{SERVER_NAME}__{name}" for name in spooler_mcp.TOOL_NAMES)   # defined once; init is checked against it
@@ -89,6 +87,12 @@ Proposals
 """
 
 
+def system_prompt(tuning: dict) -> str:
+    """The instructions for one run. Today the built-in text with the Proposal cap the run really has; later tuning groups extend this."""
+    cap = tuning["limits"]["proposals_per_run"]
+    return SYSTEM_PROMPT if cap == 3 else SYSTEM_PROMPT.replace("At most three Proposals per run", f"At most {cap} Proposals per run")
+
+
 class AskError(JobError):
     """A refused ask; the route answers with its status."""
 
@@ -104,6 +108,7 @@ class Run:
         self.started = time.monotonic()
         self.finished = None
         self.init_ok = False
+        self.tuning = assistant_tuning.snapshot()    # read once: this run uses only these values, whatever is saved while it works
         self.proc = None                   # the CLI process, kept so Cancel and the deadline can end its tree
         self.reason = None                 # "cancelled" or "timeout" once either has been asked for
         self.tool_calls = 0                # every tool_use seen (steps are capped, this is not)
@@ -144,10 +149,10 @@ def _inside_profile(path: Path) -> bool:
 
 # ── The recipe ────────────────────────────────────────────────────────────────
 
-def build_argv(cli: str, mcp_config: Path, system_prompt: Path) -> list:
+def build_argv(cli: str, mcp_config: Path, system_prompt: Path, max_turns: int) -> list:
     return [cli, "-p", "--bare", "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--mcp-config", str(mcp_config),
             "--tools", "", "--allowedTools", *ALLOWED_TOOLS, "--permission-mode", "dontAsk", "--permission-prompts", "none",
-            "--no-session-persistence", "--max-turns", CLI_MAX_TURNS, "--disable-slash-commands", "--system-prompt-file", str(system_prompt)]
+            "--no-session-persistence", "--max-turns", str(max_turns), "--disable-slash-commands", "--system-prompt-file", str(system_prompt)]
 
 
 def build_env(jev_url: str, base: dict | None = None) -> dict:
@@ -168,11 +173,13 @@ def build_env(jev_url: str, base: dict | None = None) -> dict:
     return env
 
 
-def mcp_config(project_id: int, data_dir: Path, run_id: str | None = None) -> dict:
+def mcp_config(project_id: int, data_dir: Path, run_id: str | None = None, max_proposals: int | None = None) -> dict:
     import sys
     args = [str(Path(spooler_mcp.__file__).resolve()), "--project", str(int(project_id)), "--data-dir", str(data_dir)]
     if run_id:
         args += ["--run", run_id]               # the server stamps the Proposals it stages with it, and caps them per run
+    if max_proposals:
+        args += ["--max-proposals", str(int(max_proposals))]
     return {"mcpServers": {SERVER_NAME: {"type": "stdio", "command": sys.executable, "args": args, "env": {"DATA_DIR": str(data_dir)}}}}
 
 
@@ -219,8 +226,9 @@ def ask(project_id: int, message, history=None) -> dict:
     project, and a project that already has a run working."""
     if not isinstance(message, str) or not message.strip():
         raise AskError("Type a question first", 400)
-    if len(message) > MAX_MESSAGE:
-        raise AskError(f"Keep the question under {MAX_MESSAGE} characters", 400)
+    longest = assistant_tuning.snapshot()["limits"]["question_chars"]
+    if len(message) > longest:
+        raise AskError(f"Keep the question under {longest} characters", 400)
     turns = clean_history(history)
     import projects                                   # lazy, like assistant.purpose_summary: the app's own record, 404 when unknown
     record = projects.get_project(int(project_id))
@@ -302,12 +310,14 @@ def settle_proposals(run: Run, state: str) -> str:
 
 
 def limits() -> dict:
-    """What the panel shows and caps by: the run deadline and the history it may send."""
-    return {"deadline_seconds": DEADLINE_SECONDS, "history_turns": MAX_HISTORY_TURNS, "history_chars": MAX_HISTORY_CHARS, "turn_chars": MAX_TURN_CHARS}
+    """What the panel shows and caps by, all from the server: the saved deadline and question length, and the history it may send."""
+    saved = assistant_tuning.snapshot()["limits"]
+    return {"deadline_seconds": saved["deadline_seconds"], "question_chars": saved["question_chars"],
+            "history_turns": MAX_HISTORY_TURNS, "history_chars": MAX_HISTORY_CHARS, "turn_chars": MAX_TURN_CHARS}
 
 
-def timeout_message() -> str:
-    return f"No answer in {DEADLINE_SECONDS:g} s; nothing was changed"
+def timeout_message(seconds) -> str:
+    return f"No answer in {seconds:g} s; nothing was changed"
 
 
 CANCELLED_MESSAGE = "Cancelled; nothing was changed"
@@ -333,7 +343,7 @@ def cancel(project_id: int, run_id: str) -> dict:
 def _watch(run: Run) -> None:
     """The deadline: when it passes before the run ends, mark it timed out and end the tree. Runs on its own thread, so a stalled
     stream cannot hold it up."""
-    if run.stop.wait(DEADLINE_SECONDS):
+    if run.stop.wait(run.tuning["limits"]["deadline_seconds"]):
         return
     with _lock:
         if run.finished is not None or run.reason is not None:
@@ -357,7 +367,7 @@ def _finish(run: Run, state: str, answer=None, error=None) -> None:
     if run.reason == "cancelled":
         state, answer, error = "cancelled", None, CANCELLED_MESSAGE
     elif run.reason == "timeout":
-        state, answer, error = "timeout", None, timeout_message()
+        state, answer, error = "timeout", None, timeout_message(run.tuning["limits"]["deadline_seconds"])
     if run.finished is None:
         try:
             state = settle_proposals(run, state)
@@ -423,10 +433,10 @@ def _execute(run: Run, cli: str, jev_url: str, prompt: str) -> None:
         cwd = folder / "cwd"
         cwd.mkdir(parents=True)                      # empty: nothing but the CLI's own files ever appear here
         mcp_path, prompt_path = folder / "mcp.json", folder / "system-prompt.txt"
-        mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir(), run.id)), encoding="utf-8")
-        prompt_path.write_text(SYSTEM_PROMPT, encoding="utf-8")
+        mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir(), run.id, run.tuning["limits"]["proposals_per_run"])), encoding="utf-8")
+        prompt_path.write_text(system_prompt(run.tuning), encoding="utf-8")
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
-        proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path, run.tuning["limits"]["max_turns"]), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=str(cwd), env=build_env(jev_url), creationflags=flags)
         run.proc = proc
         if run.reason:                               # cancelled while it was starting

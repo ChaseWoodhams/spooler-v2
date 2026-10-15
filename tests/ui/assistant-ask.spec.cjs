@@ -9,6 +9,7 @@ const PURPOSE = { default: { value: 'general', note: '' }, models: [{ id: 11, na
 
 // Stubs the assistant routes. `hold`: keep every run thinking until the test sets hold = false.
 async function stubAssistant(page, s) {
+  s.limits ||= { deadline_seconds: 60, question_chars: 2000, history_turns: 12, history_chars: 6000, turn_chars: 1500 };
   s.asks = []; s.polls = 0; s.hold = false; s.refuse = null; s.final = { state: 'answer', answer: 'Plate 1 holds both brackets.', error: null };
   await page.route('**/api/projects/1/assistant/status**', route => route.fulfill({ json: { available: true, reason: null, purpose: PURPOSE, limits: s.limits } }));
   await page.route('**/api/projects/1/assistant/ask', route => {

@@ -480,6 +480,10 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._assistant_status(None)
             return
 
+        if self.path.split("?", 1)[0].startswith("/api/assistant/"):
+            self._json({"error": "Not found"}, 404)          # an unknown Assistant path answers JSON, never the HTML page
+            return
+
         if self.path.startswith("/api/camera/"):
             self._proxy_camera()
         elif self.path.startswith("/api/thumbnail/"):
