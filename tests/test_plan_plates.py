@@ -177,10 +177,10 @@ class PlanPlatesApiTests(unittest.TestCase):
         self.assertEqual(self.call("POST", f"/api/projects/{project['id']}/plan/accept", {})[0], 400)
 
     def test_turned_counts_only_parts_stood_on_another_side_not_turns_about_z(self):
-        project = self.project_with(mushroom(), stl_of(box(150, 10, 5)))
+        project = self.project_with(mushroom(), stl_of(box(40, 40, 5)))
         def change(data):
             data["objects"][0]["rotation"] = [180.0, 0.0, 0.0]    # standing on its post: orienting lays it back on its disc
-            data["objects"][1]["rotation"] = [0.0, 0.0, 45.0]     # a diagonal bar: the nester squares it up, a turn about Z only
+            data["objects"][1]["rotation"] = [0.0, 0.0, 45.0]     # a diagonal block: the nester squares it up, a turn about Z only
         project = self.save(project, change)
         status, plan = self.plan(project)
         self.assertEqual(status, 200, plan)

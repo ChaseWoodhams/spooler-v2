@@ -117,7 +117,7 @@ const reasonHas = (page, re) => page.waitForFunction(re => new RegExp(re, 'i').t
     assert.deepEqual(await stepNames(a.page), ['Plates', 'Slice', 'Print']);
     const plan = a.page.locator('#new-intake .intake-plan');
     assert.match(await plan.innerText(), /2 objects/);
-    assert.match(await plan.innerText(), /default settings/i);
+    assert.match(await plan.innerText(), /default material is unverified/i);
     const copies = a.page.locator('#new-intake [data-intake-row]', { hasText: 'small.stl' }).getByLabel(/Copies/);
     await copies.fill('4');
     await copies.press('Tab');

@@ -60,6 +60,7 @@ def make_fake_orca(root: Path) -> Path:
              "filament_type": ["PLA"]},
             {"name": "Elegoo PLA @ECC", "inherits": "Elegoo PLA @base", "nozzle_temperature": ["210"],
              "compatible_printers": [cc]},
+            {"name": "Elegoo PETG @ECC", "inherits": "fdm_filament_common", "filament_type": ["PETG"], "compatible_printers": [cc]},
             {"name": "Elegoo PETG @ECC2", "inherits": "fdm_filament_common", "compatible_printers": [cc2]},
         ],
     }
@@ -160,7 +161,7 @@ class ProfileTests(SlicerTestCase):
         machine = "Elegoo Centauri Carbon 0.4 nozzle"
         self.assertEqual(stock["machines"], [machine])
         self.assertEqual(stock["processes"][machine], ["0.20mm Standard @Elegoo CC 0.4 nozzle"])
-        self.assertEqual(stock["filaments"][machine], ["Elegoo PLA @ECC"])
+        self.assertEqual(stock["filaments"][machine], ["Elegoo PETG @ECC", "Elegoo PLA @ECC"])
 
     def test_a_07_nozzle_is_derived_from_the_08(self):
         folder = next((self.dir / "tools").rglob("profiles")) / "Elegoo"
