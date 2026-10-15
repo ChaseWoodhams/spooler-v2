@@ -38,6 +38,11 @@ def configure(data_dir: Path | None = None) -> None:
     _clear_cache()
 
 
+def data_dir() -> Path:
+    """The data directory the Assistant reads and the MCP server is told to use."""
+    return _data_dir
+
+
 def _clear_cache() -> None:
     with _lock:
         _cache.clear()
