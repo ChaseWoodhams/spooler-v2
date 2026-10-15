@@ -495,6 +495,13 @@
             <span>Notifications</span>
             <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
           </button>
+          <button class="settings-menu-item" id="btn-settings-goto-assistant">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            <span>Assistant</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+          </button>
           <button class="settings-menu-item" id="btn-settings-goto-about">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
             <span>About and release notes <small id="settings-about-version" class="settings-item-note"></small></span>
@@ -582,6 +589,31 @@
         <p id="settings-edit-status" class="settings-edit-status" role="status" aria-live="polite" hidden></p>
         <div class="modal-actions">
           <button id="btn-settings-printer-save" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+      <!-- Assistant sub-page -->
+      <div id="settings-assistant" style="display:none">
+        <div class="settings-subpage-header">
+          <button id="btn-settings-back-assistant" class="settings-back-btn" aria-label="Back to Settings" title="Back">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <h3 tabindex="-1">Assistant</h3>
+        </div>
+        <p class="input-hint">The assistant is optional. If the CLI or Jev is missing, the project page says so and everything else works as before. No API key is needed.</p>
+        <div class="form-group">
+          <label for="assistant-cli-path">CLI path</label>
+          <input type="text" id="assistant-cli-path" autocomplete="off" spellcheck="false" placeholder="Found on PATH" aria-describedby="assistant-cli-hint" />
+          <small class="input-hint" id="assistant-cli-hint">Leave empty to use the claude program found on PATH.</small>
+        </div>
+        <div class="form-group">
+          <label for="assistant-jev-url">Jev base URL</label>
+          <input type="text" id="assistant-jev-url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:3455" aria-describedby="assistant-jev-hint" />
+          <small class="input-hint" id="assistant-jev-hint">Leave empty for http://127.0.0.1:3455.</small>
+        </div>
+        <p id="assistant-check-result" class="input-hint" role="status" aria-live="polite"></p>
+        <div class="modal-actions">
+          <button id="btn-assistant-check" class="btn btn-secondary">Check</button>
+          <button id="btn-assistant-save" class="btn btn-primary">Save</button>
         </div>
       </div>
       <!-- Notifications sub-page -->
@@ -840,7 +872,7 @@
   <script src="preview.js?v=5"></script>
   <script src="history.js?v=11"></script>
   <script src="outcome-prompt.js?v=6"></script>
-  <script src="app.js?v=79"></script>
+  <script src="app.js?v=80"></script>
   <script src="quick-print.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
   <script src="import.js?v=7"></script>
