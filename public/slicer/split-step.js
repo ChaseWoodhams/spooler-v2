@@ -451,7 +451,10 @@ async function loadGuide() {
     guide = { ...loaded, split_id: id };
   } catch (err) {
     if (!current || current.id !== id) return;
-    guide = { state: "failed", error: err.message, blocked: "", has_pdf: false, split_id: id };
+    // A not-found reply means no guide has been made yet; anything else is a real failure.
+    guide = err.status === 404
+      ? { state: "none", blocked: "", has_pdf: false, split_id: id }
+      : { state: "failed", error: err.message, blocked: "", has_pdf: false, split_id: id };
   }
   clearTimeout(guideTimer);
   if (guide.state === "generating") guideTimer = setTimeout(loadGuide, 1500);
@@ -477,8 +480,9 @@ function guidePanel() {
     <div class="split-actions-row">
       <label class="split-inline">Paper <select id="split-guide-paper"${working ? " disabled" : ""}>
         ${["a4", "letter"].map(v => `<option value="${v}"${paper === v ? " selected" : ""}>${v === "a4" ? "A4" : "Letter"}</option>`).join("")}</select></label>
-      <button class="btn btn-primary btn-sm" data-action="guide"${disabled ? " disabled" : ""}${why ? ' aria-describedby="split-guide-why"' : ""}>${g.has_pdf ? "Generate again" : "Generate"}</button>
+      <button class="btn btn-primary btn-sm" data-action="guide"${disabled ? " disabled" : ""}${why ? ' aria-describedby="split-guide-why"' : ""}>${g.has_pdf ? "Generate again" : g.state === "failed" ? "Retry" : "Generate"}</button>
     </div>
+    ${g.state === "none" && !g.has_pdf && !why ? '<small class="reason-line">No guide has been made for this split yet.</small>' : ""}
     ${why ? `<small class="reason-line" id="split-guide-why">${esc(why)}</small>` : ""}
     ${working ? `<div class="split-progress" role="status"><progress max="100" value="${g.percent || 0}"></progress> ${esc(g.stage || "Working")}</div>` : ""}
     ${g.state === "failed" && g.error ? `<div class="job-error" role="alert">${esc(g.error)}</div>` : ""}

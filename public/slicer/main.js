@@ -380,6 +380,17 @@ function renderFarm() {
   refreshFit();
 }
 
+const WARNING_ICON = '<svg class="fit-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M8 1.5 15 14H1z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6v4M8 11.5v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+// Each distinct warning once; "No spool is assigned" is a labelled warning that says it only informs and links to where a spool is assigned
+function fitWarningsHtml(fit) {
+  const seen = new Set();
+  return fit.warnings.filter(w => !seen.has(w.text) && seen.add(w.text)).map(w => {
+    if (!/^No spool is assigned to /.test(w.text)) return `<div class="fit ${esc(w.level)}">${esc(w.text)}</div>`;
+    const href = fit.printer_id ? `/#printer=${encodeURIComponent(fit.printer_id)}` : "/";
+    return `<div class="fit ${esc(w.level)} fit-labelled">${WARNING_ICON}<span><strong>Warning:</strong> ${esc(w.text)}. This does not block sending. <a href="${href}" target="_blank" rel="noopener">Assign a spool</a></span></div>`;
+  }).join("");
+}
+
 // Warnings about the plate's printer (offline, wrong nozzle, other material, too little filament); asked for when they may have changed
 function refreshFit() {
   const plate = currentPlate();
@@ -391,7 +402,7 @@ function refreshFit() {
   state.fitKey = key;
   api("GET", `/api/projects/${state.project.id}/plates/${plate.id}/fit?printer_id=${encodeURIComponent(plate.printer_id)}`).then(fit => {
     if (state.fitKey !== key) return;
-    box.innerHTML = fit.warnings.map(w => `<div class="fit ${esc(w.level)}">${esc(w.text)}</div>`).join("");
+    box.innerHTML = fitWarningsHtml(fit);
   }).catch(() => { box.innerHTML = ""; });
 }
 
@@ -1201,6 +1212,7 @@ async function importPreset(file) {
 
 function plateDot(plateId) {
   const entry = sliceEntry(plateId);
+  if (plateImporting(plateId)) return "busy";
   return !entry ? "" : entry.state === "sliced" ? (entry.outdated ? "outdated" : "sliced") : entry.state === "failed" ? "failed" : "busy";
 }
 
@@ -1560,7 +1572,7 @@ function renderSlicing() {
   const plates = platesWithObjects();
   const todo = plates.filter(p => !isUpToDate(p.id) && !isBusy(p.id) && !plateImporting(p.id));
   const noProfile = !data().profile.bundle_id;
-  $("slicing-actions").innerHTML = !plates.length ? "" : !todo.length
+  $("slicing-actions").innerHTML = !plates.length ? "" : plates.every(p => isUpToDate(p.id))
     ? '<span class="slicer-all-sliced" role="status">✓ All plates sliced</span>'
     : `<button class="btn btn-primary btn-sm" type="button" data-slice-all${noProfile ? " disabled" : ""}${noProfile ? ' aria-describedby="slice-all-why"' : ""}>
     ${todo.length === plates.length ? `Slice all ${plural(plates.length, "plate")}` : `Slice ${plural(todo.length, "plate")}`}</button>${noProfile ? '<small id="slice-all-why" class="slicer-muted">Choose a slicing profile first</small>' : ""}`;
@@ -1575,11 +1587,13 @@ function renderSlicing() {
     </div>`;
   }).join("") || '<p class="slicer-muted">No plates with objects.</p>';
   const done = plates.filter(p => isUpToDate(p.id));
+  const failed = plates.filter(p => sliceEntry(p.id)?.state === "failed");
   const seconds = done.reduce((sum, p) => sum + (sliceEntry(p.id).estimate_s || 0), 0);
   const grams = done.reduce((sum, p) => sum + (sliceEntry(p.id).estimate_g || 0), 0);
-  $("slicing-totals").textContent = done.length
-    ? `${done.length} of ${plural(plates.length, "plate")} sliced · ${duration(seconds)} of printing · ${Math.round(grams)} g of filament`
-    : "Click a sliced plate to see its layers.";
+  const failedText = failed.length ? ` · ${failed.length} failed` : "";
+  $("slicing-totals").textContent = !plates.length ? "" : done.length
+    ? `${done.length} of ${plural(plates.length, "plate")} sliced${failedText} · ${duration(seconds)} of printing · ${Math.round(grams)} g of filament`
+    : `0 of ${plural(plates.length, "plate")} sliced${failedText}`;
 }
 
 function plateFilamentLabel(id) {
