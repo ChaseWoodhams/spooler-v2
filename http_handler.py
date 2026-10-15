@@ -472,6 +472,14 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._json(load_notif_settings())
             return
 
+        if self.path == "/api/assistant/settings":
+            self._assistant_settings()
+            return
+
+        if self.path.split("?", 1)[0] == "/api/assistant/status":
+            self._assistant_status(None)
+            return
+
         if self.path.startswith("/api/camera/"):
             self._proxy_camera()
         elif self.path.startswith("/api/thumbnail/"):
@@ -653,6 +661,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._handle_push_unsubscribe()
         elif self.path == "/api/notification-settings":
             self._handle_notif_settings()
+        elif self.path == "/api/assistant/settings":
+            self._assistant_settings()
         elif self.path == "/api/push-test":
             self._handle_push_test()
         elif self.path == "/api/import-filaments":
@@ -723,6 +733,51 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         remove_subscription(body.get("endpoint", ""))
         self._json({"ok": True})
+
+    def _assistant_settings(self):
+        """GET/POST /api/assistant/settings: CLI path and Jev address (no API key). Contained: any failure is a 4xx/5xx body."""
+        try:
+            import assistant
+            if self.command == "GET":
+                self._json(assistant.settings_view())
+                return
+            try:
+                body = json.loads(self._read_body() or b"{}")
+                self._json(assistant.save_settings(body))
+            except (ValueError, assistant.AssistantError) as e:
+                self._json({"error": str(e) or "Bad request"}, 400)
+        except Exception as e:
+            self._json({"error": f"Assistant settings are unavailable: {e}"}, 500)
+
+    def _assistant_status(self, project_id):
+        """GET /api/projects/<id>/assistant/status[?fresh=1]: available, or why not. Never fails the page."""
+        record = projects.get_project(project_id) if project_id is not None else None     # 404 for an unknown project
+        fresh = "fresh=1" in urllib.parse.urlparse(self.path).query.split("&")
+        try:
+            import assistant
+            import assistant_runner
+            self._json({**assistant.project_status(record, fresh), "limits": assistant_runner.limits()} if record else assistant.status(fresh))
+        except Exception as e:
+            self._json({"available": False, "reason": f"The assistant could not start: {e}", "purpose": None})
+
+    def _assistant_call(self, fn):
+        """Run an Assistant run operation. The runner is imported here, so a broken Assistant never touches core routes; its
+        refusals are JobErrors (400/404/409/503) and anything else is a 500 with a message."""
+        try:
+            import assistant_runner
+        except Exception as e:
+            self._json({"error": f"The assistant could not start: {e}"}, 500)
+            return
+        self._jobs_call(lambda: fn(assistant_runner), broadcast=False)
+
+    def _assistant_proposal_call(self, fn):
+        """Review, accept or dismiss a staged Proposal (the module is imported here, like the runner: a broken Assistant never touches core routes)."""
+        try:
+            import assistant_proposals
+        except Exception as e:
+            self._json({"error": f"The assistant could not start: {e}"}, 500)
+            return
+        self._jobs_call(lambda: fn(assistant_proposals), broadcast=False)
 
     def _handle_notif_settings(self):
         try:
@@ -1002,6 +1057,14 @@ class SPHandler(SimpleHTTPRequestHandler):
             elif len(parts) == 7 and parts[4] == "imports" and parts[6] == "source":
                 path, name = projects.import_source(project_id, parts[5])
                 self._send_file(path, "model/3mf", download_name=safe_filename(name, "import.3mf", ""))
+            elif len(parts) == 6 and parts[4] == "assistant" and parts[5] == "status":
+                self._assistant_status(project_id)
+            elif len(parts) == 7 and parts[4] == "assistant" and parts[5] == "runs":
+                self._assistant_call(lambda runner: runner.get(project_id, parts[6]))
+            elif len(parts) == 6 and parts[4] == "assistant" and parts[5] == "proposals":
+                self._assistant_proposal_call(lambda proposals: proposals.pending(project_id))
+            elif len(parts) == 7 and parts[4] == "assistant" and parts[5] == "proposals":
+                self._assistant_proposal_call(lambda proposals: proposals.review(project_id, parts[6]))
             elif len(parts) == 5 and parts[4] == "jobs":
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
@@ -1262,6 +1325,20 @@ class SPHandler(SimpleHTTPRequestHandler):
                 "reprint": lambda: projects.reprint_plate(self._job_id(), plate_id),
             }
             self._jobs_call(actions[action], broadcast=action in ("queue", "reprint"))
+            return
+        if len(parts) == 6 and parts[4] == "assistant" and parts[5] == "ask":
+            def ask(runner):
+                body = self._json_body()
+                return runner.ask(self._job_id(), body.get("message"), body.get("history"))
+            self._assistant_call(ask)
+            return
+        if len(parts) == 8 and parts[4] == "assistant" and parts[5] == "runs" and parts[7] == "cancel":
+            self._assistant_call(lambda runner: runner.cancel(self._job_id(), parts[6]))
+            return
+        if len(parts) == 8 and parts[4] == "assistant" and parts[5] == "proposals" and parts[7] in ("accept", "dismiss"):
+            token, accepting = parts[6], parts[7] == "accept"
+            self._assistant_proposal_call(lambda proposals: proposals.accept(self._job_id(), token, self._json_body()) if accepting
+                                          else proposals.dismiss(self._job_id(), token))
             return
         self._json({"error": "Not found"}, 404)
 

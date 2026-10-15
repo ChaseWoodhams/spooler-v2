@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 import database
+import errors
 import snapshots
 import state
 import time_estimate
@@ -56,10 +57,7 @@ _progress: dict = {}                 # job_id → {"phase", "sent", "total"} whi
 _start_tasks: dict = {}              # job_id → asyncio.Task
 
 
-class JobError(Exception):
-    def __init__(self, message: str, status: int = 400):
-        super().__init__(message)
-        self.status = status
+JobError = errors.JobError   # lives in errors.py so the read core can raise it without importing this module
 
 
 # ── Setup ──────────────────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ from unittest import mock
 
 import database
 import jobs
+import placement_read
 import projects
 import slicer
 import splits
@@ -356,7 +357,7 @@ class PlanPlatesApiTests(unittest.TestCase):
         project = self.lay(project, [(1, 1, (50, 50), False), (2, 1, (150, 150), False)])
         stacked = [{"group": json.dumps({"overrides": {}, "filament": None}), "plate": 1, "overrides": {}, "fixed": [],
                     "items": [{"key": k, "center": (100.0, 100.0), "turned": False, "angle": 0.0, "oversize": False} for k in (1, 2)]}]
-        with mock.patch.object(projects, "arrange_layout", return_value=stacked):
+        with mock.patch.object(placement_read, "arrange_layout", return_value=stacked):   # where _plan_data looks it up
             status, plan = self.plan(project)
             accepted = self.accept(project)
         self.assertEqual(status, 200, plan)

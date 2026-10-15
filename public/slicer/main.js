@@ -10,6 +10,7 @@ import { newProject } from "./new-project.js?v=10";
 import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
 import { showExport } from "./export-plan.js?v=2";
 import { Viewport, featureColor } from "./viewport.js?v=5";
+import { assistantPanel } from "./assistant.js?v=5";
 import { reviewHtml, reviewTitle, blockers, acknowledgements } from "./review.js?v=1";
 
 const $ = id => document.getElementById(id);
@@ -50,12 +51,25 @@ const state = {
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
-function toast(message, error = false) {
+// `action` {label, onClick} adds a button to the toast (Undo after an accepted Proposal) and keeps it up longer.
+function toast(message, error = false, { action = null } = {}) {
   const el = document.createElement("div");
-  el.className = `toast${error ? " toast-error" : ""}`;
-  el.textContent = message;
+  el.className = `toast${error ? " toast-error" : ""}${action ? " toast-action" : ""}`;
+  if (action) {
+    const text = document.createElement("span");
+    text.className = "toast-msg";
+    text.textContent = message;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "toast-btn";
+    button.textContent = action.label;
+    button.addEventListener("click", () => { el.remove(); action.onClick(); });
+    el.append(text, button);
+  } else {
+    el.textContent = message;
+  }
   $("toast-area").appendChild(el);
-  setTimeout(() => el.remove(), error ? 6000 : 3500);
+  setTimeout(() => el.remove(), action ? 10000 : error ? 6000 : 3500);
 }
 
 // Every wait is bounded (net.js fetchWithTimeout): reads give up after 20 s and retry once; writes get 2 minutes because
@@ -198,6 +212,67 @@ function setFilamentChoice(modelId, choice) {
   if (Object.keys(filaments).length) data().filaments = filaments; else delete data().filaments;
   changed();
   renderObjectPanel();
+}
+// Purpose: what a Model is printed for. data().purposes["<model id>"] is its own; data().purpose is the project default;
+// absent means General. The server stores nothing for plain General, so a project that never sets one is unchanged.
+const PURPOSE_LABELS = { general: "General", functional: "Functional", display: "Display", draft: "Draft" };
+const PURPOSE_NOTE_MAX = 300;
+const effectivePurpose = modelId => {
+  const own = data().purposes?.[String(modelId)];
+  if (own) return { ...own, source: "model" };
+  if (data().purpose) return { ...data().purpose, source: "project" };
+  return { value: "general", note: "", source: "default" };
+};
+function setModelPurpose(modelId, value, note) {
+  const purposes = { ...(data().purposes || {}) };
+  if (value) purposes[String(modelId)] = { value, note: note ?? purposes[String(modelId)]?.note ?? "" };
+  else delete purposes[String(modelId)];
+  if (Object.keys(purposes).length) data().purposes = purposes; else delete data().purposes;
+  changed();
+  renderObjects();
+  renderObjectPanel();
+}
+function typeModelPurposeNote(modelId, note) {
+  const own = data().purposes?.[String(modelId)];
+  if (!own) return;
+  own.note = note.trim();
+  changed({ merge: true });
+}
+function typeProjectPurposeNote(note) {
+  note = note.trim();
+  if (!data().purpose && !note) return;
+  data().purpose = { value: data().purpose?.value || "general", note };
+  if (data().purpose.value === "general" && !note) delete data().purpose;
+  changed({ merge: true });
+}
+function setProjectPurpose(value, note) {
+  note = (note ?? data().purpose?.note ?? "").trim();
+  if (value === "general" && !note) delete data().purpose; else data().purpose = { value, note };
+  changed();
+  renderObjects();
+  renderObjectPanel();
+  renderPurposeFold();
+}
+// A Model's Purpose select (with "Project default" to follow the project) and note, used by the Model row and the inspector
+function purposeControls(modelId, name) {
+  const own = data().purposes?.[String(modelId)];
+  const inherited = effectivePurpose(modelId);
+  const options = [`<option value="">Project default (${PURPOSE_LABELS[(data().purpose || { value: "general" }).value]})</option>`,
+    ...Object.entries(PURPOSE_LABELS).map(([value, label]) => `<option value="${value}"${own?.value === value ? " selected" : ""}>${label}</option>`)];
+  return `<select class="slicer-purpose" data-purpose-model="${modelId}" aria-label="Purpose of ${esc(name)}" title="What this Model is printed for. Every Copy shares it.">${options.join("")}</select>
+    <input type="text" class="slicer-purpose-note" data-purpose-note="${modelId}" maxlength="${PURPOSE_NOTE_MAX}" aria-label="Purpose note for ${esc(name)}"
+      placeholder="${own ? "Note, e.g. carries motor thrust" : "Follows the project"}" value="${esc(own ? own.note : inherited.note)}"${own ? "" : " readonly"}>`;
+}
+function renderPurposeFold() {
+  const body = $("purpose-body");
+  if (!body || !state.project) return;
+  const current = data().purpose || { value: "general", note: "" };
+  $("purpose-summary").textContent = PURPOSE_LABELS[current.value];
+  if (body.contains(document.activeElement)) return;
+  body.innerHTML = `<label class="slicer-field">Default Purpose <select id="project-purpose" title="Models follow this unless they have their own">
+      ${Object.entries(PURPOSE_LABELS).map(([value, label]) => `<option value="${value}"${current.value === value ? " selected" : ""}>${label}</option>`).join("")}</select></label>
+    <label class="slicer-field">Note <input type="text" id="project-purpose-note" maxlength="${PURPOSE_NOTE_MAX}" placeholder="e.g. brackets for the shelf" value="${esc(current.note)}"></label>
+    <p class="slicer-muted">Guides Orient all and the assistant. It never changes print settings by itself.</p>`;
 }
 const isUpToDate = plateId =>sliceEntry(plateId)?.state === "sliced" && !sliceEntry(plateId).outdated;
 const isBusy = plateId => ["queued", "slicing"].includes(sliceEntry(plateId)?.state);
@@ -990,6 +1065,7 @@ function renderAll({ geometry = true } = {}) {
   renderProfile();
   renderPlates();
   renderObjects();
+  renderPurposeFold();
   renderSettings();
   renderSliceState();
   renderSlicing();
@@ -997,6 +1073,7 @@ function renderAll({ geometry = true } = {}) {
   if (geometry) renderViewport();
   renderTools();
   renderObjectPanel();
+  assistantPanel.update();
 }
 
 const PRESET_KINDS = ["machine", "filament", "process"];
@@ -1334,6 +1411,7 @@ function renderObjects() {
       ${model?.state === "failed" ? `<button class="btn btn-secondary btn-sm slicer-retry-btn" type="button" data-retry-model="${model.id}" title="Try importing this model again">Retry</button>`
         : overrides ? `<span class="slicer-badge" title="Settings changed for this object">${overrides}</span>` : "<span></span>"}
       <button class="slicer-icon-btn" type="button" data-remove-object="${object.id}" title="Remove from the plate" aria-label="Remove ${esc(object.name)} from the plate">✕</button>
+      <div class="slicer-object-purpose">${purposeControls(object.model, object.name)}</div>
     </div>`;
   });
   $("object-list").innerHTML = rows.join("") || '<p class="slicer-muted">No objects on this plate. Add a model or drop STL files on the bed.</p>';
@@ -1700,6 +1778,7 @@ function renderObjectPanel() {
     <label class="slicer-field">Copies <input type="number" id="object-copies" min="1" max="500" step="1" value="${copies}" title="How many objects are made from this model, across all plates"></label>
     ${note ? `<div class="slicer-muted" id="object-copies-note">${esc(note)}</div>` : ""}
     ${filamentControls(object)}
+    <div class="slicer-field slicer-purpose-field">Purpose<div class="slicer-purpose-pair">${purposeControls(object.model, object.name)}</div></div>
     <div class="slicer-actions-row">
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="flat" title="Rotate so the largest flat face is on the bed">Lay flat</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="orient" title="Suggest an orientation, to accept or ignore (O)">Suggest orientation</button>
@@ -2319,7 +2398,7 @@ function planMap(plate) {
     const [x, y] = object.position, cy = y1 - y + y0;
     return `<rect class="plan-object${object.pinned ? " pinned" : ""}" x="${(x - half[0]).toFixed(1)}" y="${(cy - half[1]).toFixed(1)}" width="${(half[0] * 2).toFixed(1)}" height="${(half[1] * 2).toFixed(1)}" transform="rotate(${(-turn).toFixed(1)} ${x.toFixed(1)} ${cy.toFixed(1)})"><title>${esc(object.name)}</title></rect>`;
   }).join("");
-  return `<svg class="plan-map" viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" role="img" aria-label="${esc(plate.name)}: ${plural(plate.parts, "object")}"><rect class="plan-bed" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}"/>${objects}</svg>`;
+  return `<svg class="plan-map" viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" role="img" aria-label="${esc(plate.name)}: ${plural(plate.objects.length, "object")}"><rect class="plan-bed" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}"/>${objects}</svg>`;
 }
 
 function planSheetHtml(plan) {
@@ -2327,7 +2406,7 @@ function planSheetHtml(plan) {
   const cards = plan.plates.map(plate => `<div class="plan-card">
       <div class="plan-card-head"><b>${esc(plate.name)}</b>${plate.new ? ' <span class="slicer-muted">new</span>' : ""}</div>
       ${planMap(plate)}
-      <div class="slicer-muted">${plural(plate.parts, "object")} · ${esc(plate.filament)}${plate.turned ? ` · ${plate.turned} turned` : ""}</div>
+      <div class="slicer-muted">${plural(plate.objects.length, "object")} · ${esc(plate.filament)}${plate.turned ? ` · ${plate.turned} turned` : ""}</div>
       ${SHOW_PLAN_SECONDS && plate.time_estimate?.seconds ? `<div class="slicer-muted">${planTime(plate.time_estimate.seconds)}</div>` : ""}
     </div>`).join("");
   const kept = plan.kept.length ? `<h4>Kept as they are</h4><ul class="plan-kept">${plan.kept.map(k => `<li><b>${esc(k.name)}</b> <span class="slicer-muted">${esc(k.reason)}</span></li>`).join("")}</ul>` : "";
@@ -2384,6 +2463,7 @@ async function showPlan() {
 }
 
 async function acceptPlan() {
+  if (state.review) return acceptReview();   // the sheet is showing an Assistant Proposal, not a plan
   const plan = state.plan;
   if (!plan) return;
   await withButton($("plan-accept"), async () => {
@@ -2401,6 +2481,74 @@ async function acceptPlan() {
       $("plan-error").textContent = err.message;   // "changed elsewhere" or "The plan changed, review it again"
       state.plan = null;   // nothing to accept any more: Accept does nothing until the sheet is opened again
     }
+  });
+}
+
+// ── Assistant Proposals in the Plan plates review sheet ──
+// The sheet is the one every accepted change goes through: placement shows each touched plate before and after, settings a table
+// of key, before, after and layer. Accept is the panel's (it owns the card); the sheet only asks it and shows a refusal.
+function proposalSheetHtml(view) {
+  const list = (items, cls) => items.length ? `<ul class="${cls}">${items.map(item => `<li>${item}</li>`).join("")}</ul>` : "";
+  const diff = view.settings?.length ? "" : list((view.diff || []).map(line => `<b>${esc(line.label)}</b> ${esc(line.text)}`), "assistant-diff");
+  const pinned = view.pinned?.length ? `<p class="slicer-muted">Pinned, left alone: ${view.pinned.map(p => esc(p.label)).join(", ")}</p>` : "";
+  const notes = list([...(view.settings?.length ? [] : view.notes || []), ...(view.problems || [])].map(esc), "assistant-notes slicer-muted");   // a settings table carries its own notes
+  let body = "";
+  if (view.before && view.after) {
+    const now = new Map(view.before.plates.map(plate => [plate.id, plate]));
+    const next = new Map(view.after.plates.map(plate => [plate.id, plate]));
+    const ids = [...new Set([...view.after.plates.map(plate => plate.id), ...view.before.plates.map(plate => plate.id)])];
+    const card = (plate, label) => plate
+      ? `<div class="plan-card" data-side="${label.toLowerCase()}"><div class="plan-card-head"><b>${esc(plate.name)}</b> <span class="slicer-muted">${label}</span></div>
+          ${planMap(plate)}
+          <div class="slicer-muted">${plural(plate.objects.length, "object")}${plate.turned ? ` · ${plate.turned} turned` : ""}</div></div>`
+      : `<div class="plan-card slicer-muted" data-side="${label.toLowerCase()}">${label === "Now" ? "Not on a plate yet" : "Plate removed"}</div>`;
+    body = `<div class="proposal-pairs">${ids.map(id => `<div class="proposal-pair">${card(now.get(id), "Now")}${card(next.get(id), "After")}</div>`).join("")}</div>`;
+  } else if (view.settings?.length) {
+    // Setting, Now, After and the layer the old value comes from; a change that would have no effect carries its note under the row
+    const layers = { preset: "Profile", project: "Project", plate: "Plate", object: "Object", bed: "Bed type", bricklayers: "BrickLayers" };
+    body = `<table class="proposal-table" data-table="settings"><thead><tr><th>Setting</th><th>Now</th><th>After</th><th>Layer</th></tr></thead><tbody>${view.settings.map(row => {
+      const rowNotes = row.notes || (row.note ? [row.note] : []);
+      return `<tr data-key="${esc(row.key)}"><td>${esc(row.label || row.key)}<div class="slicer-muted">${esc(row.key)}</div></td><td>${esc(row.old)}</td><td><b>${esc(row.new)}</b></td><td>${esc(layers[row.layer] || row.layer)}</td></tr>${rowNotes.length ? `<tr class="proposal-note"><td colspan="4" class="slicer-muted">${rowNotes.map(esc).join(" ")}</td></tr>` : ""}`;
+    }).join("")}</tbody></table>`;
+  }
+  return `<p class="slicer-muted">${esc(view.scope)}. ${esc(view.reason)}</p>${diff}${pinned}${notes}${body}`;
+}
+
+function openProposalReview(view, { accept }) {
+  state.review = { view, accept };
+  $("plan-title").textContent = view.title;
+  $("plan-body").innerHTML = proposalSheetHtml(view);
+  $("plan-error").textContent = "";
+  $("plan-accept").disabled = false;
+  $("dlg-plan").showModal();
+}
+
+async function acceptReview() {
+  const review = state.review;
+  if (!review) return;
+  let refused = null;
+  await withButton($("plan-accept"), async () => {
+    const outcome = await review.accept();
+    if (outcome.ok) { $("dlg-plan").close(); return; }
+    refused = outcome.message;
+    $("plan-error").textContent = outcome.message;
+  });
+  if (refused) $("plan-accept").disabled = true;   // Superseded: nothing to accept any more
+}
+
+// The page takes the project an accepted Proposal produced: one revision, one Undo step, and an Undo button on the toast.
+function proposalApplied(result, card) {
+  const { proposal, ...project } = result;
+  applyProject(project);
+  recordEdit();
+  const after = editLog.current;
+  renderAll();
+  state.viewport?.fit(state.viewport.objectsBox());
+  toast(`${card.title}: applied`, false, {
+    action: { label: "Undo", onClick: () => {
+      if (editLog.current === after) undo();
+      else toast("More has changed since. Use Undo in the toolbar to step back", true);
+    } },
   });
 }
 
@@ -2916,6 +3064,7 @@ function bindUi() {
   setDefer(phone.matches);
   phone.addEventListener('change', e => setDefer(e.matches));
   $('btn-mobile-edit').addEventListener('click', () => setDefer(!document.body.classList.contains('defer-edit')));
+  assistantPanel.attach({ api, project: () => state.project, flush: flushSave, openReview: openProposalReview, applied: proposalApplied });
   $('btn-sidebar').addEventListener('click', e => {
     const hidden = document.body.classList.toggle('sidebar-collapsed');
     e.currentTarget.textContent = hidden ? 'Show sidebar' : 'Hide sidebar';
@@ -3091,6 +3240,18 @@ function bindUi() {
     }
   });
 
+  $("object-list").addEventListener("change", e => {
+    if (e.target.matches("[data-purpose-model]")) setModelPurpose(Number(e.target.dataset.purposeModel), e.target.value);
+  });
+  for (const root of [$("object-list"), $("object-panel")]) root.addEventListener("input", e => {
+    if (e.target.matches("[data-purpose-note]")) typeModelPurposeNote(Number(e.target.dataset.purposeNote), e.target.value);
+  });
+  $("purpose-body").addEventListener("change", e => {
+    if (e.target.id === "project-purpose") setProjectPurpose(e.target.value);
+  });
+  $("purpose-body").addEventListener("input", e => {
+    if (e.target.id === "project-purpose-note") typeProjectPurposeNote(e.target.value);
+  });
   $("object-list").addEventListener("click", async e => {
     const retry = e.target.closest("[data-retry-model]");
     if (retry) {
@@ -3211,6 +3372,7 @@ function bindUi() {
       renderAll();
       return;
     }
+    if (e.target.matches("[data-purpose-model]")) return setModelPurpose(object.model, e.target.value);
     if (e.target.id === "object-copies") { setCopies(object, Number(e.target.value)); return; }
     if (e.target.id === "object-pinned") {
       if (e.target.checked) object.pinned = true; else delete object.pinned;
@@ -3307,6 +3469,7 @@ function bindUi() {
   $("btn-orient-all").addEventListener("click", e => orientAll(e.shiftKey));
   $("btn-plan-plates").addEventListener("click", planPlates);
   $("plan-accept").addEventListener("click", acceptPlan);
+  $("dlg-plan").addEventListener("close", () => { state.review = null; $("plan-title").textContent = "Plan plates"; });
   $("merge-plate").addEventListener("change", e => {
     const target = Number(e.target.value);
     e.target.value = "";

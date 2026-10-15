@@ -11,7 +11,7 @@
   <script src="/modal.js?v=1"></script>
   <script src="/confirm-dialog.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=4" />
-  <link rel="stylesheet" href="slicer.css?v=57" />
+  <link rel="stylesheet" href="slicer.css?v=60" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -47,6 +47,7 @@
     <div class="slicer-nav">
     <nav id="step-bar" class="slicer-steps" aria-label="Workflow steps"></nav>
     <div class="slicer-top-actions">
+      <button id="btn-assistant" class="btn btn-secondary btn-sm" type="button" aria-expanded="false" aria-controls="assistant-panel" title="Ask the optional assistant about this project">Assistant</button>
       <span id="slice-state" class="slicer-slice-state" role="status"></span>
       <span id="step-actions" class="slicer-step-actions"></span>
     </div>
@@ -107,6 +108,11 @@
         <div class="slicer-actions-row"><button id="btn-slice-send" class="btn btn-secondary btn-sm" type="button" disabled
           title="Slice this Plate and send it to its printer">Slice &amp; send</button></div>
       </section>
+
+      <details class="slicer-card slicer-fold" id="fold-purpose" data-steps="plates slice">
+        <summary><span>Purpose</span><small id="purpose-summary">General</small></summary>
+        <div id="purpose-body" class="slicer-purpose-body"></div>
+      </details>
 
       <details class="slicer-card slicer-fold" id="fold-material" data-steps="plates slice">
         <summary><span>Printer and material</span><small id="material-summary"></small></summary>
@@ -282,6 +288,7 @@
         </div>
       </div>
     </main>
+    <aside id="assistant-panel" class="assistant-panel" aria-label="Assistant" hidden></aside>
   </div>
 
   <dialog id="dlg-projects" class="slicer-dialog">
@@ -348,7 +355,7 @@
   </dialog>
 
   <dialog id="dlg-plan" class="slicer-dialog slicer-dialog-wide">
-    <h3>Plan plates</h3>
+    <h3 id="plan-title">Plan plates</h3>
     <div id="plan-body"></div>
     <p id="plan-error" class="slicer-error" role="alert"></p>
     <div class="slicer-dialog-actions">
@@ -394,6 +401,6 @@
   <script src="/status-badge.js?v=1"></script>
   <script src="/outcome-prompt.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=61"></script>
+  <script type="module" src="slicer/main.js?v=66"></script>
 </body>
 </html>
