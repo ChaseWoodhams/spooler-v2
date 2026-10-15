@@ -759,6 +759,16 @@ class SPHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             self._json({"available": False, "reason": f"The assistant could not start: {e}", "purpose": None})
 
+    def _assistant_call(self, fn):
+        """Run an Assistant run operation. The runner is imported here, so a broken Assistant never touches core routes; its
+        refusals are JobErrors (400/404/409/503) and anything else is a 500 with a message."""
+        try:
+            import assistant_runner
+        except Exception as e:
+            self._json({"error": f"The assistant could not start: {e}"}, 500)
+            return
+        self._jobs_call(lambda: fn(assistant_runner), broadcast=False)
+
     def _handle_notif_settings(self):
         try:
             s = json.loads(self._read_body() or b"{}")
@@ -1039,6 +1049,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._send_file(path, "model/3mf", download_name=safe_filename(name, "import.3mf", ""))
             elif len(parts) == 6 and parts[4] == "assistant" and parts[5] == "status":
                 self._assistant_status(project_id)
+            elif len(parts) == 7 and parts[4] == "assistant" and parts[5] == "runs":
+                self._assistant_call(lambda runner: runner.get(project_id, parts[6]))
             elif len(parts) == 5 and parts[4] == "jobs":
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
@@ -1299,6 +1311,12 @@ class SPHandler(SimpleHTTPRequestHandler):
                 "reprint": lambda: projects.reprint_plate(self._job_id(), plate_id),
             }
             self._jobs_call(actions[action], broadcast=action in ("queue", "reprint"))
+            return
+        if len(parts) == 6 and parts[4] == "assistant" and parts[5] == "ask":
+            def ask(runner):
+                body = self._json_body()
+                return runner.ask(self._job_id(), body.get("message"), body.get("history"))
+            self._assistant_call(ask)
             return
         self._json({"error": "Not found"}, 404)
 
