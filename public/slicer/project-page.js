@@ -211,7 +211,8 @@ function sendBar() {
       <label class="slicer-check"><input type="checkbox" id="pp-send-timelapse"${sendOpts.timelapse ? " checked" : ""}> Time-lapse</label>
       <button type="button" id="pp-send-balance" class="btn btn-secondary btn-sm"${ticked.size ? "" : " disabled"}>Balance by estimated time</button>
       <p class="slicer-muted">Balancing gives the longest ticked Plates first to the connected printer with the least estimated work in this Project. Other Projects are not counted. Check each destination before sending.</p>`)}
-    <button type="button" id="pp-send" class="btn btn-primary" title="Each Plate becomes a Job. Start each one when its printer's bed is clear; every start runs the preflight checks."${ticked.size && !sending ? "" : " disabled"}>${sendLabel(ticked.size)}</button></div>`;
+    <button type="button" id="pp-send" class="btn btn-primary" title="Each Plate becomes a Job. Start each one when its printer's bed is clear; every start runs the preflight checks."${ticked.size && !sending ? "" : ' aria-disabled="true"'} aria-describedby="pp-send-why">${sendLabel(ticked.size)}</button>
+    <small class="reason-line" id="pp-send-why"${ticked.size ? " hidden" : ""}>Tick the Plates to send</small></div>`;
 }
 
 const sendLabel = count => count ? `Send ${plural(count, "Plate")}` : "Send Plates";
@@ -226,7 +227,9 @@ function updateBar() {
   if (!$("pp-send-where").contains(document.activeElement)) $("pp-send-where").innerHTML = whereHtml(plates);
   $("pp-send-balance").disabled = !plates.length;
   const send = $("pp-send");
-  send.disabled = !plates.length || sending;
+  const blocked = !plates.length || sending;
+  if (blocked) send.setAttribute("aria-disabled", "true"); else send.removeAttribute("aria-disabled");
+  $("pp-send-why").hidden = plates.length > 0;
   send.textContent = sendLabel(plates.length);
   for (const box of $("project-page").querySelectorAll("[data-tick]")) {
     box.checked = ticked.has(Number(box.dataset.tick));
@@ -452,7 +455,7 @@ function bindSend(root) {
   root.addEventListener("click", e => {
     if (e.target.closest("#pp-send-all")) { ticked = new Set(readySendable().map(p => p.id)); return updateBar(); }
     if (e.target.closest("#pp-send-none")) { ticked.clear(); return updateBar(); }
-    if (e.target.closest("#pp-send")) return sendTicked();
+    if (e.target.closest("#pp-send")) return $("pp-send").getAttribute("aria-disabled") === "true" ? undefined : sendTicked();
     if (e.target.closest("#pp-send-balance")) {
       const map = host.balance([...ticked]);
       if (map) { Object.assign(dest, map); host.toast("Assignments suggested by estimated time. Review each destination before sending."); updateBar(); }
