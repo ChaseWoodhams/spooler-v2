@@ -19,7 +19,8 @@
 #history-filter-summary { flex-basis: 100%; overflow-wrap: anywhere; color: var(--text-muted); }
 
 /* Ticket 20 · History rows, chips and form (PS-30..34, T15) */
-#panel-history .history-row { grid-template-columns: 112px minmax(0, 1fr) 120px max-content minmax(150px, 210px); }
+#panel-history .history-row { grid-template-columns: max-content minmax(0, 1fr) minmax(80px, 120px) max-content max-content; }
+#panel-history .history-date, #panel-history .history-stats { overflow: visible; text-overflow: clip; white-space: nowrap; }
 #panel-history .history-badges { display: flex; flex-wrap: nowrap; gap: 4px; justify-self: start; }
 #panel-history .history-badges .status-badge { white-space: nowrap; }
 #panel-history .history-stats { font-size: 12px; }
@@ -38,12 +39,12 @@
 #panel-history .history-outcome-form legend { font-size: 13px; }
 @media (max-width: 640px) {
   /* Three lines: file; date + badges; printer + figures. The filter summary text is kept for screen readers; chips replace it. */
-  #panel-history .history-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "file file" "date badges" "printer stats"; gap: 2px 8px; padding: 10px 12px; align-items: center; }
+  #panel-history .history-row { grid-template-columns: max-content minmax(0, 1fr); grid-template-areas: "file file" "date badges" "printer printer" "stats stats"; gap: 2px 8px; padding: 10px 12px; align-items: center; }
   #panel-history .history-file { grid-area: file; grid-column: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #panel-history .history-date { grid-area: date; grid-column: auto; }
   #panel-history .history-badges { grid-area: badges; justify-self: end; }
   #panel-history .history-printer { grid-area: printer; grid-column: auto; }
-  #panel-history .history-stats { grid-area: stats; grid-column: auto; text-align: right; }
+  #panel-history .history-stats { grid-area: stats; grid-column: auto; text-align: left; white-space: normal; overflow-wrap: anywhere; }
   #panel-history #history-filter-summary { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #panel-history .history-chips { display: flex; }
   #panel-history .history-chip, #panel-history .history-unconfirmed-chip { min-height: 44px; }
