@@ -61,6 +61,32 @@ class ClassifyTests(unittest.TestCase):
             self.assertNotIn(key, ps.PROPOSABLE_SETTINGS)
 
 
+class QuickPrintParityTests(unittest.TestCase):
+    """The Object-scope vocabulary is the Quick print dialog's (projects.QUICK_*); this keeps the two copies equal."""
+
+    def test_object_scope_keys_are_exactly_what_quick_print_writes(self):
+        import projects
+        written = set()
+        for options in ({"layer_height": 0.2, "infill": 20, "walls": 3, "supports": "tree", "brim": "custom", "brim_width": 5},
+                        {"supports": "normal", "brim": "off"}, {"brim": "auto"}):
+            written |= set(projects._quick_overrides(options))
+        self.assertEqual(written, set(ps.OBJECT_SCOPE_KEYS))
+        self.assertEqual(ps.QUICK_LAYER_HEIGHTS, tuple(f"{h:g}" for h in projects.QUICK_LAYER_HEIGHTS))
+        self.assertEqual(ps.QUICK_BRIM_TYPES, ("no_brim", "auto_brim", "outer_only"))
+        for supports, expected in (("normal", "normal(auto)"), ("tree", "tree(auto)")):
+            self.assertEqual(projects._quick_overrides({"supports": supports})["support_type"], expected)
+            self.assertIn(expected, ps.QUICK_SUPPORT_TYPES)
+
+    def test_every_quick_print_value_is_accepted_at_object_scope(self):
+        import projects
+        for height in projects.QUICK_LAYER_HEIGHTS:
+            self.assertIsNone(ps.refusal("layer_height", height, "object", nozzle=0.4), height)
+        for key, value in projects._quick_overrides({"infill": 100, "walls": 20, "supports": "tree", "brim": "custom", "brim_width": 20}).items():
+            self.assertIsNone(ps.refusal(key, value, "object"), (key, value))
+        for key, value in projects._quick_overrides({"infill": 0, "walls": 1, "supports": "off", "brim": "off"}).items():
+            self.assertIsNone(ps.refusal(key, value, "object"), (key, value))
+
+
 class BoundsTests(unittest.TestCase):
     def refusal(self, key, value, scope="project", **context):
         return ps.refusal(key, value, scope, **context)

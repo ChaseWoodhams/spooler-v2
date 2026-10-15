@@ -314,6 +314,18 @@ class ProposeSettingsTests(SettingsCase):
     def test_filament_settings_are_refused_below_project_scope(self):
         self.assertIn("project", self.refused(self.propose("plate", {"fan_min_speed": 50}, scope_id=1))["fan_min_speed"])
 
+    def test_cooling_changes_carry_a_note_when_a_model_has_its_own_filament_choice(self):
+        data = project_data(filaments={"11": {"preset": "Elegoo PETG @ECC", "colour": "grey"}})
+        self.add_project(2, "Chosen", 3, data, [{"id": 11, "name": "Arm", "state": "ready", "size": [80, 20, 10], "volume_cm3": 1.0}])
+        session = McpSession(self.dir, 2)
+        try:
+            session.start()
+            reply = session.call("propose_settings", {"revision": 3, "scope": "project", "changes": {"fan_min_speed": 60}})
+        finally:
+            session.close()
+        got = json.loads(reply["result"]["content"][0]["text"])
+        self.assertTrue(any("own Filament choice" in n for n in got["notes"]), got)
+
     def test_a_stale_revision_returns_stale_and_stages_nothing(self):
         got = self.propose(changes={"wall_loops": 4}, revision=6)
         self.assertIs(got["stale"], True)
