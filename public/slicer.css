@@ -342,6 +342,9 @@ body.slicer-page a.btn { text-decoration: none; }
 .plate-fit .fit { padding: 4px 8px; border-radius: 6px; border-left: 3px solid var(--border, #444); background: var(--surface2, rgba(255,255,255,.04)); }
 .plate-fit .fit.warn { border-left-color: #e6a23c; }
 .plate-fit .fit.fail { border-left-color: #e5534b; }
+.plate-fit .fit-labelled { display: flex; gap: 6px; align-items: flex-start; }
+.plate-fit .fit-labelled .fit-icon { flex: none; margin-top: 2px; }
+.plate-fit .fit-labelled a { color: inherit; text-decoration: underline; }
 #spool-note.warn { color: #e6a23c; }
 
 /* A Split step that a model put on a plate whole didn't need */
