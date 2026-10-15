@@ -701,9 +701,7 @@ function renderPrinter(printer) {
     <!-- Controls -->
     <div class="card-controls">
       ${connected && !printing && !paused && bedClearedWaiting(printer.id) ? `
-        <button class="btn btn-primary btn-sm" onclick="confirmBedCleared('${escAttr(printer.id)}')" title="Confirm the printed plate is off the bed; releases the next queued job when auto-start is on">
-          Printed OK · Bed cleared
-        </button>
+        <span class="card-waiting">Waiting for bed clear</span>
         ${bedClearedNext(printer)}
       ` : ""}
       ${printing ? `
