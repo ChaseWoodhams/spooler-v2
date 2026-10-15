@@ -365,3 +365,103 @@ class ProposalRouteTests(ProposalCase):
         self.assertEqual(self.call("GET", f"/api/projects/{other['id']}/assistant/proposals/{token}")[0], 404)
         self.assertEqual(self.call("POST", f"/api/projects/{other['id']}/assistant/proposals/{token}/accept", {"revision": 1})[0], 404)
         self.assertEqual(self.staging(), [token], "the other project's attempts did not consume it")
+
+
+class StagingSweepTests(ProposalCase):
+    def stage(self, **extra):
+        return proposal_store.write(projects.projects_dir(), {
+            "project_id": self.project["id"], "run": "old-run", "base_revision": self.project["revision"], "kind": "orientation",
+            "title": "t", "scope": "s", "reason": "r", "review": "placement", "data": self.project["data"], "diff": [], **extra})["token"]
+
+    def test_a_run_that_ends_in_an_error_leaves_no_staged_proposal(self):
+        self.scenario({"calls": [self.propose_call([1, 2])], "result": {"is_error": True, "result": "The model stopped"}})
+        view = self.poll(self.ask())
+        self.assertEqual(view["state"], "error")
+        self.assertEqual(view["proposals"], [])
+        self.assertEqual(self.staging(), [])
+        self.assertEqual(self.current()["data"], self.project["data"])
+
+    def test_a_run_whose_cli_dies_after_proposing_leaves_no_staged_proposal(self):
+        self.scenario({"calls": [self.propose_call([1, 2])], "no_result": True, "exit_code": 3})
+        view = self.poll(self.ask())
+        self.assertEqual(view["state"], "error")
+        self.assertEqual(self.staging(), [])
+
+    def test_proposals_older_than_24_hours_are_swept_and_fresh_ones_stay(self):
+        old = self.stage(created_at=time.time() - 25 * 3600)
+        fresh = self.stage()
+        self.assertEqual(projects.sweep_assistant_staging(), 1)
+        self.assertEqual(self.staging(), [fresh])
+        self.assertIsNone(self.staged(old))
+
+    def test_a_proposal_that_cannot_be_read_is_swept_when_it_is_old_and_kept_while_it_is_young(self):
+        young, old = proposal_store.new_token(), proposal_store.new_token()
+        for token in (young, old):
+            folder = proposal_store.staging_root(projects.projects_dir()) / token
+            folder.mkdir(parents=True)
+            (folder / "proposal.json").write_text("{not json", encoding="utf-8")
+        stamp = time.time() - 25 * 3600
+        os.utime(proposal_store.staging_root(projects.projects_dir()) / old, (stamp, stamp))
+        projects.sweep_assistant_staging()
+        self.assertEqual(self.staging(), [young])
+
+    def test_startup_sweeps_all_staging_and_changes_no_project_data(self):
+        self.stage()
+        self.stage()
+        stray = proposal_store.staging_root(projects.projects_dir()) / "not-a-token"
+        stray.mkdir()
+        before = (self.current()["revision"], self.current()["data"], self.current()["slices"])
+        projects.init()
+        self.assertEqual(self.staging(), ["not-a-token"], "only Proposal folders are touched")
+        after = self.current()
+        self.assertEqual((after["revision"], after["data"], after["slices"]), before)
+
+    def test_the_sweep_is_safe_with_nothing_staged(self):
+        self.assertEqual(projects.sweep_assistant_staging(startup=True), 0)
+
+    def test_asking_again_sweeps_what_has_expired(self):
+        old = self.stage(created_at=time.time() - 25 * 3600)
+        self.scenario({"calls": [], "answer": "Fine."})
+        self.poll(self.ask())
+        self.assertIsNone(self.staged(old))
+
+    def test_a_proposal_replaced_by_a_newer_one_of_its_kind_is_gone_when_the_run_ends(self):
+        view = self.run_scenario([self.propose_call([1]), self.propose_call([2])])
+        first, second = (r[1]["token"] for r in self.results())
+        self.assertEqual(self.staging(), [second])
+        self.assertEqual([p["token"] for p in view["proposals"]], [second])
+        self.assertIsNone(self.staged(first))
+
+
+class IsolationTests(ProposalCase):
+    def tree(self):
+        """Every file under the data directory (except the fake CLI's own folder) with its content hash."""
+        found = {}
+        for path in self.dir.rglob("*"):
+            if path.is_file() and self.cli_dir not in path.parents:
+                found[path.relative_to(self.dir).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return found
+
+    def test_proposing_writes_only_under_projects_assistant_opens_no_socket_and_leaves_the_database_alone(self):
+        from tests.test_spooler_mcp import CLEAN_SCRIPT, FORBIDDEN, ROOT
+        import subprocess
+        import sys
+        before = self.tree()
+        db = hashlib.sha256((self.dir / "spooler.db").read_bytes()).hexdigest()
+        messages = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "propose_orientation", "arguments": {"revision": self.project["revision"], "object_ids": [1, 2]}}}]
+        done = subprocess.run([sys.executable, "-I", "-c", CLEAN_SCRIPT, str(ROOT), str(self.dir), str(self.project["id"])],
+                              input="\n".join(map(json.dumps, messages)) + "\n", capture_output=True, text=True, encoding="utf-8",
+                              env={**os.environ, "DATA_DIR": str(self.dir)}, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        reply = json.loads(done.stdout.splitlines()[1])
+        self.assertFalse(reply["result"].get("isError"), reply)
+        token = json.loads(reply["result"]["content"][0]["text"])["token"]
+        loaded = json.loads(done.stderr.strip().splitlines()[-1])
+        self.assertEqual([m for m in loaded if m.split(".")[0] in FORBIDDEN], [])
+        self.assertIn("proposal_store", loaded)
+        after = self.tree()
+        added = sorted(set(after) - set(before))
+        self.assertEqual(added, [f"projects/.assistant/{token}/proposal.json"])
+        self.assertEqual({k: v for k, v in after.items() if k in before}, before, "no existing file changed")
+        self.assertEqual(hashlib.sha256((self.dir / "spooler.db").read_bytes()).hexdigest(), db)
