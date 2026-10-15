@@ -21,6 +21,7 @@ A run view is {id, project_id, state, steps: [{label, tool}], answer, error}; st
 """
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -36,6 +37,9 @@ MAX_HISTORY_TURNS = 12
 MAX_HISTORY_CHARS = 6000
 MAX_TURN_CHARS = 1500
 MAX_STEPS = 30
+DEADLINE_SECONDS = 60                      # wall clock per run, enforced here; tests patch it
+CANCEL_WAIT = 15                           # how long the cancel route waits for the run to finish ending
+USAGE_LIMIT_ERROR = "AI unavailable: usage limit reached"
 MAX_ERROR = 300
 KEEP_RUNS = 40
 CLI_MAX_TURNS = "12"
@@ -81,6 +85,12 @@ class Run:
         self.started = time.monotonic()
         self.finished = None
         self.init_ok = False
+        self.proc = None                   # the CLI process, kept so Cancel and the deadline can end its tree
+        self.reason = None                 # "cancelled" or "timeout" once either has been asked for
+        self.tool_calls = 0                # every tool_use seen (steps are capped, this is not)
+        self.proposals: list = []          # Proposal tokens (tickets 15 onwards fill this; the log line carries them)
+        self.done = threading.Event()      # set by _finish
+        self.stop = threading.Event()      # set when the run is over, to release the deadline watcher
 
     def view(self) -> dict:
         return {"id": self.id, "project_id": self.project_id, "state": self.state, "steps": list(self.steps),
@@ -221,6 +231,42 @@ def get(project_id: int, run_id: str) -> dict:
         return run.view()
 
 
+def timeout_message() -> str:
+    return f"No answer in {DEADLINE_SECONDS:g} s; nothing was changed"
+
+
+CANCELLED_MESSAGE = "Cancelled; nothing was changed"
+
+
+def cancel(project_id: int, run_id: str) -> dict:
+    """Stop a working run: end its process tree and return its view once it has ended as `cancelled`. A run that has already ended is
+    returned as it is. The run folder, partial output and any staged Proposal are gone before this returns."""
+    with _lock:
+        run = _runs.get(str(run_id))
+        if run is None or run.project_id != int(project_id):
+            raise AskError("Run not found", 404)
+        working = run.finished is None
+        if working and run.reason is None:
+            run.reason = "cancelled"
+    if working:
+        _terminate(run.proc)
+        run.stop.set()
+        run.done.wait(CANCEL_WAIT)
+    return get(project_id, run_id)
+
+
+def _watch(run: Run) -> None:
+    """The deadline: when it passes before the run ends, mark it timed out and end the tree. Runs on its own thread, so a stalled
+    stream cannot hold it up."""
+    if run.stop.wait(DEADLINE_SECONDS):
+        return
+    with _lock:
+        if run.finished is not None or run.reason is not None:
+            return
+        run.reason = "timeout"
+    _terminate(run.proc)
+
+
 def _prune() -> None:
     """Under _lock: keep the newest KEEP_RUNS runs; never drop one that is working."""
     done = sorted((r for r in _runs.values() if r.finished is not None), key=lambda r: r.finished)
@@ -231,25 +277,59 @@ def _prune() -> None:
 # ── One run ───────────────────────────────────────────────────────────────────
 
 def _finish(run: Run, state: str, answer=None, error=None) -> None:
-    """The single place a run ends. The first outcome wins."""
+    """The single place a run ends. The first outcome wins; it writes the one log line and drops staged Proposals the run leaves behind."""
+    if run.reason == "cancelled":
+        state, answer, error = "cancelled", None, CANCELLED_MESSAGE
+    elif run.reason == "timeout":
+        state, answer, error = "timeout", None, timeout_message()
+    first = False
     with _lock:
         if run.finished is None:
+            first = True
             run.state, run.answer, run.error, run.finished = state, answer, error, time.monotonic()
         if _active.get(run.project_id) == run.id:
             del _active[run.project_id]
+    run.stop.set()
+    if first:
+        try:
+            if state != "proposal":
+                discard_staged(run)
+            _log_run(run)
+        except Exception as e:                       # bookkeeping must never stop the run from ending
+            print(f"[Assistant] Could not close run bookkeeping: {type(e).__name__}")
+    run.done.set()
+
+
+def discard_staged(run: Run) -> None:
+    """Delete any Proposal this run staged. A seam: ticket 15 fills it in (staging lives under <data dir>/projects/.assistant/<token>)."""
+
+
+def _log_run(run: Run) -> None:
+    """One line per run: when, which project, how long, how it ended, how many tool calls, which Proposal tokens. Never any prompt,
+    answer or tool output text."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    tokens = ",".join(run.proposals) or "none"
+    print(f"[Assistant] time={stamp} project={run.project_id} duration={run.finished - run.started:.1f}s state={run.state} "
+          f"tool_calls={run.tool_calls} proposals={tokens}")
 
 
 def _terminate(proc) -> None:
     """Stop the CLI and everything under it. terminate() was enough in the ticket 07 measurement; taskkill /T is the backstop."""
     if proc is None or proc.poll() is not None:
         return
-    try:
-        proc.terminate()
-        proc.wait(timeout=3)
-    except Exception:
-        pass
-    if proc.poll() is None and os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=10)
+    if os.name == "nt":
+        # terminate() only ends the process it was given, and taskkill /T walks the tree from a LIVE parent: once a launcher
+        # (claude.cmd) is dead its children are orphans nobody can find. So the tree goes first, terminate() is the fallback.
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=10)
+        except Exception:
+            pass
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            pass
     try:
         proc.wait(timeout=5)
     except Exception:
@@ -259,6 +339,7 @@ def _terminate(proc) -> None:
 def _execute(run: Run, cli: str, jev_url: str, prompt: str) -> None:
     proc, folder = None, None
     outcome = ("error", None, "The assistant could not run.")
+    threading.Thread(target=_watch, args=(run,), name=f"assistant-deadline-{run.id[:8]}", daemon=True).start()
     try:
         root = run_root()
         if _inside_profile(root):
@@ -272,6 +353,9 @@ def _execute(run: Run, cli: str, jev_url: str, prompt: str) -> None:
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=str(cwd), env=build_env(jev_url), creationflags=flags)
+        run.proc = proc
+        if run.reason:                               # cancelled while it was starting
+            _terminate(proc)
         threading.Thread(target=_feed, args=(proc, prompt), daemon=True).start()
         stderr = []
         threading.Thread(target=_drain, args=(proc.stderr, stderr), daemon=True).start()
@@ -338,6 +422,8 @@ def _consume(run: Run, proc) -> tuple:
             continue                                  # a banner or noise line: not an event
         if not isinstance(event, dict):
             continue
+        if run.reason:                                # cancelled or timed out: whatever it says is discarded
+            break
         kind, subtype = event.get("type"), event.get("subtype")
         if kind == "system" and subtype == "init":
             problem = _check_init(event)
@@ -352,6 +438,7 @@ def _consume(run: Run, proc) -> tuple:
                 if isinstance(block, dict) and block.get("type") == "tool_use":
                     name = str(block.get("name") or "")
                     tool = name[len(f"mcp__{SERVER_NAME}__"):] if name.startswith(f"mcp__{SERVER_NAME}__") else name
+                    run.tool_calls += 1
                     _step(run, STEP_LABELS.get(tool, "Working"), tool)
         elif kind == "result":
             if not run.init_ok:
@@ -362,6 +449,9 @@ def _consume(run: Run, proc) -> tuple:
             except subprocess.TimeoutExpired:
                 pass
             return _from_result(event)
+    if run.reason:
+        _terminate(proc)
+        return (run.reason, None, None)               # _finish writes the plain message for it
     code = proc.wait()
     if code:
         return ("error", None, f"The assistant stopped unexpectedly (exit code {code}).")
@@ -382,11 +472,20 @@ def _check_init(event: dict):
 
 def _from_result(event: dict) -> tuple:
     text = event.get("result") if isinstance(event.get("result"), str) else ""
+    if (event.get("is_error") or event.get("subtype") == "error_rate_limit") and _is_usage_limit(text, event):
+        return ("usage_limit", None, USAGE_LIMIT_ERROR)
     if event.get("is_error") or str(event.get("subtype") or "success") != "success":
         return ("error", None, _plain(text) or "The assistant reported an error.")
     if not text.strip():
         return ("error", None, "The assistant sent an empty answer.")
     return ("answer", text.strip(), None)
+
+
+_USAGE_LIMIT = re.compile(r"usage limit|rate[ _-]?limit|too many requests|429|quota|credit balance|limit reached|hit your limit", re.I)
+
+
+def _is_usage_limit(text: str, event: dict) -> bool:
+    return bool(_USAGE_LIMIT.search(text) or _USAGE_LIMIT.search(str(event.get("subtype") or "")) or event.get("api_error_status") == 429)
 
 
 def _step(run: Run, label: str, tool: str) -> None:
