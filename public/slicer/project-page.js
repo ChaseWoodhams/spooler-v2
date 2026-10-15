@@ -281,7 +281,7 @@ function plateBoard() {
         title="Choose the printers to spread the queued Plates over, so they finish about together by estimated print time">Assign printers · balance by time</button>` : ""}</div>
     ${id === "queued" && assigning ? chooser() : ""}
     <ul class="pp-plates"${folds.has(id) ? " hidden" : ""}>${cards.map(({ plate, word, reason }) => `<li class="pp-plate st-${plate.status}${plate.id === selected ? " sel" : ""}${ticked.has(plate.id) ? " ticked" : ""}" data-plate-card>
-      ${id === "ready" && sendable(plate) ? `<input type="checkbox" class="pp-tick" data-tick="${plate.id}" aria-label="Send ${esc(plate.name)}, ${esc(word)}"${ticked.has(plate.id) ? " checked" : ""}>` : ""}
+      ${id === "ready" && sendable(plate) ? `<label class="pp-tick-row"><input type="checkbox" class="pp-tick" data-tick="${plate.id}" aria-label="Send ${esc(plate.name)}, ${esc(word)}"${ticked.has(plate.id) ? " checked" : ""}></label>` : ""}
       <button type="button" class="pp-plate-btn" data-plate="${plate.id}" aria-pressed="${plate.id === selected}">${esc(plate.name)}</button>
       ${rowStatus(id, plate, word, reason)}
       ${plateMeta(plate)}

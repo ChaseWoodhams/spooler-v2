@@ -43,7 +43,11 @@
       "radius-sm": { "$value": "8px" },
       "hit-min": { "$value": "44px", "$description": "touch target floor: coarse pointers and widths up to 1100px" },
       "hit-fine": { "$value": "32px", "$description": "fine-pointer desktop floor, with --hit-gap between neighbours" },
+      "hit-target-min": { "$value": "24px", "$description": "WCAG 2.5.8 floor for any control in the slicer steps" },
       "hit-gap": { "$value": "8px" },
+      "fs-small": { "$value": "12px", "$description": "type floor: nothing in the app renders smaller" },
+      "fs-body": { "$value": "14px", "$description": "body text" },
+      "fs-input": { "$value": "16px", "$description": "form fields on small screens (stops iOS zoom)" },
       "fs-secondary": { "$value": "13px", "$description": "floor for secondary dashboard text" },
       "fs-page-title": { "$value": "20px", "$description": "the one page title; section headings stay smaller" }
     },

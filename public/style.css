@@ -31,7 +31,11 @@
   --radius-sm: 8px;
   --hit-min: 44px; /* touch target floor: coarse pointers and widths up to 1100px */
   --hit-fine: 32px; /* fine-pointer desktop floor, with --hit-gap between neighbours */
+  --hit-target-min: 24px; /* WCAG 2.5.8 floor for any control in the slicer steps */
   --hit-gap: 8px;
+  --fs-small: 12px; /* type floor: nothing in the app renders smaller */
+  --fs-body: 14px; /* body text */
+  --fs-input: 16px; /* form fields on small screens (stops iOS zoom) */
   --fs-secondary: 13px; /* floor for secondary dashboard text */
   --fs-page-title: 20px; /* the one page title; section headings stay smaller */
   --shadow: 0 4px 24px rgba(0,0,0,.5);
