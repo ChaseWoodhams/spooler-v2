@@ -524,6 +524,172 @@ def propose_orientation(ctx: Context, revision: int, object_ids=None, mode=None,
         targets={"objects": sorted(rotations), "plates": plate_ids})
 
 
+# ── Arrange and plan Proposals (ticket 16) ────────────────────────────────────
+# Positions come from Spooler's own non-saving helpers (`arrange_layout` + `_place_layout`, `_plan_data`); the model never chooses
+# one. Both stage through `stage_proposal`, so review, Accept (one revision), Superseded, sweeps and the cap are the pipeline's.
+
+DIFF_LINES = 12
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _stand(data: dict) -> list:
+    return sorted((o["id"], o["plate"], tuple(o["position"]), tuple(o["rotation"])) for o in data.get("objects") or [])
+
+
+def _move_lines(before: dict, after: dict) -> list:
+    """[{label, text, object}] for each object whose plate, place or turn differs; plain text, the name only in the label."""
+    old = {o["id"]: o for o in before.get("objects") or []}
+    lines = []
+    for obj in after.get("objects") or []:
+        was = old.get(obj["id"])
+        if was is None or (was["plate"], was["position"], was["rotation"]) == (obj["plate"], obj["position"], obj["rotation"]):
+            continue
+        where = f"plate {was['plate']} → {obj['plate']}" if was["plate"] != obj["plate"] else f"stays on plate {obj['plate']}"
+        turn = f"; turned {_degrees(was['rotation'])} → {_degrees(obj['rotation'])} degrees" if was["rotation"] != obj["rotation"] else ""
+        lines.append({"label": obj.get("name") or f"Object {obj['id']}", "object": obj["id"],
+                      "text": f"{where}; at {_degrees(was['position'])} → {_degrees(obj['position'])} mm{turn}"})
+    return lines
+
+
+def _capped(lines: list) -> tuple:
+    if len(lines) <= DIFF_LINES:
+        return list(lines), []
+    return list(lines[:DIFF_LINES]), [f"{len(lines) - DIFF_LINES} more objects change; the review sheet shows them all"]
+
+
+def _helper_error(e: Exception, fallback: str) -> "ToolError":
+    return ToolError(str(e.args[0] if e.args else fallback)[:200])
+
+
+@tool("propose_arrange", "Propose an Arrange: Spooler's own nester lays out the unpinned Objects on the given Plates (omit plate_ids "
+      "for every Plate) onto as few Plates as fit; you never choose positions. Pinned Objects stay where they are, Plates that hold a "
+      "Model still importing are left out, Objects of failed Models are skipped. Pass the project revision you read. A behind revision "
+      "returns {stale: true} and no Proposal; if nothing would move, proposal is null and nothing is staged. Returns the Proposal "
+      "token, a readable diff, notes and problems, never the resulting data. At most 3 Proposals per run.",
+      {"revision": {"type": "integer"}, "plate_ids": {"type": "array", "items": {"type": "integer"}}, "reason": {"type": "string"}},
+      required=["revision"])
+def propose_arrange(ctx: Context, revision: int, plate_ids=None, reason=None) -> dict:
+    _, project_read, placement_read, _ = ctx.core()
+    record = ctx.record()
+    stale = stale_result(record, revision)
+    if stale:
+        return stale
+    check_proposal_room(ctx)
+    data = record["data"]
+    order = placement_read._arrange_plate_ids(record, plate_ids)
+    problems = []
+    if plate_ids is not None:
+        for missing in sorted(set(plate_ids) - {p["id"] for p in data.get("plates") or []}):
+            problems.append(f"Plate {missing} is not in this project")
+    try:
+        layout = placement_read.arrange_layout(ctx.project_id, record, order)
+    except Exception as e:                       # a JobError from the helper (no profile, no nester): the model reads it
+        if type(e).__name__ != "JobError":
+            raise
+        raise _helper_error(e, "Arrange is not possible") from None
+    states = {m["id"]: m.get("state") for m in record.get("models") or []}
+    ready, failed = project_read.READY, project_read.FAILED
+    resulting = copy.deepcopy(data)
+    busy = {o["plate"] for o in data["objects"] if o["plate"] in order and states.get(o["model"]) not in (ready, failed)}
+    holding = {o["plate"] for o in data["objects"] if states.get(o["model"]) == failed}
+    free = [p for p in order if p not in busy]
+    used = placement_read._place_layout(resulting, free, layout, lambda group: json.loads(group)["overrides"]) if layout else []
+    emptied = [p for p in free if p not in used and p not in holding] if layout else []
+    resulting["plates"] = [p for p in resulting["plates"] if p["id"] not in emptied]
+    notes = []
+    if busy:
+        notes.append(f"{_plural(len(busy), 'plate')} left out: a Model on it is still importing")
+    skipped = sum(1 for o in data["objects"] if o["plate"] in order and states.get(o["model"]) == failed)
+    if skipped:
+        notes.append(f"{_plural(skipped, 'object')} skipped: their Model failed to import")
+    pinned = [{"object": o["id"], "label": o.get("name") or f"Object {o['id']}"} for o in data["objects"]
+              if o.get("pinned") and o["plate"] in order]
+    big = [item["key"] for plate in layout for item in plate["items"] if item.get("oversize")]
+    if big:
+        notes.append(f"{_plural(len(big), 'object')} {'is' if len(big) == 1 else 'are'} bigger than the bed and left centred on a plate of its own")
+    if _stand(resulting) == _stand(data) and not emptied:
+        return {"revision": record["revision"], "proposal": None, "message": "Nothing would move: already arranged, so nothing was staged.",
+                "problems": problems, "notes": notes}
+    lines = _move_lines(data, resulting)
+    diff, extra = _capped(lines)
+    notes += extra
+    if emptied:
+        notes.append(f"{_plural(len(emptied), 'plate')} ({', '.join(map(str, emptied))}) would be emptied and removed")
+    count = len({line["object"] for line in lines})
+    names = {p["id"]: p.get("name") or f"Plate {p['id']}" for p in data.get("plates") or []}
+    scope = f"{_plural(count, 'object')} on " + ", ".join(names[i] for i in order[:3]) + (" and more" if len(order) > 3 else "")
+    return stage_proposal(
+        ctx, record, kind="arrange", title=f"Arrange {_plural(count, 'object')}", scope=scope,
+        reason=one_line(reason) or f"Lays the parts out again onto {_plural(len(used), 'plate')}.", review="placement", data=resulting,
+        emptied=emptied, diff=diff, notes=notes, pinned=pinned, problems=problems,
+        targets={"objects": sorted({line["object"] for line in lines}), "plates": sorted(set(order) | set(used))})
+
+
+@tool("propose_plan", "Propose Plan plates: Spooler's own planner orients every unpinned Object, packs them onto as few Plates as fit "
+      "and orders the Plates longest first; you never choose rotations or positions. Plates that are queued, printing, have a Print on "
+      "record or hold a Model still importing are kept as they are. density is an optional packing preset (tight, normal, roomy); "
+      "omit it to keep the project's density, and accepting a preset also sets it. allow_tilt (default false) lets the planner lean "
+      "parts onto angled faces. Pass the project revision you read. A behind revision returns {stale: true}. A plan Spooler would "
+      "refuse comes back as {refused: true, refused_quoted} with proposal null and nothing staged; so does a plan with nothing to "
+      "change. Returns the Proposal token, a readable diff, notes and problems, never the resulting data. At most 3 Proposals per run.",
+      {"revision": {"type": "integer"}, "density": {"type": "string", "enum": ["tight", "normal", "roomy"]},
+       "allow_tilt": {"type": "boolean"}, "reason": {"type": "string"}}, required=["revision"])
+def propose_plan(ctx: Context, revision: int, density=None, allow_tilt=False, reason=None) -> dict:
+    _, project_read, placement_read, _ = ctx.core()
+    record = ctx.record()
+    stale = stale_result(record, revision)
+    if stale:
+        return stale
+    check_proposal_room(ctx)
+    with ctx.reader() as conn:
+        ledger = project_read.read_ledger(conn, ctx.project_id)
+    try:
+        planned = placement_read._plan_data(ctx.project_id, record, bool(allow_tilt), {"preset": density} if density else None, ledger=ledger)
+    except Exception as e:
+        if type(e).__name__ != "JobError":
+            raise
+        raise _helper_error(e, "Plan is not possible") from None
+    if planned.get("refused"):                   # passed through: Spooler would not offer this plan, so nothing is staged
+        return {"revision": record["revision"], "proposal": None, "refused": True, "refused_quoted": quoted(planned["refused"], 400),
+                "problems": [{"object": p.get("key"), "problem": p.get("problem")} for p in planned.get("problems") or []][:20],
+                "message": "Spooler would not offer this plan, so nothing was staged. Tell the person why."}
+    data = planned["data"]
+    kept = planned.get("kept") or []
+    if not planned["plates"] or (_stand(data) == _stand(record["data"]) and not planned["emptied"] and data.get("pack") == record["data"].get("pack")):
+        return {"revision": record["revision"], "proposal": None, "message": "The plan would change nothing, so nothing was staged.",
+                "kept": [{"id": k["id"], "reason": k["reason"]} for k in kept][:10]}
+    diff, notes = _capped(_move_lines(record["data"], data))
+    plate_names = {p["id"]: p.get("name") or f"Plate {p['id']}" for p in data["plates"]}
+    for entry in planned["plates"]:
+        diff.append({"label": plate_names.get(entry["id"], f"Plate {entry['id']}"), "plate": entry["id"],
+                     "text": f"{_plural(len(entry['objects']), 'part')}, {entry['turned']} turned" + (" (new plate)" if entry["new"] else "")})
+    if kept:
+        notes.append(f"{_plural(len(kept), 'plate')} kept as they are (queued, printing, printed or importing)")
+    if planned.get("tilts_withheld"):
+        notes.append(f"{_plural(planned['tilts_withheld'], 'tilt')} withheld: parts would lean on an angled face (allow_tilt lets them)")
+    if planned.get("too_big"):
+        notes.append(f"{_plural(len(planned['too_big']), 'object')} bigger than the bed, left on a plate of its own")
+    if planned.get("tippy"):
+        notes.append(f"{_plural(len(planned['tippy']), 'object')} would stand on a narrow edge")
+    if density:
+        notes.append(f"Accepting also sets the packing density to {density}")
+    emptied = planned["emptied"]
+    if emptied:
+        notes.append(f"{_plural(len(emptied), 'plate')} ({', '.join(map(str, emptied))}) would be emptied and removed")
+    count = sum(len(e["objects"]) for e in planned["plates"])
+    plates = len(planned["plates"])
+    pinned = [{"object": o["id"], "label": o.get("name") or f"Object {o['id']}"} for o in data["objects"] if o.get("pinned")]
+    return stage_proposal(
+        ctx, record, kind="plan", title=f"Plan {_plural(plates, 'plate')}", scope=f"{_plural(count, 'object')} across {_plural(plates, 'plate')}",
+        reason=one_line(reason) or f"Orients and packs the parts onto {_plural(plates, 'plate')}, longest first.", review="placement",
+        data=data, emptied=emptied, diff=diff, notes=notes, pinned=pinned,
+        targets={"objects": sorted(o["id"] for e in planned["plates"] for o in e["objects"]),
+                 "plates": sorted({e["id"] for e in planned["plates"]} | set(emptied))})
+
+
 # ── The protocol ──────────────────────────────────────────────────────────────
 
 def _reply(message_id, result=None, error=None) -> dict:
