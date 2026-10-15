@@ -9,8 +9,8 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '../..');
 const publicDir = process.env.UI_PUBLIC_DIR || path.join(root, 'public'); // point at another checkout to see a guard fail there
 
-const mk = (id, name) => ({ id, name, ip: '192.0.2.20', printer_type: 'cc1', connected: true, camera_url: '/cam', attrs: { FirmwareVersion: '01.04.00' },
-  status: { PrintInfo: { Status: 0 }, TempOfNozzle: 22, TempOfHotbed: 21, TempOfBox: 24, TempTargetNozzle: 0, TempTargetHotbed: 0, CurrentCoord: '202.00,150.00,10.00' } });
+const mk = (id, name, printing = false) => ({ id, name, ip: '192.0.2.20', printer_type: 'cc1', connected: true, camera_url: '/cam', attrs: { FirmwareVersion: '01.04.00' },
+  status: { PrintInfo: { Status: printing ? 13 : 0, ...(printing ? { Filename: '/usb/benchy.gcode', CurrentLayer: 4, TotalLayer: 100, RemainTime: 600 } : {}) }, TempOfNozzle: 22, TempOfHotbed: 21, TempOfBox: 24, TempTargetNozzle: 0, TempTargetHotbed: 0, CurrentCoord: '202.00,150.00,10.00' } });
 const LONG = 'Centauri Carbon in the workshop by the window, second shelf';
 const prints = [
   { id: 3, file_name: 'benchy.gcode', outcome: 'completed', started_at: 1760000000, ended_at: 1760003600 },
@@ -18,7 +18,7 @@ const prints = [
   { id: 1, file_name: 'old.gcode', outcome: null, started_at: 1759800000 },
 ];
 
-async function open(browser, base, { width = 1098, height = 800, hash = '#printer=p1', recent = prints, recentFails = false, storage } = {}) {
+async function open(browser, base, { width = 1098, height = 800, hash = '#printer=p1', recent = prints, recentFails = false, storage, printing = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
   if (storage) await context.addInitScript(s => { for (const [k, v] of Object.entries(s)) localStorage.setItem(k, v); }, storage);
   const page = await context.newPage();
@@ -29,7 +29,7 @@ async function open(browser, base, { width = 1098, height = 800, hash = '#printe
       const msg = JSON.parse(raw);
       fx.commands.push(msg);
       if (msg.action === 'list_printers') {
-        socket.send(JSON.stringify({ type: 'printer_update', printer: mk('p1', 'Cockpit fixture') }));
+        socket.send(JSON.stringify({ type: 'printer_update', printer: mk('p1', 'Cockpit fixture', printing) }));
         socket.send(JSON.stringify({ type: 'printer_update', printer: mk('p2', LONG) }));
       }
     });
@@ -171,6 +171,26 @@ async function open(browser, base, { width = 1098, height = 800, hash = '#printe
       await context.close();
     }
     console.log('PASS: Phone header dot lines up with a wrapped name');
+
+    // UCF-09: while a Print is running the cockpit opens on Temperatures, not on disabled jog buttons; idle is unchanged
+    {
+      const { page, context } = await open(browser, base, { printing: true });
+      assert.equal(await page.getByRole('tab', { name: 'Temperatures', exact: true }).getAttribute('aria-selected'), 'true', 'printing opens on Temperatures');
+      await page.getByRole('tab', { name: 'Motion', exact: true }).click();
+      assert.equal(await page.getByRole('tab', { name: 'Motion', exact: true }).getAttribute('aria-selected'), 'true', 'Motion is still reachable');
+      await context.close();
+    }
+    {
+      const { page, context } = await open(browser, base, { printing: true, hash: '#printer=p1&tab=motion' });
+      assert.equal(await page.getByRole('tab', { name: 'Motion', exact: true }).getAttribute('aria-selected'), 'true', 'a link that names Motion is honoured');
+      await context.close();
+    }
+    {
+      const { page, context } = await open(browser, base);
+      assert.equal(await page.getByRole('tab', { name: 'Motion', exact: true }).getAttribute('aria-selected'), 'true', 'idle still opens on Motion');
+      await context.close();
+    }
+    console.log('PASS: Cockpit opens on Temperatures during a Print and on Motion when idle');
   } finally { await browser.close(); await new Promise(r => server.close(r)); }
 })().catch(e => { console.error(e); process.exit(1); });
 

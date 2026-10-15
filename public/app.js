@@ -1346,7 +1346,7 @@ function _openSettings() {
   if (tog) tog.checked = document.body.classList.contains("light-mode");
   if (_settingsModal) openOperatorDialog(_settingsModal);
   _settingsFeedback("");
-  _settingsMenu.querySelector("h3")?.focus();
+  _settingsModal?.focus();   // the dialog itself, so no focus box lands on the heading
 }
 function _showSettingsPage(pageEl) {
   _settingsPageReturnTargets.set(pageEl, document.activeElement);
