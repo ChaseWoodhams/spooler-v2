@@ -5,7 +5,7 @@
 import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=6";
-import { projectPage } from "./project-page.js?v=10";
+import { projectPage } from "./project-page.js?v=11";
 import { newProject } from "./new-project.js?v=10";
 import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
 import { showExport } from "./export-plan.js?v=2";
@@ -387,8 +387,9 @@ function fitWarningsHtml(fit) {
   const seen = new Set();
   return fit.warnings.filter(w => !seen.has(w.text) && seen.add(w.text)).map(w => {
     if (!/^No spool is assigned to /.test(w.text)) return `<div class="fit ${esc(w.level)}">${esc(w.text)}</div>`;
-    const href = fit.printer_id ? `/#printer=${encodeURIComponent(fit.printer_id)}` : "/";
-    return `<div class="fit ${esc(w.level)} fit-labelled">${WARNING_ICON}<span><strong>Warning:</strong> ${esc(w.text)}. This does not block sending. <a href="${href}" target="_blank" rel="noopener">Assign a spool</a></span></div>`;
+    // The printer's own page has no spool control; the Spools panel lists each spool with "Assign to <printer>"
+    const href = "/#spools";
+    return `<div class="fit ${esc(w.level)} fit-labelled">${WARNING_ICON}<span><strong>Warning:</strong> ${esc(w.text)}. This does not block sending. <a href="${href}" target="_blank" rel="noopener">Assign a spool in Spools</a></span></div>`;
   }).join("");
 }
 
