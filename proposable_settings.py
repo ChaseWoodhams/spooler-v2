@@ -11,6 +11,7 @@ without a project. Public API:
     PROPOSABLE_SETTINGS     {key: Spec}      what may be proposed, with its bounds
     OBJECT_SCOPE_KEYS       the keys the six Quick print options write; the only keys an Object may be given
     READ_ONLY_SETTINGS      keys the Assistant may read (get_settings reports them) but never propose
+    is_readable(key)        whether get_settings / describe_setting may return the key at all (the allow-list for reading)
     why_not(key, scope)     None when `key` may be proposed at `scope`, otherwise the reason it may not
     refusal(key, value, scope, profile_value=, nozzle=)    None when the value is acceptable, otherwise why not
     bounds(key, scope, profile_value=)                     what would be accepted, for get_settings and describe_setting
@@ -84,6 +85,28 @@ PROPOSABLE_SETTINGS = {
 # What get_settings reports with `proposable: false` so the model can read the whole picture without being able to change it.
 READ_ONLY_SETTINGS = ("nozzle_temperature", "nozzle_temperature_initial_layer", "hot_plate_temp", "hot_plate_temp_initial_layer",
                       "textured_plate_temp", "textured_plate_temp_initial_layer", "filament_type", "nozzle_diameter")
+
+# Plainly safe process and filament keys the Assistant may read besides the proposable and read-only ones.
+READABLE_EXTRA = ("default_acceleration", "travel_speed", "outer_wall_acceleration", "inner_wall_acceleration", "initial_layer_acceleration",
+                  "initial_layer_print_height", "line_width", "outer_wall_line_width", "sparse_infill_line_width", "seam_gap",
+                  "reduce_crossing_wall", "spiral_mode", "print_sequence", "enable_prime_tower", "filament_diameter",
+                  "filament_flow_ratio", "pressure_advance", "enable_pressure_advance")
+
+_PRIVATE_WORDS = frozenset(("host", "apikey", "api", "password", "passwd", "secret", "token", "user", "username", "auth", "authorization",
+                            "cafile", "cert", "ssl", "url", "upload", "path", "dir", "directory", "folder", "webui", "login", "credentials"))
+
+
+def is_private(key: str) -> bool:
+    """G-code that runs on the printer, post-processing scripts, print host / API key / upload settings, file naming and anything
+    path- or credential-like. Such a key is never read, whatever else is true of it."""
+    words = key.lower().split("_")
+    return (key.endswith("_gcode") or key in ("post_process", "filename_format") or any(w.startswith("printhost") for w in words)
+            or any(w in _PRIVATE_WORDS for w in words))
+
+
+def is_readable(key: str) -> bool:
+    return (key in PROPOSABLE_SETTINGS or key in READ_ONLY_SETTINGS or key in READABLE_EXTRA) and not is_private(key)
+
 
 _TEMPERATURE = re.compile(r"(^|_)temp(erature)?($|_)")
 _MOTION = re.compile(r"acceleration|jerk|travel_speed|accel_to_decel|junction_deviation|rate_slope")

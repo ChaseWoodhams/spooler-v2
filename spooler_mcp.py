@@ -710,7 +710,8 @@ def _settings(call, *args):
       "project, plate or object), hidden/greyed state under OrcaSlicer's dependency rules (inert_reason says why a setting has no "
       "effect), proposable, and bounds. Settings you may not propose (nozzle and bed temperature, filament type, nozzle diameter, ...) "
       "are included with proposable false and why_not. Without keys you get the proposable settings, the read-only ones and every "
-      "setting something overrides; pass keys to read specific ones.",
+      "setting something overrides; pass keys to read specific ones. Only settings Spooler allows reading are returned; any other key "
+      "comes back in not_available with no value.",
       {"scope": {"type": "string", "enum": ["project", "plate", "object"]}, "id": {"type": "integer"},
        "keys": {"type": "array", "items": {"type": "string"}}}, required=["scope"])
 def get_settings(ctx: Context, scope: str, id=None, keys=None) -> dict:

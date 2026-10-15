@@ -5,8 +5,8 @@ Socket-free and read-only (it imports only the read core, so the MCP server can 
 nothing here saves. The MCP tools `get_settings`, `describe_setting` and `propose_settings` are thin callers of these functions.
 
   chain(record, scope, scope_id)                      the effective values and source layer of every setting at a scope
-  get_settings(record, scope, scope_id, keys=None)    the rows get_settings returns
-  describe(record, key)                               what describe_setting returns
+  get_settings(record, scope, scope_id, keys=None)    the rows get_settings returns (readable keys only)
+  describe(record, key)                               what describe_setting returns (a readable key only)
   plan(record, scope, scope_id, changes)              check proposed {key: value}, drop no-ops, return the resulting data and the rows
 
 Scopes are "project", "plate" and "object". Layers, lowest to highest: preset (the locked profile), project, plate, object; `bed` and
@@ -137,24 +137,25 @@ def _row(c: Chain, key: str, scope: str, rules: dict) -> dict:
 
 
 def get_settings(record: dict, scope: str, scope_id=None, keys=None) -> dict:
-    """Rows of effective settings at a scope: the proposable keys, the read-only set and every key some layer overrides. With
-    `keys`, exactly those that exist (the rest are reported as unknown)."""
+    """Rows of effective settings at a scope: the proposable keys, the read-only set and every readable key some layer overrides.
+    With `keys`, exactly those that are readable (the rest are reported as not available, with no value). A key outside
+    `proposable_settings.is_readable` is never returned."""
     c = chain(record, scope, scope_id)
     rules = _rule_values(c)
-    known = set(_schema().get("options", {})) | set(_schema().get("definitions", {})) | set(c.values["process"]) | set(c.values["filament"])
-    unknown = []
+    not_available = []
     if keys is not None:
         wanted = []
         for key in dict.fromkeys(keys):
-            (wanted if key in known else unknown).append(key)
+            (wanted if isinstance(key, str) and ps.is_readable(key) else not_available).append(key)
     else:
         overridden = [k for kind in ("process", "filament") for k, layer in c.sources[kind].items() if layer in OVERRIDE_LAYERS]
-        wanted = list(dict.fromkeys([k for k in ps.PROPOSABLE_SETTINGS if ps.is_proposable(k, scope)] + list(ps.READ_ONLY_SETTINGS) + overridden))
+        wanted = [k for k in dict.fromkeys([k for k in ps.PROPOSABLE_SETTINGS if ps.is_proposable(k, scope)] + list(ps.READ_ONLY_SETTINGS) + overridden)
+                  if ps.is_readable(k)]
     result = {"revision": record["revision"], "scope": scope, "settings": [_row(c, key, scope, rules) for key in wanted]}
     if scope != "project":
         result["id"] = scope_id
-    if keys is not None and unknown:
-        result["unknown"] = unknown
+    if not_available:
+        result["not_available"] = not_available
     if c.nozzle:
         result["nozzle_mm"] = c.nozzle
     return result
@@ -163,9 +164,9 @@ def get_settings(record: dict, scope: str, scope_id=None, keys=None) -> dict:
 def describe(record, key: str) -> dict:
     """What a setting is, in OrcaSlicer's own words, and what the Assistant may do with it. `record` (may be None) supplies the
     profile's value that caps a speed."""
-    meta = _meta(key)
+    meta = _meta(key) if isinstance(key, str) and ps.is_readable(key) else None
     if not meta:
-        raise JobError(f"Unknown setting {str(key)[:60]!r}", 404)
+        raise JobError(f"Setting {str(key)[:60]!r} is not available", 404)
     out = {"key": key, "label": meta.get("label") or key, "type": meta.get("type")}
     for field, name in (("full_label", "full_label"), ("tooltip", "tooltip"), ("sidetext", "units"), ("mode", "mode")):
         if meta.get(field):
