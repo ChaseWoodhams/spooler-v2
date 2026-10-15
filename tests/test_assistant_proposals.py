@@ -465,3 +465,30 @@ class IsolationTests(ProposalCase):
         self.assertEqual(added, [f"projects/.assistant/{token}/proposal.json"])
         self.assertEqual({k: v for k, v in after.items() if k in before}, before, "no existing file changed")
         self.assertEqual(hashlib.sha256((self.dir / "spooler.db").read_bytes()).hexdigest(), db)
+
+
+class EndedRunTests(ProposalCase):
+    def wait_staged(self):
+        end = time.monotonic() + 30
+        while not self.staging() and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertTrue(self.staging(), "the proposal was never staged")
+
+    def test_cancelling_a_run_that_already_proposed_leaves_no_staged_proposal_and_no_data_change(self):
+        self.scenario({"calls": [self.propose_call([1, 2])], "hang_after_calls": 60})
+        run = self.ask()
+        self.wait_staged()
+        status, view = self.call("POST", f"/api/projects/{run['project_id']}/assistant/runs/{run['id']}/cancel")
+        self.assertEqual((status, view["state"], view["proposals"]), (200, "cancelled", []))
+        self.assertEqual(self.staging(), [])
+        self.assertEqual(self.current()["data"], self.project["data"])
+
+    def test_a_run_that_times_out_after_proposing_leaves_no_staged_proposal(self):
+        self.scenario({"calls": [self.propose_call([1, 2])], "hang_after_calls": 60})
+        with mock.patch.object(assistant_runner, "DEADLINE_SECONDS", 6):
+            run = self.ask()
+            self.wait_staged()
+            view = self.poll(run)
+        self.assertEqual((view["state"], view["proposals"]), ("timeout", []))
+        self.assertEqual(self.staging(), [])
+        self.assertEqual(self.current()["revision"], self.project["revision"])

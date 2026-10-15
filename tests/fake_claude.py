@@ -23,6 +23,7 @@ Scenario keys (all optional):
   mcp_status       status reported for the spooler server (default "connected")
   skip_server      true: do not start the server (tool calls then report an error)
   hang_after_init  seconds to sleep after init (a stalled run)
+  hang_after_calls seconds to sleep after the scripted calls, server still running (a run that proposed, then stalled)
   exit_code        exit with this code after the events; with no_result true no result event is printed
   no_result        true: print no final result
   unknown_events   true: print events of unknown types and subtypes the runner must ignore
@@ -164,6 +165,8 @@ def main(argv) -> int:
         record["tool_results"].append({"tool": call["tool"], "is_error": bool(result.get("isError")), "text": result["content"][0]["text"]})
         save()
         emit({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": result["content"]}]}})
+    if scenario.get("hang_after_calls"):
+        time.sleep(float(scenario["hang_after_calls"]))
     if server:
         server.close()
 
