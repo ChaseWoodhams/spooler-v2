@@ -34,7 +34,8 @@ PRINTER, PROCESS = "Elegoo Centauri Carbon 0.4 nozzle", "0.20mm Standard @Elegoo
 PRESET = {"PETG": "Elegoo PETG @ECC", "ASA": "Elegoo ASA @ECC"}
 # Only settings the stock presets state themselves: a setting they do not state is not carried by a re-import (see the known-gap tests).
 BASE_PROCESS = {"wall_loops": "1", "wall_generator": "classic", "sparse_infill_density": "10%"}
-COMMON = {"layer_height": "0.2", "nozzle_diameter": "0.4", "curr_bed_type": "Textured PEI Plate", "_layers": None}
+# Written from the cubes themselves, not from Spooler: a 20 mm cube at 0.2 mm layers is 100 layers.
+COMMON = {"layer_height": "0.2", "nozzle_diameter": "0.4", "curr_bed_type": "Textured PEI Plate", "_layers": 100}
 SLOTS = {1: ([70.0, 90.0], [100.0, 90.0]), 2: ([160.0, 90.0], [190.0, 90.0])}   # two Objects per Plate, as the re-import needs
 
 
@@ -46,6 +47,7 @@ def diagnostics_root() -> Path:
 @unittest.skipUnless(ORCA and Path(ORCA).is_file(), "Set SPOOLER_ORCA to the bundled Orca 2.4.2 (NOT RUN without it)")
 class ParityMatrixTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.artifacts = 0
         self._tmp = tempfile.TemporaryDirectory(prefix="spooler-parity-")
         self.root = Path(self._tmp.name)
         self.diagnostics = diagnostics_root()
@@ -110,7 +112,7 @@ class ParityMatrixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["faithful"], faithful, plan["differences"])
         representation = "single-3mf" if faithful else PACKAGE
         artifact = projects.export_project(project["id"], plan["revision"], plan["fingerprint"], representation)
-        self.artifacts = getattr(self, "artifacts", 0) + 1
+        self.artifacts += 1
         folder = self.root / f"artifact-{self.artifacts}"
         folder.mkdir()
         if faithful:
@@ -126,7 +128,7 @@ class ParityMatrixTests(unittest.IsolatedAsyncioTestCase):
         project = await self.build(material, plates, edit)
         files = self.files(project, faithful)
         for plate, path in files.items():
-            want = {**{k: v for k, v in COMMON.items() if v is not None}, **expected[plate]}
+            want = {**COMMON, **expected[plate]}
             reference = self.direct(path)
             produced = await self.spooler(project["id"], plate)
             parity.assert_parity(f"{name} plate {plate} direct Orca vs Spooler", reference, produced, want, self.diagnostics)
@@ -139,8 +141,8 @@ class ParityMatrixTests(unittest.IsolatedAsyncioTestCase):
             done = projects.confirm_import(review["token"], {**review["binding"], "acknowledged": bool(review["required"])})
             await self.settle()
             reopened = projects.get_project(done["id"])
-            again = await self.spooler(done["id"], reopened["data"]["plates"][0]["id"])
-            parity.assert_parity(f"{name} plate {plate} direct Orca vs Spooler after re-import", reference, again, want, self.diagnostics)
+            reimported = await self.spooler(done["id"], reopened["data"]["plates"][0]["id"])
+            parity.assert_parity(f"{name} plate {plate} direct Orca vs Spooler after re-import", reference, reimported, want, self.diagnostics)
         return project
 
     # ── Baselines ────────────────────────────────────────────────────────────────
@@ -156,25 +158,30 @@ class ParityMatrixTests(unittest.IsolatedAsyncioTestCase):
     # ── Layered overrides ───────────────────────────────────────────────────────
 
     async def test_project_plate_and_object_overrides_layer_in_that_order(self):
+        """The Project says 1 wall, the Plate changes the infill, one Object asks for 4 walls. One wall prints no Inner wall at
+        all, so Inner wall deposition can only come from the Object override reaching Orca: dropping it in both paths still fails."""
         def edit(data):
-            data["plates"][0]["overrides"] = {"wall_loops": "2", "sparse_infill_density": "25%"}
+            data["plates"][0]["overrides"] = {"sparse_infill_density": "25%"}
             data["objects"][0]["overrides"] = {"wall_loops": "4"}
-        project = await self.scenario("layered overrides", "PETG", 1, edit,
-                                      {1: {"filament_type": "PETG", "wall_loops": "2", "sparse_infill_density": "25%", "_moves": {"Inner wall": 100}}},
-                                      faithful=True)
-        self.assertEqual(projects.effective_settings(project["id"], 1)["process"]["wall_loops"], "2")
+        await self.scenario("layered overrides", "PETG", 1, edit,
+                            {1: {"filament_type": "PETG", "wall_loops": "1", "sparse_infill_density": "25%",
+                                 "_moves": {"Inner wall": 50, "Outer wall": 50}}}, faithful=True)
 
     # ── Nullable retract/lift/wipe, bed, temperature, cooling and flow ────────────────
 
-    async def test_nullable_retract_lift_wipe_overrides_for_petg_and_asa(self):
-        for material in ("PETG", "ASA"):
-            with self.subTest(material=material):
-                def edit(data):
-                    data["profile"]["filament"] = {"filament_retraction_length": [None], "filament_z_hop": ["0.4"], "filament_wipe": ["nil"]}
-                await self.scenario(f"{material} nullable", material, 1, edit,
-                                    {1: {"filament_type": material, "filament_z_hop": "0.4", "z_hop": "0.4", "retraction_length": "0.8"}}, faithful=True)
-                await self.asyncTearDown()
-                await self.asyncSetUp()
+    async def nullable(self, material):
+        """A nil retraction length and wipe fall back to the printer's values; a set z-hop reaches Orca. Orca omits nil overrides
+        from its footer, so what is asserted is the resolved printer value (0.8) next to the explicit lift (0.4)."""
+        def edit(data):
+            data["profile"]["filament"] = {"filament_retraction_length": [None], "filament_z_hop": ["0.4"], "filament_wipe": ["nil"]}
+        await self.scenario(f"{material} nullable", material, 1, edit,
+                            {1: {"filament_type": material, "filament_z_hop": "0.4", "z_hop": "0.4", "retraction_length": "0.8"}}, faithful=True)
+
+    async def test_nullable_retract_lift_wipe_overrides_for_petg(self):
+        await self.nullable("PETG")
+
+    async def test_nullable_retract_lift_wipe_overrides_for_asa(self):
+        await self.nullable("ASA")
 
     async def test_temperature_cooling_flow_and_bed_changes(self):
         def edit(data):
@@ -184,12 +191,18 @@ class ParityMatrixTests(unittest.IsolatedAsyncioTestCase):
                             {1: {"filament_type": "PETG", "nozzle_temperature": "245", "nozzle_temperature_initial_layer": "250",
                                  "filament_flow_ratio": "0.97", "fan_min_speed": "35", "textured_plate_temp": "75"}}, faithful=True)
 
+    async def test_the_other_bed_side_is_what_orca_prints_for(self):
+        def edit(data):
+            data["bed"] = "smooth"
+        await self.scenario("high temp plate", "PETG", 1, edit,
+                            {1: {"filament_type": "PETG", "curr_bed_type": "High Temp Plate"}}, faithful=True)
+
     # ── Geometry ────────────────────────────────────────────────────────────────
 
     @unittest.expectedFailure
     async def test_a_rotated_and_scaled_multi_object_plate(self):
         """KNOWN GAP (found by this workflow): with a 45 degree turn and a scaled Object, Spooler's own Slice estimates 1364 s and
-        direct Orca on the exported file 1362 s: 0.15%, beyond the spec's max(1 s, 0.1%). Layers, toolpath counts and placement
+        direct Orca on the exported file 1362 s: 0.15%, beyond the spec's max(1 s, 0.1%). Layers, toolpath counts and position
         agree, so the likely cause is geometry serialisation precision (export 9 significant figures, Slice 4 decimals). Left at
         the spec's bound on purpose; this passes as an unexpected success once the drift is closed."""
         def edit(data):

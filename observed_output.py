@@ -51,6 +51,11 @@ def read_footer(path) -> dict | None:
             text = fh.read().decode("utf-8", errors="replace")
     except OSError:
         return None
+    return footer_of(text)
+
+
+def footer_of(text: str) -> dict | None:
+    """The same, from G-code text already in memory."""
     start, end = text.rfind(FOOTER_START), text.rfind(FOOTER_END)
     if start < 0 or end < start:
         return None
@@ -79,7 +84,7 @@ def _same_element(expected, observed) -> bool:
     return False
 
 
-def _same(expected, observed: str) -> bool:
+def same_value(expected, observed: str) -> bool:
     if not isinstance(expected, list):
         return _same_element(expected, observed)
     if not expected:
@@ -185,7 +190,7 @@ def check(snapshot: dict, gcode, schema: dict, *, fingerprint: str | None = None
             continue
         report["compared"] += 1
         observed = footer[read_key]
-        if _same(expected, observed):
+        if same_value(expected, observed):
             report["matched"] += 1
             continue
         row = {"kind": kind, "key": key, "scope": scope, "expected": _show(expected), "observed": _unquote(observed)}
@@ -228,5 +233,3 @@ def summary(report: dict, limit: int = 20) -> dict:
             "differences": [{k: d[k] for k in ("kind", "key", "scope", "expected", "observed")} for d in report["differences"][:limit]]}
 
 
-# Public name for callers outside this module (the parity workflow compares printed values the same way).
-same_value = _same

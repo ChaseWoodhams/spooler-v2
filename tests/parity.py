@@ -14,7 +14,8 @@ import observed_output
 
 TIME_FLOOR_S, TIME_FRACTION = 1.0, 0.001        # larger of one second or 0.1%
 WEIGHT_FLOOR_G, WEIGHT_FRACTION = 0.02, 0.001   # larger of 0.02 g or 0.1%
-PLACEMENT_MM = 0.05                              # geometry is serialised to 9 significant figures; this is far above that
+POSITION_MM = 0.05                               # geometry is serialised to 9 significant figures; this is far above that
+START_CODE_ROLES = frozenset({"Custom"})         # the printer's own start/purge moves sit outside every Object and would hide a moved one
 # Only these differences are ignored, besides observed_output.IGNORED (names, ids, compatibility lists, colour labels).
 COSMETIC = frozenset({"thumbnails", "thumbnails_format", "gcode_label_objects", "print_flow_ratio_calibration"})
 _MOVE = re.compile(r"^G[01]\s")
@@ -27,8 +28,7 @@ class ParityFailure(AssertionError):
 
 def parse(text: str) -> dict:
     """Print-affecting facts from one Orca G-code file: footer config, layers, time, weight, per-role moves, extrusion bounds."""
-    start, end = text.rfind(observed_output.FOOTER_START), text.rfind(observed_output.FOOTER_END)
-    config = dict(re.findall(r"^; ([A-Za-z0-9_]+) = (.*?)\s*$", text[start:end], re.M)) if 0 <= start < end else {}
+    config = observed_output.footer_of(text) or {}
     layers = re.search(r"^; total layer(?:s count| number)[:=]\s*(\d+)", text, re.M)
     estimates = gcode_meta.parse_estimates(text)
     roles, role = {}, ""
@@ -47,7 +47,7 @@ def parse(text: str) -> dict:
             y = float(axes["Y"])
         if "E" in axes and float(axes["E"]) > 0 and ("X" in axes or "Y" in axes) and role:
             roles[role] = roles.get(role, 0) + 1
-            if x is not None and y is not None:
+            if x is not None and y is not None and role not in START_CODE_ROLES:
                 bounds = [x, y, x, y] if bounds is None else [min(bounds[0], x), min(bounds[1], y), max(bounds[2], x), max(bounds[3], y)]
     return {"config": config, "layers": int(layers.group(1)) if layers else None, "time_s": estimates["estimate_s"],
             "weight_g": estimates["estimate_g"], "moves": roles, "bounds": bounds}
@@ -78,8 +78,8 @@ def compare(reference: dict, other: dict) -> list:
             found.append({"what": "toolpath", "key": role, "reference": reference["moves"].get(role, 0),
                           "other": other["moves"].get(role, 0), "why": "deposition move counts differ"})
     a, b = reference["bounds"], other["bounds"]
-    if (a is None) != (b is None) or (a and any(abs(p - q) > PLACEMENT_MM for p, q in zip(a, b))):
-        found.append({"what": "placement", "reference": a, "other": b, "why": f"extrusion bounds differ by more than {PLACEMENT_MM} mm"})
+    if (a is None) != (b is None) or (a and any(abs(p - q) > POSITION_MM for p, q in zip(a, b))):
+        found.append({"what": "position", "reference": a, "other": b, "why": f"extrusion bounds differ by more than {POSITION_MM} mm"})
     return found
 
 

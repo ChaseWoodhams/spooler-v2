@@ -92,8 +92,14 @@ class ParityLogicTests(unittest.TestCase):
         with self.assertRaises(parity.ParityFailure):
             parity.assert_parity("asa", gcode(filament_type="ASA", nozzle_temperature="260"), wrong_temperature, asa, self.diagnostics)
 
-    def test_a_moved_object_fails_on_placement(self):
-        self.assertIn("placement", self.fails(gcode(x0=95.0)))
+    def test_a_moved_object_fails_on_position(self):
+        self.assertIn("position", self.fails(gcode(x0=95.0)))
+
+    def test_the_start_code_purge_line_does_not_hide_a_moved_object(self):
+        def with_purge(text):
+            return ";TYPE:Custom\nG1 X0.000 Y-1.200 E0.5\nG1 X178.000 Y132.000 E0.5\n" + text
+        reference, moved = parity.parse(with_purge(gcode())), parity.parse(with_purge(gcode(x0=95.0)))
+        self.assertTrue([d for d in parity.compare(reference, moved) if d["what"] == "position"])
 
     def test_a_resolver_bug_shared_by_both_paths_is_caught_by_the_independent_expectation(self):
         both_wrong = gcode(wall_loops="1")
