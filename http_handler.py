@@ -480,6 +480,10 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._assistant_status(None)
             return
 
+        if self.path.split("?", 1)[0] == "/api/assistant/run-log":
+            self._assistant_run_log()
+            return
+
         if self.path.split("?", 1)[0].startswith("/api/assistant/"):
             self._json({"error": "Not found"}, 404)          # an unknown Assistant path answers JSON, never the HTML page
             return
@@ -667,6 +671,8 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._handle_notif_settings()
         elif self.path == "/api/assistant/settings":
             self._assistant_settings()
+        elif self.path == "/api/assistant/run-log/clear":
+            self._assistant_run_log()
         elif self.path == "/api/push-test":
             self._handle_push_test()
         elif self.path == "/api/import-filaments":
@@ -752,6 +758,16 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._json({"error": str(e) or "Bad request"}, 400)
         except Exception as e:
             self._json({"error": f"Assistant settings are unavailable: {e}"}, 500)
+
+    def _assistant_run_log(self):
+        """GET /api/assistant/run-log (newest first) and POST /api/assistant/run-log/clear. Contained: any failure is a JSON 500."""
+        try:
+            import assistant_runlog
+            if self.command == "POST":
+                assistant_runlog.clear()
+            self._json({"entries": assistant_runlog.entries(), "cap": assistant_runlog.CAP})
+        except Exception as e:
+            self._json({"error": f"The run log is unavailable: {e}"}, 500)
 
     def _assistant_status(self, project_id):
         """GET /api/projects/<id>/assistant/status[?fresh=1]: available, or why not. Never fails the page."""

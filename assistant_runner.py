@@ -29,6 +29,7 @@ import uuid
 from pathlib import Path
 
 import assistant
+import assistant_runlog
 import assistant_tuning
 import datapaths
 import proposal_store
@@ -113,6 +114,7 @@ class Run:
         self.reason = None                 # "cancelled" or "timeout" once either has been asked for
         self.tool_calls = 0                # every tool_use seen (steps are capped, this is not)
         self.proposals: list = []          # Proposal tokens; the log line carries them
+        self.question = self.prompt = self.project_name = self.model = None    # kept for the run log (assistant_runlog)
         self.names: dict = {"models": {}, "plates": {}}    # id -> name, to word the progress steps
         self.done = threading.Event()      # set by _finish
         self.stop = threading.Event()      # set when the run is over, to release the deadline watcher
@@ -250,6 +252,7 @@ def ask(project_id: int, message, history=None) -> dict:
         _runs[run.id] = run
         _prune()
     prompt = build_prompt(record, message, turns)
+    run.question, run.prompt, run.project_name = message, prompt, record.get("name")
     _sweep_staging()
     threading.Thread(target=_execute, args=(run, cli, settings["jev_url"], prompt), name=f"assistant-run-{run.id[:8]}", daemon=True).start()
     return with_summaries(run.view())
@@ -386,6 +389,10 @@ def _finish(run: Run, state: str, answer=None, error=None) -> None:
             _log_run(run)
         except Exception as e:                       # bookkeeping must never stop the run from ending
             print(f"[Assistant] Could not write the run log line: {type(e).__name__}")
+        try:
+            assistant_runlog.record(run)
+        except Exception as e:                       # the kept log is bookkeeping too
+            print(f"[Assistant] Could not keep the run log entry: {type(e).__name__}")
     run.done.set()
 
 
@@ -516,6 +523,7 @@ def _consume(run: Run, proc) -> tuple:
                 _terminate(proc)
                 return ("error", None, problem)
             run.init_ok = True
+            run.model = event.get("model") if isinstance(event.get("model"), str) else None
         elif kind == "system" and subtype == "api_retry":
             _step(run, "Retrying", "api_retry")
         elif kind == "assistant":
