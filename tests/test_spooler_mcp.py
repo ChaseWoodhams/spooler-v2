@@ -100,7 +100,7 @@ class GetProjectTests(McpDataCase):
             self.assertEqual(init["result"]["serverInfo"]["name"], "spooler")
             self.assertIn("tools", init["result"]["capabilities"])
             tools = session.request("tools/list")["result"]["tools"]
-            self.assertEqual([t["name"] for t in tools], ["get_project", "get_plate", "get_model_geometry", "get_printer_capabilities", "get_slice_summary", "propose_orientation", "propose_arrange", "propose_plan"])
+            self.assertEqual([t["name"] for t in tools], ["get_project", "get_plate", "get_model_geometry", "get_printer_capabilities", "get_slice_summary", "propose_orientation", "propose_arrange", "propose_plan", "get_settings", "describe_setting", "propose_settings"])
             for t in tools:
                 self.assertNotIn("project_id", t["inputSchema"].get("properties", {}), "no tool takes a project id")
             reply = session.call("get_project")
@@ -221,7 +221,9 @@ class IsolationTests(McpDataCase):
                     {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "get_project", "arguments": {}}}] + [
             {"jsonrpc": "2.0", "id": 3 + i, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
             for i, (name, arguments) in enumerate([("get_plate", {"plate_id": 1}), ("get_model_geometry", {"model_id": 1}),
-                                                   ("get_printer_capabilities", {}), ("get_slice_summary", {"plate_id": 1})])]
+                                                   ("get_printer_capabilities", {}), ("get_slice_summary", {"plate_id": 1}),
+                                                   ("get_settings", {"scope": "project"}), ("describe_setting", {"key": "wall_loops"}),
+                                                   ("propose_settings", {"revision": 7, "scope": "project", "changes": {"wall_loops": 3}})])]
         done = subprocess.run([sys.executable, "-I", "-c", CLEAN_SCRIPT, str(ROOT), str(self.dir), "1"], input="\n".join(map(json.dumps, messages)) + "\n",
                               capture_output=True, text=True, encoding="utf-8", env={**os.environ, "DATA_DIR": str(self.dir)}, timeout=120)
         self.assertEqual(done.returncode, 0, done.stderr[-2000:])
@@ -231,7 +233,7 @@ class IsolationTests(McpDataCase):
             self.assertNotIn("could not be read", reply["result"]["content"][0]["text"], "a read tool answers or explains; it does not crash")
         self.assertEqual(json.loads(replies[2]["result"]["content"][0]["text"])["revision"], 7)
         loaded = json.loads(done.stderr.strip().splitlines()[-1])
-        for name in ("project_read", "datapaths"):
+        for name in ("project_read", "datapaths", "settings_read", "proposable_settings"):
             self.assertIn(name, loaded)
         self.assertEqual([m for m in loaded if m.split(".")[0] in FORBIDDEN], [])
         self.assertEqual(hashlib.sha256(db.read_bytes()).hexdigest(), before)
