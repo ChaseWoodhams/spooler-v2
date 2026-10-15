@@ -111,6 +111,33 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
         await self.run_worker()
         return projects.get_project(project["id"])
 
+    async def test_cancelling_a_queued_slice_leaves_the_plate_not_sliced(self):
+        project = await self.project_with_cube()
+        self.assertEqual(projects.request_slice(project["id"], 1)["slices"]["1"]["state"], "queued")
+        self.assertNotIn("1", projects.cancel_slice(project["id"], 1)["slices"])
+        with mock.patch.object(slicer, "runner", fake_runner()):
+            await self.run_worker()
+        self.assertNotIn("1", projects.get_project(project["id"])["slices"])
+
+    async def test_cancelling_a_running_slice_discards_its_result(self):
+        project = await self.project_with_cube()
+        projects.request_slice(project["id"], 1)
+        inner = fake_runner()
+
+        def runner(args, timeout):
+            projects.cancel_slice(project["id"], 1)   # the user cancels while Orca is running
+            return inner(args, timeout)
+        with mock.patch.object(slicer, "runner", runner):
+            await self.run_worker()
+        self.assertNotIn("1", projects.get_project(project["id"])["slices"])
+        self.assertFalse(projects.plate_dir(project["id"], 1).exists())
+
+    async def test_cancelling_a_plate_that_is_not_waiting_is_refused(self):
+        project = await self.project_with_cube()
+        with self.assertRaises(jobs.JobError) as refused:
+            projects.cancel_slice(project["id"], 1)
+        self.assertEqual(refused.exception.status, 409)
+
     async def test_invalid_project_edit_reports_the_field_and_keeps_saved_settings(self):
         project = await self.project_with_cube()
         for key, value in (("outer_wall_line_width", "100%%"), ("wall_loops", "2.5"),

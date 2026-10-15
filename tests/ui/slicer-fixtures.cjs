@@ -60,7 +60,7 @@ const EXPECT = {
   print: ['0 of 2 plates completed', 'needs slicing'],
 };
 
-async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model', plateFit = null, mutate = null, slices = null } = {}) {
+async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model', plateFit = null, mutate = null, slices = null, writes = null } = {}) {
   const project = makeProject(), split = makeSplit();
   if (slices) project.slices = slices;
   if (mutate) mutate(project);
@@ -71,6 +71,7 @@ async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme 
   await page.routeWebSocket(/.*/, () => {});
   await page.route('**/api/**', route => {
     const url = new URL(route.request().url());
+    if (route.request().method() !== 'GET' && writes) { const out = writes(route.request().method(), new URL(route.request().url()).pathname, project); if (out !== undefined) return route.fulfill({ json: out }); }
     if (route.request().method() !== 'GET') return route.fulfill({ status: 500, json: { detail: 'fixture is read-only' } });
     const p = url.pathname;
     const json = p === '/api/projects/1' ? project : p === `/api/splits/${SPLIT_ID}` ? split

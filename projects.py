@@ -4175,6 +4175,17 @@ def request_slice(project_id: int, plate_id: int, send: bool = False, send_opts:
     return get_project(project_id)
 
 
+def cancel_slice(project_id: int, plate_id: int) -> dict:
+    """Stop waiting for a queued or running Slice of a plate: its entry goes, so the plate reads "Not sliced yet" again.
+    A run already in OrcaSlicer finishes on its own, but `_publish_slice` finds no running entry and discards its files."""
+    record = get_project(project_id)
+    if record["slices"].get(str(plate_id), {}).get("state") not in (QUEUED, SLICING):
+        raise jobs.JobError("The plate isn't being sliced", 409)
+    _mutate(project_id, "slices", lambda s: s.pop(str(plate_id), None) if s.get(str(plate_id), {}).get("state") in (QUEUED, SLICING) else None,
+            record["created_at"])
+    return get_project(project_id)
+
+
 def _plate_list(plate_ids) -> set | None:
     if plate_ids is None:
         return None

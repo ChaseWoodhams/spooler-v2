@@ -494,6 +494,13 @@ async function requestPlateSlice(plateId) {
   toast("Slicing…");
 }
 
+// Stop waiting for a queued or running Slice: the Plate goes back to "Not sliced yet".
+async function cancelPlateSlice(plateId) {
+  applyProject(await api("POST", `/api/projects/${state.project.id}/plates/${plateId}/cancel-slice`, {}));
+  renderAll({ geometry: false });
+  toast(`Slicing cancelled for ${plateById(plateId)?.name || "the plate"}`);
+}
+
 async function sliceAndSend(plateIds) {
   await flushSave();
   const url = plateIds ? `/api/projects/${state.project.id}/plates/${plateIds[0]}/slice` : `/api/projects/${state.project.id}/slice`;
@@ -1231,12 +1238,37 @@ function slicingText(entry) {
 
 const unverifiedKeys = entry => (entry.observed?.differences || []).slice(0, 3).map(d => d.key).join(", ") + ((entry.observed?.difference_count || 0) > 3 ? "…" : "");
 
+// A rough guess at how long OrcaSlicer will need for a Plate, from its object count and size (never from a past run).
+// Slicing takes about 20 s to start up, a few seconds per object, plus a little for tall and bulky objects. Rounded to 5 s.
+function slicingEstimateSeconds(plateId) {
+  const objects = plateObjects(plateId);
+  const layerHeight = Number(data().profile?.process?.layer_height) || 0.2;
+  let tallest = 0, volume = 0;
+  for (const object of objects) {
+    const size = state.project.models.find(m => m.id === object.model)?.size;
+    if (!size) continue;
+    const [x, y, z] = size.map((v, i) => v * (object.scale?.[i] ?? object.scale?.[0] ?? 1));
+    tallest = Math.max(tallest, z);
+    volume += x * y * z / 1000;
+  }
+  const seconds = 20 + 3 * objects.length + 0.05 * (tallest / layerHeight) + volume / 40;
+  return Math.max(5, Math.round(seconds / 5) * 5);
+}
+
+// 1 = next to be sliced. Only waiting Plates have a place; the one being sliced is already underway.
+function queuePosition(plateId) {
+  if (sliceEntry(plateId)?.state !== "queued") return 0;
+  const waiting = Object.entries(state.project.slices).filter(([, e]) => e.state === "queued")
+    .sort((a, b) => (a[1].queued_at || 0) - (b[1].queued_at || 0) || Number(a[0]) - Number(b[0])).map(([id]) => Number(id));
+  return waiting.indexOf(Number(plateId)) + 1;
+}
+
 function plateStatus(plateId) {
   const entry = sliceEntry(plateId);
   if (!plateObjects(plateId).length) return { text: "Empty", cls: "" };
   if (plateImporting(plateId)) return { text: "Importing models…", cls: "" };
-  if (!entry) return { text: "Not sliced yet", cls: "" };
-  if (entry.state === "queued") return { text: "Slice in progress — waiting for the slicer", cls: "" };
+  if (!entry) return { text: `Not sliced yet · Estimate: about ${slicingEstimateSeconds(plateId)} s to slice`, cls: "" };
+  if (entry.state === "queued") return { text: `Slice in progress — waiting for the slicer · position ${queuePosition(plateId)} in line`, cls: "" };
   if (entry.state === "slicing") return { text: `Slice in progress — ${slicingText(entry)}`, cls: "" };
   if (entry.state === "failed") return { text: `Failed Slice: ${entry.error || 'The slicer could not finish'}. Retry slicing this Plate.`, cls: "bad" };
   if (entry.outdated) return { text: "Outdated Slice — objects, placement or relevant settings changed. Slice this Plate again before sending it.", cls: "warn" };
@@ -1582,8 +1614,10 @@ function renderSlicing() {
     return `<div class="slicer-plate-row${plate.id === state.plate ? " selected" : ""}" data-select-plate="${plate.id}">
       <span class="dot ${plateDot(plate.id)}"></span>
       <div><strong>${esc(plate.name)}</strong> ${plateBadge(plate)}<small class="${status.cls}">${plural(plateObjects(plate.id).length, "object")} · ${esc(status.text)}</small></div>
-      <button class="btn btn-secondary btn-sm" type="button" data-slice-plate="${plate.id}"${isBusy(plate.id) || plateImporting(plate.id) ? " disabled" : ""}>
-        ${again || isUpToDate(plate.id) ? "Slice again" : "Slice"}</button>
+      ${isBusy(plate.id)
+        ? `<button class="btn btn-secondary btn-sm" type="button" data-cancel-slice="${plate.id}" aria-label="Cancel slicing ${esc(plate.name)}">Cancel</button>`
+        : `<button class="btn btn-secondary btn-sm" type="button" data-slice-plate="${plate.id}"${plateImporting(plate.id) ? " disabled" : ""}>
+        ${again || isUpToDate(plate.id) ? "Slice again" : "Slice"}</button>`}
     </div>`;
   }).join("") || '<p class="slicer-muted">No plates with objects.</p>';
   const done = plates.filter(p => isUpToDate(p.id));
@@ -3198,6 +3232,11 @@ function bindUi() {
     if (e.target.closest("[data-brick], [data-brick-plate]")) changeBricklayers(e.target);
   });
   $("slicing-list").addEventListener("click", e => {
+    const cancel = e.target.closest("[data-cancel-slice]");
+    if (cancel) {
+      if (!cancel.disabled) withButton(cancel, () => cancelPlateSlice(Number(cancel.dataset.cancelSlice)));
+      return;
+    }
     const slice = e.target.closest("[data-slice-plate]");
     if (slice) {
       if (!slice.disabled) withButton(slice, () => sliceplates([Number(slice.dataset.slicePlate)]));
