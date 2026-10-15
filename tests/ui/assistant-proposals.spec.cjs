@@ -30,7 +30,7 @@ const review = (c) => {
 async function stubAssistant(page, s) {
   Object.assign(s, { asks: [], accepts: [], dismisses: [], patches: [], reviews: [], revision: 3, run: null, acceptStatus: 200 });
   s.base = sf.makeProject();
-  await page.route('**/api/projects/1/assistant/status**', route => route.fulfill({ json: { available: true, reason: null, purpose: PURPOSE } }));
+  await page.route('**/api/projects/1/assistant/status**', route => route.fulfill({ json: { available: true, reason: null, purpose: PURPOSE, limits: { deadline_seconds: 60, question_chars: 2000, history_turns: 12, history_chars: 6000, turn_chars: 1500 } } }));
   await page.route('**/api/projects/1/assistant/ask', route => {
     s.asks.push(route.request().postDataJSON());
     return route.fulfill({ json: { id: `run${s.asks.length}`, project_id: 1, state: 'thinking', steps: [], answer: null, error: null, proposals: [] } });

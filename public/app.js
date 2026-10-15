@@ -1817,6 +1817,84 @@ function _setThresholdError(input, message) {
 
 
 // Assistant sub-page: CLI path and Jev address (no API key). The check only runs when asked.
+// Tuning: everything shown (groups, labels, bounds, defaults, values) comes from the server's `tuning` section; the page holds none of it.
+let _assistantTuning = null;
+function _renderAssistantTuning(tuning) {
+  _assistantTuning = tuning || null;
+  const section = document.getElementById("assistant-tuning");
+  if (!section) return;
+  section.hidden = !tuning?.groups;
+  if (!tuning?.groups) return;
+  const notes = document.getElementById("assistant-tuning-notes");
+  notes.hidden = !(tuning.notes || []).length;
+  notes.textContent = (tuning.notes || []).join(" ");
+  const host = document.getElementById("assistant-tuning-groups");
+  host.replaceChildren();
+  for (const [group, spec] of Object.entries(tuning.groups)) {
+    const box = document.createElement("fieldset");
+    box.className = "assistant-tuning-group";
+    box.dataset.group = group;
+    const legend = document.createElement("legend");
+    legend.textContent = spec.label;
+    const hint = document.createElement("p");
+    hint.className = "input-hint";
+    hint.textContent = spec.hint || "";
+    box.append(legend, hint);
+    for (const [key, field] of Object.entries(spec.fields)) {
+      const row = document.createElement("div");
+      row.className = "form-group";
+      const id = `assistant-tuning-${group}-${key}`;
+      const label = document.createElement("label");
+      label.htmlFor = id;
+      label.textContent = `${field.label} (${field.unit})`;
+      const input = document.createElement("input");
+      Object.assign(input, { type: "number", id, step: 1, min: field.min, max: field.max, value: tuning.values?.[group]?.[key] ?? field.default });
+      input.dataset.group = group;
+      input.dataset.key = key;
+      input.addEventListener("input", _markAssistantTuningDirty);
+      const help = document.createElement("small");
+      help.className = "input-hint";
+      help.id = `${id}-hint`;
+      help.textContent = `${field.hint} Allowed ${field.min} to ${field.max}; default ${field.default}.`;
+      input.setAttribute("aria-describedby", help.id);
+      row.append(label, input, help);
+      box.append(row);
+    }
+    const reset = document.createElement("button");
+    Object.assign(reset, { type: "button", className: "btn btn-secondary btn-sm", textContent: `Reset ${spec.label.toLowerCase()}` });
+    reset.dataset.reset = group;
+    reset.addEventListener("click", () => _resetAssistantTuning(group));
+    box.append(reset);
+    host.append(box);
+  }
+  _markAssistantTuningDirty();
+}
+function _assistantTuningEdits() {
+  const edits = {};
+  document.querySelectorAll("#assistant-tuning-groups input[data-key]").forEach(input => {
+    const { group, key } = input.dataset;
+    const saved = _assistantTuning?.values?.[group]?.[key];
+    const typed = input.value.trim() === "" ? NaN : Number(input.value);
+    if (typed !== saved) (edits[group] ||= {})[key] = Number.isNaN(typed) ? input.value : typed;
+  });
+  return edits;
+}
+function _markAssistantTuningDirty() {
+  const dirty = document.getElementById("assistant-tuning-dirty");
+  if (dirty) dirty.hidden = !Object.keys(_assistantTuningEdits()).length;
+}
+async function _resetAssistantTuning(group) {
+  try {
+    const r = await fetch("/api/assistant/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reset_tuning: group }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || "The tuning was not reset.");
+    const label = _assistantTuning?.groups?.[group]?.label || "Tuning";
+    _renderAssistantTuning(d.tuning);
+    _settingsFeedback(`${label} reset to the defaults.`, "ok");
+  } catch (err) {
+    _settingsFeedback(err.message, "error");
+  }
+}
 async function _loadAssistantSettings() {
   const result = document.getElementById("assistant-check-result");
   if (result) result.textContent = "";
@@ -1825,21 +1903,22 @@ async function _loadAssistantSettings() {
     const s = await r.json();
     document.getElementById("assistant-cli-path").value = s.cli_path || "";
     document.getElementById("assistant-jev-url").value = s.jev_url === s.defaults?.jev_url ? "" : (s.jev_url || "");
+    _renderAssistantTuning(s.tuning);
   } catch (err) {
     _settingsFeedback(`Could not load the assistant settings: ${err.message}.`, "error");
   }
 }
 async function _saveAssistantSettings() {
-  const r = await fetch("/api/assistant/settings", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      cli_path: document.getElementById("assistant-cli-path").value,
-      jev_url: document.getElementById("assistant-jev-url").value,
-    }),
-  });
+  const edits = _assistantTuningEdits();
+  const body = {
+    cli_path: document.getElementById("assistant-cli-path").value,
+    jev_url: document.getElementById("assistant-jev-url").value,
+  };
+  if (Object.keys(edits).length) body.tuning = edits;
+  const r = await fetch("/api/assistant/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || "The assistant settings were not saved.");
+  if (!r.ok) throw new Error(d.error || "The assistant settings were not saved.");     // a refused value keeps the page as typed
+  if (d.tuning) _renderAssistantTuning(d.tuning);
   return d;
 }
 document.getElementById("btn-settings-goto-assistant")?.addEventListener("click", () => {
