@@ -439,6 +439,7 @@ def describe_pieces(pieces: list, limits: dict) -> list:
             "size":       size,
             "fits":       parts_needed(pts, limits) == 1,
             "tiny":       volume < TINY_PART_MM3 or size[0] < TINY_PART_MM,
+            "made_by_cut": piece["last"][0] if piece.get("last") else None,  # the cut that last split this part off; None when never cut
         })
     return out
 
