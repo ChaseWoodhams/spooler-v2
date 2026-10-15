@@ -227,7 +227,9 @@ function updateBar() {
   if (!$("pp-send-where").contains(document.activeElement)) $("pp-send-where").innerHTML = whereHtml(plates);
   $("pp-send-balance").disabled = !plates.length;
   const send = $("pp-send");
-  send.disabled = !plates.length || sending;
+  const blocked = !plates.length || sending;
+  if (blocked) send.setAttribute("aria-disabled", "true"); else send.removeAttribute("aria-disabled");
+  $("pp-send-why").hidden = plates.length > 0;
   send.textContent = sendLabel(plates.length);
   for (const box of $("project-page").querySelectorAll("[data-tick]")) {
     box.checked = ticked.has(Number(box.dataset.tick));
@@ -453,7 +455,7 @@ function bindSend(root) {
   root.addEventListener("click", e => {
     if (e.target.closest("#pp-send-all")) { ticked = new Set(readySendable().map(p => p.id)); return updateBar(); }
     if (e.target.closest("#pp-send-none")) { ticked.clear(); return updateBar(); }
-    if (e.target.closest("#pp-send")) return sendTicked();
+    if (e.target.closest("#pp-send")) return $("pp-send").getAttribute("aria-disabled") === "true" ? undefined : sendTicked();
     if (e.target.closest("#pp-send-balance")) {
       const map = host.balance([...ticked]);
       if (map) { Object.assign(dest, map); host.toast("Assignments suggested by estimated time. Review each destination before sending."); updateBar(); }

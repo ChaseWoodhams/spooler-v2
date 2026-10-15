@@ -797,15 +797,6 @@ function renderStepActions() {
   if (!state.project) { el.innerHTML = ""; return; }
   const next = (step, label) => `<button class="btn btn-primary" type="button" data-go="${step}"${stepAvailable(step) ? "" : " disabled"}>${label}</button>`;
   const send = sendThisPlateState();
-<<<<<<< HEAD
-  el.innerHTML = state.step === "plates" ? next("slice", "Slice →")
-    : state.step === "slice" ? next("print", "Print →") + `<button class="btn btn-secondary" type="button" data-send-this-plate${send.why ? ' aria-disabled="true" aria-describedby="send-this-plate-why"' : ""}>${esc(send.label)}</button>`
-      + (send.why ? `<small class="reason-line" id="send-this-plate-why">${esc(send.why)}</small>` : "") : "";
-  $("btn-slice-send").hidden = state.step === "slice";   // the Slice step has its own send in the header
-}
-
-// The Slice step's secondary action: send the selected Plate to its printer, or to the next free one when none is chosen. The forward action is "Print →".
-=======
   const fwd = state.step === "model" || state.step === "split" ? splitStep.forward() : null;
   const importing = importProgress();
   const progress = importing ? `<span class="slicer-import-progress" data-role="import-progress" role="status"><progress max="${importing.total}" value="${importing.done}" aria-label="Models imported"></progress> ${importing.done} of ${importing.total} models imported</span>` : "";
@@ -826,7 +817,6 @@ function importProgress() {
 }
 
 // The Slice step's secondary action (the forward action is "Print →"): send the selected Plate to its printer, or to the next free one when none is chosen.
->>>>>>> integration/slice-workflow-ux
 // `why` is set only for a real blocker.
 function sendThisPlateState() {
   const plate = currentPlate();

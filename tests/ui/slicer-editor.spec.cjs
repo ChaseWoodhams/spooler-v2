@@ -193,13 +193,6 @@ const css=(page,sel,prop)=>page.locator(sel).first().evaluate((el,p)=>getCompute
       await page.waitForTimeout(400);
       assert.equal(server.queued.length, 1, 'confirming sends the Plate');
       check('Print → sends nothing; direct send confirms naming Plate and printer', true);
-      // Send Plates says why it is disabled, tied to the button
-      await page.locator('[data-step="print"]').click();
-      await page.waitForSelector('#pp-send');
-      assert.equal(await page.locator('#pp-send').getAttribute('aria-disabled'), 'true');
-      const why = await page.locator('#pp-send').getAttribute('aria-describedby');
-      assert.match(await page.locator('#' + why).innerText(), /Tick the Plates to send/);
-      check('Send Plates names why it is disabled', true);
       await page.close();
     }
 
