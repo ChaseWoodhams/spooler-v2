@@ -492,10 +492,13 @@ def _consume(run: Run, proc) -> tuple:
                 _terminate(proc)
                 return ("error", None, "The assistant did not report its tools, so its answer was not used.")
             try:
-                proc.wait(timeout=5)                  # the CLI exits right after its result; do not wait on it forever
+                code = proc.wait(timeout=5)           # the CLI exits right after its result; do not wait on it forever
             except subprocess.TimeoutExpired:
-                pass
-            return _from_result(event)
+                code = 0
+            outcome = _from_result(event)
+            if code and outcome[0] == "answer":       # a good result from a CLI that then failed is not an answer
+                return ("error", None, f"The assistant stopped unexpectedly (exit code {code}).")
+            return outcome
     if run.reason:
         _terminate(proc)
         return (run.reason, None, None)               # _finish writes the plain message for it

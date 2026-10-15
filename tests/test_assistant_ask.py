@@ -342,6 +342,13 @@ class AskTests(unittest.TestCase):
         self.assertTrue(view["error"])
         self.assertIsNone(view["answer"])
 
+    def test_a_non_zero_exit_after_a_good_result_is_still_an_error(self):
+        self.scenario({"calls": [], "answer": "Looks fine.", "exit_code": 3})
+        view = self.finished()
+        self.assertEqual(view["state"], "error")
+        self.assertIn("3", view["error"])
+        self.assertIsNone(view["answer"])
+
     def test_a_run_that_ends_without_a_result_is_an_error(self):
         self.scenario({"calls": [], "no_result": True})
         self.assertEqual(self.finished()["state"], "error")
