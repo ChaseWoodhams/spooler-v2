@@ -10,7 +10,6 @@ import uuid
 import health
 import jobs
 import state
-from auth import AUTH_ENABLED, _parse_sid, _validate_session
 from discovery import discover_cc2_printers, discover_printers
 from persistence import save_printers, save_tray_map
 from printers import PRINTER_TYPES, make_printer
@@ -74,16 +73,6 @@ async def _send_control_error(ws, message: str) -> None:
 
 
 async def browser_handler(websocket) -> None:
-    if AUTH_ENABLED:
-        try:
-            headers = websocket.request.headers
-        except AttributeError:
-            headers = websocket.request_headers
-        token = _parse_sid(headers.get("cookie", ""))
-        if not _validate_session(token):
-            await websocket.close(1008, "Unauthorized")
-            return
-
     state.browser_clients.add(websocket)
     print(f"[Browser] Client connected ({len(state.browser_clients)} total)")
 

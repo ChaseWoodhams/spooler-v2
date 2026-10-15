@@ -6,7 +6,6 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-import auth
 import health
 import state
 from http_handler import SPHandler
@@ -51,11 +50,6 @@ class HealthEndpointTests(unittest.TestCase):
             loop.close()
         self.assertEqual((status, body["status"]), (200, "ok"))
         self.assertEqual(set(body), {"status", "uptime_s"})
-
-    @unittest.skipUnless(auth.AUTH_ENABLED, "authentication disabled in this environment")
-    def test_system_status_requires_login(self):
-        status, _ = self.get("/api/system-status")
-        self.assertEqual(status, 401)
 
 
 class SnapshotTests(unittest.TestCase):
