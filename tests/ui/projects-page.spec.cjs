@@ -129,6 +129,25 @@ async function open(browser, { projects = PROJECTS, search = '', setup } = {}) {
       await page.close();
     }
 
+    // Open is the primary action on a row; Delete is a quiet text action (UCF-07), in both themes at desktop and phone width
+    for (const light of [false, true]) for (const width of [1280, 390]) {
+      const { page } = await open(browser);
+      await page.setViewportSize({ width, height: 800 });
+      await page.evaluate(light => document.body.classList.toggle('light-mode', light), light);
+      const row = page.locator('#project-list .slicer-project-row', { hasText: 'Garden chair' });
+      await row.waitFor({ timeout: 8000 });
+      const look = el => el.evaluate(node => { const c = getComputedStyle(node), r = node.getBoundingClientRect(); return { bg: c.backgroundColor, border: c.borderTopWidth, h: r.height }; });
+      const openBtn = await look(row.getByRole('button', { name: 'Open' }));
+      const del = await look(row.getByRole('button', { name: 'Delete' }));
+      const label = `${light ? 'light' : 'dark'} ${width}`;
+      assert.notEqual(openBtn.bg, 'rgba(0, 0, 0, 0)', `${label}: Open is filled`);
+      assert.equal(del.bg, 'rgba(0, 0, 0, 0)', `${label}: Delete is not filled`);
+      assert.equal(del.border, '0px', `${label}: Delete has no outline box`);
+      if (width < 700) for (const [name, box] of [['Open', openBtn], ['Delete', del]]) assert.ok(box.h >= 44, `${label}: ${name} is ${box.h}px tall`);
+      await page.close();
+    }
+    console.log('PASS: Open is the filled primary action and Delete is a quiet text action');
+
     // No projects: one sentence and one button
     {
       const { page } = await open(browser, { projects: [] });
