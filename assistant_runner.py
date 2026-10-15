@@ -28,6 +28,8 @@ import uuid
 from pathlib import Path
 
 import assistant
+import datapaths
+import proposal_store
 import spooler_mcp
 from errors import JobError
 
@@ -81,10 +83,11 @@ class Run:
         self.started = time.monotonic()
         self.finished = None
         self.init_ok = False
+        self.proposals: list = []        # tokens of the Proposals this run leaves for the person (latest of each kind), set when it ends
 
     def view(self) -> dict:
         return {"id": self.id, "project_id": self.project_id, "state": self.state, "steps": list(self.steps),
-                "answer": self.answer, "error": self.error}
+                "answer": self.answer, "error": self.error, "proposals": list(self.proposals)}
 
 
 _lock = threading.Lock()
@@ -138,12 +141,12 @@ def build_env(jev_url: str, base: dict | None = None) -> dict:
     return env
 
 
-def mcp_config(project_id: int, data_dir: Path) -> dict:
+def mcp_config(project_id: int, data_dir: Path, run_id: str | None = None) -> dict:
     import sys
-    return {"mcpServers": {SERVER_NAME: {
-        "type": "stdio", "command": sys.executable,
-        "args": [str(Path(spooler_mcp.__file__).resolve()), "--project", str(int(project_id)), "--data-dir", str(data_dir)],
-        "env": {"DATA_DIR": str(data_dir)}}}}
+    args = [str(Path(spooler_mcp.__file__).resolve()), "--project", str(int(project_id)), "--data-dir", str(data_dir)]
+    if run_id:
+        args += ["--run", run_id]               # the server stamps the Proposals it stages with it, and caps them per run
+    return {"mcpServers": {SERVER_NAME: {"type": "stdio", "command": sys.executable, "args": args, "env": {"DATA_DIR": str(data_dir)}}}}
 
 
 def clean_history(history) -> list:
@@ -209,8 +212,9 @@ def ask(project_id: int, message, history=None) -> dict:
         _runs[run.id] = run
         _prune()
     prompt = build_prompt(record, message, turns)
+    _sweep_staging()
     threading.Thread(target=_execute, args=(run, cli, settings["jev_url"], prompt), name=f"assistant-run-{run.id[:8]}", daemon=True).start()
-    return run.view()
+    return with_summaries(run.view())
 
 
 def get(project_id: int, run_id: str) -> dict:
@@ -218,7 +222,34 @@ def get(project_id: int, run_id: str) -> dict:
         run = _runs.get(str(run_id))
         if run is None or run.project_id != int(project_id):
             raise AskError("Run not found", 404)
-        return run.view()
+        view = run.view()
+    return with_summaries(view)
+
+
+def with_summaries(view: dict) -> dict:
+    """The run view with each Proposal token replaced by its card summary (never the resulting data). A Proposal that has
+    been accepted, dismissed or swept since is left out."""
+    found = (proposal_store.read(datapaths.projects_dir(), token) for token in view.get("proposals") or [])
+    return {**view, "proposals": [proposal_store.summary(record) for record in found if record]}
+
+
+def _sweep_staging() -> None:
+    try:
+        proposal_store.sweep(datapaths.projects_dir())
+    except Exception as e:                           # housekeeping must never stop an ask
+        print(f"[Assistant] Could not sweep staging: {type(e).__name__}")
+
+
+def settle_proposals(run: Run, state: str) -> str:
+    """Decide what a run leaves behind, before it is published as finished. A run that ended in an answer keeps the latest
+    Proposal of each kind (the state becomes `proposal`); every other Proposal it staged is deleted, and a run that did not end
+    in an answer (error, cancelled, timed out) leaves none at all. Deleting staging never touches project data."""
+    root = datapaths.projects_dir()
+    staged = proposal_store.listing(root, run=run.id)
+    keep = proposal_store.latest_of_each_kind(staged) if state == "answer" else []
+    proposal_store.remove_run(root, run.id, keep=[r["token"] for r in keep])
+    run.proposals = [r["token"] for r in keep]
+    return "proposal" if keep else state
 
 
 def _prune() -> None:
@@ -232,6 +263,11 @@ def _prune() -> None:
 
 def _finish(run: Run, state: str, answer=None, error=None) -> None:
     """The single place a run ends. The first outcome wins."""
+    if run.finished is None:
+        try:
+            state = settle_proposals(run, state)
+        except Exception as e:                       # bookkeeping must never stop the run from ending
+            print(f"[Assistant] Could not settle Proposals: {type(e).__name__}")
     with _lock:
         if run.finished is None:
             run.state, run.answer, run.error, run.finished = state, answer, error, time.monotonic()
@@ -267,7 +303,7 @@ def _execute(run: Run, cli: str, jev_url: str, prompt: str) -> None:
         cwd = folder / "cwd"
         cwd.mkdir(parents=True)                      # empty: nothing but the CLI's own files ever appear here
         mcp_path, prompt_path = folder / "mcp.json", folder / "system-prompt.txt"
-        mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir())), encoding="utf-8")
+        mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir(), run.id)), encoding="utf-8")
         prompt_path.write_text(SYSTEM_PROMPT, encoding="utf-8")
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
