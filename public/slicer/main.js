@@ -199,6 +199,67 @@ function setFilamentChoice(modelId, choice) {
   changed();
   renderObjectPanel();
 }
+// Purpose: what a Model is printed for. data().purposes["<model id>"] is its own; data().purpose is the project default;
+// absent means General. The server stores nothing for plain General, so a project that never sets one is unchanged.
+const PURPOSE_LABELS = { general: "General", functional: "Functional", display: "Display", draft: "Draft" };
+const PURPOSE_NOTE_MAX = 300;
+const effectivePurpose = modelId => {
+  const own = data().purposes?.[String(modelId)];
+  if (own) return { ...own, source: "model" };
+  if (data().purpose) return { ...data().purpose, source: "project" };
+  return { value: "general", note: "", source: "default" };
+};
+function setModelPurpose(modelId, value, note) {
+  const purposes = { ...(data().purposes || {}) };
+  if (value) purposes[String(modelId)] = { value, note: note ?? purposes[String(modelId)]?.note ?? "" };
+  else delete purposes[String(modelId)];
+  if (Object.keys(purposes).length) data().purposes = purposes; else delete data().purposes;
+  changed();
+  renderObjects();
+  renderObjectPanel();
+}
+function typeModelPurposeNote(modelId, note) {
+  const own = data().purposes?.[String(modelId)];
+  if (!own) return;
+  own.note = note.trim();
+  changed({ merge: true });
+}
+function typeProjectPurposeNote(note) {
+  note = note.trim();
+  if (!data().purpose && !note) return;
+  data().purpose = { value: data().purpose?.value || "general", note };
+  if (data().purpose.value === "general" && !note) delete data().purpose;
+  changed({ merge: true });
+}
+function setProjectPurpose(value, note) {
+  note = (note ?? data().purpose?.note ?? "").trim();
+  if (value === "general" && !note) delete data().purpose; else data().purpose = { value, note };
+  changed();
+  renderObjects();
+  renderObjectPanel();
+  renderPurposeFold();
+}
+// A Model's Purpose select (with "Project default" to follow the project) and note, used by the Model row and the inspector
+function purposeControls(modelId, name) {
+  const own = data().purposes?.[String(modelId)];
+  const inherited = effectivePurpose(modelId);
+  const options = [`<option value="">Project default (${PURPOSE_LABELS[(data().purpose || { value: "general" }).value]})</option>`,
+    ...Object.entries(PURPOSE_LABELS).map(([value, label]) => `<option value="${value}"${own?.value === value ? " selected" : ""}>${label}</option>`)];
+  return `<select class="slicer-purpose" data-purpose-model="${modelId}" aria-label="Purpose of ${esc(name)}" title="What this Model is printed for. Every Copy shares it.">${options.join("")}</select>
+    <input type="text" class="slicer-purpose-note" data-purpose-note="${modelId}" maxlength="${PURPOSE_NOTE_MAX}" aria-label="Purpose note for ${esc(name)}"
+      placeholder="${own ? "Note, e.g. carries motor thrust" : "Follows the project"}" value="${esc(own ? own.note : inherited.note)}"${own ? "" : " readonly"}>`;
+}
+function renderPurposeFold() {
+  const body = $("purpose-body");
+  if (!body || !state.project) return;
+  const current = data().purpose || { value: "general", note: "" };
+  $("purpose-summary").textContent = PURPOSE_LABELS[current.value];
+  if (body.contains(document.activeElement)) return;
+  body.innerHTML = `<label class="slicer-field">Default Purpose <select id="project-purpose" title="Models follow this unless they have their own">
+      ${Object.entries(PURPOSE_LABELS).map(([value, label]) => `<option value="${value}"${current.value === value ? " selected" : ""}>${label}</option>`).join("")}</select></label>
+    <label class="slicer-field">Note <input type="text" id="project-purpose-note" maxlength="${PURPOSE_NOTE_MAX}" placeholder="e.g. brackets for the shelf" value="${esc(current.note)}"></label>
+    <p class="slicer-muted">Guides Orient all and the assistant. It never changes print settings by itself.</p>`;
+}
 const isUpToDate = plateId =>sliceEntry(plateId)?.state === "sliced" && !sliceEntry(plateId).outdated;
 const isBusy = plateId => ["queued", "slicing"].includes(sliceEntry(plateId)?.state);
 const plateImporting = plateId => plateObjects(plateId).some(o => state.project.models.find(m => m.id === o.model)?.state === "importing");
@@ -990,6 +1051,7 @@ function renderAll({ geometry = true } = {}) {
   renderProfile();
   renderPlates();
   renderObjects();
+  renderPurposeFold();
   renderSettings();
   renderSliceState();
   renderSlicing();
@@ -1334,6 +1396,7 @@ function renderObjects() {
       ${model?.state === "failed" ? `<button class="btn btn-secondary btn-sm slicer-retry-btn" type="button" data-retry-model="${model.id}" title="Try importing this model again">Retry</button>`
         : overrides ? `<span class="slicer-badge" title="Settings changed for this object">${overrides}</span>` : "<span></span>"}
       <button class="slicer-icon-btn" type="button" data-remove-object="${object.id}" title="Remove from the plate" aria-label="Remove ${esc(object.name)} from the plate">✕</button>
+      <div class="slicer-object-purpose">${purposeControls(object.model, object.name)}</div>
     </div>`;
   });
   $("object-list").innerHTML = rows.join("") || '<p class="slicer-muted">No objects on this plate. Add a model or drop STL files on the bed.</p>';
@@ -1700,6 +1763,7 @@ function renderObjectPanel() {
     <label class="slicer-field">Copies <input type="number" id="object-copies" min="1" max="500" step="1" value="${copies}" title="How many objects are made from this model, across all plates"></label>
     ${note ? `<div class="slicer-muted" id="object-copies-note">${esc(note)}</div>` : ""}
     ${filamentControls(object)}
+    <div class="slicer-field slicer-purpose-field">Purpose<div class="slicer-purpose-pair">${purposeControls(object.model, object.name)}</div></div>
     <div class="slicer-actions-row">
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="flat" title="Rotate so the largest flat face is on the bed">Lay flat</button>
       <button class="btn btn-secondary btn-sm" type="button" data-object-action="orient" title="Suggest an orientation, to accept or ignore (O)">Suggest orientation</button>
@@ -3091,6 +3155,18 @@ function bindUi() {
     }
   });
 
+  $("object-list").addEventListener("change", e => {
+    if (e.target.matches("[data-purpose-model]")) setModelPurpose(Number(e.target.dataset.purposeModel), e.target.value);
+  });
+  for (const root of [$("object-list"), $("object-panel")]) root.addEventListener("input", e => {
+    if (e.target.matches("[data-purpose-note]")) typeModelPurposeNote(Number(e.target.dataset.purposeNote), e.target.value);
+  });
+  $("purpose-body").addEventListener("change", e => {
+    if (e.target.id === "project-purpose") setProjectPurpose(e.target.value);
+  });
+  $("purpose-body").addEventListener("input", e => {
+    if (e.target.id === "project-purpose-note") typeProjectPurposeNote(e.target.value);
+  });
   $("object-list").addEventListener("click", async e => {
     const retry = e.target.closest("[data-retry-model]");
     if (retry) {
@@ -3211,6 +3287,7 @@ function bindUi() {
       renderAll();
       return;
     }
+    if (e.target.matches("[data-purpose-model]")) return setModelPurpose(object.model, e.target.value);
     if (e.target.id === "object-copies") { setCopies(object, Number(e.target.value)); return; }
     if (e.target.id === "object-pinned") {
       if (e.target.checked) object.pinned = true; else delete object.pinned;
