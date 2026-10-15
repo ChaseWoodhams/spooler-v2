@@ -127,7 +127,8 @@ class TuningLimitsTests(unittest.TestCase):
 
     def test_a_damaged_or_hand_edited_file_falls_back_per_key_with_a_note_and_never_raises(self):
         path = assistant.data_dir() / assistant.SETTINGS_NAME
-        path.write_text(json.dumps({"cli_path": "", "tuning": {"version": 1, "limits": {"max_turns": 500, "deadline_seconds": 90,
+        cli = assistant.load_settings()["cli_path"]                  # keep the fake CLI: an empty path would find a real claude on PATH
+        path.write_text(json.dumps({"cli_path": cli, "tuning": {"version": 1, "limits": {"max_turns": 500, "deadline_seconds": 90,
                                                                                            "question_chars": "lots", "mystery": 1}, "other": {}}}), encoding="utf-8")
         status, body = self.call("GET", "/api/assistant/settings")
         self.assertEqual(status, 200)
