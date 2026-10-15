@@ -476,6 +476,10 @@ class SPHandler(SimpleHTTPRequestHandler):
             self._assistant_settings()
             return
 
+        if self.path.split("?", 1)[0] == "/api/assistant/status":
+            self._assistant_status(None)
+            return
+
         if self.path.startswith("/api/camera/"):
             self._proxy_camera()
         elif self.path.startswith("/api/thumbnail/"):
@@ -747,11 +751,11 @@ class SPHandler(SimpleHTTPRequestHandler):
 
     def _assistant_status(self, project_id):
         """GET /api/projects/<id>/assistant/status[?fresh=1]: available, or why not. Never fails the page."""
-        record = projects.get_project(project_id)       # 404 for an unknown project
+        record = projects.get_project(project_id) if project_id is not None else None     # 404 for an unknown project
         fresh = "fresh=1" in urllib.parse.urlparse(self.path).query.split("&")
         try:
             import assistant
-            self._json(assistant.project_status(record, fresh))
+            self._json(assistant.project_status(record, fresh) if record else assistant.status(fresh))
         except Exception as e:
             self._json({"available": False, "reason": f"The assistant could not start: {e}", "purpose": None})
 

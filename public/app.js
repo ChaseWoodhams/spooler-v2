@@ -1336,6 +1336,7 @@ document.addEventListener("keydown", event => {
 const _settingsModal          = document.getElementById("modal-app-settings");
 const _settingsMenu           = document.getElementById("settings-menu");
 const _settingsNotifPage      = document.getElementById("settings-notifications");
+const _settingsAssistantPage  = document.getElementById("settings-assistant");
 const _settingsPrintersPage   = document.getElementById("settings-printers");
 const _settingsPrinterEditPage = document.getElementById("settings-printer-edit");
 const _settingsPageReturnTargets = new WeakMap();
@@ -1349,7 +1350,7 @@ function _settingsFeedback(message, state = "info") {
   feedback.textContent = message;
 }
 
-const _allSettingsPages = () => [_settingsNotifPage, _settingsPrintersPage, _settingsPrinterEditPage];
+const _allSettingsPages = () => [_settingsNotifPage, _settingsAssistantPage, _settingsPrintersPage, _settingsPrinterEditPage];
 
 function _openSettings() {
   _allSettingsPages().forEach(p => p && (p.style.display = "none"));
@@ -1813,6 +1814,61 @@ function _setThresholdError(input, message) {
 }
 ["notif-layer-number", "notif-nozzle-idle-threshold", "notif-nozzle-printing-threshold", "notif-spool-low-threshold"].forEach(id =>
   document.getElementById(id)?.addEventListener("input", e => { if (e.target.checkValidity()) _setThresholdError(e.target, ""); }));
+
+
+// Assistant sub-page: CLI path and Jev address (no API key). The check only runs when asked.
+async function _loadAssistantSettings() {
+  const result = document.getElementById("assistant-check-result");
+  if (result) result.textContent = "";
+  try {
+    const r = await fetchWithTimeout("/api/assistant/settings", {}, { timeoutMs: 8000, retries: 1 });
+    const s = await r.json();
+    document.getElementById("assistant-cli-path").value = s.cli_path || "";
+    document.getElementById("assistant-jev-url").value = s.jev_url === s.defaults?.jev_url ? "" : (s.jev_url || "");
+  } catch (err) {
+    _settingsFeedback(`Could not load the assistant settings: ${err.message}.`, "error");
+  }
+}
+async function _saveAssistantSettings() {
+  const r = await fetch("/api/assistant/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      cli_path: document.getElementById("assistant-cli-path").value,
+      jev_url: document.getElementById("assistant-jev-url").value,
+    }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || "The assistant settings were not saved.");
+  return d;
+}
+document.getElementById("btn-settings-goto-assistant")?.addEventListener("click", () => {
+  _loadAssistantSettings();
+  _showSettingsPage(_settingsAssistantPage);
+});
+document.getElementById("btn-settings-back-assistant")?.addEventListener("click", _backToSettingsMenu);
+document.getElementById("btn-assistant-save")?.addEventListener("click", async () => {
+  try {
+    await _saveAssistantSettings();
+    _settingsFeedback("Assistant settings saved.", "ok");
+    toast("Assistant settings saved");
+    _backToSettingsMenu();
+  } catch (err) {
+    _settingsFeedback(err.message, "error");
+  }
+});
+document.getElementById("btn-assistant-check")?.addEventListener("click", async () => {
+  const result = document.getElementById("assistant-check-result");
+  result.textContent = "Checking…";
+  try {
+    await _saveAssistantSettings();
+    const s = await (await fetch("/api/assistant/status?fresh=1")).json();
+    result.textContent = s.available ? "Available: the CLI was found and Jev answered ok." : `AI unavailable: ${s.reason}`;
+  } catch (err) {
+    result.textContent = `Could not check: ${err.message}`;
+  }
+});
+
 
 document.getElementById("btn-settings-goto-notifications")?.addEventListener("click", () => {
   _populateNotifForm();

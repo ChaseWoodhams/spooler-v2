@@ -176,6 +176,12 @@ class AssistantStatusTests(unittest.TestCase):
             self.assertEqual(code, 200)
             self.assertEqual(self.status()[1]["purpose"]["default"], {"value": "functional", "note": "carries thrust"})
 
+    def test_the_check_also_answers_without_a_project(self):
+        self.use_cli(str(self.dir / "nope.exe"))
+        code, body = self.call("GET", "/api/assistant/status?fresh=1")
+        self.assertEqual(code, 200)
+        self.assertFalse(body["available"])
+
     def test_an_unknown_project_is_404(self):
         code, _ = self.call("GET", "/api/projects/99999/assistant/status")
         self.assertEqual(code, 404)
