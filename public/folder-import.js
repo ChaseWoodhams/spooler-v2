@@ -40,7 +40,6 @@ window.FolderImport = (() => {
       xhr.setRequestHeader("Content-Type", "application/octet-stream");
       xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
       xhr.onload = () => {
-        if (xhr.status === 401) { location.replace("/login"); return; }
         let data = {};
         try { data = JSON.parse(xhr.responseText); } catch (_) { /* not JSON */ }
         if (xhr.status >= 200 && xhr.status < 300) resolve(data);
@@ -59,7 +58,6 @@ window.FolderImport = (() => {
     const response = await fetch("/api/projects", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name || "Imported models" }),
     });
-    if (response.status === 401) { location.replace("/login"); throw new Error("Signed out"); }
     const project = await response.json().catch(() => ({}));
     if (!response.ok || !project.id) throw new Error(project.error || `Couldn't create the project (HTTP ${response.status})`);
     const failed = []; let added = 0;

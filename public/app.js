@@ -15,16 +15,6 @@ const RECONNECT_MAX_MS  = 15000;
   }
 })();
 
-// Redirect to login on any 401 from our own API
-const _fetch = window.fetch.bind(window);
-window.fetch = async function(url, options) {
-  const resp = await _fetch(url, options);
-  if (resp.status === 401 && typeof url === "string" && url.startsWith("/api/")) {
-    location.replace("/login");
-  }
-  return resp;
-};
-
 let ws       = null;
 let printers = {}; // id → printer data
 let spools   = []; // spool inventory from Spoolman
@@ -180,7 +170,6 @@ function connect() {
   };
 
   ws.onclose = (ev) => {
-    if (ev.code === 1008) { location.replace("/login"); return; }
     _wsConnected = false;
     _wsAttempts++;
     // Back off while Spooler is down (e.g. restarting) instead of hammering it every few seconds
@@ -1163,14 +1152,6 @@ function openPrinterSettings(id) {
   document.getElementById("input-name").focus();
 }
 
-// ─── Sign out ─────────────────────────────────────────────────────────────────
-async function signOut() {
-  await fetch("/api/logout", { method: "POST" }).catch(() => {});
-  location.replace("/login");
-}
-document.getElementById("btn-signout")?.addEventListener("click", signOut);
-document.getElementById("btn-signout-nav")?.addEventListener("click", signOut);
-
 const mobileMoreButton = document.getElementById("btn-mobile-more");
 const mobileMoreMenu = document.getElementById("mobile-more-menu");
 function closeMobileMore() {
@@ -1208,7 +1189,6 @@ document.getElementById("btn-mobile-settings")?.addEventListener("click", () => 
   mobileMoreButton?.focus();
   document.getElementById("btn-app-settings")?.click();
 });
-document.getElementById("btn-mobile-signout")?.addEventListener("click", signOut);
 document.addEventListener("click", event => {
   if (!mobileMoreMenu?.hidden && !mobileMoreMenu.contains(event.target) && event.target !== mobileMoreButton) closeMobileMore();
 });
@@ -1313,7 +1293,6 @@ document.addEventListener("keydown", event => {
 // ─── App settings ─────────────────────────────────────────────────────────────
 const _settingsModal          = document.getElementById("modal-app-settings");
 const _settingsMenu           = document.getElementById("settings-menu");
-const _settingsPwPage         = document.getElementById("settings-change-password");
 const _settingsNotifPage      = document.getElementById("settings-notifications");
 const _settingsPrintersPage   = document.getElementById("settings-printers");
 const _settingsPrinterEditPage = document.getElementById("settings-printer-edit");
@@ -1328,7 +1307,7 @@ function _settingsFeedback(message, state = "info") {
   feedback.textContent = message;
 }
 
-const _allSettingsPages = () => [_settingsPwPage, _settingsNotifPage, _settingsPrintersPage, _settingsPrinterEditPage];
+const _allSettingsPages = () => [_settingsNotifPage, _settingsPrintersPage, _settingsPrinterEditPage];
 
 function _openSettings() {
   _allSettingsPages().forEach(p => p && (p.style.display = "none"));
@@ -1505,44 +1484,6 @@ document.getElementById("btn-settings-printer-remove")?.addEventListener("click"
   _showSettingsPage(_settingsPrintersPage);
 });
 
-// Password sub-page
-document.getElementById("btn-settings-goto-password")?.addEventListener("click", () => {
-  document.getElementById("settings-new-password").value = "";
-  document.getElementById("settings-confirm-password").value = "";
-  _settingsFeedback("");
-  _showSettingsPage(_settingsPwPage);
-});
-document.getElementById("btn-settings-back")?.addEventListener("click", _backToSettingsMenu);
-document.getElementById("btn-app-settings-save")?.addEventListener("click", async () => {
-  const pw  = document.getElementById("settings-new-password").value;
-  const pw2 = document.getElementById("settings-confirm-password").value;
-  if (pw.length < 8)  { _settingsFeedback("Password must be at least 8 characters.", "error"); return; }
-  if (pw !== pw2)     { _settingsFeedback("Passwords do not match.", "error"); return; }
-  const button = document.getElementById("btn-app-settings-save");
-  button.disabled = true;
-  button.textContent = "Saving…";
-  _settingsFeedback("Saving password…", "info");
-  try {
-    const r = await fetch("/api/change-password", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: pw }),
-    });
-    if (r.ok) {
-      _settingsFeedback("Password updated.", "ok");
-      document.getElementById("settings-new-password").value = "";
-      document.getElementById("settings-confirm-password").value = "";
-    } else {
-      const d = await r.json().catch(() => ({}));
-      _settingsFeedback(d.error || "Failed to update password. Check the connection and try again.", "error");
-    }
-  } catch (err) {
-    _settingsFeedback(`Failed to update password: ${err.message}. Check the connection and try again.`, "error");
-  } finally {
-    button.disabled = false;
-    button.textContent = "Save";
-  }
-});
 
 // ─── Push notifications ───────────────────────────────────────────────────────
 
@@ -2947,12 +2888,8 @@ document.getElementById("modal-changelog")?.addEventListener("click", e => {
 });
 
 // ─── Boot ──────────────────────────────────────────────────────────────────────
-fetch("/api/auth-status")
-  .then(r => r.json())
-  .then(({ spoolman_url }) => {
-    if (spoolman_url) document.getElementById("btn-spoolman-ui").href = spoolman_url;
-  })
-  .catch(() => {});
+const _spoolmanLink = document.getElementById("btn-spoolman-ui");
+if (_spoolmanLink) _spoolmanLink.href = "/spoolman/";
 loadChangelog();
 connect();
 

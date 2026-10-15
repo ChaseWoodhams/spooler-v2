@@ -182,7 +182,6 @@ header {
 .sidenav-item:hover { background: var(--surface2); color: var(--text); }
 .sidenav-item.active { background: rgba(255,107,43,.12); color: var(--accent); }
 .sidenav-spacer { flex: 1; }
-.sidenav-item-signout:hover { background: rgba(220,50,50,.1); color: #e05555; }
 .mobile-only, .mobile-more-menu { display: none; }
 .mobile-more-menu {
   position: fixed;
@@ -1962,8 +1961,7 @@ input[aria-invalid="true"] { border-color: var(--red) !important; }
   }
   .sidenav-spacer,
   .sidenav > #btn-history,
-  .sidenav > #btn-app-settings,
-  .sidenav > #btn-signout-nav { display: none; }
+  .sidenav > #btn-app-settings { display: none; }
   .sidenav .mobile-only { display: flex; }
   .sidenav-item {
     position: relative;

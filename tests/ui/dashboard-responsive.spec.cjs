@@ -120,20 +120,13 @@ const viewports = [
     await page.locator("#btn-system-health-close").click();
     await page.locator("#btn-mobile-more").click();
     await page.locator("#btn-mobile-settings").click();
-    await page.locator("#btn-settings-goto-password").click();
-    const passwordTitleFocused = await page.evaluate(() => document.activeElement.textContent.includes("Change password"));
-    await page.locator("#btn-settings-back").click();
-    const settingsContextRestored = await page.evaluate(() => document.activeElement.id === "btn-settings-goto-password");
-    console.log(`Settings page focus ${passwordTitleFocused && settingsContextRestored ? "PASS" : "FAIL"}`);
-    if (!passwordTitleFocused || !settingsContextRestored) process.exitCode = 1;
-    await page.locator("#btn-settings-goto-password").click();
-    await page.locator("#settings-new-password").fill("short");
-    await page.locator("#settings-confirm-password").fill("short");
-    await page.locator("#btn-app-settings-save").click();
-    const passwordFeedback = await page.locator("#settings-feedback").innerText().catch(() => "");
-    const passwordRejectedClearly = /at least 8 characters/i.test(passwordFeedback);
-    console.log(`Password validation ${passwordRejectedClearly ? "PASS" : "FAIL"}`);
-    if (!passwordRejectedClearly) process.exitCode = 1;
+    const noAuthUi = await page.evaluate(() => !/Sign out|Change password/i.test(document.body.innerText + document.body.textContent));
+    await page.locator("#btn-settings-goto-notifications").click();
+    const notificationsTitleFocused = await page.evaluate(() => document.activeElement.textContent.includes("Notifications"));
+    await page.locator("#btn-settings-back-notif").click();
+    const settingsContextRestored = await page.evaluate(() => document.activeElement.id === "btn-settings-goto-notifications");
+    console.log(`Settings page focus ${notificationsTitleFocused && settingsContextRestored ? "PASS" : "FAIL"}; no sign-out or password UI ${noAuthUi ? "PASS" : "FAIL"}`);
+    if (!notificationsTitleFocused || !settingsContextRestored || !noAuthUi) process.exitCode = 1;
     await page.locator("#modal-app-settings").click({ position: { x: 2, y: 2 } });
 
     const printerUiResults = await page.evaluate(() => {

@@ -58,10 +58,6 @@ async function api(method, path, body) {
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (response.status === 401) {
-    location.replace("/login");
-    throw new Error("Signed out");
-  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || `Request failed (HTTP ${response.status})`);
@@ -73,7 +69,6 @@ async function api(method, path, body) {
 
 async function binary(path) {
   const response = await fetch(path);
-  if (response.status === 401) location.replace("/login");
   if (!response.ok) throw new Error(`Couldn't load ${path} (HTTP ${response.status})`);
   return response.arrayBuffer();
 }
@@ -85,7 +80,6 @@ function upload(url, file, onProgress) {
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total * 100); };
     xhr.onload = () => {
-      if (xhr.status === 401) { location.replace("/login"); return; }
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch (_) {}
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
