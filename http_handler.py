@@ -1385,12 +1385,7 @@ class _Server(ThreadingHTTPServer):
     request_queue_size = 256
 
 
-LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
-
-
-def bind_host() -> str:
-    """Address the listeners bind to: this machine only, unless BIND_HOST opts in to another."""
-    return os.getenv("BIND_HOST", "").strip() or "127.0.0.1"
+from bind_address import LOOPBACK_HOSTS, bind_host  # noqa: E402  (listeners bind to bind_host())
 
 
 def bind_warning() -> str | None:

@@ -34,6 +34,20 @@ class DeepLinkTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn('id="modal-review"', body)
 
+    def test_fixed_spoolman_nav_link_redirects_to_spoolman_when_proxy_is_off(self):
+        import http.client
+        import urllib.parse
+        with mock.patch("http_handler.PROXY_SPOOLMAN", False),              mock.patch("http_handler.get_spoolman_url", return_value="http://spoolman.example:7912"):
+            conn = http.client.HTTPConnection(urllib.parse.urlparse(self.api.base).netloc, timeout=10)
+            try:
+                conn.request("GET", "/spoolman/")
+                resp = conn.getresponse()
+                resp.read()
+                self.assertIn(resp.status, (301, 302, 303, 307))
+                self.assertEqual(resp.getheader("Location"), "http://spoolman.example:7912/")
+            finally:
+                conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -208,7 +208,6 @@ header {
   cursor: pointer;
 }
 .mobile-more-menu button:hover, .mobile-more-menu button:focus-visible { background: var(--surface2); }
-.mobile-more-menu #btn-mobile-signout { color: var(--red); }
 
 /* ─── Main / Grid ─────────────────────────────────────────────────────────── */
 main {
