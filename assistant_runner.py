@@ -528,7 +528,7 @@ def _from_result(event: dict) -> tuple:
     return ("answer", text.strip(), None)
 
 
-_USAGE_LIMIT = re.compile(r"usage limit|rate[ _-]?limit|too many requests|429|quota|credit balance|limit reached|hit your limit", re.I)
+_USAGE_LIMIT = re.compile(r"usage limit|rate[ _-]?limit|too many requests|429|quota|credit balance|usage credits|limit reached|hit your limit", re.I)
 
 
 def _is_usage_limit(text: str, event: dict) -> bool:
