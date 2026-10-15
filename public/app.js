@@ -557,6 +557,19 @@ function renderPrinter(printer) {
   const cameraExpanded = _cameraPreferences.get(String(printer.id)) ?? window.innerWidth > 640;
 
   const focusKey = _cardFocusKey(card);   // a printer_update redraws the card: put the focus back where it was
+  card.classList.toggle("printer-card-offline", !connected);
+  if (!connected) {   // an offline printer is a one-line row: live printers keep the space
+    prevCameraImg?.remove();
+    card.innerHTML = `
+      <div class="status-dot ${sc}"></div>
+      <div class="offline-row-text">
+        <button type="button" class="card-title-btn" aria-label="${escAttr(`${printer.name}, Offline. Open printer controls`)}">${escHtml(printer.name)}</button>
+        <span class="offline-row-reason">Offline · not responding at ${escHtml(printer.ip)}</span>
+      </div>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="openPrinterDashboard('${escAttr(printer.id)}')" aria-label="Open ${escAttr(printer.name || "printer")} to reconnect">Open</button>`;
+    _restoreCardFocus(card, focusKey);
+    return;
+  }
   card.innerHTML = `
     <!-- Header -->
     <div class="card-header">

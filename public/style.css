@@ -1987,7 +1987,6 @@ input[aria-invalid="true"] { border-color: var(--red) !important; }
 
 /* ─── Dashboard: Needs you, up next, active projects; in-app Projects page ──── */
 .dash-section { margin-bottom: 22px; }
-#dash-projects { margin-top: 22px; }
 .dash-section h2, .dash-bar h1 { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
 .dash-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .dash-bar h1 { margin: 0; }
@@ -2276,5 +2275,12 @@ body.light-mode { --st-completed: #0f766e; --st-failed: #be123c; --st-cancelled:
 .settings-toggle-text .settings-item-note { margin-left: 0; }
 .notif-param .input-hint, .notif-param .field-error { margin-top: 2px; font-size: 12px; }
 .notif-param .input-hint { color: var(--text-muted); }
+
+/* Offline printers: one compact row after the live cards, full width of the grid */
+.printer-card.printer-card-offline { grid-column: 1 / -1; order: 1; flex-direction: row; align-items: center; gap: 12px; padding: 10px 14px; }
+.offline-row-text { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.offline-row-text .card-title-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.offline-row-reason { color: var(--text-muted); font-size: 12px; }
+.printer-card-offline > .btn { flex: none; min-height: 44px; }
 
 #modal-app-settings:focus { outline: none; }   /* focus lands on the dialog itself; its controls keep their own rings */
