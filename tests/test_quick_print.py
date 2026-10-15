@@ -350,12 +350,11 @@ class QuickPrintApiTests(unittest.IsolatedAsyncioTestCase):
                                                                           "options": {"walls": 4}})[0], 200)
         self.assertEqual(self.call("GET", f"/api/projects/{pid}")[1]["data"]["orientation"], [0.0, 0.0, 90.0])
 
-    async def test_slice_and_print_needs_a_printer(self):
+    async def test_slice_and_print_without_a_printer_goes_to_the_next_free_one(self):
         pid = await self.import_model(cube_stl(30), "cube.stl")
         projects.update_project(pid, {})                      # no printer remembered, none chosen
-        status, error = self.call("POST", f"/api/projects/{pid}/print", {})
-        self.assertEqual(status, 409)
-        self.assertIn("printer", error["error"])
+        status, record = self.call("POST", f"/api/projects/{pid}/print", {})
+        self.assertEqual(status, 200, record)                 # the Job takes the next free printer once sliced
 
 
 if __name__ == "__main__":

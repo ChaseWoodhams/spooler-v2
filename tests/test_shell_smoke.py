@@ -373,7 +373,7 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotRegex(shown, r"(?i)queue")
         # Its one primary action sends this plate to its printer
         label = await page.js("document.querySelector('#step-actions .btn-primary').textContent.trim()")
-        self.assertEqual(label, "Send to Printer 1")
+        self.assertEqual(label, "Send Plate 1 to Printer 1")
         self.assertEqual(await page.js("document.querySelectorAll('#btn-slice-send:not([hidden])').length"), 0)
 
         # The plate has never been sliced, so one click slices it first and then creates exactly one Job
@@ -411,7 +411,7 @@ class ShellSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.run_slicer()
         button = await page.js("(b => ({ disabled: b.disabled, text: b.textContent.trim() }))(document.querySelector('#step-actions .btn-primary'))")
         self.assertFalse(button["disabled"], "no printer is not a blocker: the Job takes the next free one")
-        self.assertEqual(button["text"], "Send to next free printer")
+        self.assertEqual(button["text"], "Send Plate 1 to the next free printer")
         await page.js("document.querySelector('#step-actions .btn-primary').click()")
         for _ in range(100):
             if projects.project_jobs(project_id):

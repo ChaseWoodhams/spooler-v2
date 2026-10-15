@@ -4,6 +4,7 @@ from unittest import mock
 import farm
 import jobs
 import preflight
+import slicer
 import state
 from tests.test_slicer import SlicerTestCase
 
@@ -47,9 +48,10 @@ class SpoolTests(SlicerTestCase):
         self.assertNotIn("hot_plate_temp", pla["changes"])
         self.assertEqual(farm.spool_match(3, bundle["id"], "smooth")["changes"]["hot_plate_temp"], ["60"])
 
-        # no stock PETG preset for this printer: the changes still describe the spool, and no preset is suggested
+        # the changes describe the spool whether or not this printer has a stock PETG preset to suggest
         petg = farm.spool_match(4, bundle["id"])
-        self.assertIsNone(petg["preset"])
+        stock = "Elegoo PETG @ECC" in slicer._system_presets("filament", slicer.require_orca())
+        self.assertEqual(petg["preset"], "Elegoo PETG @ECC" if stock else None)
         self.assertEqual(petg["changes"]["filament_density"], ["1.27"])
         self.assertNotIn("nozzle_temperature", petg["changes"])
 
