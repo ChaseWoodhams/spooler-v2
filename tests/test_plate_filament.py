@@ -35,7 +35,7 @@ class PlateFilamentApiTests(unittest.TestCase):
         jobs.init(self.dir)
         slicer.configure(self.dir, orca_path=make_fake_orca(self.dir / "tools"))
         slicer.init()
-        slicer.save_user_preset("filament", "My PETG", "Elegoo PLA @ECC", {"nozzle_temperature": ["245"]})
+        slicer.save_user_preset("filament", "My PETG", "Elegoo PLA @ECC", {"nozzle_temperature": ["245"], "filament_type": ["PETG"]})
         splits.configure(self.dir)
         projects.configure(self.dir)
         projects.init()
@@ -164,15 +164,13 @@ class PlateFilamentApiTests(unittest.TestCase):
         used = json.loads((projects.plate_dir(project["id"], 1) / "profile" / "filament.json").read_text())
         self.assertEqual(used["name"], "Elegoo PLA @ECC")
 
-    def test_an_unknown_filament_preset_fails_the_slice_with_a_reason(self):
+    def test_an_unknown_filament_preset_is_rejected_before_save(self):
         project = self.project_with_cubes(1)
-        status, project = self.save(project, lambda d: d.update(filaments={"1": {"preset": "No such PETG"}}))
-        self.assertEqual(status, 200, project)
-        self.assertEqual(self.call("POST", f"/api/projects/{project['id']}/plates/1/slice")[0], 200)
-        self.run_slices()
-        entry = self.fetch(project)["slices"]["1"]
-        self.assertEqual(entry["state"], "failed")
-        self.assertIn("No such PETG", entry["error"])
+        status, error = self.save(project, lambda d: d.update(filaments={"1": {"preset": "No such PETG"}}))
+        self.assertEqual(status, 404, error)
+        self.assertIn("No such PETG", error["error"])
+        self.assertNotIn("filaments", self.fetch(project)["data"])
+        self.assertEqual(self.fetch(project)["slices"], {})
 
     def test_the_project_page_totals_filament_per_choice(self):
         project = self.two_plates({"1": GREY})

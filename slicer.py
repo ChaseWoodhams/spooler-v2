@@ -17,6 +17,8 @@ Slices
 """
 
 import asyncio
+import math
+import copy
 import hashlib
 import json
 import os
@@ -25,6 +27,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 import database
@@ -32,6 +35,7 @@ import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
 import state
 from gcode_meta import read_estimates, safe_gcode_name
 from persistence import DATA_DIR
+from values import first
 
 APP_DIR         = Path(__file__).parent
 SLICE_TIMEOUT_S = int(os.getenv("SLICE_TIMEOUT_S", "900"))
@@ -316,7 +320,8 @@ def save_user_preset(kind: str, name: str, base: str, changes: dict | None = Non
         raise jobs.JobError(f"“{base}” is not a {kind} preset")
     if name in chain:
         raise jobs.JobError("A preset can't be based on itself")
-    changes = normalize_overrides({kind: changes or {}}, {kind: flat}).get(kind, {})
+    previous = _user_presets(kind).get(name, {})
+    changes = normalize_overrides({kind: changes or {}}, {kind: flat}, previous={kind: previous}).get(kind, {})
     delta = {k: v for k, v in changes.items() if flat.get(k) != v}  # the parent supplies everything else
     record = {"name": name, "type": kind, "from": "User", "instantiation": "true", "inherits": base,
               "version": flat.get("version", ""), **delta}
@@ -362,6 +367,8 @@ def import_user_preset(raw, name: str | None = None) -> dict:
                 raise jobs.JobError("blocked")
             valid.update(normalize_overrides({kind: {key: value}}, {kind: flat}).get(kind, {}))
         except jobs.JobError:
+            if key in _tab_keys(kind) and key in settings_schema().get("options", {}) and not key.endswith("_gcode"):
+                raise
             dropped.append(key)
     record = save_user_preset(kind, name or raw.get("name") or "Imported preset", base, valid)
     return {"preset": record["name"], "type": kind, "based_on": base, "dropped": sorted(dropped)}
@@ -394,6 +401,12 @@ def _tab_keys(kind: str) -> set:
 
 def _check_value(key: str, value, meta: dict | None) -> str:
     label = (meta or {}).get("label") or key
+    if isinstance(value, (dict, list, tuple)):
+        raise jobs.JobError(f"{label} needs a scalar value for each entry")
+    if value is None or value == "nil":
+        if (meta or {}).get("nullable"):
+            return "nil"
+        raise jobs.JobError(f"{label} does not support nullable inheritance; reset the override instead")
     text = ("1" if value else "0") if isinstance(value, bool) else str(value).strip()
     if len(text) > 4000:
         raise jobs.JobError(f"{label}: the value is too long")
@@ -405,26 +418,30 @@ def _check_value(key: str, value, meta: dict | None) -> str:
             return "0"
         raise jobs.JobError(f"{label} must be on or off")
     if kind in ("int", "float", "percent", "float_or_percent"):
+        if isinstance(value, (bool, dict, list)):
+            raise jobs.JobError(f"{label} must be a number")
         percent = text.endswith("%")
         if percent and kind in ("int", "float"):
             raise jobs.JobError(f"{label} can't be a percentage")
+        if not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?%?", text):
+            raise jobs.JobError(f"{label} must be a number with at most one trailing percent sign")
         try:
-            number = float(text.rstrip("%").strip())
+            number = float((text[:-1] if percent else text).strip())
         except ValueError:
             raise jobs.JobError(f"{label} must be a number")
         if number != number or abs(number) == float("inf") or (kind == "int" and number != int(number)):
             raise jobs.JobError(f"{label} must be a {'whole ' if kind == 'int' else ''}number")
-        if not percent or kind == "percent":
-            low, high = meta.get("min"), meta.get("max")
-            if (low is not None and number < low) or (high is not None and number > high):
-                bounds = f"at least {low:g}" if high is None else f"at most {high:g}" if low is None else f"between {low:g} and {high:g}"
-                raise jobs.JobError(f"{label} must be {bounds}")
+        # Orca validates the numeric token against this field's bounds, including relative tokens.
+        low, high = meta.get("min"), meta.get("max")
+        if (low is not None and number < low) or (high is not None and number > high):
+            bounds = f"at least {low:g}" if high is None else f"at most {high:g}" if low is None else f"between {low:g} and {high:g}"
+            raise jobs.JobError(f"{label} must be {bounds}")
         if kind == "int":
             return str(int(number))
         return text
     if kind == "enum":
         choices = [choice for choice, _ in meta.get("enum", [])]
-        if choices and text not in choices:
+        if not choices or text not in choices:
             raise jobs.JobError(f"“{text}” isn't a valid choice for {label}")
     return text
 
@@ -440,43 +457,179 @@ def _structured(overrides) -> dict:
     return {"process": overrides}
 
 
-def normalize_overrides(overrides, base: dict) -> dict:
+def normalize_overrides(overrides, base: dict, *, previous=None, check_coupled=True, scope=None, affected_id=None) -> dict:
     """Validate process and filament overrides against the flattened presets in `base` and OrcaSlicer's
     setting definitions. Returns {"process": {…}, "filament": {…}} with normalised string values."""
     options = settings_schema().get("options", {})
     out = {}
+    previous = _structured(previous)
     for kind, values in _structured(overrides).items():
         preset = base.get(kind) or {}
         allowed = _tab_keys(kind)
         clean = {}
         for key, value in values.items():
-            if key in BLOCKED_SETTINGS or key.endswith("_gcode"):
-                raise jobs.JobError(f"“{key}” can't be overridden in a locked profile")
-            if key not in preset and key not in allowed:
-                raise jobs.JobError(f"“{key}” isn't a {kind} setting")
-            meta = options.get(key)
-            vector = isinstance(preset.get(key), list) if key in preset else bool((meta or {}).get("vector"))
-            if vector:
-                items = value if isinstance(value, list) else [value]
-                if not 1 <= len(items) <= 16:
-                    raise jobs.JobError(f"“{key}” needs between 1 and 16 values")
-                clean[key] = [_check_value(key, item, meta) for item in items]
-            else:
-                if isinstance(value, (list, dict)):
-                    raise jobs.JobError(f"“{key}” takes a single value")
-                clean[key] = _check_value(key, value, meta)
+            if key in previous.get(kind, {}) and json.dumps(value, sort_keys=True) == json.dumps(previous[kind][key], sort_keys=True):
+                clean[key] = value
+                continue
+            try:
+                if scope == "object" and key not in settings_schema().get("object_scope", []):
+                    raise jobs.JobError(f"{key} belongs at Project or Plate scope, not Object scope" if key in allowed else f"{key} is not a recognized editable setting; remove this saved override")
+                clean[key] = _normalize_setting(key, value, kind, preset, allowed, options, previous.get(kind, {}))
+                _check_context(key, clean[key], {**base.get("machine", {}), **preset, **values}, options.get(key, {}))
+            except jobs.JobError as error:
+                error.issues = [{"code": "invalid-setting", "key": key, "kind": kind,
+                                 "severity": "error", "message": str(error), "resolution_required": True}]
+                if scope:
+                    error.issues[0].update(scope=scope)
+                if affected_id is not None:
+                    error.issues[0]["affected_id"] = affected_id
+                if scope == "object" and key not in settings_schema().get("object_scope", []):
+                    error.issues[0].update(code="unsupported-object-setting", valid_scopes=["project", "plate"] if key in allowed else [])
+                raise
         if clean:
             out[kind] = dict(sorted(clean.items()))
+        before = {**base.get("machine", {}), **preset, **previous.get(kind, {})}
+        after = {**base.get("machine", {}), **preset, **clean}
+        old_issues = configuration_issues(before)
+        new_issues = [issue for issue in configuration_issues(after) if issue not in old_issues]
+        if check_coupled and new_issues:
+            error = jobs.JobError(new_issues[0]["message"])
+            error.issues = [{**issue, "kind": kind} for issue in new_issues]
+            raise error
     return out
 
 
-def create_bundle(machine: str, process: str, filament: str, label: str | None = None, overrides: dict | None = None) -> dict:
+def _normalize_setting(key, value, kind, preset, allowed, options, previous=None):
+    if key in BLOCKED_SETTINGS or key.endswith("_gcode"):
+        raise jobs.JobError(f"“{key}” can't be overridden in a locked profile")
+    meta = options.get(key)
+    if key not in allowed or not meta or meta.get("mode") == "develop" or meta.get("readonly") or meta.get("type") not in {"int", "float", "percent", "float_or_percent", "bool", "enum", "string"}:
+        raise jobs.JobError(f"“{key}” isn't a {kind} setting")
+    vector = bool(meta.get("vector"))
+    if vector:
+        existing = (previous or {}).get(key, preset.get(key))
+        existing = existing if isinstance(existing, list) and existing else [existing]
+        # Single-nozzle editing changes entry zero. A complete vector must keep
+        # the existing shape; never silently discard unselected variants.
+        items = value if isinstance(value, list) else [value, *existing[1:]]
+        if not 1 <= len(items) <= 16:
+            raise jobs.JobError(f"“{key}” needs between 1 and 16 values")
+        if len(items) != len(existing):
+            raise jobs.JobError(f"“{key}” needs {len(existing)} value(s); preserve every stored entry. This printer edits entry 1 only")
+        return [_check_value(key, item, meta) for item in items]
+    else:
+        if isinstance(value, (list, dict)):
+            raise jobs.JobError(f"“{key}” takes a single value")
+        return _check_value(key, value, meta)
+
+def setting_issues(values, base, kind, scope, affected_id=None, *, inherited=False):
+    """Inspect old edits and typed inherited values without normalising or erasing them.
+
+    Untyped inherited Orca fields are locked pass-through, not newly editable controls.
+    """
+    options = settings_schema().get("definitions", settings_schema().get("options", {}))
+    issues = []
+    for key, value in values.items():
+        if inherited and (key in BLOCKED_SETTINGS or key.endswith("_gcode")):
+            continue
+        try:
+            if inherited:
+                meta = options.get(key)
+                if not meta:
+                    raise jobs.JobError(f"{key}: inherited setting has no pinned definition; resolve it before using new output")
+                if meta.get("type") in ("point", "none", "unknown"):
+                    continue
+                items = value if isinstance(value, list) else [value]
+                for item in items:
+                    _check_value(key, item, meta)
+            else:
+                normalize_overrides({kind: {key: value}}, base, check_coupled=False, scope=scope, affected_id=affected_id)
+        except jobs.JobError as error:
+            detail = getattr(error, "issues", [{"code": "unresolved-inherited-setting" if inherited else "invalid-setting", "key": key, "kind": kind,
+                                               "severity": "error", "message": str(error), "resolution_required": True}])[0]
+            issues.append({**detail, "scope": scope, "value": value,
+                           **({"affected_id": affected_id} if affected_id is not None else {})})
+    return issues
+
+
+def _check_context(key, value, effective, meta):
+    # PrintConfig.cpp validate() and libslic3r.h, pinned v2.4.2.
+    if meta.get("ratio_over") != "nozzle_diameter" or not key.endswith("line_width"):
+        return
+    diameters = effective.get("nozzle_diameter")
+    if not isinstance(diameters, list) or not diameters:
+        return  # Standalone user presets acquire nozzle context when selected in a Project.
+    try:
+        nozzles = [float(n) for n in diameters]
+        text = str(value)
+        width = float(text[:-1]) * max(nozzles) / 100 if text.endswith("%") else float(text)
+        limit = min(nozzles) if key == "bridge_line_width" else 5 * max(nozzles)
+    except (ValueError, TypeError):
+        raise jobs.JobError(f"{key}: resolve the nozzle diameter before editing width")
+    if width < 0 or width > limit:
+        raise jobs.JobError(f"{key}: effective width must be between 0 and {limit:g} mm for this nozzle")
+
+
+def configuration_issues(values):
+    """Pinned Orca invariants; return corrections for review, never apply them.
+
+    PrintConfig.cpp validate and ConfigManipulation.cpp update_print_fff_config,
+    v2.4.2. Missing/invalid legacy values have their own typed issues.
+    """
+    def text(key):
+        value = values.get(key)
+        return str(value[0] if isinstance(value, list) and value else value)
+
+    def number(key, ratio=None):
+        try:
+            value = text(key)
+            return float(value[:-1]) * ratio / 100 if value.endswith("%") and ratio is not None else float(value.removesuffix("%"))
+        except (ValueError, TypeError):
+            return None
+
+    issues = []
+    def add(key, message, correction):
+        issues.append({"code": "coupled-setting", "key": key, "severity": "error", "message": message,
+                       "suggested_correction": correction, "resolution_required": True})
+
+    for key, suggested in (("layer_height", "0.2"), ("initial_layer_print_height", "0.2"),
+                           ("bridge_flow", "1"), ("internal_bridge_flow", "1"), ("filament_flow_ratio", "1")):
+        actual = number(key)
+        if actual is not None and actual <= 0:
+            add(key, f"{key} must be greater than zero", {key: suggested})
+
+    height = number("layer_height")
+    start = number("seam_slope_start_height", height)
+    if text("seam_slope_type") not in ("None", "none") and height is not None and start is not None and start >= height:
+        add("seam_slope_start_height", "Scarf start height must be smaller than layer height", {"seam_slope_start_height": "0"})
+    skin, lock = number("skin_infill_depth"), number("infill_lock_depth")
+    if text("sparse_infill_pattern") == "lockedzag" and skin is not None and lock is not None and lock > skin:
+        add("infill_lock_depth", "Infill lock depth must not exceed skin depth", {"infill_lock_depth": str(skin / 2)})
+    if text("spiral_mode") in ("1", "true", "True"):
+        for key, expected in (("wall_loops", 1), ("top_shell_layers", 0), ("sparse_infill_density", 0), ("enable_support", 0), ("enforce_support_layers", 0)):
+            actual = number(key)
+            if actual is not None and actual != expected:
+                add(key, f"{key} must be {expected} when spiral vase mode is enabled", {key: str(expected)})
+    low, high = number("nozzle_temperature_range_low"), number("nozzle_temperature_range_high")
+    if low is not None and high is not None and low > high:
+        add("nozzle_temperature_range_low", "Recommended minimum temperature must not exceed the maximum", {"nozzle_temperature_range_low": text("nozzle_temperature_range_high")})
+    if text("use_firmware_retraction") in ("1", "true", "True") and text("filament_wipe" if "filament_wipe" in values else "wipe") in ("1", "true", "True"):
+        add("filament_wipe" if "filament_wipe" in values else "wipe", "Firmware retraction is not compatible with wipe", {"filament_wipe" if "filament_wipe" in values else "wipe": "0"})
+    return issues
+
+
+def create_bundle(machine: str, process: str, filament: str, label: str | None = None, overrides: dict | None = None,
+                  filament_values: dict | None = None) -> dict:
     """Lock a machine/process/filament combination, optionally with process overrides such as tree supports.
+    `filament_values` (an imported Filament configuration, see imported_filament) is locked in place of the catalogue's `filament`.
     Identical combinations return the existing bundle."""
     orca = require_orca()
     settings, chains = {}, {}
     for kind, name in zip(PRESET_KINDS, (machine, process, filament)):
-        settings[kind], chains[kind] = flatten_preset(_presets(kind, orca), name)
+        if kind == "filament" and filament_values is not None:
+            settings[kind], chains[kind] = copy.deepcopy(filament_values), [filament_values["name"]]
+        else:
+            settings[kind], chains[kind] = flatten_preset(_presets(kind, orca), name)
         if settings[kind].get("type") != kind:
             raise jobs.JobError(f"“{name}” is not a {kind} preset")
     for kind in ("process", "filament"):
@@ -511,6 +664,14 @@ def create_bundle(machine: str, process: str, filament: str, label: str | None =
                            "sha256": hashlib.sha256(contents[kind]).hexdigest()} for kind in PRESET_KINDS},
         "overrides":  overrides,
     }
+    store_bundle(bundle_id, contents, manifest)
+    print(f"[Slicer] Locked profile {bundle_id}: {manifest['label']}")
+    return manifest
+
+
+def store_bundle(bundle_id: str, contents: dict, manifest: dict) -> None:
+    """Write a content-addressed bundle folder atomically; an identical existing bundle is left as it is."""
+    target = profiles_dir() / bundle_id
     profiles_dir().mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".profile-", dir=profiles_dir()))
     try:
@@ -520,9 +681,56 @@ def create_bundle(machine: str, process: str, filament: str, label: str | None =
         os.replace(staging, target)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
-        raise
-    print(f"[Slicer] Locked profile {bundle_id}: {manifest['label']}")
-    return manifest
+        if not (target / "bundle.json").is_file():
+            raise
+
+
+def propose_bundle_refresh(bundle_id: str) -> dict:
+    """What re-reading the Project default's Filament preset from the catalogue would lock, without storing it.
+    The machine and process stay the saved bytes; only the Filament (and the overrides baked into the profile) change.
+    Returns {"bundle_id", "manifest", "contents", "settings", "reference"}; `issue` carries why it cannot be adopted."""
+    current = bundle_settings(bundle_id)
+    verify_bundle(current["bundle"])
+    folder = profiles_dir() / bundle_id
+    contents = {kind: (folder / f"{kind}.json").read_bytes() for kind in ("machine", "process")}
+    name = current["bundle"]["presets"]["filament"]["name"]
+    result = {"current": current, "name": name, "issue": None, "bundle_id": None, "manifest": None,
+              "contents": None, "settings": None, "reference": None}
+    try:
+        reference, values, _ = propose_filament(name, current["machine"], verify=False)
+    except jobs.JobError as exc:
+        result["issue"] = {"code": "preset-unavailable", "message": f"“{name}” is no longer in the preset catalogue: {exc}"}
+        return result
+    result["reference"] = reference
+    try:
+        filament_compatibility(values, current["machine"])
+    except jobs.JobError as exc:
+        result["issue"] = {"code": "incompatible-filament", "message": str(exc)}
+        result["settings"] = {"machine": current["machine"], "process": current["process"], "filament": values}
+        return result
+    overrides = _structured(current["bundle"].get("overrides")).get("filament") or {}
+    if overrides:
+        values.update(normalize_overrides({"filament": overrides}, {**current, "filament": values}).get("filament", {}))
+    contents["filament"] = json.dumps(values, indent=1, sort_keys=True).encode()
+    bundle = hashlib.sha256(b"\n".join(contents[k] for k in PRESET_KINDS)).hexdigest()[:12]
+    manifest = {**current["bundle"], "id": bundle, "created_at": time.time(), "refreshed_from": bundle_id,
+                "vendor_profile_version": vendor_profile_version(require_orca()),
+                "presets": {**current["bundle"]["presets"],
+                            "filament": {**current["bundle"]["presets"]["filament"],
+                                         "chain": reference["source_chain"], "name": values["name"],
+                                         "sha256": hashlib.sha256(contents["filament"]).hexdigest()}}}
+    result.update(bundle_id=bundle, manifest=manifest, contents=contents,
+                  settings={"machine": current["machine"], "process": current["process"], "filament": values})
+    return result
+
+
+def commit_bundle_refresh(proposal: dict) -> dict:
+    """Store a proposed refresh (immutable and content-addressed), or reuse it when it already exists."""
+    if proposal["manifest"] is None:
+        raise jobs.JobError(proposal["issue"]["message"], 409)
+    if not (profiles_dir() / proposal["bundle_id"] / "bundle.json").is_file():
+        store_bundle(proposal["bundle_id"], proposal["contents"], proposal["manifest"])
+    return load_bundle(proposal["bundle_id"])
 
 
 def derive_bundle(bundle_id: str, overrides: dict | None, label: str | None = None) -> dict:
@@ -535,6 +743,131 @@ def derive_bundle(bundle_id: str, overrides: dict | None, label: str | None = No
     return create_bundle(names["machine"], names["process"], names["filament"], label, merged)
 
 
+def filament_compatibility(values: dict, machine: dict) -> None:
+    """Validate actual material and locked machine/nozzle, not the display label."""
+    material = values.get("filament_type")
+    if not isinstance(material, list) or len(material) != 1 or not isinstance(material[0], str) or not material[0].strip():
+        raise jobs.JobError("Filament material identity is unavailable — explicitly choose a verified preset", 409)
+    nozzle = machine.get("nozzle_diameter")
+    named = re.search(r" ([0-9.]+) nozzle$", machine.get("name", ""))
+    try:
+        valid = isinstance(nozzle, list) and len(nozzle) == 1 and math.isfinite(float(nozzle[0])) and float(nozzle[0]) > 0 and (not named or float(nozzle[0]) == float(named[1]))
+    except (ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise jobs.JobError("The locked machine nozzle cannot be verified — choose a compatible profile", 409)
+    if values.get("type") != "filament" or not _compatible(values, machine.get("name", "")):
+        raise jobs.JobError(f"“{values.get('name', 'Filament')}” isn't compatible with {machine.get('name', 'this machine')} and its nozzle", 409)
+    if not values.get("compatible_printers") and values.get("compatible_printers_condition"):
+        raise jobs.JobError("This Filament uses a compatibility condition that cannot be verified — choose an explicitly compatible preset", 409)
+
+
+def _filament_reference(values: dict, chain: list, orca: Path) -> tuple:
+    """(reference, content) of freezing `values`: the stored bytes and the reference that names their hash, material and origin."""
+    content = json.dumps(values, indent=1, sort_keys=True).encode()
+    reference = {"version": 1, "sha256": hashlib.sha256(content).hexdigest(), "name": values["name"], "material": values.get("filament_type"),
+                 "source_chain": chain, "schema": "OrcaSlicer 2.4.2", "slicer_folder": orca.parent.name,
+                 "vendor_profile_version": vendor_profile_version(orca)}
+    return reference, content
+
+
+def propose_filament(name: str, machine: dict, *, verify: bool = True) -> tuple:
+    """What freezing the catalogue's current `name` would store: (reference, flattened values, content bytes).
+    Writes nothing, so a review can show it and be cancelled."""
+    orca = require_orca()
+    values, chain = flatten_preset(_presets("filament", orca), name)
+    if verify:
+        filament_compatibility(values, machine)
+    reference, content = _filament_reference(values, chain, orca)
+    return reference, values, content
+
+
+def imported_filament(project: dict, machine: dict, name: str | None) -> tuple:
+    """The Filament configuration an Orca project carries, as an immutable-preset body: (values, left_out).
+    Only keys this application may carry (the Filament tab, minus the blocked and script keys) are kept, each validated like an edit and
+    kept in Orca's own representation (full vectors, "nil" for nullable inheritance). `left_out` lists [{key, code, reason}] for the rest,
+    `code` being "blocked-setting" or "invalid-setting".
+    Raises JobError when the file does not say what material it is, or sizes a different nozzle than `machine`."""
+    material = first(project.get("filament_type"))
+    if not isinstance(material, str) or not material.strip():
+        raise jobs.JobError("The file doesn't say what material it is")
+    wanted, offered = first(project.get("nozzle_diameter")), first(machine.get("nozzle_diameter"))
+    try:
+        mismatch = wanted is not None and float(wanted) != float(offered)
+    except (TypeError, ValueError):
+        mismatch = True
+    if mismatch:
+        raise jobs.JobError(f"The file's {wanted} mm nozzle doesn't match this printer's {offered} mm nozzle")
+    values = {"name": f"{name or material} (imported)", "type": "filament", "from": "system", "instantiation": "true",
+              "filament_type": [material.strip()], "compatible_printers": [machine.get("name", "")]}
+    left_out = []
+    allowed = _tab_keys("filament")
+    for key in sorted(project):
+        if key in values or not (key in allowed or key.startswith("filament_")) or key == "filament_settings_id":
+            continue
+        try:
+            values.update(normalize_overrides({"filament": {key: project[key]}}, {"machine": machine, "filament": {}}, check_coupled=False).get("filament", {}))
+        except jobs.JobError as error:
+            left_out.append({"key": key, "code": "blocked-setting" if key in BLOCKED_SETTINGS or key.endswith("_gcode") else "invalid-setting",
+                             "reason": str(error)})
+    return values, left_out
+
+
+def snapshot_proposal(values: dict, machine: dict) -> tuple:
+    """(reference, content) for freezing `values` (an imported or adjusted Filament configuration) as an immutable snapshot.
+    Writes nothing; store_filament stores exactly this."""
+    orca = require_orca()
+    filament_compatibility(values, machine)
+    return _filament_reference(values, [values["name"]], orca)
+
+
+def lock_filament(name: str, machine: dict) -> dict:
+    """Freeze an alternate in the existing content-addressed profile store."""
+    reference, values, content = propose_filament(name, machine)
+    return store_filament(reference, content, machine)
+
+
+def store_filament(reference: dict, content: bytes, machine: dict) -> dict:
+    """Store proposed Filament content exactly as reviewed and return its verified saved reference."""
+    digest = reference["sha256"]
+    root = profiles_dir() / "filaments"
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / digest
+    if not target.exists():
+        staging = Path(tempfile.mkdtemp(prefix=".filament-", dir=root))
+        try:
+            (staging / "filament.json").write_bytes(content)
+            (staging / "snapshot.json").write_text(json.dumps(reference, indent=1), encoding="utf-8")
+            try:
+                os.replace(staging, target)
+            except OSError:
+                if not target.exists():
+                    raise
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    return filament_snapshot(reference, machine)[0]
+
+
+def filament_snapshot(reference: dict, machine: dict) -> tuple:
+    """Verify saved content without consulting the mutable preset catalogue."""
+    digest = reference.get("sha256") if isinstance(reference, dict) else None
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise jobs.JobError("Filament snapshot reference is invalid — explicitly choose a verified preset", 409)
+    folder = profiles_dir() / "filaments" / digest
+    try:
+        content = (folder / "filament.json").read_bytes()
+        saved = json.loads((folder / "snapshot.json").read_text(encoding="utf-8"))
+        values = json.loads(content)
+        if (hashlib.sha256(content).hexdigest() != digest or saved.get("sha256") != digest
+                or saved.get("version") != 1 or saved.get("material") != values.get("filament_type")
+                or saved.get("name") != values.get("name")):
+            raise ValueError("checksum")
+    except (OSError, ValueError):
+        raise jobs.JobError("The saved Filament snapshot is missing or damaged — historical Slices remain available; explicitly choose a verified preset", 409)
+    filament_compatibility(values, machine)
+    return saved, values
+
+
 def bundle_settings(bundle_id: str) -> dict:
     """A locked profile's manifest and its flattened machine, process and filament settings."""
     manifest = load_bundle(bundle_id)
@@ -544,6 +877,80 @@ def bundle_settings(bundle_id: str) -> dict:
                                        for kind in PRESET_KINDS}}
     except (OSError, ValueError):
         raise jobs.JobError(f"The files of “{manifest['label']}” are missing — lock the profile again", 409)
+
+
+_CUBE_CORNERS = [(x, y, z) for x in (0, 10) for y in (0, 10) for z in (0, 10)]
+_CUBE_FACES = [(0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5), (0, 4, 5), (0, 5, 1), (2, 3, 7), (2, 7, 6), (0, 2, 6), (0, 6, 4), (1, 5, 7), (1, 7, 3)]
+
+
+def orca_identity() -> str | None:
+    """Which OrcaSlicer answers (its folder, e.g. OrcaSlicer-2.4.2), or None when there is none."""
+    orca = orca_executable()
+    return orca.parent.name if orca else None
+
+
+def orca_project_config(settings: dict, workdir: Path, datadir: Path) -> tuple:
+    """(config, exit code, log): Orca's complete project configuration for `settings` ({machine, process, filament} values), as
+    OrcaSlicer itself writes it when exporting a 3MF of a 10 mm cube with those inputs. Keys the presets leave out come back with
+    Orca's own resolved value. `config` is None when Orca is missing (exit code None) or wrote nothing readable."""
+    orca = orca_executable()
+    if orca is None:
+        return None, None, "OrcaSlicer was not found"
+    workdir = Path(workdir)
+    for kind in PRESET_KINDS:
+        (workdir / f"{kind}.json").write_text(json.dumps(settings[kind], sort_keys=True), encoding="utf-8")
+    # A closed ASCII cube: Orca's STL reader refuses the binary files write_stl makes, and rejected the bare tetrahedron used before
+    (workdir / "template.stl").write_text("solid template\n" + "".join(
+        "facet normal 0 0 0\n outer loop\n" + "".join(f"  vertex {x} {y} {z}\n" for x, y, z in (_CUBE_CORNERS[i] for i in face)) + " endloop\nendfacet\n"
+        for face in _CUBE_FACES) + "endsolid template\n", encoding="ascii")
+    out = workdir / "template.3mf"
+    code, text = runner([str(orca), "--datadir", str(datadir), "--arrange", "0",
+                         "--load-settings", f"{workdir / 'machine.json'};{workdir / 'process.json'}",
+                         "--load-filaments", str(workdir / "filament.json"), "--export-3mf", str(out), str(workdir / "template.stl")], 120)
+    try:
+        with zipfile.ZipFile(out) as archive:
+            config = json.loads(archive.read("Metadata/project_settings.config").decode("utf-8"))
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        config = None
+    return (config if isinstance(config, dict) else None), code, text
+
+
+def orca_resolved(bundle_id: str) -> dict | None:
+    """Every value Orca resolves for a locked profile, including those its presets do not state, or None when Orca is missing or
+    could not say. The answer depends on the profile (which never changes) and on the Orca that gave it, so it is kept beside the
+    profile under that Orca's name; a failed run is never kept."""
+    identity = orca_identity()
+    if identity is None:
+        return None
+    folder = profiles_dir() / load_bundle(bundle_id)["id"]
+    cached = folder / f"orca-resolved-{re.sub(r'[^A-Za-z0-9._-]+', '_', identity)}.json"
+    try:
+        return json.loads(cached.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    try:
+        with tempfile.TemporaryDirectory(prefix=".resolve-", dir=folder) as tmp:
+            config, code, _ = orca_project_config(bundle_settings(bundle_id), Path(tmp), _data_dir / "slicer-data-resolve")
+    except OSError:                     # Orca could not be started: the caller falls back to listing what it cannot compare
+        return None
+    if config is None or code != 0:
+        return None
+    partial = cached.with_name(f".{cached.name}.{os.getpid()}.tmp")
+    partial.write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
+    os.replace(partial, cached)         # whole or not at all, even when two imports race to write it
+    return config
+
+
+def with_orca_defaults(settings: dict) -> dict:
+    """`settings` (bundle_settings) with each process and filament key its presets leave out filled in from Orca's own resolved
+    value, so a file's setting can be compared with what Orca would actually use. Unchanged when Orca cannot say."""
+    resolved = orca_resolved(settings["bundle"]["id"])
+    if not resolved:
+        return settings
+    filled = dict(settings)
+    for kind in USER_PRESET_KINDS:
+        filled[kind] = {**{k: resolved[k] for k in _tab_keys(kind) if k in resolved}, **settings[kind]}
+    return filled
 
 
 def load_bundle(bundle_id: str) -> dict:

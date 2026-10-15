@@ -189,6 +189,47 @@ class ProfileTests(SlicerTestCase):
 class UserPresetTests(SlicerTestCase):
     PROCESS = "0.20mm Standard @Elegoo CC 0.4 nozzle"
 
+    def test_filament_vector_edit_preserves_other_entries_and_rejects_invalid_shape(self):
+        # An independent Orca preset fixture with two stored variants. CC1 uses
+        # entry zero; editing it must preserve the unselected variant.
+        source = next(slicer.orca_executable().parent.rglob("Elegoo PLA @ECC.json"))
+        fixture = json.loads(source.read_text())
+        fixture["nozzle_temperature"] = ["210", "220"]
+        fixture["filament_retraction_length"] = ["0.8", "nil"]
+        source.write_text(json.dumps(fixture))
+        slicer.configure(self.dir, orca_path=slicer.orca_executable())
+        saved = slicer.save_user_preset("filament", "Tuned", "Elegoo PLA @ECC", {
+            "nozzle_temperature": "235", "filament_retraction_length": None})
+        self.assertEqual(saved["nozzle_temperature"], ["235", "220"])
+        self.assertEqual(saved["filament_retraction_length"], ["nil", "nil"])
+        bundle = slicer.create_bundle("Elegoo Centauri Carbon 0.4 nozzle", self.PROCESS, "Tuned")
+        self.assertEqual(slicer.bundle_settings(bundle["id"])["filament"]["nozzle_temperature"], ["235", "220"])
+        imported = slicer.import_user_preset(json.loads(json.dumps(saved)), name="Reopened tuned")
+        reopened = slicer.create_bundle("Elegoo Centauri Carbon 0.4 nozzle", self.PROCESS, imported["preset"])
+        self.assertEqual(slicer.bundle_settings(reopened["id"])["filament"]["filament_retraction_length"], ["nil", "nil"])
+        for key, value in (("nozzle_temperature", ["235"]), ("nozzle_temperature", ["235", "bad"]),
+                           ("nozzle_temperature", ["235", "220", "230"]), ("idle_temperature", [None]),
+                           ("idle_temperature", ["nil"]), ("filament_retraction_length", [["nil"]]),
+                           ("filament_z_hop_types", ["invented"]), ("filament_type", [{"type": "ASA"}])):
+            with self.subTest(key=key, value=value), self.assertRaises(JobError):
+                slicer.save_user_preset("filament", "Rejected", "Elegoo PLA @ECC", {key: value})
+
+    def test_import_refuses_invalid_typed_values_instead_of_dropping_them(self):
+        with self.assertRaises(JobError) as rejected:
+            slicer.import_user_preset({"type": "process", "name": "Invalid import", "inherits": self.PROCESS,
+                "wall_loops": "2.5"})
+        self.assertEqual(rejected.exception.issues[0]["key"], "wall_loops")
+        self.assertNotIn("Invalid import", slicer.stock_presets()["user"]["process"])
+
+    def test_saving_an_unchanged_legacy_preset_value_preserves_it(self):
+        slicer.save_user_preset("process", "Old preset", self.PROCESS, {"wall_loops": "4"})
+        source = next((self.dir / "presets" / "process").glob("*.json"))
+        record = json.loads(source.read_text())
+        record["wall_loops"] = "2.5"
+        source.write_text(json.dumps(record))
+        saved = slicer.save_user_preset("process", "Old preset", self.PROCESS, {"wall_loops": "2.5", "layer_height": "0.3"})
+        self.assertEqual(saved["wall_loops"], "2.5")
+
     def test_saved_preset_stores_only_its_changes_and_flattens_over_its_parent(self):
         record = slicer.save_user_preset("process", "Strong walls", self.PROCESS, {"wall_loops": "5", "layer_height": "0.2"})
 

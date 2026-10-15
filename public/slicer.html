@@ -11,7 +11,7 @@
   <script src="/modal.js?v=1"></script>
   <script src="/confirm-dialog.js?v=1"></script>
   <link rel="stylesheet" href="split.css?v=4" />
-  <link rel="stylesheet" href="slicer.css?v=55" />
+  <link rel="stylesheet" href="slicer.css?v=56" />
   <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/" } }</script>
 </head>
 <body class="slicer-page">
@@ -37,7 +37,8 @@
       <details class="tool-more">
         <summary class="btn btn-secondary btn-sm" aria-label="More project actions" title="Export and other project actions">More</summary>
         <div class="tool-more-panel">
-          <div class="tool-more-row"><button id="btn-export-3mf" class="btn btn-secondary btn-sm" type="button" title="Download the project as an OrcaSlicer project (3MF) with its plates, placements and settings">Export 3MF</button></div>
+          <div class="tool-more-row"><button id="btn-import-records" class="btn btn-secondary btn-sm" type="button" title="Imported 3MF files, the losses accepted with them and the original archives">Imports</button></div>
+          <div class="tool-more-row"><button id="btn-export-3mf" class="btn btn-secondary btn-sm" type="button" title="Review what an OrcaSlicer project (3MF) can faithfully keep of this project, then download it">Export 3MF</button></div>
         </div>
       </details>
       <span id="save-state" class="slicer-muted"></span>
@@ -113,6 +114,7 @@
           <select id="preset-machine-select"></select></div>
         <div class="preset-row"><label for="preset-filament-select">Filament</label>
           <select id="preset-filament-select"></select>
+          <button id="btn-refresh-filament" class="preset-btn" type="button" title="Review the preset catalogue's current version of this Filament before the Project uses it">Review update</button>
           <button id="btn-save-filament" class="preset-btn" type="button" aria-label="Save filament preset" title="Save the filament changes as a preset" hidden>Save</button>
           <button id="btn-delete-filament" class="preset-btn" type="button" aria-label="Delete filament preset" title="Delete this saved preset" hidden>Delete</button></div>
         <div class="preset-row"><label for="preset-process-select">Process</label>
@@ -128,7 +130,7 @@
         <details class="slicer-subfold" id="fold-material-more">
           <summary>Spool and preset import</summary>
           <div class="preset-row"><label for="spool-select">Spool</label>
-            <select id="spool-select" title="Use a Spoolman spool: its density, temperatures and cost are applied as filament settings"></select></div>
+            <select id="spool-select" title="Review a Spoolman spool's density, temperatures and cost before they are applied to the Project default Filament"></select></div>
           <p id="spool-note" class="slicer-muted" hidden></p>
           <div class="preset-row"><label for="btn-import-preset">Import</label>
             <button id="btn-import-preset" class="btn btn-secondary btn-sm" type="button" title="Import an OrcaSlicer process or filament preset (.json)">Orca preset…</button>
@@ -150,6 +152,10 @@
         <div id="bricklayers" class="slicer-bricklayers"></div>
       </details>
 
+      <section class="slicer-card" data-steps="plates slice" aria-label="Plate settings review">
+        <button id="review-effective-settings" class="btn btn-secondary btn-sm" type="button">Settings actually used</button>
+        <div id="effective-settings-review" aria-live="polite"></div>
+      </section>
       <details class="slicer-card slicer-settings slicer-fold" id="fold-settings" data-steps="plates slice">
         <summary><span>Print settings</span><small id="settings-summary"></small></summary>
         <div id="settings-scope-toggle" class="scope-toggle" role="group" aria-label="Settings apply to">
@@ -365,6 +371,15 @@
     <div class="slicer-dialog-actions"><button class="btn btn-secondary" type="button" data-close>Close</button></div>
   </dialog>
 
+  <dialog id="dlg-review" class="slicer-dialog slicer-dialog-wide" aria-labelledby="review-title">
+    <h3 id="review-title">Review changes</h3>
+    <div id="review-body"></div>
+    <div class="slicer-dialog-actions">
+      <button class="btn btn-secondary" type="button" data-close id="btn-review-cancel">Cancel</button>
+      <button id="btn-review-apply" class="btn btn-primary" type="button">Apply to Project</button>
+    </div>
+  </dialog>
+
   <dialog id="dlg-save-profile" class="slicer-dialog">
     <h3 id="save-profile-title">Save as a preset</h3>
     <p id="save-profile-summary" class="slicer-muted"></p>
@@ -379,6 +394,6 @@
   <script src="/status-badge.js?v=1"></script>
   <script src="/outcome-prompt.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=60"></script>
+  <script type="module" src="slicer/main.js?v=61"></script>
 </body>
 </html>

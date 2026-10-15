@@ -7,7 +7,10 @@ import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=5";
 import { projectPage } from "./project-page.js?v=10";
 import { newProject } from "./new-project.js?v=10";
+import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
+import { showExport } from "./export-plan.js?v=2";
 import { Viewport, featureColor } from "./viewport.js?v=5";
+import { reviewHtml, reviewTitle, blockers, acknowledgements } from "./review.js?v=1";
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -25,12 +28,15 @@ const state = {
   step: "plates",
   mode: "prepare",
   settingsTab: "process",
+  reviewContext: null,
+  reviewQuery: { plate: null, search: "", changed: false, object: "" },
   schema: null,
   bundles: [],
   bundleSettings: new Map(),
   saveTimer: null,
   saving: false,
   pendingSave: false,
+  saveError: null,
   poller: null,
   preview: null,        // { key, analysis, buffer }
   playing: null,        // { frame } while the preview plays the print
@@ -64,6 +70,7 @@ async function api(method, path, body, { timeoutMs = method === "GET" ? 20000 : 
   if (!response.ok) {
     const error = new Error(data.error || `Request failed (HTTP ${response.status})`);
     error.status = response.status;
+    error.issues = data.issues || [];
     throw error;
   }
   return data;
@@ -180,7 +187,7 @@ function plateMix(plateId) {
   const seen = new Map();
   for (const o of plateObjects(plateId).sort((a, b) => a.id - b.id)) {
     const choice = filamentChoice(o.model);
-    seen.set(choice ? `${choice.preset}\n${choice.colour || ""}` : "", choiceLabel(choice));
+    seen.set(choice ? `${choice.preset}\n${choice.colour || ""}\n${choice.snapshot?.sha256 || ""}` : "", choiceLabel(choice));
   }
   const labels = [...seen.values()];
   return labels.length < 2 ? "" : `${plateById(plateId)?.name || `Plate ${plateId}`} mixes ${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
@@ -222,7 +229,7 @@ async function boot() {
   showPrinter(printer.shown, { save: false });
   state.settings = new SettingsPanel({
     tabs: $("settings-tabs"), pages: $("settings-pages"), body: $("settings-body"), search: $("settings-search"),
-    mode: $("settings-mode"), onChange: changeSetting, onReset: resetSettings, onTab: tab => { state.settingsTab = tab; renderSettings(); },
+    mode: $("settings-mode"), onResolve: resolveSavedSetting, onChange: changeSetting, onReset: resetSettings, onTab: tab => { state.settingsTab = tab; renderSettings(); },
   });
   projectPage.attach({
     api, toast,
@@ -254,6 +261,20 @@ async function boot() {
   });
   $("settings-mode").value = remember("slicer.mode") || (remember("slicer.advanced") === "1" ? "advanced" : "simple");
   $("settings-mode").addEventListener("change", e => { remember("slicer.mode", e.target.value); renderFoldSummaries(); });
+  $("review-effective-settings").addEventListener("click", () => reviewEffectiveSettings());
+  $("effective-settings-review").addEventListener("input", event => {
+    if (event.target.matches("[data-review-search]")) updateReviewQuery({ search: event.target.value });
+  });
+  $("effective-settings-review").addEventListener("change", event => {
+    if (event.target.matches("[data-review-changed]")) updateReviewQuery({ changed: event.target.checked });
+    if (event.target.matches("[data-review-scope]")) updateReviewQuery({ object: event.target.value });
+  });
+  $("effective-settings-review").addEventListener("click", event => {
+    const control = event.target.closest('[data-control]');
+    if (control) { openSettingControl(JSON.parse(control.dataset.control)); return; }
+    const button = event.target.closest('[data-resolve]');
+    if (button) resolveSavedSetting(JSON.parse(button.dataset.target), button.dataset.setting, button.dataset.resolve, button.dataset.destination);
+  });
   try {
     state.schema = await (await fetch("/orca/settings.json")).json();
     state.settings.setSchema(state.schema);
@@ -386,23 +407,71 @@ async function chooseSpool(value) {
     renderAll();
     return;
   }
+  renderFarm();   // the selector keeps showing the saved spool until the review is applied
+  await openReview({ source: "spool", spool_id: id });
+}
+
+// ── Reviewed preset and spool changes ─────────────────────────────────────────────
+// A newer preset or a Spoolman spool only reaches the Project through a server-side preview and an explicit,
+// revision-checked apply; cancelling leaves everything as it was.
+const review = { body: null, preview: null };
+
+async function openReview(body) {
+  if (!state.project) return;
   try {
-    let match = await api("POST", "/api/slicer/spool-match", { spool_id: id, bundle_id: profile.bundle_id, bed: data().bed });
-    if (match.preset && match.preset !== match.current_preset) {
-      await choosePreset("filament", match.preset);
-      if (currentPresets()?.filament !== match.preset) { renderFarm(); return; }   // switching was declined or failed
-      match = await api("POST", "/api/slicer/spool-match", { spool_id: id, bundle_id: data().profile.bundle_id, bed: data().bed });
-    }
-    for (const key of SPOOL_KEYS) delete data().profile.filament[key];
-    Object.assign(data().profile.filament, match.changes);
-    data().profile.spool_id = id;
-    rememberDefaults({ spool: id, profile: data().profile.bundle_id });
-    changed();
-    renderAll();
-    toast(`Using ${match.spool.name}` + (match.preset ? "" : " — no stock preset for this material, so the preset's other settings are kept"));
+    await flushSave();   // review the saved Project, never half-typed edits
+    review.body = body;
+    review.preview = await api("POST", `/api/projects/${state.project.id}/settings/review`, body);
   } catch (err) {
     toast(err.message, true);
     renderFarm();
+    return;
+  }
+  renderReview();
+  if (!$("dlg-review").open) $("dlg-review").showModal();
+}
+
+function renderReview(error = null) {
+  const preview = review.preview;
+  $("review-title").textContent = reviewTitle(preview);
+  $("review-body").innerHTML = reviewHtml(preview, { error });
+  updateReviewApply();
+}
+
+function updateReviewApply() {
+  const preview = review.preview;
+  const accepted = [...$("review-body").querySelectorAll("[data-accept]")].every(box => box.checked);
+  $("btn-review-apply").disabled = preview.unchanged || blockers(preview).length > 0 || !accepted;
+}
+
+async function applyReview() {
+  const preview = review.preview;
+  const accept = {};
+  for (const issue of acknowledgements(preview)) accept["accept_" + issue.code.replace(/-/g, "_")] = true;
+  $("btn-review-apply").disabled = true;
+  try {
+    const project = await api("POST", `/api/projects/${state.project.id}/settings/adopt`,
+      { ...review.body, revision: preview.revision, token: preview.token, ...accept });
+    const before = editLog.current;
+    applyProject(project);
+    await loadBundles();
+    await bundleSettings(data().profile.bundle_id);
+    if (before && before !== JSON.stringify(data())) { editLog.undo.push(before); editLog.redo = []; }   // one ordinary, undoable edit
+    editLog.current = JSON.stringify(data());
+    if (review.body.source === "spool") rememberDefaults({ spool: review.body.spool_id, profile: data().profile.bundle_id });
+    $("dlg-review").close();
+    $("save-state").textContent = "Saved";
+    renderAll();
+    toast(review.body.source === "spool" ? "Spool properties applied" : "Preset update applied");
+  } catch (err) {
+    if (err.status === 409 && !err.issues.length) {   // the Project or the source changed since the preview: show the new one
+      try {
+        review.preview = await api("POST", `/api/projects/${state.project.id}/settings/review`, review.body);
+        renderReview(`${err.message}. The review below is current.`);
+        return;
+      } catch (again) { err = again; }
+    }
+    renderReview(err.message);
   }
 }
 
@@ -728,6 +797,10 @@ const editLog = { undo: [], redo: [], current: null, at: 0 };
 const EDIT_LIMIT = 60;
 
 function resetEdits() {
+  state.saveError = null;
+  state.settings?.pending.clear();
+  state.settings?.localIssues.clear();
+  state.settings?.setIssues([]);
   editLog.undo = [];
   editLog.redo = [];
   editLog.current = state.project ? JSON.stringify(data()) : null;
@@ -796,16 +869,16 @@ async function save() {
     const project = await api("PATCH", `/api/projects/${state.project.id}`, { data: sent, revision: state.project.revision });
     const localChangedMeanwhile = JSON.stringify(sent) !== JSON.stringify(data());
     applyProject(project, { keepLocalData: localChangedMeanwhile });
+    state.saveError = null;
+    state.settings.setIssues([]);
     if (localChangedMeanwhile) state.project.revision = project.revision;
     $("save-state").textContent = "Saved";
     loadProblems();
   } catch (err) {
+    state.saveError = err;
+    state.settings.setIssues(err.issues);
     $("save-state").textContent = "Not saved";
     toast(err.message, true);
-    if (err.status === 409 || err.status === 400) {
-      state.project = await api("GET", `/api/projects/${state.project.id}`);
-      renderAll();
-    }
   } finally {
     state.saving = false;
     if (state.pendingSave) {
@@ -824,6 +897,8 @@ async function flushSave() {
     await save();
   }
   while (state.saving) await new Promise(resolve => setTimeout(resolve, 50));
+  if (state.saveError) throw state.saveError;
+  if (state.settings.pending.size) throw new Error('Correct the invalid setting values before continuing');
 }
 
 // The elapsed time of a running slice counts up between polls
@@ -858,7 +933,7 @@ async function refreshProject() {
   const before = state.project;
   const newModels = fresh.models.filter(m => m.state === "ready" && before.models.find(b => b.id === m.id)?.state !== "ready");
   const sliceChanged = JSON.stringify(fresh.slices) !== JSON.stringify(before.slices);
-  const layoutChanged = !state.saving && !state.saveTimer && fresh.revision !== before.revision;
+  const layoutChanged = !state.saving && !state.saveTimer && !state.saveError && !state.settings.pending.size && fresh.revision !== before.revision;
   state.project = { ...before, models: fresh.models, slices: fresh.slices };
   if (layoutChanged) applyProject(fresh);
   if (newModels.length || fresh.models.some((m, i) => m.state !== before.models[i]?.state)) loadProblems();   // a model failed or finished
@@ -899,7 +974,7 @@ function refreshWhenShown() {
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshWhenShown(); });
 // The app shell asks before reloading for an update (net.js), and refreshes this page when Projects is shown again.
-window.spoolerBusy = () => !!(state.saving || state.saveTimer || state.pendingSave || document.querySelector("dialog[open]"));
+window.spoolerBusy = () => !!(state.saving || state.saveTimer || state.pendingSave || state.saveError || state.settings?.pending.size || document.querySelector("dialog[open]"));
 window.spoolerRefresh = refreshWhenShown;
 window.spoolerHome = showProjectsPage;   // the shell's Projects button: back to the page that lists them
 
@@ -1142,6 +1217,8 @@ function slicingText(entry) {
   return `${STAGE_TEXT[entry.stage] || "Slicing"} · ${clock(elapsed)}${usual}`;
 }
 
+const unverifiedKeys = entry => (entry.observed?.differences || []).slice(0, 3).map(d => d.key).join(", ") + ((entry.observed?.difference_count || 0) > 3 ? "…" : "");
+
 function plateStatus(plateId) {
   const entry = sliceEntry(plateId);
   if (!plateObjects(plateId).length) return { text: "Empty", cls: "" };
@@ -1151,6 +1228,7 @@ function plateStatus(plateId) {
   if (entry.state === "slicing") return { text: `Slice in progress — ${slicingText(entry)}`, cls: "" };
   if (entry.state === "failed") return { text: `Failed Slice: ${entry.error || 'The slicer could not finish'}. Retry slicing this Plate.`, cls: "bad" };
   if (entry.outdated) return { text: "Outdated Slice — objects, placement or relevant settings changed. Slice this Plate again before sending it.", cls: "warn" };
+  if (entry.observed?.state === "mismatch") return { text: `Unverified Slice — Orca's output differs from the expected settings (${unverifiedKeys(entry)}). Review the differences before sending.`, cls: "warn" };
   const text = ['Current Slice', duration(entry.estimate_s), entry.estimate_g != null ? `${Math.round(entry.estimate_g)} g` : "Filament estimate unavailable", plural(entry.layers, "layer")].filter(Boolean).join(" · ");
   const printer = state.printers.find(p => p.id === entry.sent_to)?.name;
   if (entry.send_error) return { text: `${text} · not sent: ${entry.send_error}`, cls: "warn" };
@@ -1267,6 +1345,8 @@ function effectiveProcess(base) {
 }
 
 function renderSettings() {
+  const review = $("effective-settings-review");
+  if (review && state.reviewContext !== effectiveReviewContext()) review.innerHTML = "";
   if (!state.project || !state.schema) return;
   if (state.settingsTab === "object" && !$("fold-settings").open) $("fold-settings").open = true;
   const base = state.bundleSettings.get(data().profile.bundle_id);
@@ -1303,8 +1383,152 @@ function renderSettings() {
     const note = kind !== "process" ? "Filament settings apply to every plate."
       : own.length ? `Changes here apply to every plate. ${listNames(own.map(p => p.name))} ${own.length === 1 ? "has settings of its" : "have settings of their"} own on top.`
       : "Changes here apply to every plate.";
-    state.settings.show({ tab: kind, tabs, layout: kind, base: base[kind], changes: data().profile[kind], target: { kind }, note });
+    state.settings.show({ tab: kind, tabs, layout: kind, base: base[kind], changes: data().profile[kind], target: { kind }, note,
+      inheritance: { machine: base.machine, process: effectiveProcess(base) } });
   }
+}
+
+function effectiveReviewContext() {
+  return state.project ? JSON.stringify([state.project.id, state.plate, state.project.revision, data()]) : null;
+}
+
+async function resolveSavedSetting(target, key, action, destination) {
+  try {
+    await flushSave();
+    const projectId = state.project.id, revision = state.project.revision;
+    const before = JSON.stringify(data());
+    const body = {revision, scope: ['object','plate'].includes(target.kind) ? target.kind : 'project',
+      kind: ['object','plate'].includes(target.kind) ? 'process' : target.kind, affected_id: target.id, key, action, destination};
+    let project;
+    try { project = await api('POST', `/api/projects/${projectId}/settings/resolve`, body); }
+    catch (error) {
+      const collision = error.issues?.find(i => i.code === 'setting-move-collision');
+      if (!collision || !confirm(`${key}: ${destination} currently has ${JSON.stringify(collision.destination_value)}. Replace it with ${JSON.stringify(collision.value)}?`)) throw error;
+      project = await api('POST', `/api/projects/${projectId}/settings/resolve`, {...body, replace:true});
+    }
+    if (state.project.id !== projectId) return;
+    const newerLocalEdits = before !== JSON.stringify(data());
+    applyProject(project, {keepLocalData:newerLocalEdits});
+    if (newerLocalEdits) {
+      state.project.revision = project.revision;
+      toast('The setting was resolved. Review your newer unsaved edits before saving.', true);
+    } else {
+      recordEdit();
+      state.settings.setIssues([]);
+      $("save-state").textContent = 'Saved';
+      renderAll();
+      await reviewEffectiveSettings();
+    }
+  } catch (error) { toast(error.message, true); }
+}
+
+function settingResolutionButtons(issue) {
+  if (!issue.resolution_required || !['project','plate','object'].includes(issue.scope) || !issue.key) return '';
+  const target = {kind: issue.scope === 'project' ? issue.kind : issue.scope, id:issue.affected_id};
+  const attrs = `data-target="${esc(JSON.stringify(target))}" data-setting="${esc(issue.key)}"`;
+  const destinations = issue.scope === 'object' ? (issue.valid_scopes || []) : issue.scope === 'plate' ? ['project'] : [];
+  return `<button type="button" data-resolve="remove" ${attrs}>Remove saved override</button>` +
+    destinations.map(d => `<button type="button" data-resolve="move" data-destination="${d}" ${attrs}>Move to ${d === 'plate' ? 'Plate' : 'Project'}</button>`).join('');
+}
+
+// The server owns precedence and every row below. Review presents its captured response; search, the changed filter and
+// the Object drill-down are requests to the server, never browser-side merges.
+const REVIEW_SECTIONS = [["material", "Material"], ["nozzle", "Nozzle"], ["bed", "Bed"], ["temperature", "Temperature"], ["cooling", "Cooling"],
+  ["flow", "Flow"], ["retraction", "Retraction"], ["other", "Other process and filament values"], ["machine", "Machine (read-only)"]];
+const SOURCE_NAMES = { preset: "preset", "alternate-preset": "alternate Filament", project: "project", plate: "plate", object: "object",
+  bed: "bed selection", bricklayers: "BrickLayers", "orca-default": "Orca default" };
+
+function reviewValue(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  return Array.isArray(v) ? v.join(", ") : String(v);
+}
+
+function reviewRow(r) {
+  const notes = [];
+  if (r.enforced) notes.push(`<span>Enforced: ${esc(r.enforced_reason || SOURCE_NAMES[r.source] || r.source)}.</span>`);
+  if (r.note) notes.push(`<span>${esc(r.note)}</span>`);
+  if (r.inactive) notes.push(`<span>Inactive: ${esc(r.inactive_reason)} Stored value is retained.</span>`);
+  if (r.read_only && !r.enforced) notes.push(`<span>Read-only: ${esc(r.read_only_reason || "")}</span>`);
+  if (r.reset_to) notes.push(`<span>Reset returns to ${r.reset_to.value == null ? "the Orca default" : esc(reviewValue(r.reset_to.value))} (${esc(SOURCE_NAMES[r.reset_to.source] || r.reset_to.source)}).</span>`);
+  if (r.control) notes.push(`<button type="button" class="btn btn-secondary btn-sm" data-control="${esc(JSON.stringify(r.control))}" aria-label="Go to ${esc(r.label)} control">Edit</button>`);
+  const chain = (r.chain || []).map(c => SOURCE_NAMES[c.source] || c.source).join(" › ");
+  return `<tr><th scope="row">${esc(r.label)}${r.label !== r.key ? ` <small>${esc(r.key)}</small>` : ""}</th>
+    <td>${esc(reviewValue(r.has_inherited ? r.inherited : null))}</td><td>${esc(reviewValue(r.requested))}</td><td>${esc(reviewValue(r.effective))}</td>
+    <td>${esc(SOURCE_NAMES[r.source] || r.source)}${chain ? ` <small>${esc(chain)}</small>` : ""}</td><td>${notes.join(" ")}</td></tr>`;
+}
+
+function reviewResults(result) {
+  const review = result.review;
+  const bySection = new Map();
+  for (const r of review.rows) bySection.set(r.section, [...(bySection.get(r.section) || []), r]);
+  const material = review.rows.find(r => r.key === "filament_type");
+  const nozzle = review.rows.find(r => r.key === "nozzle_diameter");
+  const bed = review.rows.find(r => r.key === "curr_bed_type");
+  const issues = (result.issues || []).map(i => `<div class="slicer-warning">${esc(i.scope || "")} ${esc(i.affected_id || "")}: ${esc(i.message)}${i.affected_names?.length ? ` — Objects: ${esc(i.affected_names.join(", "))}` : ""}${"value" in i ? ` Saved value: ${esc(JSON.stringify(i.value))}.` : ""} ${settingResolutionButtons(i)}${i.control && ["project", "plate", "object"].includes(i.control.scope) ? `<button type="button" class="btn btn-secondary btn-sm" data-control="${esc(JSON.stringify(i.control))}" aria-label="Go to ${esc(i.key)} control">Go to control</button>` : ""}${i.read_only ? " <small>Inherited and read-only: it is passed through unchanged and cannot be edited here.</small>" : ""}</div>`).join("");
+  const sections = REVIEW_SECTIONS.filter(([id]) => bySection.has(id)).map(([id, title]) => `<details${id !== "machine" ? " open" : ""}><summary>${title} (${bySection.get(id).length})</summary>
+    <table><thead><tr><th scope="col">Setting</th><th scope="col">Inherited</th><th scope="col">Requested</th><th scope="col">Effective</th><th scope="col">Source</th><th scope="col">Notes</th></tr></thead>
+    <tbody>${bySection.get(id).map(reviewRow).join("")}</tbody></table></details>`).join("");
+  return `<p><b>${esc(reviewValue(material?.effective))}</b> · Nozzle ${esc(reviewValue(nozzle?.effective))} mm · ${esc(reviewValue(bed?.effective))}</p>
+    <p>${esc(review.filament_basis.explanation)}</p>${issues}
+    <p class="slicer-muted">Changed means different from ${esc(review.changed_basis)}.</p>
+    ${sections || "<p>No settings match.</p>"}
+    <p>Object settings are sent separately for ${(result.objects || []).length} Objects.</p>`;
+}
+
+function effectiveReviewTitle(review) {
+  return review.scope.kind === "object" ? `Settings sent to Orca — ${review.scope.name}` : "Settings sent to Orca";
+}
+
+function openSettingControl(control) {
+  if (control.scope === "object") {
+    if (!plateObjects().some(o => o.id === control.id)) { toast("That Object is no longer on this Plate", true); return; }
+    state.settingsTab = "object";
+    selectObject(control.id);
+  } else state.settingsTab = control.scope === "plate" ? "plate" : control.kind === "filament" ? "filament" : "process";
+  $("fold-settings").open = true;
+  $("settings-search").value = control.key;
+  renderSettings();
+  $("settings-body").querySelector(`[data-key="${control.key}"]`)?.focus();
+}
+
+let reviewRequest = 0;
+async function reviewEffectiveSettings({ partial = false } = {}) {
+  const el = $("effective-settings-review");
+  const ticket = ++reviewRequest;
+  try {
+    await flushSave();
+    const projectId = state.project.id, plateId = currentPlate().id, revision = state.project.revision;
+    if (state.reviewQuery.plate !== plateId) state.reviewQuery = { plate: plateId, search: "", changed: false, object: "" };
+    const query = state.reviewQuery;
+    if (!partial) el.textContent = "Reviewing…";
+    const params = new URLSearchParams({ revision });
+    if (query.search.trim()) params.set("search", query.search.trim());
+    if (query.changed) params.set("changed", "1");
+    if (query.object) params.set("object", query.object);
+    const result = await api("GET", `/api/projects/${projectId}/plates/${plateId}/effective-settings?${params}`);
+    if (ticket !== reviewRequest || state.project.id !== projectId || currentPlate().id !== plateId || state.project.revision !== revision) return;
+    state.reviewContext = effectiveReviewContext();
+    if (partial && el.querySelector("[data-review-results]")) {
+      el.querySelector("[data-review-title]").textContent = effectiveReviewTitle(result.review);
+      el.querySelector("[data-review-results]").innerHTML = reviewResults(result);
+      return;
+    }
+    const objects = plateObjects(plateId);
+    el.innerHTML = `<h4 data-review-title>${esc(effectiveReviewTitle(result.review))}</h4><p>Expected inputs for this ${result.review.scope.kind}, not measured output from a completed Slice.</p>
+      <div class="slicer-review-controls" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <input type="search" data-review-search aria-label="Search reviewed settings" placeholder="Search labels or keys" value="${esc(query.search)}">
+        <label><input type="checkbox" data-review-changed${query.changed ? " checked" : ""}> Changed values only</label>
+        <label>Review scope <select data-review-scope aria-label="Review scope"><option value="">Plate</option>${objects.map(o => `<option value="${o.id}"${String(o.id) === String(query.object) ? " selected" : ""}>${esc(o.name)}</option>`).join("")}</select></label>
+      </div>
+      <div data-review-results>${reviewResults(result)}</div>`;
+  } catch (err) { if (ticket === reviewRequest) el.textContent = err.message; }
+}
+
+let reviewTimer = null;
+function updateReviewQuery(change) {
+  state.reviewQuery = { ...state.reviewQuery, ...change };
+  clearTimeout(reviewTimer);
+  reviewTimer = setTimeout(() => reviewEffectiveSettings({ partial: true }), 150);
 }
 
 function renderScope() {
@@ -1502,7 +1726,9 @@ function filamentControls(object) {
       <option value="">Project default${base ? ` (${esc(base.replace(/ @.*$/, ""))})` : ""}</option>
       ${filamentOptions(list, choice)}
     </select></label>
-    <label class="slicer-field"${choice ? "" : " hidden"}>Colour <input type="text" id="object-filament-colour" maxlength="${FILAMENT_COLOUR_MAX}" placeholder="e.g. grey" value="${esc(choice?.colour || "")}"></label>
+    ${choice ? `<p class="slicer-muted">${choice.snapshot ? `Saved material: ${esc(choice.snapshot.material.join(", "))}.` : "Material snapshot pending verification; save and review before slicing."} Shared by every Copy of this Model. Project default Filament changes and Spoolman tuning do not apply.</p>` : ""}
+    ${choice ? `<button type="button" class="btn btn-secondary btn-sm" id="object-filament-refresh" data-model="${object.model}" title="Review the catalogue's current version of this preset before this Model uses it">Review preset update</button>` : ""}
+    <label class="slicer-field"${choice ? "" : " hidden"}>Colour label only <input type="text" id="object-filament-colour" maxlength="${FILAMENT_COLOUR_MAX}" placeholder="e.g. grey" value="${esc(choice?.colour || "")}"></label>
     <label class="slicer-check" title="The planner, Arrange and Orient leave a pinned object where it is; you can still move it by hand"><input type="checkbox" id="object-pinned"${object.pinned ? " checked" : ""}> Pin</label>
     ${mix ? `<p class="slicer-warn" role="alert">${esc(mix)}. Slicing is refused until each plate holds one filament.</p>` : ""}`;
 }
@@ -2357,6 +2583,53 @@ function startPlayback() {
   $("btn-play").textContent = "Pause";
 }
 
+/** Orca's own configuration compared with the saved inputs: differences by setting and scope, recorded normalization, and what is unavailable. */
+function observedOutputHtml(check) {
+  const table = (attr, caption, head, rows) => rows.length ? `<table ${attr}><caption>${caption}</caption><thead><tr>${head.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>` : "";
+  const settingRow = (d, extra) => `<tr><th scope="row">${esc(d.key)}</th><td>${esc(d.scope)}</td><td>${showValue(d.expected)}</td><td>${showValue(d.observed)}</td>${extra ? `<td>${esc(d.reason)}</td>` : ""}</tr>`;
+  return `<section data-observed-output data-observed-state="${esc(check.state)}"><h4>Orca output check</h4><p class="${check.trusted ? "" : "warn"}">${esc(check.label)}</p>`
+    + (check.reason ? `<p>${esc(check.reason)}</p>` : "")
+    + (check.compared ? `<p class="slicer-muted">${check.compared} reported settings compared${check.source ? ` (from ${esc(check.source)})` : ""}.</p>` : "")
+    + table("data-observed-differences", "Reported differently by Orca (affects the print)", ["Setting", "Set by", "Expected", "Orca reported"], (check.differences || []).map(d => settingRow(d)))
+    + table("data-observed-normalized", "Known Orca normalization (recorded, not a mismatch)", ["Setting", "Set by", "Expected", "Orca reported", "Why"], (check.normalized || []).map(d => settingRow(d, true)))
+    + ((check.unavailable || []).length ? `<p class="slicer-muted" data-observed-unavailable>Not reported by Orca, so unverified: ${esc(check.unavailable.map(u => u.key).join(", "))}.</p>` : "")
+    + (check.post_processing ? `<p class="warn" data-observed-post>${esc(check.post_processing.note)}</p>` : "")
+    + (check.object_overrides ? `<p class="slicer-muted">${esc(check.object_overrides.note)}</p>` : "")
+    + (check.limits || []).map(l => `<p class="slicer-muted">${esc(l)}</p>`).join("")
+    + (check.state === "mismatch" ? '<p><button type="button" data-send-unverified>Send anyway (I accept these differences)</button></p>' : "")
+    + "</section>";
+}
+
+async function sendUnverified() {
+  const plate = state.plate;
+  // "Send anyway" accepts the differences of the Slice that was reviewed: the server refuses it if that Slice has been replaced
+  const shown = (await api("GET", `/api/projects/${state.project.id}/plates/${plate}/slice-inputs`)).slice;
+  if (!await queuePlates([plate], { acceptUnverified: { [plate]: { fingerprint: shown.fingerprint, sliced_at: shown.sliced_at } } })) return;
+  await loadJobs();
+  toast("Sent to the printer");
+}
+
+const showValue = value => esc(typeof value === "string" ? value : JSON.stringify(value) ?? "—");
+async function loadSliceInputs(details) {
+  const body = details.querySelector("[data-slice-inputs-body]");
+  const projectId = state.project.id, plateId = state.plate;
+  body.textContent = "Loading…";
+  try {
+    const review = await api("GET", `/api/projects/${projectId}/plates/${plateId}/slice-inputs`);
+    if (state.project.id !== projectId || state.plate !== plateId || !body.isConnected) return;
+    const saved = review.saved;
+    const rows = review.differences.filter(d => d.kind !== "objects").map(d => `<tr><th scope="row">${esc(d.key)}</th><td>${showValue(d.saved)}</td><td>${showValue(d.current)}</td></tr>`);
+    const objectsChanged = review.differences.some(d => d.kind === "objects");
+    body.innerHTML = `<p>${esc(review.label)}</p>` + (saved.state === "saved"
+      ? `<p data-saved-inputs>Saved inputs: ${esc(saved.inputs.filament.filament_type ?? "")} on ${esc(saved.inputs.process.curr_bed_type ?? "")}, project revision ${saved.inputs.revision}.</p>`
+      : `<p data-saved-unavailable class="warn">Saved inputs unavailable: ${esc(saved.reason)}</p>`)
+      + (review.current.state === "unresolved" ? '<p class="warn">The current Project inputs cannot be resolved right now.</p>' : "")
+      + (rows.length || objectsChanged ? `<table data-slice-differences><caption>Changed since this Slice</caption><thead><tr><th>Setting</th><th>Saved</th><th>Current Project</th></tr></thead><tbody>${rows.join("")}${objectsChanged ? '<tr><th scope="row">Objects</th><td colspan="2">Placement or geometry changed</td></tr>' : ""}</tbody></table>`
+        : saved.state === "saved" ? "<p>The current Project matches the saved inputs.</p>" : "")
+      + (review.observed ? observedOutputHtml(review.observed) : "");
+  } catch (err) { body.textContent = err.message; }
+}
+
 function renderPreviewPanel(info) {
   const { analysis } = state.preview;
   const entry = sliceEntry();
@@ -2377,7 +2650,12 @@ function renderPreviewPanel(info) {
       <dt>Filament</dt><dd>${entry?.estimate_g ? `${entry.estimate_g.toFixed(1)} g` : "—"}</dd>
       <dt>Layers</dt><dd>${analysis.layers.length}</dd>
     </dl>
-    ${entry?.outdated ? '<p class="slicer-slice-state warn">This plate changed after it was sliced.</p>' : ""}
+    ${entry?.outdated ? `<p class="slicer-slice-state warn">${entry.outdated_reason === "inputs-unresolved" ? "This plate's inputs can no longer be resolved, so this Slice cannot be confirmed as current." : "This plate changed after it was sliced."}</p>` : ""}
+    ${entry?.observed?.state === "mismatch" ? `<p class="slicer-slice-state warn">Unverified: Orca's output differs from the expected settings (${esc(unverifiedKeys(entry))}). Review the differences below before sending.</p>` : ""}
+    <details class="slicer-subfold" data-slice-inputs${state.sliceInputsOpen ? " open" : ""}>
+      <summary>Inputs this Slice was prepared with</summary>
+      <div data-slice-inputs-body class="slicer-muted">Open to load the saved inputs.</div>
+    </details>
     ${info?.stride > 1 ? `<p class="slicer-muted">Large toolpath: showing every ${info.stride}th move.</p>` : ""}
     <details class="slicer-subfold" data-preview-more${state.previewMore ? " open" : ""}>
       <summary>Features and details</summary>
@@ -2413,13 +2691,13 @@ async function loadPrinters() {
 }
 
 /** Save the project, then turn the given Plates into Jobs (the Print step and the Slice step both send through here). */
-async function queuePlates(plates, { leveling, timelapse, again = false }) {
+async function queuePlates(plates, { leveling, timelapse, again = false, acceptUnverified = null }) {
   await flushSave();
   if ($('save-state').textContent === 'Not saved') {
     toast('Project changes could not be saved. Retry saving before sending these Plates.', true); return null;
   }
   if (leveling !== undefined || timelapse !== undefined) rememberDefaults({ options: { leveling, timelapse } });
-  return api("POST", `/api/projects/${state.project.id}/queue`, { plates, leveling, timelapse, again });
+  return api("POST", `/api/projects/${state.project.id}/queue`, { plates, leveling, timelapse, again, ...(acceptUnverified ? { accept_unverified: acceptUnverified } : {}) });
 }
 
 // ── Dialogs ─────────────────────────────────────────────────────────────────────
@@ -2522,7 +2800,11 @@ async function uploadNewModel(file) {
   $("btn-new-upload").disabled = true;
   try {
     const params = new URLSearchParams({ filename: file.name, scale: "1", up: "z" });   // millimetres, Z up; a wrong guess is fixed per file later
-    let project = await upload(`/api/projects/upload?${params}`, file, pct => { bar.style.width = `${pct}%`; });
+    const onProgress = pct => { bar.style.width = `${pct}%`; };
+    let project = isReviewed(file)   // a 3MF is inspected and reviewed in staging before anything is created
+      ? await importWithReview({ file, host: { api, upload }, onProgress })
+      : await upload(`/api/projects/upload?${params}`, file, onProgress);
+    if (!project) { toast("Import cancelled — nothing was created"); return; }
     const name = $("new-project-name").value.trim();
     if (name && name !== project.name) project = await api("PATCH", `/api/projects/${project.id}`, { name });
     // A 3MF holding several objects on one plate opens crammed together: plan it like a batch import does
@@ -2681,6 +2963,10 @@ function bindUi() {
     }
   });
   $("btn-export-3mf").addEventListener("click", exportProject);
+  $("btn-import-records").addEventListener("click", () => {
+    $("btn-import-records").closest("details").open = false;
+    if (state.project) showRecords({ api }, state.project.id).catch(err => toast(err.message, true));
+  });
   $("btn-projects").addEventListener("click", showProjectsPage);
   $("btn-empty-projects").addEventListener("click", showProjectsPage);
   $("btn-pd-new").addEventListener("click", openProjectsDialog);
@@ -2774,6 +3060,10 @@ function bindUi() {
   $("bed-select").addEventListener("change", e => { data().bed = e.target.value; rememberDefaults({ plate_side: data().bed }); changed(); renderViewport(); });
 
   $("btn-save-profile-confirm").addEventListener("click", savePreset);
+  $("btn-refresh-filament").addEventListener("click", () => openReview({ source: "preset", target: { kind: "default" } }));
+  $("btn-review-apply").addEventListener("click", applyReview);
+  $("review-body").addEventListener("change", updateReviewApply);
+  $("dlg-review").addEventListener("close", () => { review.preview = null; renderFarm(); });
 
   $("btn-add-model").addEventListener("click", () => $("model-input").click());
   $("model-input").addEventListener("change", e => { chooseImport([...e.target.files]); e.target.value = ""; });
@@ -2950,6 +3240,8 @@ function bindUi() {
   $("object-panel").addEventListener("click", async e => {
     if (e.target.closest("[data-orient-accept]")) return acceptOrientation();
     if (e.target.closest("[data-orient-ignore]")) { state.orientSuggestion = null; return renderObjectPanel(); }
+    const refresh = e.target.closest("#object-filament-refresh");
+    if (refresh) return openReview({ source: "preset", target: { kind: "model", model_id: Number(refresh.dataset.model) } });
     const action = e.target.closest("[data-object-action]")?.dataset.objectAction;
     const object = selectedObject();
     if (!action || !object) return;
@@ -3033,7 +3325,11 @@ function bindUi() {
     state.viewport?.setShell(e.target.value);
     savePrinterPrefs({ shell: e.target.value });
   });
-  $("preview-panel").addEventListener("toggle", e => { if (e.target.matches("[data-preview-more]")) state.previewMore = e.target.open; }, true);
+  $("preview-panel").addEventListener("toggle", e => {
+    if (e.target.matches("[data-preview-more]")) state.previewMore = e.target.open;
+    if (e.target.matches("[data-slice-inputs]")) { state.sliceInputsOpen = e.target.open; if (e.target.open) loadSliceInputs(e.target); }
+  }, true);
+  $("preview-panel").addEventListener("click", e => { if (e.target.closest("[data-send-unverified]")) sendUnverified().catch(err => toast(err.message, true)); });
   $("preview-panel").addEventListener("change", e => {
     const name = e.target.dataset.feature;
     if (!name) return;
@@ -3165,14 +3461,7 @@ async function exportProject() {
   const button = $("btn-export-3mf");
   button.disabled = true;
   try {
-    await flushSave();
-    const response = await fetch(`/api/projects/${state.project.id}/export.3mf`);
-    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "The export failed");
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(await response.blob());
-    link.download = `${state.project.name.replace(/[^\w .-]+/g, "_").trim() || "project"}.3mf`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+    await showExport({ api, toast, save: flushSave }, state.project.id);
   } catch (err) {
     toast(err.message, true);
   } finally {

@@ -184,6 +184,7 @@ const row = (page, n) => page.locator(`#object-list [data-object="${n}"] .slicer
     // Snap is remembered and switches the grid on
     {
       const { page } = await open(browser);
+      await more(page);
       assert.equal(await page.locator('#snap-step').isDisabled(), true);
       await moreOpen(page);
       await page.locator('#snap-on').check();

@@ -19,6 +19,7 @@ import asyncio
 import backup
 import bed_cleared
 import dashboard
+import export_plan
 import holds
 import farm
 import health
@@ -28,12 +29,14 @@ import preflight
 import remembered_defaults
 import print_history
 import projects
+import settings_review
 import slicer
 import splits
 import state
 import time
 import time_estimate
 from persistence import DATA_DIR, save_printers
+from values import safe_filename
 from push import (
     WEBPUSH_AVAILABLE, add_subscription, get_public_key, has_subscriptions,
     load_notif_settings, remove_subscription, save_notif_settings, send_push_all,
@@ -623,7 +626,9 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if self.path.startswith("/api/projects/"):
             parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'projects', <id>, 'models', <model id>]
-            if len(parts) == 6 and parts[4] == "models" and parts[5].isdigit():
+            if len(parts) == 5 and parts[3] == "import-review":      # cancel a pending import review
+                self._jobs_call(lambda: projects.cancel_import(parts[4]), broadcast=False)
+            elif len(parts) == 6 and parts[4] == "models" and parts[5].isdigit():
                 def remove():
                     self._guard_draft(self._job_id())
                     return projects.delete_model(self._job_id(), int(parts[5]))
@@ -790,7 +795,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             else:
                 result = fn()
         except jobs.JobError as e:
-            self._json({"error": str(e), **getattr(e, "extra", {})}, e.status)
+            self._json({"error": str(e), **getattr(e, "extra", {}), **({"issues": e.issues} if getattr(e, "issues", None) else {})}, e.status)
             return
         if broadcast and not coroutine:
             jobs.broadcast_threadsafe()
@@ -985,10 +990,18 @@ class SPHandler(SimpleHTTPRequestHandler):
 
     def _handle_projects_get(self):
         parts = self.path.split("?", 1)[0].split("/")  # ['', 'api', 'projects', <id>, <section>, <item id>, <what>]
+        if len(parts) == 5 and parts[3] == "import-review":      # a pending import review, by token
+            self._jobs_call(lambda: projects.get_import_review(parts[4]), broadcast=False)
+            return
         try:
             project_id = self._job_id()
             if len(parts) == 4:
                 self._json(projects.get_project(project_id))
+            elif len(parts) == 5 and parts[4] == "imports":
+                self._json({"imports": projects.import_records(project_id)})
+            elif len(parts) == 7 and parts[4] == "imports" and parts[6] == "source":
+                path, name = projects.import_source(project_id, parts[5])
+                self._send_file(path, "model/3mf", download_name=safe_filename(name, "import.3mf", ""))
             elif len(parts) == 5 and parts[4] == "jobs":
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
@@ -1003,10 +1016,23 @@ class SPHandler(SimpleHTTPRequestHandler):
             elif len(parts) == 5 and parts[4] == "quick-options":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 self._json(projects.quick_options(project_id, (query.get("preset") or [None])[0]))
+            elif len(parts) == 5 and parts[4] == "export-plan":
+                self._guard_draft(project_id)
+                self._json(projects.export_plan(project_id))
             elif len(parts) == 5 and parts[4] == "export.3mf":
-                record = projects.get_project(project_id)
-                name = re.sub(r'[^\w .-]+', "_", record["name"]).strip() or "project"
-                self._send_bytes(projects.export_orca_project(project_id), "model/3mf", download_name=f"{name}.3mf")
+                self._guard_draft(project_id)
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                if query.get("revision") or query.get("fingerprint"):      # the reviewed plan: refused if the Project changed since
+                    artifact = projects.export_project(project_id, (query.get("revision") or [None])[0], (query.get("fingerprint") or [None])[0])
+                else:                                                      # the direct action: the same plan, made now
+                    plan = projects.export_plan(project_id)
+                    artifact = projects.export_project(project_id, plan["revision"], plan["fingerprint"])
+                self._send_bytes(artifact["body"], artifact["content_type"], download_name=artifact["filename"])
+            elif len(parts) == 5 and parts[4] == "export-package.zip":
+                self._guard_draft(project_id)
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)       # only for a plan the caller reviewed
+                artifact = projects.export_project(project_id, (query.get("revision") or [None])[0], (query.get("fingerprint") or [None])[0], export_plan.PACKAGE)
+                self._send_bytes(artifact["body"], artifact["content_type"], download_name=artifact["filename"])
             elif len(parts) == 7 and parts[4] == "models" and parts[6] == "preview":
                 self._send_file(projects.model_preview(project_id, int(parts[5])), "application/octet-stream")
             elif len(parts) == 7 and parts[4] == "objects" and parts[6] == "orientation":
@@ -1014,6 +1040,16 @@ class SPHandler(SimpleHTTPRequestHandler):
                 if query.get("face"):
                     query["face"] = [float(x) for x in query["face"].split(",")]   # "x,y,z", a direction in the model's space
                 self._json(projects.suggest_orientation(project_id, int(parts[5]), query))
+            elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "effective-settings":
+                self._guard_draft(project_id)
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                self._json(projects.effective_settings(
+                    project_id, int(parts[5]), (query.get("revision") or [None])[0],
+                    object_id=int(query["object"][0]) if query.get("object") else None,
+                    search=(query.get("search") or [""])[0], changed_only=(query.get("changed") or ["0"])[0] in ("1", "true")))
+            elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "slice-inputs":
+                self._guard_draft(project_id)
+                self._json(projects.slice_inputs(project_id, int(parts[5])))
             elif len(parts) == 7 and parts[4] == "plates" and parts[6] == "fit":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 self._json(farm.plate_fit(projects.get_project(project_id), int(parts[5]), (query.get("printer_id") or [None])[0]))
@@ -1027,7 +1063,7 @@ class SPHandler(SimpleHTTPRequestHandler):
                 if parts[6] == "gcode":
                     record = projects.get_project(project_id)
                     plate = next((p for p in record["data"]["plates"] if p["id"] == plate_id), {"name": f"Plate {plate_id}"})
-                    name = re.sub(r'[^\w .-]+', "_", f"{record['name']}_{plate['name']}").strip() + ".gcode"
+                    name = safe_filename(f"{record['name']}_{plate['name']}") + ".gcode"
                     self._send_file(path, "text/plain; charset=utf-8", download_name=name)
                 else:
                     self._send_file(path, "application/octet-stream")
@@ -1036,7 +1072,7 @@ class SPHandler(SimpleHTTPRequestHandler):
         except ValueError:
             self._json({"error": "Not found"}, 404)
         except jobs.JobError as e:
-            self._json({"error": str(e)}, e.status)
+            self._json({"error": str(e), **({"issues": e.issues} if getattr(e, "issues", None) else {})}, e.status)
 
     def _handle_projects_post(self):
         path = self.path.split("?", 1)[0]
@@ -1054,6 +1090,27 @@ class SPHandler(SimpleHTTPRequestHandler):
         if path == "/api/projects/upload":
             self._handle_project_upload(new_project=True)
             return
+        if path == "/api/projects/import-review":              # stage and inspect a 3MF; nothing changes yet
+            self._handle_import_review_upload()
+            return
+        if len(parts) == 6 and parts[3] == "import-review" and parts[5] == "resolve":
+            def resolve():
+                body = self._json_body()
+                pending = projects.get_import_review(parts[4])["binding"]["target"]
+                if pending:
+                    self._guard_draft(pending["project_id"], body)
+                return projects.resolve_import(parts[4], {k: v for k, v in body.items() if k != "draft_token"})
+            self._splits_call(resolve)
+            return
+        if len(parts) == 6 and parts[3] == "import-review" and parts[5] == "confirm":
+            def confirm():
+                body = self._json_body()
+                pending = projects.get_import_review(parts[4])["binding"]["target"]
+                if pending:
+                    self._guard_draft(pending["project_id"], body)
+                return projects.confirm_import(parts[4], body)
+            self._splits_call(confirm)
+            return
         if len(parts) == 5 and parts[3].isdigit() and parts[4] == "create":   # promote a draft
             def create_it():
                 body = self._json_body()
@@ -1067,6 +1124,31 @@ class SPHandler(SimpleHTTPRequestHandler):
                 projects.discard_draft(self._job_id())
                 return {"ok": True}
             self._jobs_call(discard, broadcast=False)
+            return
+        if len(parts) == 5 and parts[3].isdigit() and parts[4] == "export-lossy":
+            # The explicit lossy whole-Project 3MF: only for an acknowledgement of the reviewed report, never from export.3mf
+            try:
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                artifact = projects.export_lossy(self._job_id(), body)
+            except jobs.JobError as e:
+                self._json({"error": str(e), **({"issues": e.issues} if getattr(e, "issues", None) else {})}, e.status)
+                return
+            self._send_bytes(artifact["body"], artifact["content_type"], download_name=artifact["filename"])
+            return
+        if len(parts) == 6 and parts[4] == "settings" and parts[5] in ("review", "adopt"):
+            def review_setting_change():   # preview or apply a preset refresh / Spoolman adoption (revision- and token-checked)
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                return (settings_review.preview if parts[5] == "review" else settings_review.apply)(self._job_id(), body)
+            self._jobs_call(review_setting_change, broadcast=False)
+            return
+        if len(parts) == 6 and parts[4:6] == ["settings", "resolve"]:
+            def resolve_setting():
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                return projects.resolve_setting(self._job_id(), body)
+            self._jobs_call(resolve_setting, broadcast=False)
             return
         def split_of(body):   # which of a project's splits the call is about; none = the first (Quick print has one)
             try:
@@ -1217,6 +1299,27 @@ class SPHandler(SimpleHTTPRequestHandler):
                                                      scale=value("scale") or 1.0, up=value("up") or "z",
                                                      plate_id=value("plate") or None)
         self._jobs_call(add, broadcast=False)
+
+    def _handle_import_review_upload(self):
+        # The body is the raw 3MF; the Project it would join (`target`, with its Draft token), scale, up axis and plate travel in the query.
+        self.close_connection = True  # an early rejection leaves the body unread
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        def value(key: str) -> str:
+            return (query.get(key) or [""])[0]
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+
+        def stage():
+            target = self._int(value("target"), "target must be a Project number") if value("target") else None
+            if target is not None:
+                self._guard_draft(target)
+            return projects.prepare_import(self.rfile, length, value("filename"), target=target, scale=value("scale") or 1.0,
+                                           up=value("up") or "z", plate=value("plate") or None, quick=value("quick") in ("1", "true"))
+        self._jobs_call(stage, broadcast=False)
 
     def _handle_split_upload(self):
         # The body is the raw model file, streamed to disk; scale and up axis travel in the query string.

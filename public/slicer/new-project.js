@@ -8,6 +8,8 @@
    stay in the project when the dialog closes (a model too big for the bed becomes a split on Done). Mounted by main.js, which
    passes { api, upload, toast, openCreated, importNotes }. */
 
+import { importWithReview, isReviewed } from "./import-review.js?v=2";
+
 const POLL_MS = 1500;
 const POLL_FAILURES = 3;   // consecutive failed checks before the table stops asking
 const MODEL = window.FolderImport.MODEL;
@@ -150,7 +152,11 @@ function summaryText() {
 const STEP_TEXT = {
   split: s => `${plural(s.split, "model")} bigger than the bed will be cut into parts that fit.`,
   plates: s => `${plural(s.objects, "object")} (copies included) arranged onto plates automatically.`,
-  slice: () => "Default settings; change anything in All settings later.",
+  slice: () => {
+    const choice = intake?.suggested_filament;
+    return choice?.material ? `Suggested default: ${esc(choice.material.join(", "))} — ${esc(choice.name)}. Create adopts this material; change it in All settings before slicing.`
+      : "Default material is unverified. Choose a Filament in All settings before slicing.";
+  },
   print: () => "Send the plates to a printer and start them.",
 };
 const STEP_NAME = { split: "Split", plates: "Plates", slice: "Slice", print: "Print" };
@@ -369,8 +375,20 @@ async function drain() {
         if (!id) return;
         const params = new URLSearchParams({ filename: item.name, scale: "1", up: "z" });   // millimetres, Z up; a wrong guess is fixed per model
         if (existing) params.set("plate", existing.plate);
-        const result = await host.upload(guarded(`/api/projects/${id}/models/upload?${params}`), item.file, pct => { item.pct = pct; render(); });
+        const onProgress = pct => { item.pct = pct; render(); };
+        const result = isReviewed(item.file)   // a 3MF is inspected first; Continue with losses commits it, Cancel leaves the project as it was
+          ? await importWithReview({ file: item.file, host, target: id, draftToken: existing ? null : draftToken,
+              query: existing ? { plate: existing.plate } : {}, onProgress })
+          : await host.upload(guarded(`/api/projects/${id}/models/upload?${params}`), item.file, onProgress);
         if (mine !== generation) return;
+        if (result === null) {   // cancelled in the review: nothing was imported
+          queue = queue.filter(q => q !== item);
+          message = `Import of ${item.name} cancelled — the project was not changed.`;
+          host.toast(message);
+          render();
+          continue;
+        }
+        if (result?.separate) host.toast(`${item.name} was imported as its own project, “${result.name}”.`);
         if (existing) importNotes = [...new Set([...importNotes, ...(result?.import_notes || [])])];
         queue = queue.filter(q => q !== item);
         await refresh();
