@@ -60,10 +60,15 @@ class ToolError(Exception):
 class Context:
     """What a tool may use: the one project it is bound to and a fresh read-only view of the data."""
 
-    def __init__(self, project_id: int, data_dir: str, run: str | None = None):
+    def __init__(self, project_id: int, data_dir: str, run: str | None = None, max_proposals: int | None = None):
         self.project_id = int(project_id)
+        self.max_proposals = max_proposals          # the per-run cap this server enforces; None is the built-in one
         self.data_dir = data_dir
         self.run = run or f"terminal-{uuid.uuid4().hex[:12]}"       # the Assistant run that owns the Proposals staged here
+
+    def proposal_cap(self) -> int:
+        import proposal_store
+        return self.max_proposals or proposal_store.MAX_PER_RUN
 
     def core(self):
         """The socket-free read core, imported on first use (after DATA_DIR is set for the modules that read it at import)."""
@@ -410,8 +415,9 @@ class Superseded(Exception):
 def check_proposal_room(ctx: Context) -> None:
     """The server's own per-run cap: the model cannot talk its way past it."""
     import proposal_store
-    if len(proposal_store.listing(ctx.projects_dir(), run=ctx.run)) >= proposal_store.MAX_PER_RUN:
-        raise ToolError(f"At most {proposal_store.MAX_PER_RUN} Proposals per run. Tell the person what you found instead of proposing more.")
+    cap = ctx.proposal_cap()
+    if len(proposal_store.listing(ctx.projects_dir(), run=ctx.run)) >= cap:
+        raise ToolError(f"At most {cap} Proposals per run. Tell the person what you found instead of proposing more.")
 
 
 def one_line(text, cap: int = REASON_CAP) -> str:
@@ -442,7 +448,7 @@ def stage_proposal(ctx: Context, record: dict, *, kind: str, title: str, scope: 
         "reason": reason, "review": review, "data": data, "emptied": list(emptied), "diff": list(diff), "notes": list(notes),
         "pinned": list(pinned), "problems": list(problems), "targets": targets or {},
         **({"settings": list(settings)} if settings is not None else {})})        # a settings Proposal's table: [{key, label, old, new, layer, notes}]
-    left = proposal_store.MAX_PER_RUN - len(proposal_store.listing(ctx.projects_dir(), run=ctx.run))
+    left = ctx.proposal_cap() - len(proposal_store.listing(ctx.projects_dir(), run=ctx.run))
     return {"revision": record["revision"], "token": staged["token"], "kind": kind, "title": title,
             "diff": [{"label_quoted": quoted(line["label"], NAME_CAP), "text": line["text"]} for line in diff],
             "notes": list(notes), "pinned_skipped": [{"object": p["object"], "name_quoted": quoted(p["label"], NAME_CAP)} for p in pinned],
@@ -837,11 +843,14 @@ def main(argv=None) -> int:
     parser.add_argument("--project", type=int, required=True)
     parser.add_argument("--data-dir", required=True, help="the Spooler data directory (never defaulted: pass it explicitly)")
     parser.add_argument("--run", default=None, help="the Assistant run these Proposals belong to (the per-run cap counts them)")
+    parser.add_argument("--max-proposals", type=int, default=None, help="the most Proposals one run may stage (default: the built-in 3)")
     args = parser.parse_args(argv)
+    if args.max_proposals is not None and args.max_proposals < 1:
+        parser.error("--max-proposals must be at least 1")
     os.environ["DATA_DIR"] = args.data_dir       # persistence reads it once, at import
     if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    serve(Context(args.project, args.data_dir, args.run), sys.stdin.buffer, sys.stdout.buffer)
+    serve(Context(args.project, args.data_dir, args.run, args.max_proposals), sys.stdin.buffer, sys.stdout.buffer)
     return 0
 
 

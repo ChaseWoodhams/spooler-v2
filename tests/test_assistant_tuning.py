@@ -54,6 +54,63 @@ class TuningLimitsTests(unittest.TestCase):
         self.assertEqual(self.call("POST", "/api/assistant/settings", {"tuning": {"limits": {"nope": 1}}})[0], 400)
         self.assertEqual(self.call("POST", "/api/assistant/settings", {"tuning": {"nope": {}}})[0], 400)
 
+    # ── saved limits reach the next run ──
+    def test_saved_values_are_read_back_and_survive_a_connection_settings_save(self):
+        status, body = self.save(max_turns=7)
+        self.assertEqual((status, body["tuning"]["values"]["limits"]), (200, {**LIMIT_DEFAULTS, "max_turns": 7}))
+        self.assertEqual(self.call("POST", "/api/assistant/settings", {"jev_url": "http://127.0.0.1:9999"})[0], 200)
+        self.assertEqual(self.values()["max_turns"], 7, "saving the connection does not drop the tuning")
+        self.save(deadline_seconds=90)
+        self.assertEqual(self.call("GET", "/api/assistant/settings")[1]["jev_url"], "http://127.0.0.1:9999", "nor the other way round")
+        self.assertEqual(self.values(), {**LIMIT_DEFAULTS, "max_turns": 7, "deadline_seconds": 90})
+
+    def test_the_saved_turn_cap_reaches_the_cli_of_the_next_run(self):
+        self.save(max_turns=7)
+        self.assertEqual(self.finished()["state"], "answer")
+        self.assertEqual(self.argv_after("--max-turns"), "7")
+
+    def test_the_saved_question_length_is_enforced_and_served_to_the_panel(self):
+        self.save(question_chars=100)
+        status, body = self.ask("x" * 101)
+        self.assertEqual(status, 400)
+        self.assertIn("100", body["error"])
+        self.assertEqual(self.ask("x" * 100)[0], 200)
+        _, status_body = self.call("GET", f"/api/projects/{self.project['id']}/assistant/status")
+        self.assertEqual(status_body["limits"]["question_chars"], 100)
+
+    def test_the_saved_deadline_stops_a_stalled_run_and_the_notice_and_panel_limits_follow_it(self):
+        self.save(deadline_seconds=5)
+        _, status_body = self.call("GET", f"/api/projects/{self.project['id']}/assistant/status")
+        self.assertEqual(status_body["limits"]["deadline_seconds"], 5)
+        self.scenario({"calls": [], "hang_after_init": 60})
+        view = self.finished()
+        self.assertEqual((view["state"], view["error"]), ("timeout", "No answer in 5 s; nothing was changed"))
+
+    def test_the_saved_proposal_cap_is_enforced_by_the_tool_server(self):
+        self.save(proposals_per_run=1)
+        revision = self.project["revision"]
+        self.scenario({"calls": [{"tool": "propose_arrange", "arguments": {"revision": revision}},
+                                 {"tool": "propose_orientation", "arguments": {"revision": revision, "object_ids": [1, 2]}}], "answer": "done"})
+        self.finished()
+        first, second = read_record(self.cli_dir)["tool_results"]
+        self.assertFalse(first["is_error"], first["text"])
+        self.assertTrue(second["is_error"])
+        self.assertIn("At most 1 Proposals per run", second["text"])
+
+    def test_a_run_already_working_keeps_the_values_it_started_with(self):
+        self.scenario({"calls": [], "hang_after_init": 4, "answer": "slow"})
+        status, run = self.ask()
+        self.assertEqual(status, 200)
+        deadline = time.monotonic() + 20
+        while not (self.cli_dir / "record.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.save(deadline_seconds=5, max_turns=3, question_chars=100)                  # edited while the run works
+        view = self.poll(run)
+        self.assertEqual((view["state"], view["answer"]), ("answer", "slow"))
+        self.assertEqual(self.argv_after("--max-turns"), "12")
+        self.assertEqual(self.finished()["state"], "answer")
+        self.assertEqual(self.argv_after("--max-turns"), "3", "the next run takes the new value")
+
 
 if __name__ == "__main__":
     unittest.main()
