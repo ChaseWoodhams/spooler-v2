@@ -15,7 +15,7 @@ body.slicer-page a.btn { text-decoration: none; }
 .slicer-step.active { color: var(--text); background: rgba(255, 107, 43, .12); }
 .slicer-step.active .num { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; font-weight: 800; box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-fill); }
 .slicer-step.active { font-weight: 700; }
-.slicer-step:disabled { opacity: .4; cursor: not-allowed; }
+.slicer-step:disabled, .slicer-step[aria-disabled="true"] { opacity: .4; cursor: not-allowed; }
 .slicer-step-sep { width: 12px; height: 1px; background: var(--border); }
 .slicer-step-actions { display: flex; gap: 8px; }
 .slicer-split-stage { flex: 1; min-height: 0; border: 0; border-radius: 0; }
@@ -758,3 +758,5 @@ body[data-workflow-step="model"] .slicer-small-screen-note, body[data-workflow-s
 .import-diff { border-collapse: collapse; font-size: 12px; }
 .import-diff th, .import-diff td { text-align: left; padding: 2px 10px 2px 0; }
 .import-resolved ul, .import-differences ul { margin: 0; padding-left: 18px; font-size: 13px; }
+.slicer-import-progress { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+.slicer-import-progress progress { width: 72px; height: 8px; }
