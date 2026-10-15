@@ -18,7 +18,7 @@ const cases = {
   const browser = await chromium.launch({ headless: true });
   const open = async name => {
     const { page, context } = await sf.openSlicer(browser, server.baseUrl, { step: 'slice', slices: cases[name].slices });
-    await page.locator('#slicing-list [data-slice-plate]').first().waitFor();
+    await page.locator('#slicing-list [data-select-plate]').first().waitFor();
     return { page, context, summary: await page.locator('#slicing-totals').innerText(), actions: await page.locator('#slicing-actions').innerText() };
   };
   try {
