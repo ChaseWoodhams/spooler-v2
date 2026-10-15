@@ -29,6 +29,8 @@ import uuid
 from pathlib import Path
 
 import assistant
+import datapaths
+import proposal_store
 import spooler_mcp
 from errors import JobError
 
@@ -67,6 +69,13 @@ Purpose
 - Every Model has a Purpose (General, Functional, Display or Draft) and an optional note. It says what the part is for.
 - If a Model's Purpose matters to the answer and is still General with no note, you may ask what the part is for. Ask about Purpose at most once per chat: read the earlier turns first and do not ask again. Never block on it: answer anyway, saying which assumption you made.
 - A purpose the person states in chat applies only to that answer. You cannot store or change a Purpose; they set it in the app.
+
+Proposals
+- You propose with the propose tools; you never apply anything. The person sees each Proposal as a card, reviews it and accepts or dismisses it.
+- Read the project first and pass its revision to the propose tool. If it answers stale, read again and propose again.
+- Orientation is chosen by Spooler's own helper: you pick which Objects and optionally a mode, never rotations or positions.
+- Pinned Objects and Objects of a Model still importing are skipped by the tool. Say so rather than trying to work around it.
+- At most three Proposals per run, one per kind is usually enough. After proposing, say in one or two plain sentences what you proposed and why. Nothing has changed until the person accepts.
 """
 
 
@@ -94,7 +103,7 @@ class Run:
 
     def view(self) -> dict:
         return {"id": self.id, "project_id": self.project_id, "state": self.state, "steps": list(self.steps),
-                "answer": self.answer, "error": self.error}
+                "answer": self.answer, "error": self.error, "proposals": list(self.proposals)}
 
 
 _lock = threading.Lock()
@@ -148,12 +157,12 @@ def build_env(jev_url: str, base: dict | None = None) -> dict:
     return env
 
 
-def mcp_config(project_id: int, data_dir: Path) -> dict:
+def mcp_config(project_id: int, data_dir: Path, run_id: str | None = None) -> dict:
     import sys
-    return {"mcpServers": {SERVER_NAME: {
-        "type": "stdio", "command": sys.executable,
-        "args": [str(Path(spooler_mcp.__file__).resolve()), "--project", str(int(project_id)), "--data-dir", str(data_dir)],
-        "env": {"DATA_DIR": str(data_dir)}}}}
+    args = [str(Path(spooler_mcp.__file__).resolve()), "--project", str(int(project_id)), "--data-dir", str(data_dir)]
+    if run_id:
+        args += ["--run", run_id]               # the server stamps the Proposals it stages with it, and caps them per run
+    return {"mcpServers": {SERVER_NAME: {"type": "stdio", "command": sys.executable, "args": args, "env": {"DATA_DIR": str(data_dir)}}}}
 
 
 def clean_history(history) -> list:
@@ -219,8 +228,9 @@ def ask(project_id: int, message, history=None) -> dict:
         _runs[run.id] = run
         _prune()
     prompt = build_prompt(record, message, turns)
+    _sweep_staging()
     threading.Thread(target=_execute, args=(run, cli, settings["jev_url"], prompt), name=f"assistant-run-{run.id[:8]}", daemon=True).start()
-    return run.view()
+    return with_summaries(run.view())
 
 
 def get(project_id: int, run_id: str) -> dict:
@@ -228,7 +238,34 @@ def get(project_id: int, run_id: str) -> dict:
         run = _runs.get(str(run_id))
         if run is None or run.project_id != int(project_id):
             raise AskError("Run not found", 404)
-        return run.view()
+        view = run.view()
+    return with_summaries(view)
+
+
+def with_summaries(view: dict) -> dict:
+    """The run view with each Proposal token replaced by its card summary (never the resulting data). A Proposal that has
+    been accepted, dismissed or swept since is left out."""
+    found = (proposal_store.read(datapaths.projects_dir(), token) for token in view.get("proposals") or [])
+    return {**view, "proposals": [proposal_store.summary(record) for record in found if record]}
+
+
+def _sweep_staging() -> None:
+    try:
+        proposal_store.sweep(datapaths.projects_dir())
+    except Exception as e:                           # housekeeping must never stop an ask
+        print(f"[Assistant] Could not sweep staging: {type(e).__name__}")
+
+
+def settle_proposals(run: Run, state: str) -> str:
+    """Decide what a run leaves behind, before it is published as finished. A run that ended in an answer keeps the latest
+    Proposal of each kind (the state becomes `proposal`); every other Proposal it staged is deleted, and a run that did not end
+    in an answer (error, cancelled, timed out) leaves none at all. Deleting staging never touches project data."""
+    root = datapaths.projects_dir()
+    staged = proposal_store.listing(root, run=run.id)
+    keep = proposal_store.latest_of_each_kind(staged) if state == "answer" else []
+    proposal_store.remove_run(root, run.id, keep=[r["token"] for r in keep])
+    run.proposals = [r["token"] for r in keep]
+    return "proposal" if keep else state
 
 
 def timeout_message() -> str:
@@ -277,11 +314,17 @@ def _prune() -> None:
 # ── One run ───────────────────────────────────────────────────────────────────
 
 def _finish(run: Run, state: str, answer=None, error=None) -> None:
-    """The single place a run ends. The first outcome wins; it writes the one log line and drops staged Proposals the run leaves behind."""
+    """The single place a run ends. The first outcome wins; it decides which staged Proposals the run leaves, writes the one log
+    line and drops the rest."""
     if run.reason == "cancelled":
         state, answer, error = "cancelled", None, CANCELLED_MESSAGE
     elif run.reason == "timeout":
         state, answer, error = "timeout", None, timeout_message()
+    if run.finished is None:
+        try:
+            state = settle_proposals(run, state)     # a cancelled or timed-out run keeps none; an answer keeps the latest of each kind
+        except Exception as e:                       # bookkeeping must never stop the run from ending
+            print(f"[Assistant] Could not settle Proposals: {type(e).__name__}")
     first = False
     with _lock:
         if run.finished is None:
@@ -301,7 +344,9 @@ def _finish(run: Run, state: str, answer=None, error=None) -> None:
 
 
 def discard_staged(run: Run) -> None:
-    """Delete any Proposal this run staged. A seam: ticket 15 fills it in (staging lives under <data dir>/projects/.assistant/<token>)."""
+    """Delete any Proposal this run staged (staging lives under <projects dir>/.assistant/<token>). `settle_proposals` has already
+    done this for every run that did not end in a Proposal; this is the same deletion again, by run, as a backstop."""
+    proposal_store.remove_run(datapaths.projects_dir(), run.id)
 
 
 def _log_run(run: Run) -> None:
@@ -348,7 +393,7 @@ def _execute(run: Run, cli: str, jev_url: str, prompt: str) -> None:
         cwd = folder / "cwd"
         cwd.mkdir(parents=True)                      # empty: nothing but the CLI's own files ever appear here
         mcp_path, prompt_path = folder / "mcp.json", folder / "system-prompt.txt"
-        mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir())), encoding="utf-8")
+        mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir(), run.id)), encoding="utf-8")
         prompt_path.write_text(SYSTEM_PROMPT, encoding="utf-8")
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

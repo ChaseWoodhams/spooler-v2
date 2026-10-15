@@ -800,3 +800,17 @@ body.print-step .assistant-panel, body.print-step #btn-assistant { display: none
 @media (prefers-reduced-motion: reduce) { .assistant-spin { animation: none; } }
 .assistant-steps { margin: 4px 0 0; padding-left: 20px; font-size: 12px; color: var(--text-muted); }
 .assistant-steps .on { color: var(--text); }
+
+/* Assistant Proposal cards (slicer/assistant.js) and their review sheet (the Plan plates dialog, slicer/main.js) */
+.assistant-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; background: var(--bg); display: flex; flex-direction: column; gap: 4px; }
+.assistant-card.done { opacity: 0.7; background: var(--surface2); }
+.assistant-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.assistant-reason { margin: 0; }
+.assistant-diff, .assistant-notes { margin: 0; padding-left: 18px; overflow-wrap: anywhere; }
+.assistant-card .assistant-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.proposal-pairs { display: flex; flex-direction: column; gap: 10px; max-height: 55vh; overflow-y: auto; margin-top: 8px; }
+.proposal-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 640px) { .proposal-pair { grid-template-columns: 1fr; } }
+.proposal-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.proposal-table th, .proposal-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.proposal-note td { border-bottom: 0; padding-top: 0; }

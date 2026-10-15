@@ -100,7 +100,7 @@ class GetProjectTests(McpDataCase):
             self.assertEqual(init["result"]["serverInfo"]["name"], "spooler")
             self.assertIn("tools", init["result"]["capabilities"])
             tools = session.request("tools/list")["result"]["tools"]
-            self.assertEqual([t["name"] for t in tools], ["get_project", "get_plate", "get_model_geometry", "get_printer_capabilities", "get_slice_summary"])
+            self.assertEqual([t["name"] for t in tools], ["get_project", "get_plate", "get_model_geometry", "get_printer_capabilities", "get_slice_summary", "propose_orientation"])
             for t in tools:
                 self.assertNotIn("project_id", t["inputSchema"].get("properties", {}), "no tool takes a project id")
             reply = session.call("get_project")

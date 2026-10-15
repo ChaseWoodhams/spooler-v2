@@ -2,7 +2,9 @@
 // assistant can and can't do, the Purpose summary, example prompts), and the conversation of this visit: ask, progress
 // steps while a run works, then the plain-text answer. The thread lives only in this object: reload or Clear empties it
 // and nothing is stored. Each ask sends the earlier turns (capped), because the server keeps no conversation.
-// Later tickets add entry kinds (Proposal cards, timeout, cancelled, usage limit) to ENTRY_RENDERERS and finish().
+// Proposal cards (ticket 15) are thread entries {kind: "proposal", card, status, question}: pending, accepted, dismissed,
+// superseded (the project changed) or replaced (a newer Proposal of the same kind). Later tickets add timeout, cancelled and
+// usage limit to entryHtml() and finish().
 // Nothing here runs until the person opens the panel, so the page loads and works the same without an assistant.
 const OPEN_KEY = "slicer.assistant.open";
 const CHIPS = ["Make these parts stronger", "Fit more on this plate", "Why is this plate so slow?"];
@@ -14,6 +16,11 @@ const MAX_TURN_CHARS = 1500;
 const POLL_FIRST_MS = 400;
 const POLL_MS = 900;
 const POLL_FAILURES = 3;
+const CARD_STATUS = {
+  accepted: "Applied. Undo puts it back.",
+  dismissed: "Dismissed. Nothing was changed.",
+  replaced: "Replaced by a newer proposal of the same kind. Nothing was changed.",
+};
 const GIVE_UP_MS = 90000;              // the server stops a run after 60 s; if its answer still has not come, stop waiting (never a spinner forever)
 const END_STATES = ["timeout", "cancelled", "usage_limit", "error"];
 const END_TITLES = { timeout: "No answer in 60 s", cancelled: "Cancelled", usage_limit: "AI unavailable", error: "The assistant could not answer" };
@@ -35,7 +42,8 @@ export const assistantPanel = {
   notice: null,        // a refused ask: {text}; not part of the thread or the history
   pollTimer: null,
 
-  // hooks: { api(method, path, body), project() -> record | null }
+  // hooks: { api(method, path, body), project() -> record | null, flush() (save unsaved edits first),
+  //          openReview(view, { accept }) (the Plan plates review sheet), applied(project, card) (the page takes the accepted project) }
   attach(hooks) {
     this.hooks = hooks;
     this.panel = document.getElementById("assistant-panel");
@@ -69,6 +77,7 @@ export const assistantPanel = {
 
   // Called whenever the page re-renders: read the (cached, cheap) status again when the saved project changed.
   update() {
+    this.supersedeStale();
     if (!this.open) return;
     const project = this.hooks.project();
     if (project && this.fetched !== `${project.id}:${project.revision}` && !this.loading) this.refresh();
@@ -110,6 +119,13 @@ export const assistantPanel = {
     else if (action === "cancel") this.cancel(target);
     else if (action === "retry") this.retry();
     else if (action === "clear") this.clear();
+    else if (action === "review" || action === "dismiss" || action === "ask-again") {
+      const entry = this.entryFor(target.dataset.token);
+      if (!entry) return;
+      if (action === "review") this.review(entry);
+      else if (action === "dismiss") this.dismissCard(entry);
+      else this.send(entry.question);
+    }
   },
 
   draftChanged() {
@@ -120,8 +136,12 @@ export const assistantPanel = {
 
   // The earlier turns of this visit for the next ask: what was said and answered, newest kept, capped like the server does.
   history() {
-    const turns = this.thread.filter(entry => entry.kind === "user" || entry.kind === "answer")
-      .map(entry => ({ role: entry.kind === "user" ? "user" : "assistant", text: entry.text.slice(0, MAX_TURN_CHARS) }));
+    const turns = this.thread.flatMap(entry => {
+      if (entry.kind === "user") return [{ role: "user", text: entry.text }];
+      if (entry.kind === "answer") return [{ role: "assistant", text: entry.text }];
+      if (entry.kind === "proposal") return [{ role: "assistant", text: this.proposalTurn(entry) }];
+      return [];
+    }).map(turn => ({ ...turn, text: turn.text.slice(0, MAX_TURN_CHARS) }));
     const kept = [];
     let used = 0;
     for (const turn of turns.reverse()) {
@@ -155,20 +175,29 @@ export const assistantPanel = {
     }
   },
 
+  // `again` is a question to ask once more (Try again, or a Superseded card's "Ask again"); otherwise the composer's text is sent.
   async send(again) {
     const input = this.panel.querySelector(".assistant-input");
-    const project = this.hooks.project();
     const text = again ?? input?.value.trim();
-    if (!text || this.busy || !project || !this.status?.available) return;
-    const history = this.history();
-    if (again === undefined) input.value = "";
+    if (!text || this.busy || !this.hooks.project() || !this.status?.available) return;
     this.notice = null;
     this.busy = true;
+    try {
+      await this.hooks.flush?.();           // unsaved edits are saved first, so the Proposal is made for the project as it is
+    } catch (error) {
+      this.busy = false;
+      this.notice = { text: error.message };
+      this.renderThread();
+      return;
+    }
+    const project = this.hooks.project();
+    const history = this.history();
+    if (again === undefined) input.value = "";
     this.thread.push({ kind: "user", text });
     this.renderThread();
     try {
       const run = await this.hooks.api("POST", `/api/projects/${project.id}/assistant/ask`, { message: text, history });
-      this.run = { id: run.id, project: project.id, steps: run.steps || [], failures: 0, startedAt: Date.now() };
+      this.run = { id: run.id, project: project.id, steps: run.steps || [], failures: 0, startedAt: Date.now(), question: text };
     } catch (error) {                       // refused: nothing started, so the question goes back to be sent again
       this.thread.pop();
       this.busy = false;
@@ -205,18 +234,125 @@ export const assistantPanel = {
     }
   },
 
-  // A run ended. Later tickets add states here: proposal.
+  // A run ended: answer, proposal, or one of the end states.
   finish(view) {
+    const question = this.run?.question;
     this.run = null;
     this.busy = false;
     clearTimeout(this.pollTimer);
     if (view.state === "answer") this.thread.push({ kind: "answer", text: view.answer || "" });
-    else {
+    else if (view.state === "proposal") {
+      if (view.answer) this.thread.push({ kind: "answer", text: view.answer });
+      for (const card of view.proposals || []) this.addCard(card, question);
+    } else {
       const kind = END_STATES.includes(view.state) ? view.state : "error";
       this.thread.push({ kind, text: view.error || "The assistant did not answer.", view });
     }
     this.renderThread();
     this.panel.querySelector(".assistant-input")?.focus({ preventScroll: true });
+  },
+
+  // ── Proposal cards ──
+  proposalTurn(entry) {
+    const outcome = { pending: "waiting for the person's decision", accepted: "accepted", dismissed: "dismissed",
+      superseded: "superseded by a change to the project", replaced: "replaced by a newer proposal" }[entry.status];
+    return `Proposal "${entry.card.title}" (${entry.card.scope}): ${outcome}`;
+  },
+
+  // Only the latest Proposal of each kind stays live: an older pending one of the same kind is replaced.
+  addCard(card, question) {
+    for (const old of this.thread) {
+      if (old.kind === "proposal" && old.status === "pending" && old.card.kind === card.kind) this.settle(old, "replaced");
+    }
+    this.thread.push({ kind: "proposal", card, status: "pending", question });
+  },
+
+  entryFor(token) {
+    return this.thread.find(entry => entry.kind === "proposal" && entry.card.token === token);
+  },
+
+  // Gives a card its final state and sweeps its staging (best effort: sweeping never changes the project).
+  settle(entry, status) {
+    entry.status = status;
+    this.hooks.api("POST", `/api/projects/${entry.card.project_id}/assistant/proposals/${entry.card.token}/dismiss`, {}).catch(() => {});
+  },
+
+  // Called as the page re-renders: a Proposal is only good for the revision it was made at, so any edit supersedes it.
+  supersedeStale() {
+    const project = this.hooks?.project();
+    if (!project) return;
+    let changed = false;
+    for (const entry of this.thread) {
+      if (entry.kind === "proposal" && entry.status === "pending" && entry.card.project_id === project.id && entry.card.base_revision !== project.revision) {
+        this.settle(entry, "superseded");
+        changed = true;
+      }
+    }
+    if (changed && this.open) this.renderThread();
+  },
+
+  async review(entry) {
+    if (entry.status !== "pending") return;
+    try {
+      const view = await this.hooks.api("GET", `/api/projects/${entry.card.project_id}/assistant/proposals/${entry.card.token}`);
+      this.hooks.openReview(view, { accept: () => this.accept(entry) });
+    } catch (error) {
+      if (error.status === 409 || error.status === 404) { this.settle(entry, "superseded"); this.renderThread(); return; }
+      this.notice = { text: error.message };
+      this.renderThread();
+    }
+  },
+
+  // Accept: the server applies the stored data as one revision (or refuses with 409: Superseded). Resolves {ok, message}.
+  async accept(entry) {
+    if (entry.status !== "pending") return { ok: false, message: "This proposal is no longer open." };
+    await this.hooks.flush?.();
+    let project;
+    try {
+      project = await this.hooks.api("POST", `/api/projects/${entry.card.project_id}/assistant/proposals/${entry.card.token}/accept`, { revision: this.hooks.project().revision });
+    } catch (error) {
+      if (error.status === 409 || error.status === 404) {
+        entry.status = "superseded";
+        this.renderThread();
+        return { ok: false, message: "The project changed since this proposal was made, so it was not applied. Ask again from the Assistant." };
+      }
+      throw error;
+    }
+    entry.status = "accepted";             // before the page re-renders: a new revision must not read as a supersede
+    this.hooks.applied(project, entry.card);
+    this.renderThread();
+    return { ok: true };
+  },
+
+  dismissCard(entry) {
+    if (entry.status !== "pending") return;
+    this.settle(entry, "dismissed");
+    this.renderThread();
+  },
+
+  cardHtml(entry) {
+    const { card, status } = entry;
+    const lines = (card.diff || []).map(line => `<li><b>${esc(line.label)}</b> ${esc(line.text)}</li>`).join("");
+    const pinned = (card.pinned || []).length
+      ? `<div class="slicer-muted">Pinned, left alone: ${(card.pinned || []).map(p => esc(p.label)).join(", ")}</div>` : "";
+    const notes = [...(card.notes || []), ...(card.problems || [])].map(note => `<li>${esc(note)}</li>`).join("");
+    let foot;
+    if (status === "pending") {
+      foot = `<div class="assistant-actions"><button type="button" class="btn btn-primary btn-sm" data-action="review" data-token="${esc(card.token)}">Review changes…</button>
+        <button type="button" class="btn btn-secondary btn-sm" data-action="dismiss" data-token="${esc(card.token)}">Dismiss</button></div>`;
+    } else if (status === "superseded") {
+      foot = `<div class="slicer-muted">The project changed since this was made, so it can't be applied. Nothing was changed.</div>
+        <div class="assistant-actions"><button type="button" class="btn btn-secondary btn-sm" data-action="ask-again" data-token="${esc(card.token)}"${this.busy ? " disabled" : ""}>Ask again</button></div>`;
+    } else foot = `<div class="slicer-muted">${CARD_STATUS[status]}</div>`;
+    const badge = status === "superseded" ? ` <span class="slicer-badge">Superseded</span>` : "";
+    return `<div class="assistant-card${status === "pending" ? "" : " done"}" data-token="${esc(card.token)}" data-kind="${esc(card.kind)}" data-status="${status}">
+        <div class="assistant-card-head"><b>${esc(card.title)}</b>${badge}</div>
+        <div class="slicer-muted">${esc(card.scope)}</div>
+        <p class="assistant-reason">${esc(card.reason)}</p>
+        ${lines ? `<ul class="assistant-diff">${lines}</ul>` : ""}${pinned}
+        ${notes ? `<ul class="assistant-notes slicer-muted">${notes}</ul>` : ""}
+        ${foot}
+      </div>`;
   },
 
   clear() {
@@ -243,6 +379,7 @@ export const assistantPanel = {
   entryHtml(entry, isLast) {
     if (entry.kind === "user") return `<div class="assistant-msg me">${esc(entry.text)}</div>`;
     if (entry.kind === "answer") return `<div class="assistant-msg answer">${esc(entry.text)}</div>`;
+    if (entry.kind === "proposal") return this.cardHtml(entry);
     const retry = isLast ? `<div class="assistant-actions"><button type="button" class="btn btn-secondary btn-sm" data-action="retry">Try again</button></div>` : "";
     const quiet = entry.kind === "cancelled" ? "" : " warn";
     const reassure = entry.kind === "error" ? `<div class="slicer-muted">Nothing was changed.</div>` : "";

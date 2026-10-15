@@ -19,10 +19,12 @@ by `Context.core()` after the data directory is known.
 """
 import argparse
 import contextlib
+import copy
 import json
 import os
 import sys
 import traceback
+import uuid
 
 SERVER_NAME = "spooler"
 PROTOCOL_VERSION = "2024-11-05"
@@ -58,9 +60,10 @@ class ToolError(Exception):
 class Context:
     """What a tool may use: the one project it is bound to and a fresh read-only view of the data."""
 
-    def __init__(self, project_id: int, data_dir: str):
+    def __init__(self, project_id: int, data_dir: str, run: str | None = None):
         self.project_id = int(project_id)
         self.data_dir = data_dir
+        self.run = run or f"terminal-{uuid.uuid4().hex[:12]}"       # the Assistant run that owns the Proposals staged here
 
     def core(self):
         """The socket-free read core, imported on first use (after DATA_DIR is set for the modules that read it at import)."""
@@ -79,6 +82,12 @@ class Context:
             yield conn
         finally:
             conn.close()
+
+    def projects_dir(self):
+        """Where staged Proposals live (`<projects dir>/.assistant`): the only place this server writes."""
+        datapaths, _, _, _ = self.core()
+        datapaths.configure_all(self.data_dir)
+        return datapaths.projects_dir()
 
     def record(self) -> dict:
         _, project_read, _, _ = self.core()
@@ -105,12 +114,21 @@ def check_arguments(schema: dict, arguments) -> dict:
     for name in schema.get("required") or []:
         if name not in arguments:
             raise ToolError(f"Missing argument {name!r}")
-    kinds = {"integer": int, "string": str, "boolean": bool, "number": (int, float)}
-    for name, value in arguments.items():
-        kind = properties[name].get("type")
+    kinds = {"integer": int, "string": str, "boolean": bool, "number": (int, float), "array": list}
+
+    def of_kind(value, kind) -> bool:
         expected = kinds.get(kind)
-        if expected and (not isinstance(value, expected) or (kind in ("integer", "number") and isinstance(value, bool))):
-            raise ToolError(f"Argument {name!r} must be {'an' if kind == 'integer' else 'a'} {kind}")
+        return not expected or (isinstance(value, expected) and not (kind in ("integer", "number") and isinstance(value, bool)))
+
+    for name, value in arguments.items():
+        spec = properties[name]
+        kind = spec.get("type")
+        if not of_kind(value, kind):
+            raise ToolError(f"Argument {name!r} must be {'an' if kind in ('integer', 'array') else 'a'} {kind}")
+        if kind == "array" and spec.get("items") and not all(of_kind(item, spec["items"].get("type")) for item in value):
+            raise ToolError(f"Every item of {name!r} must be {'an' if spec['items'].get('type') == 'integer' else 'a'} {spec['items'].get('type')}")
+        if "enum" in spec and value not in spec["enum"]:
+            raise ToolError(f"Argument {name!r} must be one of: {', '.join(map(str, spec['enum']))}")
     return arguments
 
 
@@ -373,6 +391,139 @@ def get_slice_summary(ctx: Context, plate_id: int) -> dict:
     return fit_to_cap(result, ("features", "findings"))
 
 
+# ── Proposing ─────────────────────────────────────────────────────────────────
+# A propose tool never changes the project. It computes the resulting data with one of Spooler's own non-saving helpers, stages it
+# with `stage_proposal` (the one write this server makes: `<projects dir>/.assistant/<token>/proposal.json`), and tells the model
+# the token, a readable diff, notes and problems. The person reviews and accepts in the app; that is the only thing that saves.
+
+REASON_CAP = 160
+
+
+def stale_result(record: dict, revision: int):
+    """None when `revision` is the one the model read at; otherwise the answer that makes it read again, and no Proposal."""
+    if revision == record["revision"]:
+        return None
+    return {"stale": True, "revision": record["revision"],
+            "changed": f"The project changed since you read it (you used revision {revision}, it is now {record['revision']}). "
+                       "Read it again and propose again; nothing was staged."}
+
+
+def check_proposal_room(ctx: Context) -> None:
+    """The server's own per-run cap: the model cannot talk its way past it."""
+    import proposal_store
+    if len(proposal_store.listing(ctx.projects_dir(), run=ctx.run)) >= proposal_store.MAX_PER_RUN:
+        raise ToolError(f"At most {proposal_store.MAX_PER_RUN} Proposals per run. Tell the person what you found instead of proposing more.")
+
+
+def one_line(text, cap: int = REASON_CAP) -> str:
+    return quoted(" ".join(str(text or "").split()), cap)
+
+
+def stage_proposal(ctx: Context, record: dict, *, kind: str, title: str, scope: str, reason: str, review: str, data: dict,
+                   emptied=(), diff=(), notes=(), pinned=(), problems=(), targets=None) -> dict:
+    """Stage one Proposal (any kind) and return what the model is told about it. `diff` is [{label, text}], `pinned` is
+    [{object, label}], `review` says which review sheet shows it ("placement" or "settings"). The resulting `data` is stored for
+    Accept to apply as it is; it is never sent back to the model."""
+    import proposal_store
+    check_proposal_room(ctx)
+    staged = proposal_store.write(ctx.projects_dir(), {
+        "project_id": ctx.project_id, "run": ctx.run, "base_revision": record["revision"], "kind": kind, "title": title, "scope": scope,
+        "reason": reason, "review": review, "data": data, "emptied": list(emptied), "diff": list(diff), "notes": list(notes),
+        "pinned": list(pinned), "problems": list(problems), "targets": targets or {}})
+    left = proposal_store.MAX_PER_RUN - len(proposal_store.listing(ctx.projects_dir(), run=ctx.run))
+    return {"revision": record["revision"], "token": staged["token"], "kind": kind, "title": title,
+            "diff": [{"label_quoted": quoted(line["label"], NAME_CAP), "text": line["text"]} for line in diff],
+            "notes": list(notes), "pinned_skipped": [{"object": p["object"], "name_quoted": quoted(p["label"], NAME_CAP)} for p in pinned],
+            "problems": list(problems), "proposals_left_this_run": left,
+            "next": "The person sees this as a card and decides. Nothing was changed. Do not call propose again for the same change."}
+
+
+def _degrees(values) -> str:
+    return ", ".join(f"{round(float(v), 1):g}" for v in values)
+
+
+@tool("propose_orientation", "Propose a better orientation for Objects, made by Spooler's own orientation helper (you never choose "
+      "rotations). object_ids are the Objects to consider (omit for every Object); mode is least-support or strength (omit to follow "
+      "each Model's Purpose: Functional gives strength, the others least support); reason is one short line for the person. Pinned "
+      "Objects and Objects of a Model still importing are skipped and reported. Pass the project revision you read. A behind "
+      "revision returns {stale: true} and no Proposal. Returns the Proposal token, a readable diff, notes and problems, never the "
+      "resulting data. At most 3 Proposals per run.",
+      {"revision": {"type": "integer"}, "object_ids": {"type": "array", "items": {"type": "integer"}},
+       "mode": {"type": "string", "enum": ["least-support", "strength"]}, "reason": {"type": "string"}}, required=["revision"])
+def propose_orientation(ctx: Context, revision: int, object_ids=None, mode=None, reason=None) -> dict:
+    _, project_read, placement_read, _ = ctx.core()
+    record = ctx.record()
+    stale = stale_result(record, revision)
+    if stale:
+        return stale
+    check_proposal_room(ctx)
+    data = record["data"]
+    states = {m["id"]: m.get("state") for m in record.get("models") or []}
+    wanted = None if object_ids is None else set(object_ids)
+    problems, pinned, unchanged, rotations, diff, modes, no_face = [], [], [], {}, [], {}, 0
+    if wanted is not None:
+        for missing in sorted(wanted - {o["id"] for o in data.get("objects") or []}):
+            problems.append(f"Object {missing} is not in this project")
+    options = placement_read._orient_options(record, {"mode": mode} if mode else {})
+    for obj in data.get("objects") or []:
+        if wanted is not None and obj["id"] not in wanted:
+            continue
+        label = obj.get("name") or f"Object {obj['id']}"
+        if states.get(obj["model"]) != project_read.READY:
+            problems.append(f"Object {obj['id']} cannot be targeted: its Model is "
+                            f"{'still importing' if states.get(obj['model']) == project_read.IMPORTING else 'not ready'}")
+            continue
+        if obj.get("pinned"):
+            pinned.append({"object": obj["id"], "label": label})
+            continue
+        own = options
+        if not mode:                 # the same default Orient all uses: the Model's effective Purpose chooses the weighting
+            chosen = project_read.PURPOSE_ORIENT_MODE[project_read.effective_purpose(data, obj["model"])["value"]]
+            if chosen == "looks":
+                chosen, no_face = "least-support", no_face + 1
+            own = {**options, "mode": chosen}
+        modes[own["mode"]] = modes.get(own["mode"], 0) + 1
+        try:
+            found = placement_read._orientation_for(ctx.project_id, obj, own)
+        except Exception as e:
+            problems.append(f"Object {obj['id']} could not be assessed: {getattr(e, 'args', [''])[0] or type(e).__name__}"[:160])
+            continue
+        if not found["changed"]:
+            unchanged.append(obj["id"])
+            continue
+        rotations[obj["id"]] = found["rotation"]
+        now, then = found["current"], found["suggested"]
+        diff.append({"label": label, "text": f"rotation {_degrees(obj['rotation'])} → {_degrees(found['rotation'])} degrees; "
+                                              f"estimated support {now['support'] / 1000:.1f} → {then['support'] / 1000:.1f} cm³; "
+                                              f"height {now['height']:.0f} → {then['height']:.0f} mm", "object": obj["id"]})
+    notes = []
+    if modes:
+        notes.append("Weighting: " + (f"{mode} as asked" if mode else "from each Model's Purpose (" + ", ".join(
+            f"{name} for {count}" for name, count in sorted(modes.items())) + ")"))
+    if no_face:
+        notes.append(f"{no_face} Display part{'s' if no_face != 1 else ''} had no favoured side to weigh, so least-support was used")
+    if unchanged:
+        notes.append(f"{len(unchanged)} object{'s were' if len(unchanged) != 1 else ' was'} already on a good face")
+    if not rotations:
+        return {"revision": record["revision"], "proposal": None, "message": "No orientation would change, so nothing was staged.",
+                "unchanged": unchanged, "pinned_skipped": [{"object": p["object"], "name_quoted": quoted(p["label"], NAME_CAP)} for p in pinned],
+                "problems": problems, "notes": notes}
+    resulting = copy.deepcopy(data)
+    for obj in resulting["objects"]:
+        if obj["id"] in rotations:
+            obj["rotation"] = rotations[obj["id"]]
+    plate_ids = sorted({o["plate"] for o in data["objects"] if o["id"] in rotations})
+    names = {p["id"]: p.get("name") or f"Plate {p['id']}" for p in data.get("plates") or []}
+    count = len(rotations)
+    scope = f"{count} object{'s' if count != 1 else ''} on " + ", ".join(names.get(i, f"Plate {i}") for i in plate_ids)
+    how = "that print stronger" if (mode or "") == "strength" else "that need less support"
+    return stage_proposal(
+        ctx, record, kind="orientation", title=f"Better orientation for {count} object{'s' if count != 1 else ''}", scope=scope,
+        reason=one_line(reason) or f"Turns {count} object{'s' if count != 1 else ''} onto faces {how}.", review="placement",
+        data=resulting, diff=diff, notes=notes, pinned=pinned, problems=problems,
+        targets={"objects": sorted(rotations), "plates": plate_ids})
+
+
 # ── The protocol ──────────────────────────────────────────────────────────────
 
 def _reply(message_id, result=None, error=None) -> dict:
@@ -437,11 +588,12 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Read-only Spooler MCP server for one project")
     parser.add_argument("--project", type=int, required=True)
     parser.add_argument("--data-dir", required=True, help="the Spooler data directory (never defaulted: pass it explicitly)")
+    parser.add_argument("--run", default=None, help="the Assistant run these Proposals belong to (the per-run cap counts them)")
     args = parser.parse_args(argv)
     os.environ["DATA_DIR"] = args.data_dir       # persistence reads it once, at import
     if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    serve(Context(args.project, args.data_dir), sys.stdin.buffer, sys.stdout.buffer)
+    serve(Context(args.project, args.data_dir, args.run), sys.stdin.buffer, sys.stdout.buffer)
     return 0
 
 

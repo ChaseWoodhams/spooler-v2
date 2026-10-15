@@ -68,6 +68,7 @@ import orca_3mf
 import preflight
 import packing
 import problem_kinds
+import proposal_store
 import remembered_defaults
 import slicer
 import splits
@@ -125,6 +126,7 @@ def init() -> None:
     """Migrate, and queue again any plate that was slicing when Spooler stopped."""
     database.migrate()
     sweep_import_staging(startup=True)    # a review that was being prepared when Spooler stopped
+    sweep_assistant_staging(startup=True) # Proposals the Assistant staged before Spooler stopped: their cards are gone with the page
     with database.transaction() as conn:
         for row in conn.execute("SELECT id, slices FROM projects").fetchall():
             entries = json.loads(row["slices"] or "{}")
@@ -491,6 +493,7 @@ async def draft_sweep_loop(interval_s: float = 3600) -> None:
     """Sweep abandoned drafts at startup and then every `interval_s`."""
     while True:
         try:
+            await asyncio.to_thread(sweep_assistant_staging)
             swept = await asyncio.to_thread(sweep_drafts)
             if swept:
                 print(f"[Projects] Removed {len(swept)} abandoned draft project(s)")
@@ -1278,6 +1281,16 @@ def cancel_import(token: str) -> dict:
     """Throw away a review's staging. Only the named token's own folder is touched; cancelling twice is harmless."""
     shutil.rmtree(_staging_path(token), ignore_errors=True)
     return {"ok": True}
+
+
+def sweep_assistant_staging(now: float | None = None, startup: bool = False) -> int:
+    """Remove staged Assistant Proposals that are over 24 hours old (all of them at startup). Only files under
+    projects/.assistant are removed; project data is never read or changed."""
+    try:
+        return proposal_store.sweep(projects_dir(), now, startup)
+    except OSError as e:                  # housekeeping never stops startup
+        print(f"[Projects] Could not sweep Assistant staging: {e}")
+        return 0
 
 
 def sweep_import_staging(now: float | None = None, startup: bool = False) -> int:
