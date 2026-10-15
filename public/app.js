@@ -1841,6 +1841,7 @@ function _renderAssistantTuning(tuning) {
     hint.textContent = spec.hint || "";
     box.append(legend, hint);
     for (const [key, field] of Object.entries(spec.fields)) {
+      if (field.type === "text") { box.append(_assistantTuningTextRow(group, key, field, tuning.values?.[group]?.[key] ?? field.default)); continue; }
       const row = document.createElement("div");
       row.className = "form-group";
       const id = `assistant-tuning-${group}-${key}`;
@@ -1869,11 +1870,43 @@ function _renderAssistantTuning(tuning) {
   }
   _markAssistantTuningDirty();
 }
+// A text field (the Instructions): an editable box with a counter against the cap, and the built-in text beside it, read only.
+function _assistantTuningTextRow(group, key, field, value) {
+  const id = `assistant-tuning-${group}-${key}`;
+  const row = document.createElement("div");
+  row.className = "form-group";
+  const label = document.createElement("label");
+  label.htmlFor = id;
+  label.textContent = field.label;
+  const area = document.createElement("textarea");
+  Object.assign(area, { id, rows: 14, value, maxLength: field.max, placeholder: "Empty: the built-in instructions are used." });
+  area.dataset.group = group;
+  area.dataset.key = key;
+  const count = document.createElement("small");
+  count.className = "input-hint";
+  count.id = `${id}-count`;
+  const update = () => { count.textContent = `${area.value.length} of ${field.max} ${field.unit}`; _markAssistantTuningDirty(); };
+  area.addEventListener("input", update);
+  const help = document.createElement("small");
+  help.className = "input-hint";
+  help.id = `${id}-hint`;
+  help.textContent = field.hint;
+  area.setAttribute("aria-describedby", `${help.id} ${count.id}`);
+  const builtinLabel = document.createElement("label");
+  builtinLabel.htmlFor = `${id}-builtin`;
+  builtinLabel.textContent = "Built-in instructions";
+  const builtin = document.createElement("textarea");
+  Object.assign(builtin, { id: `${id}-builtin`, rows: 14, readOnly: true, value: field.builtin || "" });
+  row.append(label, area, count, help, builtinLabel, builtin);
+  count.textContent = `${area.value.length} of ${field.max} ${field.unit}`;
+  return row;
+}
 function _assistantTuningEdits() {
   const edits = {};
-  document.querySelectorAll("#assistant-tuning-groups input[data-key]").forEach(input => {
+  document.querySelectorAll("#assistant-tuning-groups input[data-key], #assistant-tuning-groups textarea[data-key]").forEach(input => {
     const { group, key } = input.dataset;
     const saved = _assistantTuning?.values?.[group]?.[key];
+    if (input.tagName === "TEXTAREA") { if (input.value !== saved) (edits[group] ||= {})[key] = input.value; return; }
     const typed = input.value.trim() === "" ? NaN : Number(input.value);
     if (typed !== saved) (edits[group] ||= {})[key] = Number.isNaN(typed) ? input.value : typed;
   });

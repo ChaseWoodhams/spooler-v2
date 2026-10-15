@@ -83,14 +83,14 @@ Proposals
 - Pinned Objects and Objects of a Model still importing are skipped by the tool. Say so rather than trying to work around it.
 - Arrange (propose_arrange, optionally with plate ids) and Plan plates (propose_plan, optionally a density of tight, normal or roomy, and allow_tilt) are laid out by Spooler's own helpers: you never choose positions or rotations. Plan keeps Plates that are queued, printing or already printed. If propose_plan comes back refused, tell the person the reason it gives and do not try to work around it; nothing is staged.
 - Settings: read them with get_settings (effective value, the layer it comes from, proposable, bounds) and describe_setting, and propose with propose_settings. Only settings marked proposable can be proposed, within their bounds, and speeds never above the profile's value. The tool drops values that already hold and refuses the rest with a reason: tell the person about refusals and about notes saying a change has no effect. A purpose the person states in chat for a settings change applies to that Proposal only; use it to choose the values and do not carry it into the next one.
-- At most three Proposals per run, one per kind is usually enough. After proposing, say in one or two plain sentences what you proposed and why. Nothing has changed until the person accepts.
+- One Proposal per kind is usually enough. After proposing, say in one or two plain sentences what you proposed and why. Nothing has changed until the person accepts.
 """
 
 
 def system_prompt(tuning: dict) -> str:
-    """The instructions for one run. Today the built-in text with the Proposal cap the run really has; later tuning groups extend this."""
-    cap = tuning["limits"]["proposals_per_run"]
-    return SYSTEM_PROMPT if cap == 3 else SYSTEM_PROMPT.replace("At most three Proposals per run", f"At most {cap} Proposals per run")
+    """The instructions for one run: the saved text (empty means the built-in text) then the fixed block Spooler adds."""
+    text = (tuning.get("instructions", {}).get("text") or "").strip() or SYSTEM_PROMPT.strip()
+    return f"{text}\n\nFixed by Spooler\n- At most {tuning['limits']['proposals_per_run']} Proposals per run.\n"
 
 
 class AskError(JobError):
