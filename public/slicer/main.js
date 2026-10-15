@@ -713,6 +713,18 @@ function stepAvailable(step) {
   return false;
 }
 
+// What unlocks a locked step, in words; "" when the step is open
+function stepLockedReason(step) {
+  if (stepAvailable(step)) return "";
+  switch (step) {
+    case "split":  return "The model check must finish first";
+    case "plates": return "Split the model first";
+    case "slice":  return "Put the model on a plate first";
+    case "print":  return "Put the model on a plate first";
+  }
+  return "Not available for this project";
+}
+
 function stepDone(step) {
   const split = splitStep.split;
   switch (step) {
@@ -775,9 +787,10 @@ function renderSteps() {
   const steps = STEPS.filter(([id]) => isGcodeProject() ? id === "print" : splitIdsOf(state.project).length || (id !== "model" && id !== "split"));
   $("step-bar").innerHTML = steps.map(([id, label], index) => {
     const skipped = id === "split" && splitSkipped();   // a model that fits the bed skips Split, but the step stays openable
+    const reason = stepLockedReason(id);
     return `${index ? '<span class="slicer-step-sep"></span>' : ""}
     <button class="slicer-step${id === state.step ? " active" : ""}${skipped ? " skipped" : stepDone(id) ? " done" : ""}" type="button" data-step="${id}"${id === state.step ? ' aria-current="step"' : ''}
-      ${stepAvailable(id) ? "" : " disabled"}${skipped ? ' title="This model fits the bed, so it was put on a plate whole. Open Split to cut it anyway."' : ""}><span class="num">${skipped ? "–" : stepDone(id) && id !== state.step ? "✓" : index + 1}</span>${label}${skipped ? "<small> not needed</small>" : ""}</button>`;
+      ${reason ? ` aria-disabled="true" aria-describedby="step-why-${id}" title="${esc(reason)}"` : ""}${skipped ? ' title="This model fits the bed, so it was put on a plate whole. Open Split to cut it anyway."' : ""}><span class="num">${skipped ? "–" : stepDone(id) && id !== state.step ? "✓" : index + 1}</span>${label}${skipped ? "<small> not needed</small>" : ""}${reason ? `<span class="sr-only" id="step-why-${id}">Unavailable. ${esc(reason)}</span>` : ""}</button>`;
   }).join("");
 }
 
@@ -786,10 +799,23 @@ function renderStepActions() {
   if (!state.project) { el.innerHTML = ""; return; }
   const next = (step, label) => `<button class="btn btn-primary" type="button" data-go="${step}"${stepAvailable(step) ? "" : " disabled"}>${label}</button>`;
   const send = sendThisPlateState();
-  el.innerHTML = state.step === "plates" ? next("slice", "Slice →")
+  const fwd = state.step === "model" || state.step === "split" ? splitStep.forward() : null;
+  const importing = importProgress();
+  const progress = importing ? `<span class="slicer-import-progress" data-role="import-progress" role="status"><progress max="${importing.total}" value="${importing.done}" aria-label="Models imported"></progress> ${importing.done} of ${importing.total} models imported</span>` : "";
+  el.innerHTML = progress + (fwd ? `<button class="btn btn-primary" type="button" data-split-forward="${fwd.action}"${fwd.why ? ' aria-disabled="true" aria-describedby="split-forward-why"' : ""}>${esc(fwd.label)}</button>`
+        + (fwd.why ? `<small class="reason-line" id="split-forward-why">${esc(fwd.why)}</small>` : "") : "")
+    + (state.step === "plates" ? next("slice", "Slice →")
     : state.step === "slice" ? `<button class="btn btn-primary" type="button" data-send-this-plate${send.why ? ' aria-disabled="true" aria-describedby="send-this-plate-why"' : ""}>${esc(send.label)}</button>`
-      + (send.why ? `<small class="reason-line" id="send-this-plate-why">${esc(send.why)}</small>` : "") : "";
+      + (send.why ? `<small class="reason-line" id="send-this-plate-why">${esc(send.why)}</small>` : "") : "");
   $("btn-slice-send").hidden = state.step === "slice";   // the Slice step has its own send in the header
+}
+
+// Models still importing onto Plates: how many of them are done
+function importProgress() {
+  const models = state.project?.models || [];
+  const used = models.filter(m => data().objects.some(o => o.model === m.id));
+  const importing = used.filter(m => m.state === "importing");
+  return importing.length ? { done: used.length - importing.length, total: used.length } : null;
 }
 
 // The Slice step's one action: send the selected Plate to its printer, or to the next free one when none is chosen.
@@ -2984,7 +3010,7 @@ function bindUi() {
 
   $("step-bar").addEventListener("click", e => {
     const btn = e.target.closest("[data-step]");
-    if (btn && !btn.disabled) setStep(btn.dataset.step);
+    if (btn && btn.getAttribute("aria-disabled") !== "true") setStep(btn.dataset.step);
   });
   $("slice-state").addEventListener("click", e => {
     if (e.target.closest("[data-show-problem]")) showProblem();
@@ -2992,6 +3018,8 @@ function bindUi() {
   $("step-actions").addEventListener("click", e => {
     const btn = e.target.closest("[data-go]");
     if (btn && !btn.disabled) setStep(btn.dataset.go);
+    const fwd = e.target.closest("[data-split-forward]");
+    if (fwd && fwd.getAttribute("aria-disabled") !== "true") withButton(fwd, () => splitStep.perform(fwd.dataset.splitForward));
     const send = e.target.closest("[data-send-this-plate]");
     if (send && !send.disabled && send.getAttribute("aria-disabled") !== "true") withButton(send, sendThisPlate);
   });

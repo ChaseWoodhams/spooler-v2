@@ -63,7 +63,7 @@ const EXPECT = {
 async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model', plateFit = null, mutate = null, slices = null, writes = null } = {}) {
   const project = makeProject(), split = makeSplit();
   if (slices) project.slices = slices;
-  if (mutate) mutate(project);
+  if (mutate) mutate(project, split);
   const context = await browser.newContext({ viewport: { width, height }, serviceWorkers: 'block' });
   await context.addInitScript(([t, s]) => { try { localStorage.setItem('theme', t); localStorage.setItem('slicer.step.1', s); } catch (_) { /* ignore */ } }, [theme, step]);
   const page = await context.newPage();
