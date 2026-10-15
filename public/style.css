@@ -2178,6 +2178,7 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
   label:has(> input[type="checkbox"]), label:has(> input[type="radio"]) { min-height: var(--hit-min); display: flex; align-items: center; gap: 8px; }
   input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; }
   .file-actions { flex-wrap: wrap; }
+  .modal-box select { min-height: var(--hit-min); }
 }
 
 /* ─── Outcome status badges (status-badge.js): icon + label, own colours ──────── */
