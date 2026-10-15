@@ -751,7 +751,11 @@ def serve(ctx: Context, stdin, stdout) -> None:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Read-only Spooler MCP server for one project")
+    parser = argparse.ArgumentParser(
+        description="Read-only Spooler MCP server for one project. Also usable from a terminal Claude session (see docs/assistant-terminal.md).",
+        epilog="Terminal use: claude mcp add spooler -- python spooler_mcp.py --project 12 --data-dir <Spooler data dir>. The server is bound "
+               "to that one project, reads it read-only, and can only stage Proposals (never apply them): they appear as cards in that "
+               "project's Assistant panel, where Accept happens. --data-dir is always required so a live install is never reached by accident.")
     parser.add_argument("--project", type=int, required=True)
     parser.add_argument("--data-dir", required=True, help="the Spooler data directory (never defaulted: pass it explicitly)")
     parser.add_argument("--run", default=None, help="the Assistant run these Proposals belong to (the per-run cap counts them)")

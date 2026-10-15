@@ -24,6 +24,7 @@ STAGING_NAME = ".assistant"
 FILE_NAME = "proposal.json"
 TTL_S = 24 * 3600
 MAX_PER_RUN = 3
+TERMINAL_PREFIX = "terminal-"       # run ids of Proposals staged by a terminal-started server (no app run owns them)
 TOKEN = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -139,3 +140,20 @@ def summary(record: dict) -> dict:
     """What a card needs, never the resulting data."""
     keys = ("token", "kind", "title", "scope", "reason", "diff", "notes", "pinned", "problems", "review", "base_revision", "project_id", "created_at")
     return {key: record.get(key) for key in keys}
+
+
+def terminal_pending(projects_dir, project_id) -> list:
+    """The project's Proposals staged by terminal sessions (runs named `terminal-...`), newest of each kind per session; older ones
+    of that kind are deleted. App-started runs are not listed: their Proposals reach the panel through the run."""
+    by_run = {}
+    for record in listing(projects_dir, project_id=project_id):
+        if str(record.get("run") or "").startswith(TERMINAL_PREFIX):
+            by_run.setdefault(record["run"], []).append(record)
+    kept = []
+    for records in by_run.values():
+        latest = latest_of_each_kind(records)
+        for record in records:
+            if record not in latest:
+                remove(projects_dir, record["token"])
+        kept += latest
+    return sorted(kept, key=lambda r: (r.get("created_at") or 0, r["token"]))

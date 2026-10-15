@@ -21,6 +21,7 @@ const CARD_STATUS = {
   dismissed: "Dismissed. Nothing was changed.",
   replaced: "Replaced by a newer proposal of the same kind. Nothing was changed.",
 };
+const TERMINAL_POLL_MS = 5000;          // how often an open panel looks for Proposals staged from a terminal session
 const GIVE_UP_MS = 90000;              // the server stops a run after 60 s; if its answer still has not come, stop waiting (never a spinner forever)
 const END_STATES = ["timeout", "cancelled", "usage_limit", "error"];
 const END_TITLES = { timeout: "No answer in 60 s", cancelled: "Cancelled", usage_limit: "AI unavailable", error: "The assistant could not answer" };
@@ -41,6 +42,7 @@ export const assistantPanel = {
   run: null,           // {id, steps: [{label}]} while busy
   notice: null,        // a refused ask: {text}; not part of the thread or the history
   pollTimer: null,
+  terminalTimer: null, // looks for Proposals staged by a terminal session (no app run owns them)
 
   // hooks: { api(method, path, body), project() -> record | null, flush() (save unsaved edits first),
   //          openReview(view, { accept }) (the Plan plates review sheet), applied(project, card) (the page takes the accepted project) }
@@ -68,7 +70,8 @@ export const assistantPanel = {
     document.body.classList.toggle("assistant-open", open);
     this.panel.hidden = !open;
     this.button.setAttribute("aria-expanded", String(open));
-    if (open) { this.refresh(); if (focus) this.focusStart(); }
+    if (open) { this.refresh(); this.watchTerminal(); if (focus) this.focusStart(); }
+    else clearTimeout(this.terminalTimer);
   },
 
   focusStart() {
@@ -252,6 +255,34 @@ export const assistantPanel = {
     this.panel.querySelector(".assistant-input")?.focus({ preventScroll: true });
   },
 
+  // ── Proposals from a terminal session ──
+  // The Spooler MCP server started from a terminal stages Proposals for its project without an app run. While the panel is open
+  // (and the tab visible) the project's pending ones are listed and shown as cards; each then works like any other card.
+  watchTerminal() {
+    clearTimeout(this.terminalTimer);
+    if (!this.open) return;
+    this.loadTerminal().finally(() => {
+      if (this.open) this.terminalTimer = setTimeout(() => this.watchTerminal(), TERMINAL_POLL_MS);
+    });
+  },
+
+  async loadTerminal() {
+    const project = this.hooks.project();
+    if (!project || document.hidden) return;
+    let cards;
+    try {
+      cards = (await this.hooks.api("GET", `/api/projects/${project.id}/assistant/proposals`)).proposals || [];
+    } catch { return; }                       // an unreachable list changes nothing; the next look tries again
+    if (this.hooks.project()?.id !== project.id) return;
+    let added = false;
+    for (const card of cards) {
+      if (card.base_revision !== project.revision || this.entryFor(card.token)) continue;
+      this.addCard(card, null);
+      added = true;
+    }
+    if (added) this.renderThread();
+  },
+
   // ── Proposal cards ──
   proposalTurn(entry) {
     const outcome = { pending: "waiting for the person's decision", accepted: "accepted", dismissed: "dismissed",
@@ -342,7 +373,7 @@ export const assistantPanel = {
         <button type="button" class="btn btn-secondary btn-sm" data-action="dismiss" data-token="${esc(card.token)}">Dismiss</button></div>`;
     } else if (status === "superseded") {
       foot = `<div class="slicer-muted">The project changed since this was made, so it can't be applied. Nothing was changed.</div>
-        <div class="assistant-actions"><button type="button" class="btn btn-secondary btn-sm" data-action="ask-again" data-token="${esc(card.token)}"${this.busy ? " disabled" : ""}>Ask again</button></div>`;
+        ${entry.question ? `<div class="assistant-actions"><button type="button" class="btn btn-secondary btn-sm" data-action="ask-again" data-token="${esc(card.token)}"${this.busy ? " disabled" : ""}>Ask again</button></div>` : ""}`;
     } else foot = `<div class="slicer-muted">${CARD_STATUS[status]}</div>`;
     const badge = status === "superseded" ? ` <span class="slicer-badge">Superseded</span>` : "";
     return `<div class="assistant-card${status === "pending" ? "" : " done"}" data-token="${esc(card.token)}" data-kind="${esc(card.kind)}" data-status="${status}">
