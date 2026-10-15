@@ -38,6 +38,10 @@ let holdPicker = null;      // plate id whose "Hold after..." chooser is open
 let holdChoice = "";        // the chooser's current value: "plate:<id>" or "job:<id>"
 let warnPanel = null;       // { jobId, titles }: warnings found when a Plate was sent that wait for an accept
 let selected = null;
+const SORTS = { longest: "Longest first", number: "Plate number", time: "Print time, shortest first", filament: "Filament, least first" };
+const SORT_KEY = "spooler.print.sort";   // one choice per browser, not per Project
+let sortBy = (() => { try { const v = localStorage.getItem(SORT_KEY); return v in SORTS ? v : "longest"; } catch (err) { return "longest"; } })();
+let failedPictures = new Set();   // preview picture urls that did not load: the card says "No preview" for them
 let folds = new Set();   // board groups the user closed; remembered per Project
 
 const memoryKey = () => `spooler.print.${host.projectId()}`;
@@ -153,7 +157,10 @@ function boardGroups() {
       : plate.status === "printed_ok" ? "done" : "ready";
     groups[group].push({ plate, word, reason });
   }
-  groups.ready.sort((a, b) => (a.plate.status === "unsliced") - (b.plate.status === "unsliced") || rank(a.plate.id) - rank(b.plate.id));   // sliced Plates first, in print order
+  const numeric = key => (a, b) => (a.plate[key] ?? Infinity) - (b.plate[key] ?? Infinity);   // Plates with no estimate go last
+  const order = { longest: (a, b) => rank(a.plate.id) - rank(b.plate.id), number: (a, b) => a.plate.id - b.plate.id,
+    time: numeric("estimate_s"), filament: numeric("estimate_g") }[sortBy];
+  groups.ready.sort((a, b) => (a.plate.status === "unsliced") - (b.plate.status === "unsliced") || order(a, b) || a.plate.id - b.plate.id);   // sliced Plates first, then the chosen order
   return GROUPS.filter(([id]) => groups[id].length).map(([id, title]) => ({ id, title, cards: groups[id] }));
 }
 
@@ -264,6 +271,8 @@ function plateBoard() {
         <button type="button" class="btn btn-secondary btn-sm" data-act="assign-cancel">Cancel</button></div></div>`;
   return `<div class="pp-board"><a class="pp-queue-link" href="/?queue=1">Open the Queue page</a>${boardGroups().map(({ id, title, cards }) => `<section class="pp-card pp-group pp-group-${id}" data-group="${id}" aria-labelledby="pp-group-${id}">
     <div class="pp-group-head"><h3 id="pp-group-${id}"><button type="button" class="pp-fold" data-fold="${id}" aria-expanded="${!folds.has(id)}">${folds.has(id) ? "▸" : "▾"} ${title} <span class="slicer-muted">${cards.length}</span></button></h3>
+      ${id === "ready" ? `<label class="pp-sort slicer-muted" for="pp-sort">Sort <select id="pp-sort" aria-label="Sort the ready list">${Object.entries(SORTS).map(([key, label]) => `<option value="${key}"${key === sortBy ? " selected" : ""}>${label}</option>`).join("")}</select></label>
+        <span class="slicer-muted" id="pp-sort-label">Sorted: ${SORTS[sortBy]}</span>` : ""}
       ${id === "ready" && cards.some(c => sendable(c.plate)) ? `<span class="pp-ticks"><button type="button" class="btn btn-secondary btn-sm" id="pp-send-all" title="Tick every Plate that is sliced and not already in the queue">All</button>
         <button type="button" class="btn btn-secondary btn-sm" id="pp-send-none">None</button></span>` : ""}
       ${id === "ready" && !cards.some(c => sendable(c.plate)) && cards.some(c => c.plate.status === "unsliced") ? `<p class="pp-slice-first" role="note"><strong>Slice first.</strong> No Plate here is sliced yet, so there is nothing to send.
@@ -278,6 +287,8 @@ function plateBoard() {
       ${plateMeta(plate)}
       ${reason ? `<span class="pp-reason">${esc(reason)}</span>` : ""}${cardActions(plate)}</li>`).join("")}</ul></section>`).join("")}</div>`;
 }
+
+const noPreview = why => `<div class="pp-nopreview slicer-muted" role="note"><b>No preview</b> <span>${why}</span></div>`;
 
 function detail() {
   const plate = plateOf(selected);
@@ -325,7 +336,8 @@ function detail() {
     <div class="pp-actions">${btn("accept-warnings", "Accept warnings", true, "", warnPanel.canStart ? "" : "Fix the failing checks first")}${btn("dismiss-warnings", "Not now", false)}</div></div>` : "";
   const picture = `/api/projects/${host.projectId()}/plates/${plate.id}/preview.png?v=${plate.layout}`;
   return `<div class="pp-card"><div><b>${esc(plate.name)}</b> ${chip(plate.status)}</div>
-    ${plate.parts ? `<img class="pp-preview" src="${picture}" alt="${esc(plate.name)} as laid out" width="320" height="240" loading="lazy">` : ""}
+    ${!plate.parts ? noPreview("this Plate has no objects") : failedPictures.has(picture) ? noPreview("the picture could not be loaded")
+      : `<img class="pp-preview" src="${picture}" alt="${esc(plate.name)} as laid out" width="320" height="240">`}
     <div class="slicer-muted">${facts || "No slice yet"}</div>
     ${plate.status === "waiting" ? '<div class="slicer-muted">Waiting on another plate to print OK first</div>' : ""}
     ${plate.outcome_unknown ? '<p role="status">The latest Print has an unknown Outcome. Review its record in History before treating this Plate as completed.</p>' : ''}
@@ -451,6 +463,11 @@ async function act(name, button) {
 }
 
 function bindSend(root) {
+  root.addEventListener("error", e => {   // error events do not bubble, so listen while they go down
+    if (!e.target.matches?.("img.pp-preview")) return;
+    failedPictures.add(e.target.getAttribute("src"));
+    render();
+  }, true);
   root.addEventListener("toggle", e => { const id = e.target.dataset?.barfold; if (id && barFolds[id] !== e.target.open) { barFolds[id] = e.target.open; remember(); } }, true);
   root.addEventListener("click", e => {
     if (e.target.closest("#pp-send-all")) { ticked = new Set(readySendable().map(p => p.id)); return updateBar(); }
@@ -466,6 +483,11 @@ function bindSend(root) {
     if (box && e.target !== box && !e.target.closest("a, button, input, select, label")) tick(Number(box.dataset.tick), !box.checked);
   });
   root.addEventListener("change", e => {
+    if (e.target.id === "pp-sort") {
+      sortBy = e.target.value in SORTS ? e.target.value : "longest";
+      try { localStorage.setItem(SORT_KEY, sortBy); } catch (err) { /* private window */ }
+      return render();
+    }
     if (e.target.matches("[data-tick]")) return tick(Number(e.target.dataset.tick), e.target.checked);
     if (e.target.id === "pp-send-leveling") sendOpts.leveling = e.target.checked;
     else if (e.target.id === "pp-send-timelapse") sendOpts.timelapse = e.target.checked;
