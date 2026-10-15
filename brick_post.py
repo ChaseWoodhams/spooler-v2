@@ -17,7 +17,7 @@ import json
 import sys
 from pathlib import Path
 
-import jobs  # used as a module: jobs.JobError
+from errors import JobError   # not `jobs`: this module is read by the MCP server, which must not load the job and printer code
 
 APP_DIR = Path(__file__).resolve().parent
 SCRIPT = APP_DIR / "vendor" / "bricklayers" / "bricklayers.py"
@@ -39,11 +39,11 @@ def _number(raw: dict, key: str, low: float, high: float, whole: bool) -> float 
     try:
         number = float(value)
     except (TypeError, ValueError):
-        raise jobs.JobError(f"{label} must be a number")
+        raise JobError(f"{label} must be a number")
     if number != number or (whole and number != int(number)):
-        raise jobs.JobError(f"{label} must be a {'whole ' if whole else ''}number")
+        raise JobError(f"{label} must be a {'whole ' if whole else ''}number")
     if not low <= number <= high:
-        raise jobs.JobError(f"{label} must be between {low:g} and {high:g}")
+        raise JobError(f"{label} must be between {low:g} and {high:g}")
     return int(number) if whole else round(number, 3)
 
 
@@ -52,7 +52,7 @@ def validate(raw) -> dict | None:
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        raise jobs.JobError("The BrickLayers setting must be an object")
+        raise JobError("The BrickLayers setting must be an object")
     return {"enabled": bool(raw.get("enabled", False)),
             "extrusion_multiplier": _number(raw, "extrusion_multiplier", *MULTIPLIER_RANGE, whole=False),
             "start_at_layer": _number(raw, "start_at_layer", *START_RANGE, whole=True)}
