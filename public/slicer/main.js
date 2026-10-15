@@ -1201,6 +1201,7 @@ async function importPreset(file) {
 
 function plateDot(plateId) {
   const entry = sliceEntry(plateId);
+  if (plateImporting(plateId)) return "busy";
   return !entry ? "" : entry.state === "sliced" ? (entry.outdated ? "outdated" : "sliced") : entry.state === "failed" ? "failed" : "busy";
 }
 
@@ -1560,7 +1561,7 @@ function renderSlicing() {
   const plates = platesWithObjects();
   const todo = plates.filter(p => !isUpToDate(p.id) && !isBusy(p.id) && !plateImporting(p.id));
   const noProfile = !data().profile.bundle_id;
-  $("slicing-actions").innerHTML = !plates.length ? "" : !todo.length
+  $("slicing-actions").innerHTML = !plates.length ? "" : plates.every(p => isUpToDate(p.id))
     ? '<span class="slicer-all-sliced" role="status">✓ All plates sliced</span>'
     : `<button class="btn btn-primary btn-sm" type="button" data-slice-all${noProfile ? " disabled" : ""}${noProfile ? ' aria-describedby="slice-all-why"' : ""}>
     ${todo.length === plates.length ? `Slice all ${plural(plates.length, "plate")}` : `Slice ${plural(todo.length, "plate")}`}</button>${noProfile ? '<small id="slice-all-why" class="slicer-muted">Choose a slicing profile first</small>' : ""}`;
@@ -1575,11 +1576,13 @@ function renderSlicing() {
     </div>`;
   }).join("") || '<p class="slicer-muted">No plates with objects.</p>';
   const done = plates.filter(p => isUpToDate(p.id));
+  const failed = plates.filter(p => sliceEntry(p.id)?.state === "failed");
   const seconds = done.reduce((sum, p) => sum + (sliceEntry(p.id).estimate_s || 0), 0);
   const grams = done.reduce((sum, p) => sum + (sliceEntry(p.id).estimate_g || 0), 0);
-  $("slicing-totals").textContent = done.length
-    ? `${done.length} of ${plural(plates.length, "plate")} sliced · ${duration(seconds)} of printing · ${Math.round(grams)} g of filament`
-    : "Click a sliced plate to see its layers.";
+  const failedText = failed.length ? ` · ${failed.length} failed` : "";
+  $("slicing-totals").textContent = !plates.length ? "" : done.length
+    ? `${done.length} of ${plural(plates.length, "plate")} sliced${failedText} · ${duration(seconds)} of printing · ${Math.round(grams)} g of filament`
+    : `0 of ${plural(plates.length, "plate")} sliced${failedText}`;
 }
 
 function plateFilamentLabel(id) {
