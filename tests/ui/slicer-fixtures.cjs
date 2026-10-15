@@ -60,7 +60,7 @@ const EXPECT = {
   print: ['0 of 2 plates completed', 'needs slicing'],
 };
 
-async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model', plateFit = null, mutate = null, slices = null, splitOverride = null, writes = null, onPost = null } = {}) {
+async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme = 'dark', step = 'model', plateFit = null, mutate = null, slices = null, splitOverride = null, writes = null, onPost = null, statusOverride = null } = {}) {
   const project = makeProject(), split = { ...makeSplit(), ...(splitOverride || {}) };
   if (slices) project.slices = slices;
   if (mutate) mutate(project, split);
@@ -83,7 +83,7 @@ async function openSlicer(browser, baseUrl, { width = 1280, height = 900, theme 
       : /\/models\/\d+\/preview$/.test(p) ? 'mesh'
       : p === '/api/jobs' ? { jobs: [] } : p === '/api/outcome-prompts' ? { awaiting: [] }
       : /\/plates\/\d+\/fit$/.test(p) ? (plateFit ? plateFit(url) : { printer_id: null, warnings: [] })
-      : p.endsWith('/status') ? projectStatus()
+      : p.endsWith('/status') ? (statusOverride ? statusOverride(projectStatus()) : projectStatus())
       : p.endsWith('/jobs') ? { jobs: [] } : p === '/api/printers' ? fx.printers(2)
       : p === '/api/defaults' ? { defaults: { options: {} } } : p === '/api/slicer/spools' ? { spools: [] }
       : p === '/api/slicer/presets' ? { machines: [], processes: {}, filaments: {} } : {};
