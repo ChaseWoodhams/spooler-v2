@@ -91,7 +91,7 @@ class ReadToolsMcpTests(McpDataCase):
         self.project()
         _, tools = self.ask("get_project")
         by_name = {t["name"]: t for t in tools}
-        self.assertEqual(sorted(by_name), sorted(("get_project",) + READ_TOOLS + ("propose_orientation",)))
+        self.assertEqual(sorted(by_name), sorted(("get_project",) + READ_TOOLS + ("propose_orientation", "get_settings", "describe_setting", "propose_settings")))
         self.assertEqual(by_name["get_plate"]["inputSchema"]["required"], ["plate_id"])
         self.assertEqual(by_name["get_model_geometry"]["inputSchema"]["required"], ["model_id"])
         self.assertEqual(by_name["get_printer_capabilities"]["inputSchema"]["properties"], {})

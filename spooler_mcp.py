@@ -114,7 +114,7 @@ def check_arguments(schema: dict, arguments) -> dict:
     for name in schema.get("required") or []:
         if name not in arguments:
             raise ToolError(f"Missing argument {name!r}")
-    kinds = {"integer": int, "string": str, "boolean": bool, "number": (int, float), "array": list}
+    kinds = {"integer": int, "string": str, "boolean": bool, "number": (int, float), "array": list, "object": dict}
 
     def of_kind(value, kind) -> bool:
         expected = kinds.get(kind)
@@ -420,7 +420,7 @@ def one_line(text, cap: int = REASON_CAP) -> str:
 
 
 def stage_proposal(ctx: Context, record: dict, *, kind: str, title: str, scope: str, reason: str, review: str, data: dict,
-                   emptied=(), diff=(), notes=(), pinned=(), problems=(), targets=None) -> dict:
+                   emptied=(), diff=(), notes=(), pinned=(), problems=(), targets=None, settings=None) -> dict:
     """Stage one Proposal (any kind) and return what the model is told about it. `diff` is [{label, text}], `pinned` is
     [{object, label}], `review` says which review sheet shows it ("placement" or "settings"). The resulting `data` is stored for
     Accept to apply as it is; it is never sent back to the model."""
@@ -429,7 +429,8 @@ def stage_proposal(ctx: Context, record: dict, *, kind: str, title: str, scope: 
     staged = proposal_store.write(ctx.projects_dir(), {
         "project_id": ctx.project_id, "run": ctx.run, "base_revision": record["revision"], "kind": kind, "title": title, "scope": scope,
         "reason": reason, "review": review, "data": data, "emptied": list(emptied), "diff": list(diff), "notes": list(notes),
-        "pinned": list(pinned), "problems": list(problems), "targets": targets or {}})
+        "pinned": list(pinned), "problems": list(problems), "targets": targets or {},
+        **({"settings": list(settings)} if settings is not None else {})})        # a settings Proposal's table: [{key, label, old, new, layer, notes}]
     left = proposal_store.MAX_PER_RUN - len(proposal_store.listing(ctx.projects_dir(), run=ctx.run))
     return {"revision": record["revision"], "token": staged["token"], "kind": kind, "title": title,
             "diff": [{"label_quoted": quoted(line["label"], NAME_CAP), "text": line["text"]} for line in diff],
@@ -522,6 +523,85 @@ def propose_orientation(ctx: Context, revision: int, object_ids=None, mode=None,
         reason=one_line(reason) or f"Turns {count} object{'s' if count != 1 else ''} onto faces {how}.", review="placement",
         data=resulting, diff=diff, notes=notes, pinned=pinned, problems=problems,
         targets={"objects": sorted(rotations), "plates": plate_ids})
+
+
+# ── Settings tools (ticket 17): get_settings, describe_setting, propose_settings ─────────────────────────────────────
+# The logic lives in settings_read.py (socket-free) and proposable_settings.py (the allow-list); these are the tool faces.
+
+def _settings(call, *args):
+    """Run a settings_read function, turning its plain refusals into errors the model reads."""
+    import settings_read
+    try:
+        return call(settings_read, *args)
+    except Exception as e:
+        if getattr(e, "status", None) is not None and type(e).__name__ == "JobError":
+            raise ToolError(str(e)) from None
+        raise
+
+
+@tool("get_settings", "Read the effective slicer settings at a scope: scope is project, plate or object, id is the Plate or Object id "
+      "(not needed for project). Each row has the effective value, source (the layer it comes from: preset = the locked profile, "
+      "project, plate or object), hidden/greyed state under OrcaSlicer's dependency rules (inert_reason says why a setting has no "
+      "effect), proposable, and bounds. Settings you may not propose (nozzle and bed temperature, filament type, nozzle diameter, ...) "
+      "are included with proposable false and why_not. Without keys you get the proposable settings, the read-only ones and every "
+      "setting something overrides; pass keys to read specific ones.",
+      {"scope": {"type": "string", "enum": ["project", "plate", "object"]}, "id": {"type": "integer"},
+       "keys": {"type": "array", "items": {"type": "string"}}}, required=["scope"])
+def get_settings(ctx: Context, scope: str, id=None, keys=None) -> dict:
+    result = _settings(lambda m, record: m.get_settings(record, scope, id, keys), ctx.record())
+    return fit_to_cap(result, ("settings",))
+
+
+@tool("describe_setting", "Describe one slicer setting by key: its label, OrcaSlicer's tooltip, units, bounds, choices, whether it can "
+      "be set on a single Object, whether you may propose it (and at which scopes, with the bounds you must stay within) or why not, "
+      "and what switches it off. Pass the exact key, for example wall_loops.", {"key": {"type": "string"}}, required=["key"])
+def describe_setting(ctx: Context, key: str) -> dict:
+    record = ctx.record()
+    return {"revision": record["revision"], **_settings(lambda m, rec: m.describe(rec, key), record)}
+
+
+def _layer_words(layer) -> str:
+    import settings_read
+    return settings_read.LAYER_WORDS.get(layer, str(layer))
+
+
+@tool("propose_settings", "Propose slicer setting changes, checked and staged by Spooler. scope is project, plate or object and id the "
+      "Plate or Object id (not for project); changes is {setting key: new value}. Only the allow-listed keys within their bounds can "
+      "be proposed (see get_settings: proposable and bounds); speeds can never be raised above the profile's value; temperatures, "
+      "flow, motion limits, machine settings and G-code are never proposable; an Object accepts only the Quick print options "
+      "(layer_height, sparse_infill_density, wall_loops, enable_support, support_type, brim_type, brim_width). Values that already "
+      "hold are dropped; a change that would have no effect (its controlling setting is off) is kept with a note you should pass on. "
+      "reason is one short line for the person; a purpose the person stated applies to this Proposal only. Pass the project "
+      "revision you read. A behind revision returns {stale: true} and no Proposal. Returns the token, the readable diff, notes, "
+      "refused keys with reasons and unchanged keys, never the data. At most 3 Proposals per run.",
+      {"revision": {"type": "integer"}, "scope": {"type": "string", "enum": ["project", "plate", "object"]}, "id": {"type": "integer"},
+       "changes": {"type": "object"}, "reason": {"type": "string"}}, required=["revision", "scope", "changes"])
+def propose_settings(ctx: Context, revision: int, scope: str, changes: dict, id=None, reason=None) -> dict:
+    record = ctx.record()
+    stale = stale_result(record, revision)
+    if stale:
+        return stale
+    check_proposal_room(ctx)
+    if not changes or len(changes) > 20 or not all(isinstance(k, str) for k in changes):
+        raise ToolError("changes must name between 1 and 20 settings, as {setting key: new value}")
+    planned = _settings(lambda m, rec: m.plan(rec, scope, id, changes), record)
+    refused = [{"key": quoted(r["key"], 80), "reason": quoted(r["reason"], 300)} for r in planned.refused]
+    unchanged = [{"key": u["key"], "value": u["value"], "source": u["layer"], "reason": u["reason"]} for u in planned.unchanged]
+    if planned.data is None:
+        return {"revision": record["revision"], "proposal": None, "message": "Nothing was staged: every change was refused or already holds.",
+                "refused": refused, "unchanged": unchanged}
+    rows = planned.rows
+    diff = [{"label": f"{row['key']}:", "text": f"{row['old']} → {row['new']} (was {_layer_words(row['layer'])})", "key": row["key"], "layer": row["layer"]}
+            for row in rows]
+    count = len(rows)
+    where = "the project" if scope == "project" else f"{scope.capitalize()} {id}"
+    staged = stage_proposal(
+        ctx, record, kind="settings", title=f"Change {count} setting{'s' if count != 1 else ''} for {where}",
+        scope="Whole project" if scope == "project" else planned.scope_label, reason=one_line(reason) or f"Changes {count} setting{'s' if count != 1 else ''}.",
+        review="settings", data=planned.data, diff=diff, notes=planned.notes,
+        problems=[f"Not proposed: {r['key']}: {r['reason']}" for r in planned.refused], settings=rows,
+        targets={"plates": [id]} if scope == "plate" else {"objects": [id]} if scope == "object" else {})
+    return {**staged, "refused": refused, "unchanged": unchanged}
 
 
 # ── The protocol ──────────────────────────────────────────────────────────────
