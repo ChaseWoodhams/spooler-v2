@@ -769,6 +769,15 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         self._jobs_call(lambda: fn(assistant_runner), broadcast=False)
 
+    def _assistant_proposal_call(self, fn):
+        """Review, accept or dismiss a staged Proposal (the module is imported here, like the runner: a broken Assistant never touches core routes)."""
+        try:
+            import assistant_proposals
+        except Exception as e:
+            self._json({"error": f"The assistant could not start: {e}"}, 500)
+            return
+        self._jobs_call(lambda: fn(assistant_proposals), broadcast=False)
+
     def _handle_notif_settings(self):
         try:
             s = json.loads(self._read_body() or b"{}")
@@ -1051,6 +1060,8 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._assistant_status(project_id)
             elif len(parts) == 7 and parts[4] == "assistant" and parts[5] == "runs":
                 self._assistant_call(lambda runner: runner.get(project_id, parts[6]))
+            elif len(parts) == 7 and parts[4] == "assistant" and parts[5] == "proposals":
+                self._assistant_proposal_call(lambda proposals: proposals.review(project_id, parts[6]))
             elif len(parts) == 5 and parts[4] == "jobs":
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
@@ -1317,6 +1328,11 @@ class SPHandler(SimpleHTTPRequestHandler):
                 body = self._json_body()
                 return runner.ask(self._job_id(), body.get("message"), body.get("history"))
             self._assistant_call(ask)
+            return
+        if len(parts) == 8 and parts[4] == "assistant" and parts[5] == "proposals" and parts[7] in ("accept", "dismiss"):
+            token, accepting = parts[6], parts[7] == "accept"
+            self._assistant_proposal_call(lambda proposals: proposals.accept(self._job_id(), token, self._json_body()) if accepting
+                                          else proposals.dismiss(self._job_id(), token))
             return
         self._json({"error": "Not found"}, 404)
 

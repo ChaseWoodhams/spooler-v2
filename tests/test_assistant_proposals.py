@@ -247,3 +247,121 @@ class OrientationProposalTests(ProposalCase):
         self.assertEqual(result["proposals_left_this_run"], 2)
         self.assertLess(len(json.dumps(result)), 3000)
         self.assertEqual(self.staged(result["token"])["reason"], "Stands the mushrooms on their wide discs")
+
+
+class ProposalRouteTests(ProposalCase):
+    def propose(self, **extra):
+        view = self.run_scenario([self.propose_call([1, 2], **extra)])
+        self.assertEqual(view["state"], "proposal", view)
+        return view, view["proposals"][0]["token"]
+
+    def path(self, token, action=""):
+        return f"/api/projects/{self.project['id']}/assistant/proposals/{token}{action}"
+
+    def test_the_run_view_carries_a_card_summary_but_never_the_resulting_data(self):
+        view, token = self.propose(reason="Lie them on their discs")
+        card, = view["proposals"]
+        self.assertEqual((card["token"], card["kind"], card["title"], card["reason"], card["base_revision"]),
+                         (token, "orientation", "Better orientation for 2 objects", "Lie them on their discs", self.project["revision"]))
+        self.assertEqual(card["scope"], "2 objects on Plate 1")
+        self.assertEqual([line["label"] for line in card["diff"]], ["Part 1", "Part 2"])
+        self.assertNotIn("data", card)
+        self.assertNotIn("emptied", card)
+
+    def test_the_review_view_shows_the_plates_before_and_after_in_the_shape_the_plan_sheet_renders(self):
+        _, token = self.propose()
+        status, review = self.call("GET", self.path(token))
+        self.assertEqual(status, 200, review)
+        self.assertEqual((review["token"], review["kind"], review["review"], review["revision"]), (token, "orientation", "placement", self.project["revision"]))
+        self.assertEqual(len(review["bed"]), 4)
+        before, after = review["before"]["plates"], review["plates"]
+        self.assertEqual(review["after"]["plates"], after)
+        self.assertEqual([p["id"] for p in before], [1])
+        self.assertEqual([p["id"] for p in after], [1])
+        for plate in before + after:
+            self.assertEqual(set(plate) >= {"id", "name", "new", "filament", "parts", "turned", "objects"}, True)
+            self.assertEqual(plate["parts"], 3, "the whole plate is drawn so the change is seen in place")
+            self.assertTrue(all(len(o["outline"]) > 2 for o in plate["objects"]))
+        self.assertEqual([o["rotation"] for o in before[0]["objects"]], [[180, 0, 0], [180, 0, 0], [0, 0, 0]])
+        self.assertNotEqual(after[0]["objects"][0]["rotation"], [180, 0, 0])
+        self.assertEqual(after[0]["turned"], 2)
+        self.assertEqual(review["kept"], [])
+        self.assertIn("Better orientation", review["title"])
+        self.assertNotIn("data", review)
+        self.assertEqual(self.current()["revision"], self.project["revision"], "reviewing changes nothing")
+
+    def test_accept_applies_the_staged_data_as_one_revision_and_the_prior_data_can_be_put_back(self):
+        _, token = self.propose()
+        staged = self.staged(token)
+        prior = self.current()
+        status, result = self.call("POST", self.path(token, "/accept"), {"revision": prior["revision"]})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["revision"], prior["revision"] + 1, "one revision")
+        self.assertEqual(result["data"], staged["data"])
+        self.assertEqual(self.current()["data"], staged["data"])
+        self.assertEqual(self.staging(), [], "staging is swept on accept")
+        # what the client's Undo does: save the prior data over the accepted revision
+        status, undone = self.call("PATCH", f"/api/projects/{prior['id']}", {"data": prior["data"], "revision": result["revision"]})
+        self.assertEqual(status, 200, undone)
+        self.assertEqual(self.current()["data"], prior["data"])
+
+    def test_accept_makes_the_slice_of_a_changed_plate_outdated(self):
+        projects.request_slices(self.project["id"], [1])
+        self.settle()
+        sliced = self.current()
+        self.assertEqual((sliced["slices"]["1"]["state"], sliced["slices"]["1"]["outdated"]), ("sliced", False))
+        self.project = sliced
+        _, token = self.propose()
+        status, result = self.call("POST", self.path(token, "/accept"), {"revision": sliced["revision"]})
+        self.assertEqual(status, 200, result)
+        self.assertIs(self.current()["slices"]["1"]["outdated"], True)
+
+    def test_accept_after_any_edit_is_refused_409_the_proposal_is_superseded_and_nothing_is_rebased(self):
+        _, token = self.propose()
+        edited = self.edit(self.current(), lambda d: d["objects"][2].update(position=[30, 30]))
+        status, refused = self.call("POST", self.path(token, "/accept"), {"revision": edited["revision"]})
+        self.assertEqual(status, 409, refused)
+        self.assertIs(refused["superseded"], True)
+        self.assertEqual(self.current()["data"], edited["data"], "the edit stands and the proposal was not merged into it")
+        self.assertEqual(self.current()["revision"], edited["revision"])
+        self.assertEqual(self.staging(), [], "a superseded Proposal is swept")
+        self.assertEqual(self.call("GET", self.path(token))[0], 404)
+        self.assertEqual(self.call("POST", self.path(token, "/accept"), {"revision": edited["revision"]})[0], 404)
+
+    def test_reviewing_a_proposal_the_project_has_moved_past_says_superseded(self):
+        _, token = self.propose()
+        self.edit(self.current(), lambda d: d["objects"][2].update(position=[30, 30]))
+        status, refused = self.call("GET", self.path(token))
+        self.assertEqual((status, refused.get("superseded")), (409, True), refused)
+        self.assertEqual(self.staging(), [])
+
+    def test_accept_from_a_page_that_is_behind_is_refused_too(self):
+        _, token = self.propose()
+        status, refused = self.call("POST", self.path(token, "/accept"), {"revision": self.project["revision"] - 1})
+        self.assertEqual((status, refused.get("superseded")), (409, True), refused)
+        self.assertEqual(self.current()["data"], self.project["data"])
+
+    def test_accept_needs_the_revision(self):
+        _, token = self.propose()
+        status, _ = self.call("POST", self.path(token, "/accept"), {})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.staging(), [token], "a malformed accept does not consume the Proposal")
+
+    def test_dismiss_changes_nothing_and_sweeps_the_staging(self):
+        _, token = self.propose()
+        status, _ = self.call("POST", self.path(token, "/dismiss"), {})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.staging(), [])
+        self.assertEqual(self.current()["data"], self.project["data"])
+        self.assertEqual(self.current()["revision"], self.project["revision"])
+        self.assertEqual(self.call("POST", self.path(token, "/dismiss"), {})[0], 200, "dismissing twice is harmless")
+
+    def test_a_token_that_is_unknown_malformed_or_from_another_project_is_404(self):
+        _, token = self.propose()
+        other = projects.create_project("Other")
+        for bad in ("0" * 32, "..%2F..%2Fspooler", "zz", "A" * 32):
+            self.assertEqual(self.call("GET", self.path(bad))[0], 404, bad)
+            self.assertEqual(self.call("POST", self.path(bad, "/accept"), {"revision": 1})[0], 404, bad)
+        self.assertEqual(self.call("GET", f"/api/projects/{other['id']}/assistant/proposals/{token}")[0], 404)
+        self.assertEqual(self.call("POST", f"/api/projects/{other['id']}/assistant/proposals/{token}/accept", {"revision": 1})[0], 404)
+        self.assertEqual(self.staging(), [token], "the other project's attempts did not consume it")
