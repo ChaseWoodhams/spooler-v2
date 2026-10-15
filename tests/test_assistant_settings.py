@@ -359,9 +359,9 @@ class ProposeSettingsTests(SettingsCase):
         got = json.loads(reply["result"]["content"][0]["text"])
         self.assertTrue(any("own Filament choice" in n for n in got["notes"]), got)
 
-    def test_a_stale_revision_returns_stale_and_stages_nothing(self):
+    def test_a_behind_revision_returns_superseded_and_stages_nothing(self):
         got = self.propose(changes={"wall_loops": 4}, revision=6)
-        self.assertIs(got["stale"], True)
+        self.assertIs(got["superseded"], True)
         self.assertEqual(got["revision"], 7)
         self.assertEqual(self.staging(), [])
 

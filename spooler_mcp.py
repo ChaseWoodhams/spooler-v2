@@ -399,13 +399,12 @@ def get_slice_summary(ctx: Context, plate_id: int) -> dict:
 REASON_CAP = 160
 
 
-def stale_result(record: dict, revision: int):
-    """None when `revision` is the one the model read at; otherwise the answer that makes it read again, and no Proposal."""
-    if revision == record["revision"]:
-        return None
-    return {"stale": True, "revision": record["revision"],
-            "changed": f"The project changed since you read it (you used revision {revision}, it is now {record['revision']}). "
-                       "Read it again and propose again; nothing was staged."}
+class Superseded(Exception):
+    """The model proposed at a revision the project has left: its answer is `result` (an ordinary result, not an error)."""
+
+    def __init__(self, result: dict):
+        super().__init__("superseded")
+        self.result = result
 
 
 def check_proposal_room(ctx: Context) -> None:
@@ -417,6 +416,18 @@ def check_proposal_room(ctx: Context) -> None:
 
 def one_line(text, cap: int = REASON_CAP) -> str:
     return quoted(" ".join(str(text or "").split()), cap)
+
+
+def proposal_record(ctx: Context, revision: int) -> dict:
+    """The project to propose against, for every propose tool: raises Superseded when `revision` is not the one the model read at
+    (so no Proposal is made and it reads again), and ToolError when the run has already staged its limit."""
+    record = ctx.record()
+    if revision != record["revision"]:
+        raise Superseded({"superseded": True, "revision": record["revision"],
+                          "changed": f"The project changed since you read it (you used revision {revision}, it is now {record['revision']}). "
+                                     "Read it again and propose again; nothing was staged."})
+    check_proposal_room(ctx)
+    return record
 
 
 def stage_proposal(ctx: Context, record: dict, *, kind: str, title: str, scope: str, reason: str, review: str, data: dict,
@@ -447,17 +458,13 @@ def _degrees(values) -> str:
       "rotations). object_ids are the Objects to consider (omit for every Object); mode is least-support or strength (omit to follow "
       "each Model's Purpose: Functional gives strength, the others least support); reason is one short line for the person. Pinned "
       "Objects and Objects of a Model still importing are skipped and reported. Pass the project revision you read. A behind "
-      "revision returns {stale: true} and no Proposal. Returns the Proposal token, a readable diff, notes and problems, never the "
+      "revision returns {superseded: true} and no Proposal. Returns the Proposal token, a readable diff, notes and problems, never the "
       "resulting data. At most 3 Proposals per run.",
       {"revision": {"type": "integer"}, "object_ids": {"type": "array", "items": {"type": "integer"}},
        "mode": {"type": "string", "enum": ["least-support", "strength"]}, "reason": {"type": "string"}}, required=["revision"])
 def propose_orientation(ctx: Context, revision: int, object_ids=None, mode=None, reason=None) -> dict:
     _, project_read, placement_read, _ = ctx.core()
-    record = ctx.record()
-    stale = stale_result(record, revision)
-    if stale:
-        return stale
-    check_proposal_room(ctx)
+    record = proposal_record(ctx, revision)
     data = record["data"]
     states = {m["id"]: m.get("state") for m in record.get("models") or []}
     wanted = None if object_ids is None else set(object_ids)
@@ -568,17 +575,13 @@ def _helper_error(e: Exception, fallback: str) -> "ToolError":
 @tool("propose_arrange", "Propose an Arrange: Spooler's own nester lays out the unpinned Objects on the given Plates (omit plate_ids "
       "for every Plate) onto as few Plates as fit; you never choose positions. Pinned Objects stay where they are, Plates that hold a "
       "Model still importing are left out, Objects of failed Models are skipped. Pass the project revision you read. A behind revision "
-      "returns {stale: true} and no Proposal; if nothing would move, proposal is null and nothing is staged. Returns the Proposal "
+      "returns {superseded: true} and no Proposal; if nothing would move, proposal is null and nothing is staged. Returns the Proposal "
       "token, a readable diff, notes and problems, never the resulting data. At most 3 Proposals per run.",
       {"revision": {"type": "integer"}, "plate_ids": {"type": "array", "items": {"type": "integer"}}, "reason": {"type": "string"}},
       required=["revision"])
 def propose_arrange(ctx: Context, revision: int, plate_ids=None, reason=None) -> dict:
     _, project_read, placement_read, _ = ctx.core()
-    record = ctx.record()
-    stale = stale_result(record, revision)
-    if stale:
-        return stale
-    check_proposal_room(ctx)
+    record = proposal_record(ctx, revision)
     data = record["data"]
     order = placement_read._arrange_plate_ids(record, plate_ids)
     problems = []
@@ -633,18 +636,14 @@ def propose_arrange(ctx: Context, revision: int, plate_ids=None, reason=None) ->
       "and orders the Plates longest first; you never choose rotations or positions. Plates that are queued, printing, have a Print on "
       "record or hold a Model still importing are kept as they are. density is an optional packing preset (tight, normal, roomy); "
       "omit it to keep the project's density, and accepting a preset also sets it. allow_tilt (default false) lets the planner lean "
-      "parts onto angled faces. Pass the project revision you read. A behind revision returns {stale: true}. A plan Spooler would "
+      "parts onto angled faces. Pass the project revision you read. A behind revision returns {superseded: true}. A plan Spooler would "
       "refuse comes back as {refused: true, refused_quoted} with proposal null and nothing staged; so does a plan with nothing to "
       "change. Returns the Proposal token, a readable diff, notes and problems, never the resulting data. At most 3 Proposals per run.",
       {"revision": {"type": "integer"}, "density": {"type": "string", "enum": ["tight", "normal", "roomy"]},
        "allow_tilt": {"type": "boolean"}, "reason": {"type": "string"}}, required=["revision"])
 def propose_plan(ctx: Context, revision: int, density=None, allow_tilt=False, reason=None) -> dict:
     _, project_read, placement_read, _ = ctx.core()
-    record = ctx.record()
-    stale = stale_result(record, revision)
-    if stale:
-        return stale
-    check_proposal_room(ctx)
+    record = proposal_record(ctx, revision)
     with ctx.reader() as conn:
         ledger = project_read.read_ledger(conn, ctx.project_id)
     try:
@@ -739,16 +738,12 @@ def _layer_words(layer) -> str:
       "(layer_height, sparse_infill_density, wall_loops, enable_support, support_type, brim_type, brim_width). Values that already "
       "hold are dropped; a change that would have no effect (its controlling setting is off) is kept with a note you should pass on. "
       "reason is one short line for the person; a purpose the person stated applies to this Proposal only. Pass the project "
-      "revision you read. A behind revision returns {stale: true} and no Proposal. Returns the token, the readable diff, notes, "
+      "revision you read. A behind revision returns {superseded: true} and no Proposal. Returns the token, the readable diff, notes, "
       "refused keys with reasons and unchanged keys, never the data. At most 3 Proposals per run.",
       {"revision": {"type": "integer"}, "scope": {"type": "string", "enum": ["project", "plate", "object"]}, "id": {"type": "integer"},
        "changes": {"type": "object"}, "reason": {"type": "string"}}, required=["revision", "scope", "changes"])
 def propose_settings(ctx: Context, revision: int, scope: str, changes: dict, id=None, reason=None) -> dict:
-    record = ctx.record()
-    stale = stale_result(record, revision)
-    if stale:
-        return stale
-    check_proposal_room(ctx)
+    record = proposal_record(ctx, revision)
     if not changes or len(changes) > 20 or not all(isinstance(k, str) for k in changes):
         raise ToolError("changes must name between 1 and 20 settings, as {setting key: new value}")
     planned = _settings(lambda m, rec: m.plan(rec, scope, id, changes), record)
@@ -804,6 +799,8 @@ def handle(message: dict, ctx: Context):
         try:
             arguments = check_arguments(entry["inputSchema"], params.get("arguments"))
             text, failed = json.dumps(entry["fn"](ctx, **arguments), ensure_ascii=False), False
+        except Superseded as e:
+            text, failed = json.dumps(e.result, ensure_ascii=False), False
         except ToolError as e:
             text, failed = str(e), True
         except Exception as e:                # a bug or unreadable data is an error result, never a dead server

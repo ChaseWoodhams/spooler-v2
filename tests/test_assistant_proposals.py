@@ -177,11 +177,11 @@ class OrientationProposalTests(ProposalCase):
         self.assertEqual((after["revision"], after["data"]), (before["revision"], before["data"]))
         self.assertEqual(self.staging(), [token])
 
-    def test_a_propose_made_at_a_behind_revision_says_stale_and_stages_nothing(self):
+    def test_a_propose_made_at_a_behind_revision_says_superseded_and_stages_nothing(self):
         view = self.run_scenario([self.propose_call([1, 2], revision=self.project["revision"] - 1)])
         (is_error, result), = self.results()
         self.assertFalse(is_error)
-        self.assertIs(result["stale"], True)
+        self.assertIs(result["superseded"], True)
         self.assertEqual(result["revision"], self.project["revision"])
         self.assertIn("changed", result)
         self.assertNotIn("token", result)

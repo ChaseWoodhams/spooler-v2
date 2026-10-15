@@ -70,12 +70,12 @@ async function open(browser, baseUrl, s) {
       assert.equal(await panel.locator('.assistant-card[data-token="term1"]').count(), 1);
 
       // a Proposal made for another revision is Superseded rather than shown, and has no Ask again (no question to repeat)
-      s.listed = [card('stale', { base_revision: 1 })];
+      s.listed = [card('superseded', { base_revision: 1 })];
       await page.waitForTimeout(500);
-      assert.equal(await panel.locator('.assistant-card[data-token="stale"]').count(), 0);
+      assert.equal(await panel.locator('.assistant-card[data-token="superseded"]').count(), 0);
       const other = panel.locator('.assistant-card[data-token="term2"]');
       await other.getByRole('button', { name: 'Dismiss' }).click();
-      console.log('PASS: review hand-off, later arrivals, no duplicates, Dismiss, stale ones not shown');
+      console.log('PASS: review hand-off, later arrivals, no duplicates, Dismiss, superseded ones not shown');
     } finally { await context.close(); }
   } finally {
     await browser.close();

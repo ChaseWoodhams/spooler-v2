@@ -66,11 +66,11 @@ class TerminalCase(ProposalCase):
     def test_terminal_proposal_is_superseded_by_an_edit(self):
         staged = self.stage(self.terminal())
         self.edit(self.current(), lambda d: d["plates"][0].update(name="Renamed"))
-        self.assertEqual(self.listing(), [])                          # a stale one is never offered
+        self.assertEqual(self.listing(), [])                          # a superseded one is never offered
         status, body = self.call("GET", f"/api/projects/{self.project['id']}/assistant/proposals/{staged['token']}")
         self.assertIn(status, (404, 409))
 
-    def test_review_of_a_stale_terminal_proposal_is_superseded(self):
+    def test_review_of_a_superseded_terminal_proposal_is_superseded(self):
         staged = self.stage(self.terminal())
         self.edit(self.current(), lambda d: d["plates"][0].update(name="Renamed"))
         status, body = self.call("POST", f"/api/projects/{self.project['id']}/assistant/proposals/{staged['token']}/accept", {"revision": self.current()["revision"]})
