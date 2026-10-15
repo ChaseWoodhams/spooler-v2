@@ -18,6 +18,8 @@ Record
                         "overrides": {…process changes for this object},
                         "pinned": true — only when set: the planner leaves this object where it is}],
            "filaments": {"<model id>": {"preset", "colour"}} — only models with a filament choice; the rest use the project's,
+           "purpose": {"value", "note"} — the project default Purpose, only when not plain General,
+           "purposes": {"<model id>": {"value", "note"}} — only models with a Purpose of their own; the rest follow the default,
            "arrange_engine": "orca" — only when chosen: Arrange uses OrcaSlicer's own arranger instead of the nester}
   models  [{"id", "name", "file", "state": importing | ready | failed, "error", "size", "triangles", "volume_cm3", "sha256",
             "split": {"id", "part" (0 = the whole model), "supports"} — models that came from a split}]
@@ -649,6 +651,52 @@ def _pinned(value) -> bool:
     return value
 
 
+PURPOSES = ("general", "functional", "display", "draft")
+MAX_PURPOSE_NOTE = 300
+# What Orient all weighs for each Purpose when no mode is asked for. Display wants "looks", which needs a favoured side.
+PURPOSE_ORIENT_MODE = {"general": "least-support", "draft": "least-support", "functional": "strength", "display": "looks"}
+
+
+def _purpose(value, what) -> dict:
+    """A Purpose: one of the four values plus an optional note of up to 300 characters."""
+    if not isinstance(value, dict) or value.get("value") not in PURPOSES:
+        raise jobs.JobError(f"{what} needs a Purpose of {', '.join(PURPOSES)}")
+    note = value.get("note", "")
+    if note is None:
+        note = ""
+    if not isinstance(note, str):
+        raise jobs.JobError(f"{what}'s note must be text")
+    if len(note.strip()) > MAX_PURPOSE_NOTE:
+        raise jobs.JobError(f"{what}'s note is limited to {MAX_PURPOSE_NOTE} characters")
+    return {"value": value["value"], "note": note.strip()}
+
+
+def _purposes(value, model_ids: set) -> dict:
+    """{"<model id>": Purpose}; a model without an entry follows the project default."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise jobs.JobError("Purposes are an object keyed by model id")
+    out = {}
+    for key, entry in value.items():
+        if not str(key).isdigit() or int(key) not in model_ids:
+            raise jobs.JobError(f"Purpose for model {key}, which isn't in the project")
+        out[str(int(key))] = _purpose(entry, f"Model {key}'s Purpose")
+    return out
+
+
+def effective_purpose(data: dict, model_id) -> dict:
+    """The Purpose a model prints for: its own, else the project default, else General. "source" says which.
+    Every Copy of a model has its model's Purpose."""
+    own = (data.get("purposes") or {}).get(str(model_id))
+    if own:
+        return {"value": own["value"], "note": own.get("note", ""), "source": "model"}
+    default = data.get("purpose")
+    if default:
+        return {"value": default["value"], "note": default.get("note", ""), "source": "project"}
+    return {"value": "general", "note": "", "source": "default"}
+
+
 def _filament_choice(value, model_id) -> dict:
     """A model's filament choice: a material preset plus an optional colour label."""
     if not isinstance(value, dict):
@@ -779,6 +827,12 @@ def validate_data(raw, record: dict) -> dict:
                                   preserve_unresolved=bundle_id == previous.get("bundle_id"))
     if filaments:  # likewise only when a model has a choice
         out["filaments"] = filaments
+    if (purpose := raw.get("purpose")) is not None:   # likewise only when the project default is not plain General
+        purpose = _purpose(purpose, "The project's Purpose")
+        if purpose["value"] != "general" or purpose["note"]:
+            out["purpose"] = purpose
+    if purposes := _purposes(raw.get("purposes"), model_ids):   # likewise only when a model has one of its own
+        out["purposes"] = purposes
     if raw.get("arrange_engine") == ORCA:  # likewise only when OrcaSlicer's arranger is chosen over the nester
         out["arrange_engine"] = ORCA
     if pack := _clean_pack(raw.get("pack")):   # likewise only when a density is chosen
@@ -3391,6 +3445,7 @@ def orient_all(project_id: int, body: dict) -> dict:
         raise jobs.JobError("Looks needs a favoured side, so it is chosen for one object at a time")
     options = _orient_options(record, body)
     summary = {"oriented": [], "unchanged": [], "pinned": []}
+    weighed = {"modes": {}, "looks_without_face": []}   # per object: the mode that ran, and the Display objects that had no side to favour
     rotations = {}
     for obj in record["data"]["objects"]:
         if (plate_id is not None and obj["plate"] != plate_id) or obj["model"] not in ready:
@@ -3398,14 +3453,22 @@ def orient_all(project_id: int, body: dict) -> dict:
         if obj.get("pinned"):
             summary["pinned"].append(obj["id"])
             continue
-        suggestion = _orientation_for(project_id, obj, options)
+        own = options
+        if not body.get("mode"):   # no mode asked for: the object's effective Purpose chooses the weighting
+            mode = PURPOSE_ORIENT_MODE[effective_purpose(record["data"], obj["model"])["value"]]
+            if mode == "looks" and options["favoured"] is None:
+                weighed["looks_without_face"].append(obj["id"])   # no favoured side is known; least-support weighs the same as looks
+                mode = "least-support"
+            own = {**options, "mode": mode}
+        weighed["modes"][str(obj["id"])] = own["mode"]
+        suggestion = _orientation_for(project_id, obj, own)
         if suggestion["changed"]:
             rotations[obj["id"]] = suggestion["rotation"]
             summary["oriented"].append(obj["id"])
         else:
             summary["unchanged"].append(obj["id"])
     result = _apply_rotations(project_id, record, rotations) if rotations else record
-    return {**result, "orient": summary, "outcome": _orient_outcome(summary)}
+    return {**result, "orient": summary, "orient_purpose": weighed, "outcome": _orient_outcome(summary)}
 
 
 def _orient_outcome(summary: dict) -> str:
@@ -3731,6 +3794,10 @@ def delete_model(project_id: int, model_id: int) -> dict:
             data["filaments"].pop(str(model_id), None)
             if not data["filaments"]:
                 del data["filaments"]
+        if data.get("purposes"):
+            data["purposes"].pop(str(model_id), None)
+            if not data["purposes"]:
+                del data["purposes"]
         models = [m for m in models if m["id"] != model_id]
         conn.execute("UPDATE projects SET data = ?, models = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
                      (json.dumps(data), json.dumps(models), time.time(), project_id))
