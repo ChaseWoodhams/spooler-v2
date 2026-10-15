@@ -28,10 +28,10 @@ function boxPreview() {
 const model = id => ({ id, file: `box${id}.stl`, state: 'ready', sha256: `sha${id}`, import: [1, 'z'], size: [40, 30, 20], triangles: 12, volume_cm3: 1, repairs: [] });
 const object = (id, plate, x, y) => ({ id, model: id, plate, name: `box${id}`, position: [x, y], rotation: [0, 0, 0], scale: [1, 1, 1] });
 
-async function open(browser, { tooClose = false, view = null, slices = {} } = {}) {
+async function open(browser, { tooClose = false, view = null, slices = {}, bundle = null } = {}) {
   const page = await browser.newPage({ viewport: view ? view : process.env.VIEW ? { width: +process.env.VIEW.split('x')[0], height: +process.env.VIEW.split('x')[1] } : { width: 1400, height: 900 } });
-  const server = { patches: [], packs: [], revision: 1,
-    data: { plates: [{ id: 1, name: 'Plate 1' }, { id: 2, name: 'Plate 2' }], bed: 'textured', profile: { bundle_id: null, process: {}, filament: {} },
+  const server = { patches: [], packs: [], queued: [], revision: 1,
+    data: { plates: [{ id: 1, name: 'Plate 1' }, { id: 2, name: 'Plate 2' }], bed: 'textured', profile: { bundle_id: bundle, process: {}, filament: {} },
             objects: [object(1, 1, 50, 50), object(2, 1, 120, 50), object(3, 1, 200, 150), object(4, 2, 128, 128)] } };
   const project = () => ({ id: 70, name: 'Plates', revision: server.revision, split_id: null, split_ids: [], models: [1, 2, 3, 4].map(model), slices,
     server_time: Date.now() / 1000, data: server.data });
@@ -49,6 +49,7 @@ async function open(browser, { tooClose = false, view = null, slices = {} } = {}
       server.patches.push(server.data);
       return route.fulfill({ json: project() });
     }
+    if (p === '/api/projects/70/queue' && method === 'POST') { server.queued.push(JSON.parse(body)); return route.fulfill({ json: { jobs: [] } }); }
     if (p === '/api/projects/70/pack') {
       const change = JSON.parse(body);
       server.packs.push(change);
@@ -61,6 +62,7 @@ async function open(browser, { tooClose = false, view = null, slices = {} } = {}
       return route.fulfill({ json: project() });
     }
     if (/^\/api\/projects\/70\/plates\/\d+\/(analysis|toolpath)$/.test(p)) return route.fulfill({ status: 500, json: { error: 'no preview in this fixture' } });   // the preview is not under test
+    if (p.startsWith("/api/slicer/profiles/") && p.endsWith("/settings")) return route.fulfill({ json: { machine: { printable_area: ["0x0", "256x0", "256x256", "0x256"] }, process: { layer_height: "0.2" }, filament: {}, machine_name: "M" } });
     if (p === '/api/projects/70') return route.fulfill({ json: project() });
     if (/^\/api\/projects\/70\/models\/\d+\/preview$/.test(p)) return route.fulfill({ body: boxPreview(), contentType: 'application/octet-stream' });
     if (p === '/api/projects/70/status') {
@@ -76,6 +78,7 @@ async function open(browser, { tooClose = false, view = null, slices = {} } = {}
   await page.goto('http://spooler.test/slicer.html?project=70');
   await page.locator('#project-name').waitFor();
   await page.waitForFunction(() => document.getElementById('project-name').value !== '');
+  if (bundle) { await page.waitForTimeout(600); return { page, server }; }   // lands on Print when every Plate is sliced
   await page.locator('[data-step="plates"]').click();
   await page.locator('#object-list [data-object]').first().waitFor();
   await page.waitForTimeout(400);   // geometry loads, then the first measure
@@ -159,7 +162,7 @@ const css=(page,sel,prop)=>page.locator(sel).first().evaluate((el,p)=>getCompute
     // PS-48 a finished Slice step reads as a status, Slice again is a normal button, and the header button names its effect
     {
       const done = { state: 'sliced', outdated: false, layers: 10, estimate_s: 600, estimate_g: 5 };
-      const { page } = await open(browser, { slices: { 1: done, 2: done } });
+      const { page, server } = await open(browser, { slices: { 1: done, 2: done }, bundle: 'b1' });
       await page.locator('[data-step="slice"]').click();
       await page.locator('#slicing-list [data-slice-plate]').first().waitFor();
       assert.equal(await page.locator('#slicing-actions [data-slice-all]').count(), 0, 'no disabled Slice all button');
@@ -168,6 +171,35 @@ const css=(page,sel,prop)=>page.locator(sel).first().evaluate((el,p)=>getCompute
       assert.match(await page.locator('#slicing-list [data-slice-plate="1"]').innerText(), /Slice again/);
       assert.match(await page.locator('[data-send-this-plate]').innerText(), /^Send Plate 1 to /);
       check('Slice step: status line, Slice again enabled, named header action', true);
+      // SWU-08 the forward action is "Print →" and sends nothing; the direct send is secondary and confirms
+      assert.equal(await page.locator('#step-actions .btn-primary').innerText(), 'Print →');
+      assert.equal(await page.locator('[data-send-this-plate]').evaluate(b => b.classList.contains('btn-secondary') && !b.classList.contains('btn-primary')), true, 'direct send is secondary');
+      await page.locator('#step-actions [data-go="print"]').click();
+      await page.waitForSelector('.slicer-step.active[data-step="print"]');
+      await page.waitForTimeout(300);
+      assert.deepEqual(server.queued, [], 'Print → sent no Job');
+      await page.locator('[data-step="slice"]').click();
+      await page.locator('[data-send-this-plate]').click();
+      const dialog = page.locator('.confirm-dialog');
+      await dialog.waitFor();
+      assert.match(await dialog.innerText(), /Plate 1/);
+      assert.match(await dialog.innerText(), /next free printer/);
+      await dialog.getByRole('button', { name: /cancel/i }).click();
+      await page.waitForTimeout(200);
+      assert.deepEqual(server.queued, [], 'cancelling the confirmation sent nothing');
+      await page.locator('[data-send-this-plate]').click();
+      await dialog.waitFor();
+      await dialog.locator('.btn-primary').click();
+      await page.waitForTimeout(400);
+      assert.equal(server.queued.length, 1, 'confirming sends the Plate');
+      check('Print → sends nothing; direct send confirms naming Plate and printer', true);
+      // Send Plates says why it is disabled, tied to the button
+      await page.locator('[data-step="print"]').click();
+      await page.waitForSelector('#pp-send');
+      assert.equal(await page.locator('#pp-send').getAttribute('aria-disabled'), 'true');
+      const why = await page.locator('#pp-send').getAttribute('aria-describedby');
+      assert.match(await page.locator('#' + why).innerText(), /Tick the Plates to send/);
+      check('Send Plates names why it is disabled', true);
       await page.close();
     }
 

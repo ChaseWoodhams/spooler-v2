@@ -496,6 +496,11 @@ async function sliceAndSend(plateIds) {
 // The Slice step's send: a current Slice goes to its printer as it is; an outdated or missing one is sliced first.
 async function sendThisPlate() {
   const plate = state.plate;
+  if (!await confirmDialog({
+    title: `${sendThisPlateState().label}?`,
+    body: "This creates a Job for the printer. Start it there when the bed is clear.",
+    confirmLabel: "Send Plate",
+  })) return;
   if (!isUpToDate(plate)) return sliceAndSend([plate]);
   if (!await queuePlates([plate], {})) return;   // the same send as Print: saves first and remembers the choices
   rememberDefaults({ printer: currentPlate()?.printer_id || null });
@@ -769,12 +774,12 @@ function renderStepActions() {
   const next = (step, label) => `<button class="btn btn-primary" type="button" data-go="${step}"${stepAvailable(step) ? "" : " disabled"}>${label}</button>`;
   const send = sendThisPlateState();
   el.innerHTML = state.step === "plates" ? next("slice", "Slice →")
-    : state.step === "slice" ? `<button class="btn btn-primary" type="button" data-send-this-plate${send.why ? ' aria-disabled="true" aria-describedby="send-this-plate-why"' : ""}>${esc(send.label)}</button>`
+    : state.step === "slice" ? next("print", "Print →") + `<button class="btn btn-secondary" type="button" data-send-this-plate${send.why ? ' aria-disabled="true" aria-describedby="send-this-plate-why"' : ""}>${esc(send.label)}</button>`
       + (send.why ? `<small class="reason-line" id="send-this-plate-why">${esc(send.why)}</small>` : "") : "";
   $("btn-slice-send").hidden = state.step === "slice";   // the Slice step has its own send in the header
 }
 
-// The Slice step's one action: send the selected Plate to its printer, or to the next free one when none is chosen.
+// The Slice step's secondary action: send the selected Plate to its printer, or to the next free one when none is chosen. The forward action is "Print →".
 // `why` is set only for a real blocker.
 function sendThisPlateState() {
   const plate = currentPlate();

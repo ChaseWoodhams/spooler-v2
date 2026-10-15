@@ -211,7 +211,8 @@ function sendBar() {
       <label class="slicer-check"><input type="checkbox" id="pp-send-timelapse"${sendOpts.timelapse ? " checked" : ""}> Time-lapse</label>
       <button type="button" id="pp-send-balance" class="btn btn-secondary btn-sm"${ticked.size ? "" : " disabled"}>Balance by estimated time</button>
       <p class="slicer-muted">Balancing gives the longest ticked Plates first to the connected printer with the least estimated work in this Project. Other Projects are not counted. Check each destination before sending.</p>`)}
-    <button type="button" id="pp-send" class="btn btn-primary" title="Each Plate becomes a Job. Start each one when its printer's bed is clear; every start runs the preflight checks."${ticked.size && !sending ? "" : " disabled"}>${sendLabel(ticked.size)}</button></div>`;
+    <button type="button" id="pp-send" class="btn btn-primary" title="Each Plate becomes a Job. Start each one when its printer's bed is clear; every start runs the preflight checks."${ticked.size && !sending ? "" : ' aria-disabled="true"'} aria-describedby="pp-send-why">${sendLabel(ticked.size)}</button>
+    <small class="reason-line" id="pp-send-why"${ticked.size ? " hidden" : ""}>Tick the Plates to send</small></div>`;
 }
 
 const sendLabel = count => count ? `Send ${plural(count, "Plate")}` : "Send Plates";
