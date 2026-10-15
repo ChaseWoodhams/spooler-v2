@@ -657,7 +657,9 @@ body.view-dashboard .slicer-top-actions, body.view-dashboard #btn-sidebar, body.
 .pd-main { display: flex; gap: 12px; align-items: flex-start; min-width: 0; }
 .pd-info { min-width: 0; flex: 1; }
 .pd-thumb { width: 56px; height: 56px; flex: none; border-radius: 8px; background: var(--surface2); object-fit: contain; }
-.pd-open { font: inherit; color: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
+.pd-open::after { border-radius: var(--radius-sm); }
+.btn-ghost-quiet { background: transparent; color: var(--text-muted); text-decoration: underline; text-underline-offset: 3px; }
+.btn-ghost-quiet:hover:not(:disabled) { color: var(--red); }
 .pd-open::after { content: ""; position: absolute; inset: 0; border-radius: 8px; }
 .pd-open:focus-visible::after { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .pd-list .slicer-project-row:hover { border-color: var(--text-muted); }

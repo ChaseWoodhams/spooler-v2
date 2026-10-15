@@ -2738,10 +2738,11 @@ function projectRow(p) {
   const when = new Date(p.updated_at * 1000);
   const thumb = p.objects ? `<img class="pd-thumb" src="/api/projects/${p.id}/plates/1/preview.png" alt="" width="56" height="56" loading="lazy" decoding="async">` : "";
   return `<div class="slicer-project-row" data-name="${esc(p.name.toLowerCase())}">
-      ${thumb}<div><strong><button type="button" class="pd-open" data-open-project="${p.id}" aria-label="Open ${esc(p.name)}">${esc(p.name)}</button></strong>${p.split_id ? '<span class="slicer-tag">from a model upload</span>' : ""}
+      ${thumb}<div><strong>${esc(p.name)}</strong>${p.split_id ? '<span class="slicer-tag">from a model upload</span>' : ""}
         <small>${plural(p.plates, "plate")} · ${plural(p.objects, "object")} · edited <time datetime="${when.toISOString()}" title="${esc(when.toLocaleString())}">${ago(p.updated_at)}</time></small>
         <div class="pd-chips">${projectChips(p)}</div></div>
-      <button class="btn btn-danger-quiet btn-sm project-delete" type="button" data-delete-project="${p.id}" aria-label="Delete ${esc(p.name)}">Delete</button>
+      <button class="btn btn-primary btn-sm pd-open" type="button" data-open-project="${p.id}" aria-label="Open ${esc(p.name)}">Open</button>
+      <button class="btn btn-ghost-quiet btn-sm project-delete" type="button" data-delete-project="${p.id}" aria-label="Delete ${esc(p.name)}">Delete</button>
     </div>`;
 }
 

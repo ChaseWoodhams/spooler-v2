@@ -9,6 +9,8 @@
 //     awaiting: [fx.awaitingOutcome()],                           // GET /api/outcome-prompts
 //     prints: fx.historyRecords(),                                // GET /api/prints
 //     preflight: fx.preflightReport(),                            // GET /api/jobs/:id/preflight
+//     ws: (req, send) => send({ type: 'file_list', ... }),         // optional replies to other WebSocket actions
+//     systemStatus: fx.systemStatus(),                            // pushed as the system_status message
 //     api: (url, request) => ({ json: ... }) | undefined,         // optional extra routes, tried first
 //   });
 const http = require('node:http');
@@ -70,6 +72,68 @@ function historyRecords() {
     duration_s: 3600, filament_g: 12, filament_mm: 4000, cost: 0.5, estimate_s: 3500, estimate_g: 11, notes: '' }));
 }
 
+/** A CC1 printer's file list as the file_list message carries it: a folder, then files of mixed size and name length. */
+function files() {
+  return [
+    { name: 'archive', path: '/local/archive', size: 0, is_dir: true },
+    { name: 'bracket_v3_0.2mm_PLA_1h30m.gcode', path: '/local/bracket_v3_0.2mm_PLA_1h30m.gcode', size: 4823104, is_dir: false, print_time: 5400, layers: 150, filament_mm: 5200, filament_g: null },
+    { name: 'a-very-long-descriptive-file-name-for-the-cable-comb-organiser-with-lid_0.16mm_PETG_6h12m.gcode', path: '/local/a-very-long-descriptive-file-name-for-the-cable-comb-organiser-with-lid_0.16mm_PETG_6h12m.gcode', size: 31457280, is_dir: false, print_time: 22320, layers: 480, filament_mm: 18400, filament_g: null },
+    { name: 'benchy.gcode', path: '/local/benchy.gcode', size: 912384, is_dir: false, print_time: null, layers: null, filament_mm: null, filament_g: null },
+  ];
+}
+
+/** Spoolman inventory (GET /api/spoolman/api/v1/spool): one assigned to printer fx-1 by name, one half full, one low, one empty, one without a weight. */
+function spools() {
+  const spool = (id, vendor, material, name, hex, remaining, extra = {}) => ({ id, remaining_weight: remaining, initial_weight: 1000, location: null,
+    filament: { name, material, color_hex: hex, vendor: { name: vendor } }, ...extra });
+  return [
+    spool(1, 'Polymaker', 'PLA', 'Jet Black', '1a1a1a', 742, { location: LONG_NAMES[0] }),
+    spool(2, 'eSUN', 'PETG', 'Signal Orange', 'ff7a00', 640),
+    spool(3, 'Prusament', 'PLA', 'Galaxy Silver with a long colour name', 'c0c0c8', 60),
+    spool(4, 'Generic', 'TPU', 'Clear', 'dddddd', 0),
+    spool(5, 'Bambu Lab', 'ASA', 'Grey', '888888', null),
+  ];
+}
+
+/** The brand and material catalogue the Add Spool dialog loads (GET /api/filament-meta). */
+function filamentMeta() {
+  return { brands: ['Bambu Lab', 'eSUN', 'Polymaker', 'Prusament'], materials: [{ name: 'PLA', density: 1.24 }, { name: 'PETG', density: 1.27 }, { name: 'ASA', density: 1.07 }, { name: 'TPU', density: 1.21 }] };
+}
+
+/** The system_status snapshot the health dialog renders (health.snapshot()): Spoolman fine, backups current, one printer offline. */
+function systemStatus(over = {}) {
+  const now = Date.now() / 1000;
+  return { generated_at: now,
+    spooler: { started_at: now - 93784, uptime_s: 93784, pid: 4242, loop_lag_ms: 12, browser_clients: 2 },
+    spoolman: { ok: true, version: '0.22.1', latency_ms: 18, down_since: null, error: null, url: 'http://127.0.0.1:7912', pending_deductions: 0 },
+    printers: printers(6).map(p => ({ id: p.id, name: p.name, printer_type: 'cc1', connected: p.connected, connected_since: p.connected ? now - 7200 : null,
+      disconnected_since: p.connected ? null : now - 600, last_message_age_s: p.connected ? 1.2 : null, reconnect_attempts: p.connected ? 0 : 4,
+      next_retry_in_s: p.connected ? null : 30, last_error: p.connected ? null : 'Connection timed out' })),
+    backups: { dir: 'C:\\Spooler\\backups', count: 6, keep: 14, interval_hours: 24, latest: { name: 'spooler-2026-10-14.zip', size: 18874368, created_at: now - 3600 * 20 },
+      overdue: false, running: false, last_attempt_at: now - 3600 * 20, last_error: null, spoolman_db: 'C:\\Spoolman\\spoolman.db' },
+    supervisor: { stale: false, started_at: now - 93000, updated_at: now - 4, services: [{ name: 'spooler', restarts: 0 }, { name: 'spoolman', restarts: 1 }] },
+    ...over };
+}
+
+/** Quick print routes for a model Project 'fixture' (printer fx-1); an `api` handler for openApp. With state.slicing it stays on the
+ *  slicing screen; otherwise the slice finishes at once and the review (Slice & print step) shows. Nothing is queued or sent. */
+function quickPrintApi(state = {}) {
+  const project = () => ({ id: 'fixture', name: 'Calibration cube', data: {}, slices: { 1: state.slicing ? { state: 'slicing', stage: 'slicing' } : { state: 'sliced', estimate_s: 5400, estimate_g: 18 } } });
+  return (url, request) => {
+    const p = url.pathname;
+    if (p === '/api/projects/fixture') return { json: project() };
+    if (p.endsWith('/quick-options')) return { json: { preset: 'PLA', bed: 'textured', spool_id: 1, options: { layer_height: 0.2, infill: 15, walls: 2, supports: 'off', brim: 'off' } } };
+    if (p === '/api/slicer') return { json: { bundles: [{ id: 'PLA', label: 'PLA standard' }, { id: 'PETG', label: 'PETG standard' }] } };
+    if (p === '/api/slicer/spools') return { json: { spools: spools().slice(0, 3).map(s => ({ id: s.id, name: `${s.filament.vendor.name} ${s.filament.material} ${s.filament.name}`, remaining_weight: s.remaining_weight })) } };
+    if (p.endsWith('/intake')) return { json: { state: 'ready', kind: 'model', file: 'calibration-cube.stl', size: [20, 20, 20], volume_cm3: 8, fits: true, scale_ok: true, can_print: true, repaired: false, estimate: { seconds: 5400, grams: 18 } } };
+    if (p.endsWith('/print') && request.method() === 'POST') {
+      if (state.slicing) return { json: { ...project(), review: { state: 'slicing' } } };
+      const warnings = [{ level: 'warn', title: 'Filament unknown', detail: 'Verify the loaded filament matches the preset.' }];
+      return { json: { ...project(), review: { can_start: true, warnings, checks: warnings } } };
+    }
+  };
+}
+
 /** Static server for the real frontend assets; close() when done. */
 async function startServer() {
   const server = http.createServer(async (req, res) => {
@@ -97,7 +161,11 @@ async function openApp(browser, baseUrl, opts = {}) {
   await page.routeWebSocket(/.*/, ws => ws.onMessage(message => {
     const req = JSON.parse(message);
     calls.ws.push(req);
-    if (req.action === 'list_printers') for (const printer of list) ws.send(JSON.stringify({ type: 'printer_update', printer }));
+    if (req.action === 'list_printers') {
+      for (const printer of list) ws.send(JSON.stringify({ type: 'printer_update', printer }));
+      if (opts.systemStatus) ws.send(JSON.stringify({ type: 'system_status', status: opts.systemStatus }));
+    }
+    if (opts.ws) opts.ws(req, reply => ws.send(JSON.stringify(reply)));   // answer other actions, e.g. list_files -> file_list
   }));
   await page.route('**/api/**', async route => {
     const request = route.request();
@@ -117,4 +185,4 @@ async function openApp(browser, baseUrl, opts = {}) {
   return { page, context, calls };
 }
 
-module.exports = { startServer, openApp, printers, awaitingOutcome, job, preflightReport, items, historyRecords, publicDir };
+module.exports = { startServer, openApp, files, spools, filamentMeta, systemStatus, quickPrintApi, printers, awaitingOutcome, job, preflightReport, items, historyRecords, publicDir };
