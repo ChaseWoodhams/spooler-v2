@@ -103,6 +103,8 @@ function renderNeedsYou() {
         <button class="btn btn-secondary" data-focus-key="correct-${print.id}" onclick="dashOpenUnconfirmed()">${ok ? "Correct" : "Set outcome"}</button>
       </div></div>`);
   }
+  // One filled primary in the strip (the first, most urgent row); later rows keep their action as a secondary button
+  for (let i = 1; i < rows.length; i++) rows[i] = rows[i].replace('btn btn-primary', 'btn btn-secondary');
   const html = rows.length
     ? `<h2>Needs you <span class="needs-count">${rows.length}</span></h2>${rows.join("")}`
     : `<p class="needs-empty"><strong>Needs you</strong> <span>Nothing needs you right now.</span></p>`;

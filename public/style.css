@@ -555,7 +555,7 @@ main {
   padding: 12px 18px;
   flex-wrap: wrap;
 }
-.card-waiting { font-size: 13px; font-weight: 600; color: var(--text); }
+.card-waiting { font-size: var(--fs-secondary); font-weight: 600; color: var(--text); }
 .card-next { flex-basis: 100%; font-size: 12px; color: var(--text-muted); }
 .card-next strong { color: var(--text); font-weight: 600; }
 .controls-spacer { flex: 1; }
@@ -2157,7 +2157,7 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
 }
 .state-block p { margin: 0; max-width: 46ch; }
 .state-block[data-state="error"] p { color: var(--text); }
-.state-block[data-state="error"] { border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border)); border-radius: 8px; }
+.state-block[data-state="error"] { border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border)); border-radius: var(--radius-sm); }
 .state-block[data-state="loading"] { animation: state-in .2s ease .3s backwards; }   /* a quick answer never flashes the block */
 .state-spinner {
   width: 22px; height: 22px; border-radius: 50%;
@@ -2282,8 +2282,8 @@ body.light-mode { --st-completed: #0f766e; --st-failed: #be123c; --st-cancelled:
 .printer-card.printer-card-offline { grid-column: 1 / -1; order: 1; flex-direction: row; align-items: center; gap: 12px; padding: 10px 14px; }
 .offline-row-text { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
 .offline-row-text .card-title-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.offline-row-reason { color: var(--text-muted); font-size: 12px; }
-.printer-card-offline > .btn { flex: none; min-height: 44px; }
+.offline-row-reason { color: var(--text-muted); }
+.printer-card-offline > .btn { flex: none; min-height: var(--hit-min); }
 
 #modal-app-settings:focus { outline: none; }   /* focus lands on the dialog itself; its controls keep their own rings */
 

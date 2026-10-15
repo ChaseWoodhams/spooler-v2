@@ -1,4 +1,4 @@
-// Ticket ucf-05: badges and chips are readable in both themes. Measures rendered colours against the real
+// Badges and chips are readable in both themes. Measures rendered colours against the real
 // composited background (not class names). Fixtures only; nothing reaches a printer.
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
@@ -27,18 +27,18 @@ const spool = { id: 17, location: '', initial_weight: 1000, remaining_weight: 75
   const browser = await chromium.launch();
   const results = [], fails = [];
   try {
-    for (const theme of ['dark', 'light']) {
+    for (const theme of ['dark', 'light']) for (const width of [1280, 390]) {
       const { page, context } = await fx.openApp(browser, server.baseUrl, {
-        theme, printers: [printing], awaiting: [fx.awaitingOutcome({ printer_id: printing.id })],
+        theme, width, printers: [printing], awaiting: [fx.awaitingOutcome({ printer_id: printing.id })],
         api: url => url.pathname === '/api/dashboard' ? { json: { needs_you: { printers: [], prints: [fx.awaitingOutcome({ id: 101, printer_name: 'P' })] }, projects: [] } }
           : url.pathname === '/api/spoolman/api/v1/spool' ? { json: [spool] }
           : url.pathname === '/api/jobs' ? { json: { jobs: [{ id: 'j1', name: 'Q', file_name: 'q.gcode', state: 'queued', print_opts: {}, position: 1 }] } } : undefined,
       });
       const check = async (name, selector, required = 4.5) => {
         const m = await page.evaluate(measure, selector);
-        assert.ok(m, `${theme}: ${name} (${selector}) is rendered`);
-        results.push({ theme, name, ratio: +m.ratio.toFixed(2) });
-        assert.ok(m.ratio >= required, `${theme}: ${name} "${m.text}" ${m.ratio.toFixed(2)}:1 < ${required}:1`);
+        assert.ok(m, `${theme} ${width}: ${name} (${selector}) is rendered`);
+        results.push({ theme, width, name, ratio: +m.ratio.toFixed(2) });
+        assert.ok(m.ratio >= required, `${theme} ${width}: ${name} "${m.text}" ${m.ratio.toFixed(2)}:1 < ${required}:1`);
       };
       const soft = async (...args) => { try { await check(...args); } catch (e) { fails.push(e.message); } };
       await page.locator('.needs-count').waitFor();

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fx = require('./fixtures.cjs');
 const sf = require('./slicer-fixtures.cjs');
-const { chromium } = (() => { try { return require(process.env.PLAYWRIGHT_MODULE || 'playwright'); } catch { return require(path.resolve(__dirname, '../../../../spooler-v2/node_modules/playwright')); } })();
+const { chromium } = require('playwright');
 
 const STEP_LABELS = { model: 'Model', split: 'Split', plates: 'Plates', slice: 'Slice', print: 'Print' };
 const shots = process.env.SLICER_SHOTS_DIR;
