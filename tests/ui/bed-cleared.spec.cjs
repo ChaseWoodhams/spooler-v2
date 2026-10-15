@@ -34,13 +34,17 @@ async function run(browser, baseUrl, width, height) {
   await page.goto(baseUrl);
   const card = page.locator('#card-bc');
   await card.waitFor();
-  const button = card.getByRole('button', { name: 'Printed OK · Bed cleared' });
+  const button = page.locator('#needs-you').getByRole('button', { name: 'Printed OK · Bed cleared' });
   await page.waitForTimeout(400);
-  assert.equal(await button.count(), 0, 'an idle printer with nothing to clear shows no Bed cleared button');
+  assert.equal(await page.getByRole('button', { name: 'Printed OK · Bed cleared' }).count(), 0, 'an idle printer with nothing to clear shows no Bed cleared button');
+  assert.doesNotMatch(await card.innerText(), /Waiting for bed clear/i);
 
   fx.waiting = true;
   await page.evaluate(() => loadDashboard());
   await button.waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Printed OK · Bed cleared' }).count(), 1, 'the decision is offered once, in Needs you');
+  assert.equal(await card.getByRole('button', { name: /Bed cleared/ }).count(), 0, 'the card does not repeat the button');
+  assert.match(await card.innerText(), /Waiting for bed clear/i);
   assert.match(await card.innerText(), /Next up: lid\.gcode starts on Bed fixture/i, 'the card says what confirming starts');
   if (shots) await page.screenshot({ path: path.join(shots, 'card-' + width + '.png') });
 
