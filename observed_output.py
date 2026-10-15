@@ -226,3 +226,7 @@ def summary(report: dict, limit: int = 20) -> dict:
             "difference_count": len(report["differences"]), "normalized_count": len(report["normalized"]),
             "unavailable_count": len(report["unavailable"]),
             "differences": [{k: d[k] for k in ("kind", "key", "scope", "expected", "observed")} for d in report["differences"][:limit]]}
+
+
+# Public name for callers outside this module (the parity workflow compares printed values the same way).
+same_value = _same
