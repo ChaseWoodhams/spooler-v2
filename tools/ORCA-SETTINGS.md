@@ -108,6 +108,10 @@ bed blocks (`incompatible-machine`, `incompatible-bed`, options `separate-projec
 (blocked scripts, rejected values, `uncompared-settings` the chosen presets do not state, conversions) and the applied `resolution`;
 both are retained with the accepted import record and neither claims full fidelity.
 
+A key the chosen presets do not state is compared with Orca's own resolved value for those presets (`slicer.orca_resolved`: one
+Orca template run per locked profile, cached as `orca-resolved.json` beside it), so it is carried when it differs and dropped when it
+equals Orca's default. `uncompared-settings` is reported only when Orca cannot supply those values (missing or failing executable).
+
 ## Settings actually used (review rows)
 
 `projects.effective_settings(project, plate, revision, object_id=, search=, changed_only=)` and

@@ -3,12 +3,14 @@
 import io
 import json
 import unittest
+from unittest import mock
 
 import jobs
 import projects
 import slicer
 from tests.orca_archives import archive
 from tests import test_import_review as base
+from tests import test_projects
 from tests.test_import_review import PROJECT, staged
 
 CC = "Elegoo Centauri Carbon 0.4 nozzle"
@@ -278,6 +280,58 @@ class DifferencesAreNotDroppedQuietly(SettingsCase):
                 self.assertEqual((direct.exception.status, direct.exception.issues[0]["code"]), (409, "import-review-required"))
                 self.assertTrue(direct.exception.issues[0]["differences"])
                 self.assertEqual(self.snapshot(project["id"]), before)
+
+
+class UnstatedSettingsTests(SettingsCase):
+    """A setting the stock presets do not state is compared with Orca's own resolved value for those presets (one Orca run per
+    locked profile, cached), so a real difference is carried and a value equal to Orca's default is not reported at all."""
+    DEFAULTS = {"brim_type": "auto_brim", "sparse_infill_density": "15%"}
+    FILE = {**PROJECT, "nozzle_diameter": ["0.4"], "brim_type": "no_brim", "sparse_infill_density": "15%"}
+
+    def with_orca(self, code=0):
+        runner = test_projects.template_runner(code=code, extras=self.DEFAULTS)
+        return mock.patch.object(slicer, "runner", runner), runner
+
+    async def test_a_new_project_carries_an_unstated_setting_that_differs_from_orcas_default(self):
+        patch, _ = self.with_orca()
+        with patch:
+            done = self.confirm(self.prepare(archive(project=self.FILE, **CUBES), "brim.3mf"))
+        self.assertEqual(done["data"]["profile"]["process"].get("brim_type"), "no_brim")
+        self.assertNotIn("sparse_infill_density", done["data"]["profile"]["process"], "equal to Orca's default: nothing to carry")
+        self.assertNotIn("uncompared-settings", [d["code"] for d in done["import_record"]["differences"]])
+
+    async def test_values_equal_to_orcas_defaults_need_no_acknowledgement(self):
+        patch, _ = self.with_orca()
+        with patch:
+            review = self.prepare(archive(project={**self.FILE, "brim_type": "auto_brim"}, **CUBES), "plain.3mf")
+        self.assertNotIn("uncompared-settings", [d["code"] for d in review["report"]["differences"]])
+        self.assertFalse(review["required"], review["report"]["differences"])
+        projects.cancel_import(review["token"])
+
+    async def test_appending_carries_an_unstated_difference_as_a_plate_override(self):
+        project = await self.project_with_cube()
+        patch, _ = self.with_orca()
+        with patch:
+            done = self.confirm(self.prepare(archive(project=self.FILE, **CUBES), "brim.3mf", target=project["id"]))
+        added = [p for p in done["data"]["plates"] if p["id"] not in {x["id"] for x in project["data"]["plates"]}]
+        self.assertEqual([p["overrides"].get("brim_type") for p in added], ["no_brim"])
+        self.assertEqual(done["data"]["profile"], project["data"]["profile"], "the Project defaults are untouched")
+
+    async def test_orcas_resolved_values_are_worked_out_once_per_locked_profile(self):
+        patch, runner = self.with_orca()
+        with patch:
+            for name in ("a.3mf", "b.3mf"):
+                projects.cancel_import(self.prepare(archive(project=self.FILE, **CUBES), name)["token"])
+        self.assertEqual(len([call for call in runner.calls if "--export-3mf" in call]), 1)
+
+    async def test_without_orcas_resolved_values_unstated_settings_are_still_listed_and_acknowledged(self):
+        patch, _ = self.with_orca(code=1)
+        with patch:
+            review = self.prepare(archive(project=self.FILE, **CUBES), "brim.3mf")
+        uncompared = next(d for d in review["report"]["differences"] if d["code"] == "uncompared-settings")
+        self.assertIn("brim_type", uncompared["keys"])
+        self.assertTrue(review["required"])
+        projects.cancel_import(review["token"])
 
 
 class ResolveApiTests(base.ImportReviewApiTests):

@@ -135,9 +135,10 @@ class ParityMatrixTests(unittest.IsolatedAsyncioTestCase):
             data = path.read_bytes()
             review = projects.prepare_import(io.BytesIO(data), len(data), path.name)
             self.assertFalse(review["blocked"], review["report"])
-            # An exported file carries Orca's whole configuration, so the review always lists many settings the stock presets do not
-            # state ("uncompared") and the blocked printer scripts. That is noise, not a verdict: whether anything that matters was
-            # dropped is decided by the full-footer comparison below, which is how the brim_type gap was found.
+            # Nothing but blocked printer scripts (never imported, by policy) may be left out on the way back in: any other difference
+            # is a fidelity gap, not something to acknowledge and move past.
+            left_out = [(d["code"], d.get("key") or d.get("keys")) for d in review["report"]["differences"] if d["code"] != "blocked-setting"]
+            self.assertEqual(left_out, [], f"{name} plate {plate}: the re-import would not carry everything")
             done = projects.confirm_import(review["token"], {**review["binding"], "acknowledged": bool(review["required"])})
             await self.settle()
             reopened = projects.get_project(done["id"])
@@ -199,23 +200,18 @@ class ParityMatrixTests(unittest.IsolatedAsyncioTestCase):
 
     # ── Geometry ────────────────────────────────────────────────────────────────
 
-    @unittest.expectedFailure
     async def test_a_rotated_and_scaled_multi_object_plate(self):
-        """KNOWN GAP (found by this workflow): with a 45 degree turn and a scaled Object, Spooler's own Slice estimates 1364 s and
-        direct Orca on the exported file 1362 s: 0.15%, beyond the spec's max(1 s, 0.1%). Layers, toolpath counts and position
-        agree, so the likely cause is geometry serialisation precision (export 9 significant figures, Slice 4 decimals). Left at
-        the spec's bound on purpose; this passes as an unexpected success once the drift is closed."""
+        """A 45 degree turn and a scaled Object. Rounding the Slice file's bed coordinates to 4 decimals once drifted Spooler's time
+        estimate 0.15% from direct Orca's (1364 s against 1362 s); the Slice file now keeps 9 significant figures."""
         def edit(data):
             data["objects"][0]["rotation"] = [0.0, 0.0, 45.0]
             data["objects"][1]["scale"] = [0.8, 0.8, 0.8]
         await self.scenario("transformed objects", "PETG", 1, edit,
                             {1: {"filament_type": "PETG", "wall_loops": "1", "_moves": {"Outer wall": 50}}}, faithful=True)
 
-    @unittest.expectedFailure
     async def test_a_setting_the_stock_preset_does_not_state_survives_a_round_trip(self):
-        """KNOWN GAP (tickets 10 and 12): brim_type is carried in the exported file and honoured by direct Orca, but the stock
-        presets do not state it, so the re-import lists it as 'uncompared-settings' and does not carry it. The reopened Project
-        slices with auto_brim."""
+        """brim_type is not stated by the stock presets. The re-import compares it with Orca's own resolved value for those presets,
+        so no_brim is carried and the reopened Project slices without a brim, as direct Orca does."""
         def edit(data):
             data["profile"]["process"] = {**data["profile"]["process"], "brim_type": "no_brim"}
         await self.scenario("unstated setting", "PETG", 1, edit, {1: {"filament_type": "PETG", "brim_type": "no_brim"}}, faithful=True)

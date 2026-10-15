@@ -15,6 +15,12 @@ from tests.test_jobs import GCODE, isolate_preflight
 from tests.test_quick_print import GEOMETRY
 from tests.test_slicer import cube_stl, fake_runner
 
+# The canned G-code's configuration footer describes whatever print it came from, not the settings these tests choose, so the
+# Orca output check would rightly refuse it as a mismatch. Without a footer the check is "not verified" and the queue still accepts
+# it; the output check itself is covered in test_observed_output.
+_FOOTER = GCODE.find(b"; CONFIG_BLOCK_START")
+SLICED = GCODE[:_FOOTER] if _FOOTER >= 0 else GCODE
+
 
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
 class QuickPrintSliceTests(unittest.IsolatedAsyncioTestCase):
@@ -34,7 +40,7 @@ class QuickPrintSliceTests(unittest.IsolatedAsyncioTestCase):
 
         def runner(args, timeout):          # a print that passes every preflight check
             result = plain(args, timeout)
-            (Path(args[args.index("--outputdir") + 1]) / "plate_1.gcode").write_bytes(GCODE)
+            (Path(args[args.index("--outputdir") + 1]) / "plate_1.gcode").write_bytes(SLICED)
             return result
         runner.calls = plain.calls
         with mock.patch.object(slicer, "runner", runner):
@@ -46,7 +52,10 @@ class QuickPrintSliceTests(unittest.IsolatedAsyncioTestCase):
     def slice_config(self):
         """The process settings the last slice handed to Orca."""
         args = self.runner.calls[-1]
-        process_file = args[args.index("--load-settings") + 1].split(";")[1]
+        process_file = Path(args[args.index("--load-settings") + 1].split(";")[1])
+        work = process_file.parent.parent             # a Slice is prepared in plates/.work-<plate>-<id>, then published as plates/<plate>
+        if work.name.startswith(".work-"):
+            process_file = work.parent / work.name.split("-")[1] / process_file.parent.name / process_file.name
         return json.loads(Path(process_file).read_text(encoding="utf-8"))
 
     def bundle_hashes(self):

@@ -270,6 +270,26 @@ class SliceMetadataTests(PackageCase):
         for key, value in {"flag": "1", "off": "0", "list": "1;2", "empty": "nil", "pct": "15%"}.items():
             self.assertIn(f'<metadata key="{key}" value="{value}"/>', text)
 
+    async def test_a_turned_object_keeps_its_exact_bed_coordinates_in_the_slice_file(self):
+        """Rounding a 45 degree turn to 4 decimals moved Orca's time estimate 0.15% away from the exported file's (found by the
+        parity workflow); the Slice file now keeps the coordinates to 9 significant figures, like the export."""
+        import re
+        import tempfile
+        from pathlib import Path
+        project = await self.two_plate_project()
+        obj = {**copy.deepcopy(project["data"]["objects"][0]), "rotation": [0.0, 0.0, 45.0], "scale": [0.8, 0.8, 0.8]}
+        verts, _ = projects.load_mesh(project["id"], obj["model"])
+        expected = projects.place(verts, obj)
+        with tempfile.TemporaryDirectory() as tmp:
+            projects.write_plate_3mf(Path(tmp) / "plate.3mf", project["id"], [obj], projects.machine_limits(
+                projects.effective_settings(project["id"], 1)["machine"]))
+            with zipfile.ZipFile(Path(tmp) / "plate.3mf") as archive:
+                model = next(archive.read(n).decode() for n in archive.namelist() if n.endswith(".model"))
+        written = [tuple(map(float, v)) for v in re.findall(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"', model)]
+        self.assertEqual(len(written), len(expected))
+        worst = max(abs(a - b) for row, out in zip(expected, written) for a, b in zip(row, out))
+        self.assertLess(worst, 1e-6)
+
 
 class PackageHttpTests(unittest.TestCase):
     setUp = test_projects.ProjectApiTests.setUp

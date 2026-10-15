@@ -64,17 +64,21 @@ the folder in the message. `tests/test_parity_logic.py` proves, without Orca, th
 walls or infill disappearing, PETG becoming PLA, ASA identity or settings changing, an Object moving, layer or time or weight
 drift beyond the bounds, and the review differing from the inputs sent to Orca.
 
-## Known gaps (run as expected failures)
+## Known gaps
 
-These are real fidelity problems this workflow found. They stay as `expectedFailure` tests so the matrix reports them; when
-one is fixed the test becomes an *unexpected success*, which must then have its decorator removed.
+None open. If a real fidelity problem is found and cannot be fixed at once, keep its case as an `expectedFailure` with the reason
+in its docstring and list it here: the runner then exits `3`, never `0`.
 
-1. **A setting the stock preset does not state is lost on re-import.** `brim_type = no_brim` is written to the exported file and
-   honoured by direct Orca, but the review lists it under `uncompared-settings` and does not carry it, so the reopened Project
-   slices with `auto_brim`. (Tickets 10 and 12 disclosed this; this test pins it.)
-2. **Rotated or scaled Objects drift 0.15 % in estimated time** (1364 s in Spooler against 1362 s in direct Orca), over the
-   spec's bound. Layers, toolpath counts and position agree; the likely cause is geometry serialisation precision. The bound has
-   been left alone on purpose.
+Found by this workflow and fixed:
+
+1. **A setting the stock presets do not state was lost on re-import.** `brim_type = no_brim` was exported and honoured by direct
+   Orca, but the import could only compare a file with the presets themselves, so it listed the key as `uncompared-settings` and
+   left it out. The import now compares such keys with Orca's own resolved value for the chosen presets (`slicer.orca_resolved`:
+   one Orca run per locked profile, kept beside it): a real difference is carried, a value equal to Orca's default is not reported.
+   Without Orca the old listing and acknowledgement remain.
+2. **Rotated or scaled Objects drifted 0.15 % in estimated time** (1364 s in Spooler against 1362 s in direct Orca). The Slice
+   file wrote bed coordinates to 4 decimals, up to 2.7e-5 mm off for a 45 degree turn; it now keeps 9 significant figures like the
+   export, and the estimates agree within the bound.
 
 ## Limits of the checks
 
@@ -83,8 +87,8 @@ one is fixed the test becomes an *unexpected success*, which must then have its 
 - A nil Filament override is shown by the resolved printer value (`retraction_length` 0.8) beside the explicit lift. Orca omits nil
   overrides from its footer, so there is no direct footer proof that nil differs from the stock value.
 - Positions are compared between the two outputs, not against an independent expected position.
-- Every re-import is confirmed with the review's own acknowledgement. The review of an exported file always lists hundreds of
-  settings as "uncompared" (the file carries Orca's full configuration), so that list is not a verdict; the footer comparison is.
+- A re-import may leave out nothing but blocked printer scripts (G-code macros and `post_process`, never imported by policy); any
+  other difference in its review fails the case before the comparison runs.
 
 ## Not covered
 
