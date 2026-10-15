@@ -526,7 +526,7 @@ def propose_orientation(ctx: Context, revision: int, object_ids=None, mode=None,
 
 # ── Arrange and plan Proposals (ticket 16) ────────────────────────────────────
 # Positions come from Spooler's own non-saving helpers (`arrange_layout` + `_place_layout`, `_plan_data`); the model never chooses
-# one. Both stage through `stage_proposal`, so review, Accept (one `save_data`), Superseded, sweeps and the cap are the pipeline's.
+# one. Both stage through `stage_proposal`, so review, Accept (one revision), Superseded, sweeps and the cap are the pipeline's.
 
 DIFF_LINES = 12
 
