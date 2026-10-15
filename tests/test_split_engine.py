@@ -164,6 +164,37 @@ class EngineTests(unittest.TestCase):
         with self.assertRaisesRegex(engine.EngineError, "too big"):
             engine.split(self.work)
 
+    def test_a_part_the_plan_says_fits_always_splits(self):
+        # A bar laid corner to corner on a low printer fits the bed only on the diagonal: its tightest footprint is longer
+        # than the bed, its axis-aligned one is not. The plan's "fits" and the Split's orientation must judge that the same way.
+        bar = m3d.Manifold.cube([290, 40, 40], True).rotate([0, 0, 45])
+        self.job(bar, planner={"mode": "smart"}, printer={"height": 50})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        engine.check(self.work)
+        pieces = self.read("check.json")["pieces"]
+        self.assertTrue(all(p["fits"] for p in pieces))
+        engine.split(self.work)  # no "no orientation that fits the printer"
+        self.assertEqual(self.read("result.json")["summary"]["parts"], 1)
+
+    def test_the_plan_and_the_orientation_use_one_fits_test(self):
+        limits = engine.printer_limits({"printer": {"height": 50}})
+        for dims in ([290, 40, 40], [200, 200, 10], [330, 20, 10], [100, 100, 60]):
+            man = m3d.Manifold.cube(dims, True).rotate([0, 0, 45])
+            described = engine.describe_pieces(engine.whole(man), limits)[0]["fits"]
+            placed, _ = engine.choose_orientation(man, [], limits)
+            self.assertEqual(described, placed is not None, dims)
+
+    def test_a_split_refused_for_a_part_names_the_cut_to_move(self):
+        self.job(channel(), planner={"mode": "grid", "balanced": True})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        cuts = self.read("cuts.json")["cuts"]
+        cuts[0]["offset"] = 20.0
+        (self.work / "cuts.json").write_text(json.dumps({"mode": "grid", "cuts": cuts}))
+        with self.assertRaisesRegex(engine.EngineError, rf"move cuts? [0-9, ]*{cuts[0]['id']}[,\s]"):
+            engine.split(self.work)
+
     def test_a_cut_that_leaves_a_sliver_is_flagged_and_refused(self):
         self.job(channel(), planner={"mode": "grid", "balanced": True})
         engine.analyze(self.work)
