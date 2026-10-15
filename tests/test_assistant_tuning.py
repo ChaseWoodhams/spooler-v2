@@ -111,6 +111,57 @@ class TuningLimitsTests(unittest.TestCase):
         self.assertEqual(self.finished()["state"], "answer")
         self.assertEqual(self.argv_after("--max-turns"), "3", "the next run takes the new value")
 
+    # ── reset, damage and unknown paths ──
+    def test_reset_returns_one_group_or_everything_to_the_defaults_and_keeps_the_connection(self):
+        self.call("POST", "/api/assistant/settings", {"jev_url": "http://127.0.0.1:9999"})
+        self.save(max_turns=7, deadline_seconds=90)
+        status, body = self.call("POST", "/api/assistant/settings", {"reset_tuning": "limits"})
+        self.assertEqual((status, body["tuning"]["values"]["limits"], body["jev_url"]), (200, LIMIT_DEFAULTS, "http://127.0.0.1:9999"))
+        self.finished()
+        self.assertEqual(self.argv_after("--max-turns"), "12")
+        self.save(max_turns=7)
+        self.assertEqual(self.call("POST", "/api/assistant/settings", {"reset_tuning": "all"})[1]["tuning"]["values"]["limits"], LIMIT_DEFAULTS)
+        self.assertEqual(self.call("POST", "/api/assistant/settings", {"reset_tuning": "nope"})[0], 400)
+        self.assertEqual(self.call("POST", "/api/assistant/settings", {"reset_tuning": "limits", "tuning": {"limits": {"max_turns": 9}}})[1]
+                         ["tuning"]["values"]["limits"]["max_turns"], 9, "a reset is applied before the values sent with it")
+
+    def test_a_damaged_or_hand_edited_file_falls_back_per_key_with_a_note_and_never_raises(self):
+        path = assistant.data_dir() / assistant.SETTINGS_NAME
+        path.write_text(json.dumps({"cli_path": "", "tuning": {"version": 1, "limits": {"max_turns": 500, "deadline_seconds": 90,
+                                                                                           "question_chars": "lots", "mystery": 1}, "other": {}}}), encoding="utf-8")
+        status, body = self.call("GET", "/api/assistant/settings")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["tuning"]["values"]["limits"], {**LIMIT_DEFAULTS, "deadline_seconds": 90})
+        notes = " ".join(body["tuning"]["notes"])
+        self.assertEqual(len(body["tuning"]["notes"]), 2, notes)
+        self.assertIn("CLI turn cap", notes)
+        self.assertIn("Longest question", notes)
+        self.assertEqual(self.finished()["state"], "answer", "runs go on with the usable values")
+        for text in ("{not json", "[]", json.dumps({"tuning": "yes"}), json.dumps({"tuning": {"version": 2, "limits": {"max_turns": 3}}}),
+                     json.dumps({"tuning": {"version": 1, "limits": 5}})):
+            path.write_text(text, encoding="utf-8")
+            status, body = self.call("GET", "/api/assistant/settings")
+            self.assertEqual((status, body["tuning"]["values"]["limits"]), (200, LIMIT_DEFAULTS), text)
+            self.assertEqual(bool(body["tuning"]["notes"]), text not in ("{not json", "[]"), text)
+        self.assertEqual(self.save(max_turns=4)[0], 200, "a save repairs a damaged file")
+        self.assertEqual(self.values()["max_turns"], 4)
+
+    def test_unknown_assistant_paths_answer_json_not_html(self):
+        import urllib.error
+        import urllib.request
+        for method, path in (("GET", "/api/assistant/nope"), ("GET", "/api/assistant/settings/extra"), ("POST", "/api/assistant/nope"),
+                             ("GET", "/api/assistant/tuning/preview")):
+            request = urllib.request.Request(self.base + path, method=method, data=b"{}" if method == "POST" else None,
+                                             headers={"Accept": "text/html", "Content-Type": "application/json"})
+            try:
+                base.AskTests  # noqa: B018 (keep the module import used)
+                with base._opener.open(request, timeout=30) as resp:
+                    self.fail(f"{method} {path} answered {resp.status}")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 404, path)
+                self.assertTrue(e.headers["Content-Type"].startswith("application/json"), (path, e.headers["Content-Type"]))
+                self.assertIn("error", json.loads(e.read()))
+
 
 if __name__ == "__main__":
     unittest.main()

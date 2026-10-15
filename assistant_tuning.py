@@ -83,7 +83,7 @@ def load() -> tuple:
             try:
                 values[group][key] = _check(group, key, saved[key])
             except ValueError:
-                notes.append(f"{spec['label']}: the saved {field['label'].lower()} is not allowed, so the default ({field['default']}) is in use.")
+                notes.append(f"{spec['label']}, {field['label']}: the saved value is not allowed, so the default ({field['default']}) is in use.")
     return values, notes
 
 
