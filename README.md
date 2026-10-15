@@ -19,16 +19,16 @@ curl -fsSL https://raw.githubusercontent.com/tharje/spooler-v2/main/docker-compo
 docker compose up -d
 ```
 
-Open **`http://<server-ip>:8080`** in your browser. On first visit you will be prompted to create a username and password.
+Open **`http://127.0.0.1:8080`** in your browser. Spooler has no login and listens on this machine only by default; to reach it from a phone or another computer, see [Network access](#network-access).
 
-> **Note:** `network_mode: host` is required on Linux. On **macOS or Windows**, Docker's host networking does not work — use the [Python setup](#option-b--python-no-docker) instead.
+> **Note:** `network_mode: host` is required on Linux, so the container shares the host's network and `BIND_HOST` applies to the host directly. On **macOS or Windows**, Docker's host networking does not work — use the [Python setup](#option-b--python-no-docker) instead.
 
 ---
 
 ## Features
 
 - **Live status** – idle, printing, warming up, paused, leveling, complete, cancelled, error
-- **Camera feed** – MJPEG stream from each printer (CC2), proxied through Spooler behind auth
+- **Camera feed** – MJPEG stream from each printer (CC2), proxied through Spooler
 - **Temperature monitoring** – nozzle, bed and chamber with live target values
 - **Print progress** – layer count, percentage, elapsed and remaining time
 - **Print speed control** – adjust speed while printing or paused (CC1 and CC2)
@@ -41,7 +41,7 @@ Open **`http://<server-ip>:8080`** in your browser. On first visit you will be p
 - **Controls** – pause, resume, stop, light toggle
 - **Auto-discovery** – finds printers on the local network automatically
 - **Persistence** – printers, history and spool data saved between restarts
-- **Authentication** – password-protected login; first-time setup via the web UI, no terminal needed
+- **Local-only by default** – no login; listens on 127.0.0.1 unless you opt in to a wider address
 - **Spoolman integration** – filament spool inventory with auto-deduction after each print
 - **Filament catalogue import** – one-click import of all ELEGOO filaments from SpoolmanDB
 - **PWA** – installable as a home screen app on Android and iOS
@@ -109,37 +109,22 @@ For a proper standalone app (no browser chrome), use HTTPS:
 
 ---
 
-## Authentication
+## Network access
 
-On first visit, Spooler shows a **Create account** page. Choose a username and password — done. No terminal or config file needed.
+Spooler has **no authentication, by design**. It listens on `127.0.0.1` (this machine only) by default, so only people using the computer it runs on can open it.
 
-### Disable authentication
-
-For trusted local networks where you don't want a password, create a `.env` file next to `docker-compose.yml`:
+To use it from a phone or another computer, set `BIND_HOST` in a `.env` file next to `docker-compose.yml` (or the server's environment):
 
 ```env
-AUTH_ENABLED=false
+BIND_HOST=0.0.0.0        # all interfaces
+# BIND_HOST=192.168.1.10 # or one LAN address
 ```
 
-Then restart: `docker compose up -d`
+Then restart (`docker compose up -d`) and open `http://<server-ip>:8080`.
 
-### Advanced: credentials via environment variable
+> **Warning:** anyone who can reach that address and port can control your printers, queue and files. Spooler provides no login and no other access control; the bind address is the only protection. Only expose it on a network you trust, and never forward the port to the internet. With Docker's `network_mode: host`, the setting applies directly to the host's network interfaces.
 
-If you prefer to manage credentials outside the data volume (e.g. Docker secrets):
-
-```bash
-# Generate a bcrypt hash
-docker compose exec spooler python3 server.py --hash-password
-```
-
-Add to `.env`:
-
-```env
-SPOOLER_PW_HASH=$2b$12$...
-SPOOLER_USERNAME=admin
-```
-
-See [`.env.example`](.env.example) for all options.
+Printer access codes and MQTT passwords (see below) are credentials for the printers themselves and are unrelated to this.
 
 ---
 
@@ -254,7 +239,6 @@ Records live in `spooler.db`. Prints logged by earlier versions in `history.json
 - **System health** – the pill in the header summarises Spoolman, printer links, backups and the supervisor; click it for details. A banner appears while the browser is reconnecting to Spooler.
 - **Printer reconnects** – a dropped link is retried after 2 s, repeated failures back off to 60 s, and a link that stays silent for 65 s is closed and reopened.
 - **Spoolman outages** – filament deductions that can't reach Spoolman are queued in `spoolman_outbox.json` and replayed automatically once it answers again.
-- **Sign-ins survive restarts** – sessions are persisted, as hashes, in `sessions.json`.
 - **Backups** – every 24 h, and on demand with *Back up now*, Spooler writes `backups/spooler-backup-<timestamp>.zip` containing the JSON configuration, `.env` files and integrity-checked SQLite snapshots, including Spoolman's database when `SPOOLMAN_DB_FILE` is set. The newest 14 are kept. See [`.env.example`](.env.example) for the settings.
 
 ### Restoring a backup
