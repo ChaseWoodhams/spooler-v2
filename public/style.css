@@ -2146,7 +2146,7 @@ body :is(button, a, input, select, textarea, [tabindex]):focus-visible {
 }
 .state-block p { margin: 0; max-width: 46ch; }
 .state-block[data-state="error"] p { color: var(--text); }
-.state-block[data-state="error"] { border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 55%, var(--border)); border-radius: 8px; }
+.state-block[data-state="error"] { border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border)); border-radius: 8px; }
 .state-block[data-state="loading"] { animation: state-in .2s ease .3s backwards; }   /* a quick answer never flashes the block */
 .state-spinner {
   width: 22px; height: 22px; border-radius: 50%;

@@ -2739,10 +2739,10 @@ function renderSpoolPanel() {
   else stateBlock(status, _spoolLoadState, _spoolLoadMessage, fetchSpools, "Retry inventory");
   if (!spools.length) {
     list.innerHTML = "";
-    empty.style.display = _spoolLoadState === "ready" ? "" : "none";
+    empty.hidden = _spoolLoadState !== "ready";
     return;
   }
-  empty.style.display = "none";
+  empty.hidden = true;
   list.innerHTML = spools.map(s => {
     const pct        = spoolPct(s);
     const remaining  = spoolRemaining(s);
