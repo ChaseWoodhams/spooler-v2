@@ -15,7 +15,7 @@ if [ ! -d "$VENV" ]; then
 fi
 
 echo "Installing dependencies…"
-"$VENV/bin/pip" install --quiet websockets bcrypt
+"$VENV/bin/pip" install --quiet -r "$DIR/requirements.txt"
 
 echo ""
 echo "=== Starting Spooler ==="
