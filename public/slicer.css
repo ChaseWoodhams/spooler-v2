@@ -80,6 +80,11 @@ body.slicer-page a.btn { text-decoration: none; }
 .slicer-object-list { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
 .slicer-object { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; padding: 5px 7px; border: 1px solid var(--border);
   border-radius: 6px; cursor: pointer; font-size: 13px; }
+.slicer-object-purpose { grid-column: 1 / -1; display: grid; grid-template-columns: auto 1fr; gap: 6px; }
+.slicer-purpose-pair { display: grid; grid-template-columns: auto 1fr; gap: 6px; }
+.slicer-purpose, .slicer-purpose-note { background: var(--surface2, var(--bg)); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 5px; font-size: 12px; min-width: 0; }
+.slicer-purpose-note[readonly] { color: var(--text-muted); }
+.slicer-purpose-body { display: flex; flex-direction: column; gap: 8px; }
 .slicer-object.selected { border-color: var(--accent); background: rgba(255, 107, 43, .08); }
 .slicer-object-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slicer-object small { color: var(--text-muted); }
