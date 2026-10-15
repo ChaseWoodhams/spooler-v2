@@ -255,5 +255,62 @@ class TuningInstructionsTests(unittest.TestCase):
         self.assertIn("You are the Spooler Assistant", self.prompt_sent())
 
 
+@unittest.skipUnless(base.GEOMETRY, "geometry libraries not installed")
+class TuningModelTests(unittest.TestCase):
+    setUp, tearDown = base.AskTests.setUp, base.AskTests.tearDown
+    call, make_project, scenario, ask, poll, finished = (base.AskTests.call, base.AskTests.make_project, base.AskTests.scenario, base.AskTests.ask,
+                                                         base.AskTests.poll, base.AskTests.finished)
+
+    def save(self, **model):
+        return self.call("POST", "/api/assistant/settings", {"tuning": {"model": model}})
+
+    def argv(self):
+        return read_record(self.cli_dir)["argv"]
+
+    def test_blank_by_default_and_the_cli_gets_no_model_option(self):
+        status, body = self.call("GET", "/api/assistant/settings")
+        self.assertEqual((status, body["tuning"]["values"]["model"]), (200, {"name": ""}))
+        self.assertEqual(body["tuning"]["groups"]["model"]["fields"]["name"]["type"], "str")
+        self.assertEqual(self.finished()["state"], "answer")
+        self.assertNotIn("--model", self.argv())
+
+    def test_a_saved_model_name_is_passed_to_the_cli_unchecked_and_blank_removes_it(self):
+        self.assertEqual(self.save(name="  claude-sonnet-4-5 ")[1]["tuning"]["values"]["model"]["name"], "claude-sonnet-4-5")
+        self.assertEqual(self.finished()["state"], "answer")
+        argv = self.argv()
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-sonnet-4-5")
+        self.save(name="whatever-not-in-any-list")
+        self.finished()
+        self.assertIn("whatever-not-in-any-list", self.argv())
+        self.save(name="")
+        self.finished()
+        self.assertNotIn("--model", self.argv())
+
+    def test_a_name_that_is_not_text_a_single_word_or_is_too_long_is_refused_and_nothing_is_saved(self):
+        for bad in (5, True, None, "two words", "x" * 101, "-p", "a\nb"):
+            self.assertEqual(self.save(name=bad)[0], 400, repr(bad))
+        self.assertEqual(self.call("GET", "/api/assistant/settings")[1]["tuning"]["values"]["model"]["name"], "")
+
+    def test_a_model_the_cli_rejects_ends_the_run_with_the_cli_message_and_changes_nothing(self):
+        self.save(name="no-such-model")
+        self.scenario({"calls": [], "reject_model": "no-such-model"})
+        revision = self.call("GET", f"/api/projects/{self.project['id']}")[1].get("revision")
+        view = self.finished()
+        self.assertEqual(view["state"], "error")
+        self.assertIn("issue with the selected model (no-such-model)", view["error"])
+        self.assertEqual(self.call("GET", f"/api/projects/{self.project['id']}")[1].get("revision"), revision)
+        self.save(name="")
+        self.scenario({"calls": [], "answer": "back", "reject_model": "no-such-model"})
+        self.assertEqual(self.finished()["answer"], "back")
+
+    def test_reset_model_returns_to_blank_and_leaves_limits(self):
+        self.save(name="m1")
+        self.call("POST", "/api/assistant/settings", {"tuning": {"limits": {"max_turns": 7}}})
+        body = self.call("POST", "/api/assistant/settings", {"reset_tuning": "model"})[1]
+        self.assertEqual((body["tuning"]["values"]["model"], body["tuning"]["values"]["limits"]["max_turns"]), ({"name": ""}, 7))
+        self.finished()
+        self.assertNotIn("--model", self.argv())
+
+
 if __name__ == "__main__":
     unittest.main()

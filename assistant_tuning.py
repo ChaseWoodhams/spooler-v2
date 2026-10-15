@@ -43,6 +43,14 @@ GROUPS = {
                      "hint": "Spooler adds a short fixed block after it (the Proposals-per-run cap), which cannot be edited."},
         },
     },
+    "model": {
+        "label": "Model",
+        "hint": "Which Claude model an Assistant run uses. Blank means the CLI's own default. The name is not checked here: a model the CLI rejects ends the run with its message.",
+        "fields": {
+            "name": {"label": "Model name", "type": "str", "unit": "text", "default": "", "min": 0, "max": 100,
+                     "hint": "For example claude-sonnet-4-5; one word, no spaces."},
+        },
+    },
 }
 
 
@@ -59,6 +67,15 @@ def _check(group: str, key: str, value):
         if len(value) > field["max"]:
             raise ValueError(f"{field['label']} cannot be longer than {field['max']} {field['unit']} (got {len(value)})")
         return value if value.strip() else ""
+    if field["type"] == "str":
+        if not isinstance(value, str):
+            raise ValueError(f"{field['label']} must be text")
+        value = value.strip()
+        if len(value) > field["max"]:
+            raise ValueError(f"{field['label']} cannot be longer than {field['max']} characters")
+        if value and (value.startswith("-") or not value.isprintable() or any(c.isspace() for c in value)):
+            raise ValueError(f"{field['label']} must be one word without spaces and not start with a dash")
+        return value
     ok = isinstance(value, int) and not isinstance(value, bool)
     if not ok and isinstance(value, float) and value.is_integer():
         value, ok = int(value), True
