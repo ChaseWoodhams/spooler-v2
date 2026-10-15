@@ -364,8 +364,52 @@ function render() {
   syncViewer();
 }
 
+// What a running stage is called in "Can't plan cuts while the split is ...".
+const STAGE_PHRASE = { analyzing: "being analysed", planning: "planning", checking: "checking", splitting: "splitting" };
+let sawPlanning = false;
+
+// The live region announces progress, and says when planning has finished.
+function announce() {
+  const live = $("split-live");
+  if (!live) return;
+  let text = "";
+  if (RUNNING.has(current.state)) {
+    if (current.state === "planning") sawPlanning = true;
+    text = current.state === "checking" ? "Checking the cuts…" : current.progress?.message || `${STATE_LABEL[current.state]}…`;
+  } else if (sawPlanning) {
+    sawPlanning = false;
+    text = current.state === "failed" ? "Planning failed" : `Planning finished — ${plural((current.check?.pieces || []).length, "part")}`;
+  } else return;
+  if (live.textContent !== text) live.textContent = text;
+}
+
+// A blocked action keeps its place in the tab order (aria-disabled) and shows why, tied to it by aria-describedby.
+function blockedReason(action) {
+  const stage = RUNNING.has(current.state) ? STAGE_PHRASE[current.state] : null;
+  if (action === "plan") return stage ? `Can't plan cuts while the split is ${stage}` : "";
+  if (action === "autofix") {
+    if (stage) return `Can't auto-fix while the split is ${stage}`;
+    if (checkDirty) return "Can't auto-fix until the cuts are checked";
+    if (!(current.check?.pieces || []).some(x => !x.fits)) return "Nothing is too big, so there is nothing to auto-fix";
+  }
+  return "";
+}
+
+function planActionsHtml() {
+  const button = (action, label, extra = "") => {
+    const why = blockedReason(action);
+    return `<button class="btn btn-secondary btn-sm" data-action="${action}"${why ? ` aria-disabled="true" aria-describedby="split-${action}-why"` : ""}${extra}>${label}</button>`;
+  };
+  const reasons = ["plan", "autofix"].map(a => { const why = blockedReason(a); return why ? `<small class="reason-line" id="split-${a}-why">${esc(why)}</small>` : ""; }).join("");
+  return `${button("plan", cuts.length ? "Plan again" : "Plan cuts")}
+      ${button("autofix", "Auto-fix", ` title="Keep these cuts and add more where parts are still too big"`)}${reasons}`;
+}
+
 function renderProgress() {
   if (!view || !current) return;
+  announce();
+  const actions = $("split-plan-actions");
+  if (actions) { const html = planActionsHtml(); if (actions.dataset.html !== html) { actions.dataset.html = html; actions.innerHTML = html; } }
   const box = $("split-progress");
   const running = RUNNING.has(current.state) && current.state !== "checking";
   box.hidden = !running;
@@ -712,7 +756,7 @@ function checkPartsHtml() {
   if (!tinyNumbers.size) return "";
   return `<ul class="split-check-parts" aria-label="Parts these cuts make">${pieces.map((p, i) => {
     const n = i + 1, bad = tinyNumbers.has(n);
-    return `<li data-check-part="${n}"${bad ? " data-tiny" : ""}>Part ${n}${bad ? ` <span class="split-bad">too small to print${p.made_by_cut != null ? ` � made by Cut ${p.made_by_cut}` : ""}</span>` : ""}</li>`;
+    return `<li data-check-part="${n}"${bad ? " data-tiny" : ""}>Part ${n}${bad ? ` <span class="split-bad">too small to print${p.made_by_cut != null ? ` � made by Cut ${p.made_by_cut}` : ""}</span>` : ""}</li>`;
   }).join("")}</ul>`;
 }
 
@@ -764,11 +808,7 @@ function sideCuts() {
       <label class="split-inline"><input type="checkbox" id="split-balanced"${s.planner.balanced ? " checked" : ""}> Even grid</label>
     </div>
     <p class="split-hint">Smart cuts follow the shape and turn pieces to fit the bed. Grid cuts slice the whole model into bed-sized blocks.</p>
-    <div class="split-actions-row">
-      <button class="btn btn-secondary btn-sm" data-action="plan"${busy ? " disabled" : ""}>${cuts.length ? "Plan again" : "Plan cuts"}</button>
-      <button class="btn btn-secondary btn-sm" data-action="autofix"${busy || !oversize || checkDirty ? " disabled" : ""}
-        title="Keep these cuts and add more where parts are still too big">Auto-fix</button>
-    </div>
+    <div class="split-actions-row" id="split-plan-actions">${planActionsHtml()}</div>
     <div id="split-check" class="split-check" role="status">${checkText()}</div>
     <div id="split-check-parts">${checkPartsHtml()}</div>
     <div id="split-cut-list" class="split-cut-list">${cutListHtml()}</div>
@@ -994,6 +1034,7 @@ function bindEvents() {
   side.addEventListener("click", async (e) => {
     const el = e.target.closest("[data-action]");
     if (!el || el.disabled || !current) return;
+    if (el.getAttribute("aria-disabled") === "true") return;   // blocked: its reason is already showing
     try {
       switch (el.dataset.action) {
         case "go-split":     host.onStep("split"); break;
