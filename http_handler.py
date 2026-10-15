@@ -1566,10 +1566,32 @@ class _Server(ThreadingHTTPServer):
     request_queue_size = 256
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def bind_host() -> str:
+    """Address the listeners bind to: this machine only, unless BIND_HOST opts in to another."""
+    return os.getenv("BIND_HOST", "").strip() or "127.0.0.1"
+
+
+def bind_warning() -> str | None:
+    """Plain warning to log when the listeners are reachable from other machines, else None."""
+    host = bind_host()
+    if host in LOOPBACK_HOSTS:
+        return None
+    return (f"[Net] WARNING: BIND_HOST={host} - Spooler has no login, so anyone who can reach "
+            f"{host} can control the printers.")
+
+
+def make_http_server(port: int) -> _Server:
+    host = bind_host()
+    server = _Server((host, port), SPHandler)
+    print(f"[HTTP] Serving on http://{server.server_address[0]}:{server.server_address[1]}")
+    return server
+
+
 def run_http(port: int) -> None:
-    server = _Server(("0.0.0.0", port), SPHandler)
-    print(f"[HTTP] Serving on http://0.0.0.0:{port}")
-    server.serve_forever()
+    make_http_server(port).serve_forever()
 
 
 def run_https(port: int) -> None:
@@ -1577,8 +1599,8 @@ def run_https(port: int) -> None:
         return
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(str(CERT_FILE), str(KEY_FILE))
-    server = _Server(("0.0.0.0", port), SPHandler)
+    server = _Server((bind_host(), port), SPHandler)
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
     server._is_https = True
-    print(f"[HTTPS] Serving on https://0.0.0.0:{port}")
+    print(f"[HTTPS] Serving on https://{server.server_address[0]}:{port}")
     server.serve_forever()

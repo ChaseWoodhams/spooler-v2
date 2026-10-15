@@ -58,7 +58,7 @@ import slicer
 import splits
 import state
 from auth import AUTH_ENABLED, BCRYPT_AVAILABLE, session_cleanup_loop
-from http_handler import run_http, run_https
+from http_handler import bind_host, bind_warning, run_http, run_https
 from persistence import DATA_DIR, load_printers, load_tray_map
 from printers import PRINTER_TYPES, make_printer
 from push import init_vapid
@@ -106,6 +106,11 @@ async def main() -> None:
         print("[Auth] No password configured – first-time setup required via the web UI")
     else:
         print(f"[Auth] Authentication enabled (user: {auth._get_username()})")
+
+    host = bind_host()
+    warning = bind_warning()
+    if warning:
+        print(warning)
 
     init_vapid()
 
@@ -174,17 +179,17 @@ async def main() -> None:
         https_thread = threading.Thread(target=run_https, args=(HTTPS_PORT,), daemon=True)
         https_thread.start()
 
-    print(f"[WS]   Browser WebSocket on ws://0.0.0.0:{WS_PORT}")
+    print(f"[WS]   Browser WebSocket on ws://{host}:{WS_PORT}")
     if ssl_ctx:
-        print(f"[WSS]  Browser WebSocket on wss://0.0.0.0:{WSS_PORT}")
+        print(f"[WSS]  Browser WebSocket on wss://{host}:{WSS_PORT}")
 
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(
-            ws_serve(browser_handler, "0.0.0.0", WS_PORT, ping_interval=20, ping_timeout=10)
+            ws_serve(browser_handler, host, WS_PORT, ping_interval=20, ping_timeout=10)
         )
         if ssl_ctx:
             await stack.enter_async_context(
-                ws_serve(browser_handler, "0.0.0.0", WSS_PORT, ssl=ssl_ctx, ping_interval=20, ping_timeout=10)
+                ws_serve(browser_handler, host, WSS_PORT, ssl=ssl_ctx, ping_interval=20, ping_timeout=10)
             )
         print("\n" + "─" * 50)
         print("  Spooler is running!")
