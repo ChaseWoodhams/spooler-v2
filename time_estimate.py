@@ -89,10 +89,13 @@ def deposited_from_filament(filament_mm, diameter_mm) -> float | None:
 
 
 def record_slice(project_id: int, plate_id: int, features: dict | None, analysis: dict, *, bundle_id: str | None = None,
-                settings_hash: str | None = None, nozzle: float | None = None, kind: str = "full", gcode_path=None) -> None:
+                settings_hash: str | None = None, nozzle: float | None = None, kind: str = "full", gcode_path=None,
+                support_volume_cm3: float | None = None, object_support_volumes: dict | None = None) -> None:
     """Log a finished slice: the features its time was estimated from, what the slicer made of it, what the rough
     estimate said, and what the calibration needs (bundle, settings hash, nozzle, kind, Orca version, measured support grams).
-    With the G-code, one `support_log` row per Object that has support is added. Rows are only ever added."""
+    With the G-code, one `support_log` row per Object that has support is added. The planner's proxy support volume (cm3) goes
+    with it: for the plate in `support_volume_cm3`, and per Object in `object_support_volumes` (keyed by the Object's name in the
+    3MF, which G-code names extend with `_id_N_copy_M`). Rows are only ever added."""
     features = features or {}
     stats = analysis.get("feature_stats") or {}
     estimates = analysis.get("estimates") or {}
@@ -102,17 +105,18 @@ def record_slice(project_id: int, plate_id: int, features: dict | None, analysis
     with database.transaction() as conn:
         cursor = conn.execute(
             "INSERT INTO slice_log (project_id, plate_id, slicer, layers, volume_cm3, first_layer_cm2, support, brim, estimate_s, "
-            "estimate_g, deposited_cm3, model_s, created_at, bundle_id, settings_hash, nozzle, kind, orca_version, support_g) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "estimate_g, deposited_cm3, model_s, created_at, bundle_id, settings_hash, nozzle, kind, orca_version, support_g, "
+            "support_volume_cm3) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (project_id, plate_id, analysis.get("slicer"), features.get("layers"), features.get("volume_cm3"),
              features.get("first_layer_cm2"), int(any(name.startswith("Support") for name in stats)), int("Brim" in stats),
              estimates.get("estimate_s"), estimates.get("estimate_g"),
              deposited_from_filament(estimates.get("estimate_mm"), (analysis.get("config") or {}).get("filament_diameter")),
              model_s, now, bundle_id, settings_hash, nozzle, kind, analysis.get("slicer"),
-             measured["support_g"] if measured else None))
+             measured["support_g"] if measured else None, support_volume_cm3))
         for name, found in ((measured or {}).get("objects") or {}).items():
-            conn.execute("INSERT INTO support_log (slice_log_id, object_name, bundle_hash, support_g, created_at) VALUES (?, ?, ?, ?, ?)",
-                         (cursor.lastrowid, name, settings_hash, found["support_g"], now))
+            proxy = (object_support_volumes or {}).get(name, (object_support_volumes or {}).get(name.rsplit("_id_", 1)[0]))
+            conn.execute("INSERT INTO support_log (slice_log_id, object_name, bundle_hash, support_volume_cm3, support_g, created_at) "
+                         "VALUES (?, ?, ?, ?, ?, ?)", (cursor.lastrowid, name, settings_hash, proxy, found["support_g"], now))
 
 
 def slice_log(project_id: int | None = None) -> dict:
