@@ -84,11 +84,25 @@ class Mesh:
         if not keep.any():
             raise OrientError("The model has no triangles to orient")
         self.verts = verts
+        self.tris = np.asarray(tris)
         self.normals = cross[keep] / doubled[keep, None]
         self.areas = doubled[keep] / 2
         self.centres = tri[keep].mean(axis=1)
         self.surface = float(self.areas.sum())
         self._hull = None
+        self._com = None
+
+    def centre_of_mass(self) -> np.ndarray:
+        """Centroid of the enclosed volume (uniform density); the mean of the vertices when the mesh isn't closed."""
+        if self._com is None:
+            tri = self.verts[self.tris]
+            vol = np.einsum("ij,ij->i", tri[:, 0], np.cross(tri[:, 1], tri[:, 2])) / 6.0
+            total = float(vol.sum())
+            if abs(total) > 1e-9 * max(1.0, self.surface ** 1.5):
+                self._com = (vol[:, None] * tri.sum(axis=1) / 4.0).sum(axis=0) / total
+            else:
+                self._com = self.verts.mean(axis=0)
+        return self._com
 
     def hull(self):
         """The convex hull's points and its facets as (unit normal, area)."""
@@ -205,3 +219,142 @@ def suggest(verts, tris, scale, rotation, *, mode: str = LEAST_SUPPORT, angle: f
     R = _rz(turn) @ _to_z(best[0])
     return {"rotation": list(rotation) if best is now else _euler(R), "changed": best is not now,
             "current": now[1], "suggested": best[1]}
+
+
+# --- ranked steady candidates for the planner (auto-plating ticket 14) -------------------------------------------------
+
+CONTACT_TOLERANCE_MM = 0.3         # vertices this close to the bed make up the footprint
+MIN_CONTACT_PER_NOZZLE_SQ = 50.0   # minimum first-layer contact in mm2 is this x nozzle diameter squared (8 at 0.4, 24.5 at 0.7) ...
+MIN_CONTACT_SHARE = 0.5            # ... but never more than this share of the best contact any candidate offers (tiny parts)
+TALL_RATIO = 5.0                   # steady needs height <= this x sqrt(footprint area)
+COM_MARGIN_SHARE = 0.1             # the centre of mass sits at least this x sqrt(footprint area) (max 1 mm) inside its edge
+RERANK_TOP = 8                     # candidates ray-cast after the proxy screen
+MAX_RAYS = 20000
+CUT_FACE_BONUS = 0.05              # a cut face's cost is cut by this share: a tie-break, nothing more
+NEEDS_SUPPORT_MM3 = 50.0           # below this support volume a candidate prints without support
+
+
+def _ray_support_volume(mesh: "Mesh", up: np.ndarray, angle: float):
+    """Support volume (mm3) with `up` up: from each overhang face, the column straight down to the first thing it hits
+    (the part or the bed). None when the embree backend isn't installed."""
+    try:
+        import trimesh
+        from trimesh.ray.ray_pyembree import RayMeshIntersector
+    except ImportError:
+        return None
+    points = mesh.verts @ _to_z(up).T
+    points[:, 2] -= points[:, 2].min()
+    solid = trimesh.Trimesh(points, mesh.tris, process=False)
+    normals_z = solid.face_normals[:, 2]
+    area, centre_z = solid.area_faces, solid.triangles_center[:, 2]
+    limit = math.cos(math.radians(min(89.0, max(1.0, angle))))
+    over = np.where((-normals_z > limit) & (centre_z >= FIRST_LAYER_MM) & (area > 1e-12))[0]
+    if len(over) == 0:
+        return 0.0
+    projected = area[over] * np.abs(normals_z[over])
+    if len(over) > MAX_RAYS:   # an area-weighted sample stands in for all of them
+        pick = np.random.default_rng(0).choice(len(over), MAX_RAYS, replace=False, p=area[over] / area[over].sum())
+        projected = np.full(MAX_RAYS, float(projected.sum()) / MAX_RAYS)
+        over = over[pick]
+    origins = solid.triangles_center[over] - [0, 0, 1e-3]
+    hit_z = np.zeros(len(over))
+    found, rays, _ = RayMeshIntersector(solid).intersects_location(origins, np.tile([0, 0, -1.0], (len(over), 1)),
+                                                                   multiple_hits=False)
+    hit_z[rays] = found[:, 2]
+    return float((projected * np.maximum(centre_z[over] - hit_z, 0.0)).sum())
+
+
+def _footprint(mesh: "Mesh", up: np.ndarray):
+    """(contact area mm2, height mm, how far the centre of mass sits inside the footprint's edge in mm) standing on `up`."""
+    R = _to_z(up)
+    points = mesh.verts @ R.T
+    low = float(points[:, 2].min())
+    height = float(points[:, 2].max()) - low
+    base = points[points[:, 2] <= low + CONTACT_TOLERANCE_MM, :2]
+    if len(base) < 3:
+        return 0.0, height, -1.0
+    from scipy.spatial import ConvexHull
+    try:
+        hull = ConvexHull(base)
+    except Exception:   # a line or a point: nothing to stand on
+        return 0.0, height, -1.0
+    centre = (R @ mesh.centre_of_mass())[:2]
+    inside = float(-(hull.equations[:, :2] @ centre + hull.equations[:, 2]).max())   # > 0 inside: distance to the nearest edge
+    return float(hull.volume), height, inside
+
+
+def rank(verts, tris, scale, rotation, *, angle: float = DEFAULT_OVERHANG_ANGLE, nozzle: float = 0.4,
+         limits: dict | None = None, cut_normals=()) -> dict:
+    """Steady orientations to print this mesh in, best first, for the planner.
+
+    Returns {"candidates": [...], "unavoidably_tippy": bool, "reason": str | None}. Each candidate is
+    {"rotation": [x, y, z], "support_volume": mm3, "support_source": "raycast" | "proxy", "needs_support": bool,
+     "contact": mm2, "height": mm, "cut_face": bool}. The first candidate is the one to use.
+
+    Candidates are the current orientation, the hull, normal-group and axis ones (`Mesh.candidates`) and each cut face
+    (`cut_normals`: outward normals of cut faces in the model's own space, which go on the bed; a small bonus breaks
+    ties in their favour). A steady one has a first-layer contact of at least `MIN_CONTACT_PER_NOZZLE_SQ` x nozzle^2,
+    its centre of mass inside that footprint, and is not taller than `TALL_RATIO` x the footprint's size. The steady
+    ones that fit `limits` are screened with the overhang proxy, and the best `RERANK_TOP` are re-ranked by an embree
+    ray-cast support volume (the proxy's own number when embree isn't installed). With nothing steady that fits an
+    empty bed the part is unavoidably tippy: the best that fits (failing that the best at all) is still returned,
+    with the reason."""
+    mesh = Mesh(verts, tris, scale)
+    points = mesh.hull()[0]
+    current_R = rotation_matrix(rotation)
+    ups = mesh.candidates(current_R[2])
+    cut = [False] * len(ups)
+    for normal in cut_normals:
+        up = -_unit(normal)
+        for i, known in enumerate(ups):
+            if float(up @ known) >= SAME_DIRECTION_COS:
+                cut[i] = True
+                break
+        else:
+            ups.append(up)
+            cut.append(True)
+    options = []
+    for index, up in enumerate(ups):
+        contact, height, inside = _footprint(mesh, up)
+        options.append({"up": up, "index": index, "cut": cut[index], "contact": contact, "height": height, "inside": inside,
+                        "fits": not limits or _fits(points, up, limits), "metrics": mesh.measure(up, angle)})
+    best_contact = max(o["contact"] for o in options)
+    need = min(MIN_CONTACT_PER_NOZZLE_SQ * nozzle ** 2, MIN_CONTACT_SHARE * best_contact)
+    for o in options:
+        size = math.sqrt(o["contact"])
+        o["steady"] = (o["contact"] > 0 and o["contact"] >= need and o["height"] <= TALL_RATIO * size
+                       and o["inside"] >= min(1.0, COM_MARGIN_SHARE * size))
+
+    def bonus(o):
+        return 1 - CUT_FACE_BONUS if o["cut"] else 1.0
+
+    def height_term(o):
+        return HEIGHT_TERM[LEAST_SUPPORT] * o["height"] * mesh.surface
+
+    pool = [o for o in options if o["steady"] and o["fits"]]
+    tippy, reason = not pool, None
+    if tippy:
+        fitting = [o for o in options if o["fits"]]
+        size = " x ".join(f"{limits[k]:g}" for k in ("bed_x", "bed_y", "height")) if limits else "any"
+        if fitting and any(o["steady"] for o in options):
+            pool = sorted(fitting, key=lambda o: -o["contact"])[:3]
+            reason = f"Too big to print steadily on a {size} mm bed: only its tilted orientations fit"
+        elif fitting:
+            pool = sorted(fitting, key=lambda o: -o["contact"])[:3]
+            reason = ("No steady orientation: it has no footprint wide and flat enough to stand on without tipping "
+                      "(first-layer contact, centre of mass, height)")
+        else:
+            pool = sorted(options, key=lambda o: -o["contact"])[:3]
+            reason = f"Doesn't fit a {size} mm bed in any orientation"
+    pool.sort(key=lambda o: (o["metrics"]["support"] + height_term(o)) * bonus(o))
+    top = pool[:RERANK_TOP]
+    for o in top:
+        volume = _ray_support_volume(mesh, o["up"], angle)
+        o["volume"], o["source"] = (o["metrics"]["support"], "proxy") if volume is None else (volume, "raycast")
+    top.sort(key=lambda o: (o["volume"] + height_term(o)) * bonus(o))
+    turn = float(rotation[2])
+    candidates = [{"rotation": list(rotation) if o["index"] == 0 else _euler(_rz(turn) @ _to_z(o["up"])),
+                   "support_volume": o["volume"], "support_source": o["source"],
+                   "needs_support": o["volume"] > NEEDS_SUPPORT_MM3, "contact": o["contact"],
+                   "height": o["height"], "cut_face": o["cut"]} for o in top]
+    return {"candidates": candidates, "unavoidably_tippy": tippy, "reason": reason}
