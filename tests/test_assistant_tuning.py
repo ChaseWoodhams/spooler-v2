@@ -312,5 +312,36 @@ class TuningModelTests(unittest.TestCase):
         self.assertNotIn("--model", self.argv())
 
 
+@unittest.skipUnless(base.GEOMETRY, "geometry libraries not installed")
+class TuningResetAllTests(unittest.TestCase):
+    setUp, tearDown = base.AskTests.setUp, base.AskTests.tearDown
+    call, make_project, scenario, ask, poll, finished = (base.AskTests.call, base.AskTests.make_project, base.AskTests.scenario, base.AskTests.ask,
+                                                         base.AskTests.poll, base.AskTests.finished)
+
+    def test_reset_all_restores_every_group_and_the_next_run_is_the_shipped_one_and_the_run_log_is_kept(self):
+        self.call("POST", "/api/assistant/settings", {"jev_url": "http://127.0.0.1:9999"})
+        _, before = self.call("GET", "/api/assistant/settings")
+        defaults = before["tuning"]["values"]
+        self.assertEqual(set(defaults), {"limits", "instructions", "model", "prompt_context", "proposal_kinds"})
+        status, saved = self.call("POST", "/api/assistant/settings", {"tuning": {
+            "limits": {"max_turns": 7}, "instructions": {"text": "Be brief."}, "model": {"name": "some-model"},
+            "prompt_context": {"history_enabled": False, "history_turns": 3}, "proposal_kinds": {"arrange": False, "plan": False}}})
+        self.assertEqual(status, 200, saved)
+        self.assertNotEqual(saved["tuning"]["values"], defaults)
+        self.finished()                                                            # one logged run before the reset
+        _, log = self.call("GET", "/api/assistant/run-log")
+        status, after = self.call("POST", "/api/assistant/settings", {"reset_tuning": "all"})
+        self.assertEqual(status, 200, after)
+        self.assertEqual(after["tuning"]["values"], defaults)
+        self.assertEqual(after["jev_url"], "http://127.0.0.1:9999")
+        self.assertEqual(self.call("GET", "/api/assistant/run-log")[1]["entries"], log["entries"])
+        self.assertEqual(self.finished()["state"], "answer")
+        record = read_record(self.cli_dir)
+        self.assertNotIn("--model", record["argv"])
+        self.assertEqual(record["argv"][record["argv"].index("--max-turns") + 1], "12")
+        self.assertNotIn("Be brief.", record["system_prompt"])
+        self.assertTrue(any("propose_arrange" in a for a in record["argv"]), record["argv"])
+
+
 if __name__ == "__main__":
     unittest.main()
