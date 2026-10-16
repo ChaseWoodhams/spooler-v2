@@ -298,9 +298,19 @@ class _Run:
                 known.append(wanted)
         return placed
 
+    def _gaps(self, members) -> dict:
+        """Gap each member keeps from its neighbours. A plate with supports on is arranged with the support gap throughout
+        (`projects` chooses the gap by the plate's supports), so one Object that needs supports widens every gap on it."""
+        cands = {k: self.items[k].candidates[c] for k, c in members}
+        wide = max((c.clearance for c in cands.values() if c.needs_support), default=0.0)
+        return {k: max(c.clearance, wide) for k, c in cands.items()}
+
     def _insert(self, anchor, base, gone, members):
         """Layout of `members` made by placing the one Object `gone` among the laid-out others, or None if it won't go."""
         import numpy as np
+        gaps = self._gaps(members)
+        if gaps != {**self._gaps([m for m in members if m[0] != gone[0]]), gone[0]: gaps[gone[0]]}:
+            return None   # the new Object widens the gap the others were laid out with
         fixed = [{"key": pin.key, "group": 0, "slot": 0, "polygon": list(pin.polygon), "clearance": pin.clearance}
                  for pin in self.pinned_on.get(anchor, [])]
         for laid in base:
@@ -309,10 +319,10 @@ class _Run:
             c, s = math.cos(a), math.sin(a)
             pts = np.asarray(cand.outline, float) @ np.array([[c, s], [-s, c]])
             middle = (pts.max(axis=0) + pts.min(axis=0)) / 2
-            fixed.append({"key": laid["key"], "group": 0, "slot": 0, "clearance": cand.clearance,
+            fixed.append({"key": laid["key"], "group": 0, "slot": 0, "clearance": gaps[laid["key"]],
                           "polygon": [(float(x), float(y)) for x, y in pts - middle + np.asarray(laid["center"], float)]})
         cand = self.items[gone[0]].candidates[gone[1]]
-        placed = nesting.nest([{"key": gone[0], "outline": list(cand.outline), "clearance": cand.clearance, "group": 0}],
+        placed = nesting.nest([{"key": gone[0], "outline": list(cand.outline), "clearance": gaps[gone[0]], "group": 0}],
                               self.p.bed, self.p.exclude, fixed)
         if len(placed) != 1 or len(placed[0]["items"]) != 1 or placed[0]["items"][0]["oversize"]:
             return None
@@ -326,7 +336,8 @@ class _Run:
             return None
         fixed = [{"key": pin.key, "group": 0, "slot": 0, "polygon": list(pin.polygon), "clearance": pin.clearance}
                  for pin in self.pinned_on.get(anchor, [])]
-        placed = nesting.nest([{"key": k, "outline": list(c.outline), "clearance": c.clearance, "group": 0} for k, c in cands],
+        gaps = self._gaps(members)
+        placed = nesting.nest([{"key": k, "outline": list(c.outline), "clearance": gaps[k], "group": 0} for k, c in cands],
                               self.p.bed, self.p.exclude, fixed)
         if len(placed) != 1 or any(i["oversize"] for i in placed[0]["items"]) or len(placed[0]["items"]) != len(members):
             return None

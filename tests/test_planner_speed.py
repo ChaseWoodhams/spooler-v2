@@ -61,13 +61,14 @@ class FitTests(unittest.TestCase):
         self.assertEqual(run.nests, used)
 
     def test_a_plate_with_supports_keeps_the_support_gap_between_all_its_objects(self):
+        # projects.py arranges a supported plate with the support gap throughout: two plain Objects beside a supported one
+        # sit as far apart as the supported one does
         plain, supported = cand(60, 60, clearance=6.0), cand(60, 60, clearance=14.0, needs_support=True)
-        run = planner._Run(problem([item(1, plain), item(2, supported)]))
-        layout = run.fit(None, ((1, 0), (2, 0)))
-        shapes = shapes_of(run, layout)
-        self.assertEqual({s["clearance"] for s in shapes}, {6.0, 14.0})
+        run = planner._Run(problem([item(1, plain), item(2, plain), item(3, supported)]))
+        layout = run.fit(None, ((1, 0), (2, 0), (3, 0)))
+        by_key = {s["key"]: s for s in shapes_of(run, layout)}
         from shapely.geometry import Polygon
-        gap = Polygon(shapes[0]["polygon"]).distance(Polygon(shapes[1]["polygon"]))
+        gap = Polygon(by_key[1]["polygon"]).distance(Polygon(by_key[2]["polygon"]))
         self.assertGreaterEqual(gap, 14.0 - 0.01)
 
 
