@@ -181,6 +181,153 @@ class PlanJobApiTests(unittest.TestCase):
         self.assertGreater(proposal["before"]["makespan_s"], 0)
         self.assertEqual([p["status"] for p in proposal["printers"]], ["ok", "ok"])
 
+    def print_on_record(self, project, plate_id):
+        with database.transaction() as conn:
+            conn.execute("INSERT INTO prints (printer_id, printer_name, file_name, started_at, ended_at, outcome, project_id, plate_id) "
+                         "VALUES ('dunt', 'Dunt', 'x.gcode', 1, 2, 'completed', ?, ?)", (project["id"], plate_id))
+
+    def queued_job(self, project, plate_id):
+        now = time.time()
+        with database.transaction() as conn:
+            conn.execute("INSERT INTO jobs (name, state, source, file_name, created_at, updated_at, project_id, plate_id) "
+                         "VALUES ('x', 'queued', 'upload', 'x.gcode', ?, ?, ?, ?)", (now, now, project["id"], plate_id))
+
+    # -- accept -----------------------------------------------------------------------------------------------------------
+
+    def test_accept_applies_the_whole_plan_in_one_change_that_one_undo_reverses(self):
+        project = self.scattered()
+        job = self.plan(project)
+        status, result = self.accept(project, job)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["revision"], project["revision"] + 1)
+        best = job["proposal"]["plans"][0]
+        self.assertEqual(len(result["data"]["plates"]), best["plates"])
+        self.assertEqual({o["plate"] for o in result["data"]["objects"]}, {r["plate"] for r in best["plate_rows"]})
+        self.assertEqual(self.current(project)["data"], result["data"])
+        # the page's Undo saves the earlier data back over the new revision
+        status, undone = self.call("PATCH", f"/api/projects/{project['id']}", {"data": project["data"], "revision": result["revision"]})
+        self.assertEqual(status, 200, undone)
+        self.assertEqual([(o["id"], o["plate"], o["position"]) for o in undone["data"]["objects"]],
+                         [(o["id"], o["plate"], o["position"]) for o in project["data"]["objects"]])
+
+    def test_an_also_considered_plan_can_be_accepted_instead(self):
+        project = self.scattered()
+        job = self.plan(project)
+        plans = job["proposal"]["plans"]
+        self.assertGreater(len(plans), 1, "the fixture should give an alternative to choose")
+        status, result = self.accept(project, job, plan=1)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(len(result["data"]["plates"]), plans[1]["plates"])
+        self.assertEqual(result["plan"]["index"], 1)
+        self.assertEqual(self.accept(project, job, plan=0)[0], 404)    # the Proposal is used up
+
+    def test_a_proposal_made_before_the_project_changed_is_superseded_and_refused(self):
+        project = self.scattered()
+        job = self.plan(project)
+        self.assertFalse(job["proposal"]["superseded"])
+        changed = self.call("PATCH", f"/api/projects/{project['id']}", {"data": {**project["data"], "bed": "smooth"},
+                                                                       "revision": project["revision"]})[1]
+        status, refused = self.accept(project, job)
+        self.assertEqual(status, 409, refused)
+        self.assertIn("changed elsewhere", refused["error"])
+        self.assertEqual(self.current(project)["data"], changed["data"])
+        self.assertTrue(self.call("GET", f"/api/projects/{project['id']}/plan/proposals/{job['proposal']['token']}")[1]["superseded"])
+
+    def test_dismiss_changes_nothing_and_the_proposal_is_gone(self):
+        project = self.scattered()
+        job = self.plan(project)
+        status, _ = self.call("POST", f"/api/projects/{project['id']}/plan/dismiss", {"proposal": job["proposal"]["token"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.current(project)["data"], project["data"])
+        self.assertEqual(self.accept(project, job)[0], 404)
+
+    def test_pinned_objects_and_queued_or_printed_plates_are_untouched(self):
+        project = self.project_with(cube_stl(20))
+        project = self.lay(project, [(1, 1, True), (1, 1, False), (1, 2, False), (1, 3, False), (1, 4, False)])
+        self.queued_job(project, 3)
+        self.print_on_record(project, 4)
+        job = self.plan(project)
+        self.assertEqual(sorted(k["id"] for k in job["proposal"]["kept"]), [3, 4])
+        result = self.accept(project, job)[1]
+        before = {o["id"]: o for o in project["data"]["objects"]}
+        for o in result["data"]["objects"]:
+            if o["id"] in (1, 4, 5):    # the pinned cube, the queued plate's and the printed plate's
+                self.assertEqual((o["plate"], o["position"], o["rotation"]),
+                                 (before[o["id"]]["plate"], before[o["id"]]["position"], before[o["id"]]["rotation"]))
+        self.assertEqual(sorted(p["id"] for p in result["data"]["plates"] if p["id"] in (3, 4)), [3, 4])
+
+    def test_a_plate_queued_after_the_proposal_was_made_refuses_it(self):
+        project = self.scattered()
+        job = self.plan(project)
+        self.queued_job(project, 2)
+        status, refused = self.accept(project, job)
+        self.assertEqual(status, 409, refused)
+        self.assertEqual(self.current(project)["data"], project["data"])
+
+    def test_replanned_plates_slices_become_outdated(self):
+        project = self.scattered()
+        projects.request_slices(project["id"], [2])
+
+        async def work():
+            while await projects.process_next():
+                pass
+        asyncio.run(work())
+        project = projects.get_project(project["id"])
+        self.assertFalse(project["slices"]["2"]["outdated"])
+        job = self.plan(project)
+        self.assertEqual(self.accept(project, job)[0], 200)
+        slice_after = self.current(project)["slices"].get("2")
+        self.assertTrue(slice_after is None or slice_after["outdated"])
+
+    # -- printers ---------------------------------------------------------------------------------------------------------
+
+    def test_a_printer_with_no_installed_nozzle_is_named_and_gets_no_plates(self):
+        hardware = self.dir / "printer_hardware.json"
+        data = json.loads(hardware.read_text())
+        data.pop("og")
+        hardware.write_text(json.dumps(data))
+        project = self.scattered()
+        job = self.plan(project)
+        proposal = job["proposal"]
+        og = next(p for p in proposal["printers"] if p["id"] == "og")
+        self.assertEqual((og["status"], og["receives_plates"]), ("unset", False))
+        self.assertIn("OG", og["message"])
+        for plan in proposal["plans"]:
+            self.assertEqual({r["printer"] for r in plan["plate_rows"]}, {"dunt"})
+            self.assertEqual(plan["printers"]["og"]["plates"], [])
+        result = self.accept(project, job)[1]
+        self.assertEqual({p.get("printer_id") for p in result["data"]["plates"]}, {"dunt"})
+
+    def test_a_printer_whose_nozzle_matches_nothing_is_named_too(self):
+        preflight.set_printer_hardware("og", 0.6)
+        job = self.plan(self.scattered())
+        og = next(p for p in job["proposal"]["printers"] if p["id"] == "og")
+        self.assertEqual((og["status"], og["receives_plates"]), ("mismatch", False))
+
+    def test_no_printer_with_the_plan_nozzle_leaves_everything_unplanned(self):
+        preflight.set_printer_hardware("dunt", 0.6)
+        preflight.set_printer_hardware("og", 0.6)
+        job = self.plan(self.scattered())
+        self.assertEqual(job["state"], "done", job)
+        self.assertEqual(job["proposal"]["plans"], [])
+        self.assertEqual(len(job["proposal"]["unplanned"]), 4)
+
+    # -- tippy ------------------------------------------------------------------------------------------------------------
+
+    def test_an_unavoidably_tippy_object_is_listed_with_its_reason_and_given_a_brim(self):
+        project = self.project_with(ball_stl(), cube_stl(20))
+        project = self.lay(project, [(1, 1, False), (2, 2, False)])
+        job = self.plan(project)
+        best = job["proposal"]["plans"][0]
+        self.assertEqual([t["object"] for t in best["tippy_objects"]], [1])
+        self.assertIn("steady", best["tippy_objects"][0]["reason"])
+        self.assertEqual(best["tippy"], 1)
+        result = self.accept(project, job)[1]
+        objects = {o["id"]: o for o in result["data"]["objects"]}
+        self.assertEqual(objects[1]["overrides"].get("brim_type"), "outer_only")
+        self.assertNotIn("brim_type", objects[2].get("overrides") or {})
+        self.assertEqual(self.call("PATCH", f"/api/projects/{project['id']}", {"data": result["data"], "revision": result["revision"]})[0], 200)
+
 
 if __name__ == "__main__":
     unittest.main()
