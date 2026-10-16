@@ -33,6 +33,16 @@ GROUPS = {
                                "hint": "The longest question the panel accepts."},
         },
     },
+    "instructions": {
+        "label": "Instructions",
+        "hint": "The Assistant's whole instruction text. Empty means the built-in text. Applies to the next run only. The Assistant's powers do not "
+                "depend on this text: its tools, read-only access to the one project, Proposals that are only staged, and treating quoted names "
+                "and notes as data stay fixed in Spooler.",
+        "fields": {
+            "text": {"label": "Instruction text", "type": "text", "unit": "characters", "default": "", "min": 0, "max": 8000,
+                     "hint": "Spooler adds a short fixed block after it (the Proposals-per-run cap), which cannot be edited."},
+        },
+    },
     "model": {
         "label": "Model",
         "hint": "Which Claude model an Assistant run uses. Blank means the CLI's own default. The name is not checked here: a model the CLI rejects ends the run with its message.",
@@ -71,6 +81,12 @@ def defaults() -> dict:
 def _check(group: str, key: str, value):
     """The value if it fits the field, else raises ValueError with the bound in the message."""
     field = GROUPS[group]["fields"][key]
+    if field["type"] == "text":
+        if not isinstance(value, str):
+            raise ValueError(f"{field['label']} must be text")
+        if len(value) > field["max"]:
+            raise ValueError(f"{field['label']} cannot be longer than {field['max']} {field['unit']} (got {len(value)})")
+        return value if value.strip() else ""
     if field["type"] == "str":
         if not isinstance(value, str):
             raise ValueError(f"{field['label']} must be text")
@@ -134,8 +150,20 @@ def snapshot() -> dict:
 
 def view() -> dict:
     values, notes = load()
+    out = _view(values, notes)
+    out["groups"]["instructions"]["fields"]["text"]["builtin"] = builtin_instructions()
+    return out
+
+
+def _view(values, notes) -> dict:
     return {"version": VERSION, "values": values, "defaults": defaults(), "notes": notes,
             "groups": {group: {"label": spec["label"], "hint": spec["hint"], "fields": copy.deepcopy(spec["fields"])} for group, spec in GROUPS.items()}}
+
+
+def builtin_instructions() -> str:
+    """The built-in instruction text the page shows beside the editor (the runner owns it)."""
+    import assistant_runner
+    return assistant_runner.SYSTEM_PROMPT.strip()
 
 
 def save(body, reset=None) -> None:
