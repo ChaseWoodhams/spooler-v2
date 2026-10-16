@@ -6,9 +6,11 @@ workers (each one an OrcaSlicer process), cached by plate content so a plate tha
 are then re-ranked by the same cost (`planner.cost`) with the measured print time and support grams, and the plates are
 handed to the printers again with the measured times.
 
-  budget      slices start only while `budget_s` (about 25 s) lasts, the first plan's plates first; a slice in flight is given
-              what is left of the budget as its timeout. What was not measured stays on its proxy figures and is marked
-              partly estimated, and so is a plate whose slice failed. A run therefore always completes.
+  budget      the slices to make are chosen up front from the plates' proxy times (`_schedule`): those expected to end within
+              `budget_s` (about 25 s) on the pool, the first plan's plates first, so the same plans always measure the same
+              plates. The deadline stays as a safety cap: a slice in flight is given what is left of it as its timeout. What
+              was not measured stays on its proxy figures and is marked partly estimated, and so is a plate whose slice
+              failed. A run therefore always completes.
   reduced     a plate that needs supports and would alone take most of the budget gets a reduced-shell slice (1 wall, no
               infill, no shells): it gives the support grams but no time, so its time stays the proxy.
   did not slice a plate whose slice failed in OrcaSlicer itself (not for lack of budget), while others sliced, is replanned: its
@@ -38,12 +40,14 @@ import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import planner
 
 BUDGET_S = 25.0                  # default time for all confirmation slices
 MAX_WORKERS = 4                  # 4-8 parallel slices gave about 2.5x throughput (research 02); more only made each one slower (ticket 22)
 SLICE_S_PER_PRINT_S = 1 / 1000   # rough slicing time per second of print: a 6-7 h supported plate took about 25 s (measured, small_mix)
+POOL_SLICE_S_PER_PRINT_S = 1 / 2000   # wall time per print second of one full slice among 4 (seat_hip: 13 full slices, 159 h of proxy print, 74 s)
 REPAIR_BUDGET_S = 12.0           # extra time to slice the plates a failed plate was split into
 HEAVY_SHARE = 0.8                # a plate expected to take more than this share of the budget alone is "heavy"
 REDUCED_PROCESS = {"wall_loops": "1", "sparse_infill_density": "0%", "top_shell_layers": "0", "bottom_shell_layers": "0"}
@@ -172,6 +176,28 @@ def _fits(plate: planner.PlanPlate) -> bool:
     return not any(p.oversize for p in plate.items)
 
 
+def _expected_wall_s(job: PlateJob, round_s: float) -> float:
+    """How long the slice is expected to take in the pool. A reduced slice is made for a plate too heavy to slice in full in
+    the budget, so it is expected to take at most the whole round: it gets a worker that is still free."""
+    expected = job.proxy_seconds * POOL_SLICE_S_PER_PRINT_S
+    return min(expected, round_s) if job.kind == "reduced" else expected
+
+
+def _schedule(jobs: list, round_s: float, workers: int) -> list:
+    """The keys of the jobs to slice, in order: each goes to the worker free first, and is made only if it is expected to
+    end within `round_s` (the first always is). Chosen from the plates' proxy figures alone, so the same plans always measure
+    the same plates; the deadline stays only as a safety cap for a slice that runs far over its expected time."""
+    lanes, chosen = [0.0] * workers, []
+    for job in jobs:
+        lane = min(range(workers), key=lambda i: (lanes[i], i))
+        expected = _expected_wall_s(job, round_s)
+        if chosen and lanes[lane] + expected > round_s:
+            continue   # stays unstarted, on its proxy figures
+        lanes[lane] += expected
+        chosen.append(job.key)
+    return chosen
+
+
 # --- the pool -----------------------------------------------------------------------------------------------------------------
 
 def _is_budget_error(error: BaseException) -> bool:
@@ -216,39 +242,24 @@ def confirm_plans(project_id: int, record: dict, problem: planner.Problem, plans
             keyed[index] = register(plate)
         rows.append([[plate, keyed[index]] for index, plate in enumerate(plan.plates)])
 
-    results, errors, walls, hard = {}, {}, {}, set()
+    results, errors, hard = {}, {}, set()
     done_count = 0
 
     def work(job):
-        began = time.monotonic()
-        left = deadline[0] - began
+        left = deadline[0] - time.monotonic()
         if left <= 0:
             raise TimeoutError("the confirmation budget ran out")
-        try:
-            return slice_plate(job, left)
-        finally:
-            walls[job.key] = (time.monotonic() - began, job.proxy_seconds)
+        return slice_plate(job, left)
 
-    def worth_starting(job) -> bool:
-        """Slices start freely until one has finished; after that a slice starts only if, at the wall time per print second
-        the finished ones took (under the same parallel load), it would end before the deadline."""
-        spent = sum(w for w, _ in walls.values())
-        printed = sum(p for _, p in walls.values())
-        if not walls or printed <= 0:
-            return True
-        return job.proxy_seconds * spent / printed <= deadline[0] - time.monotonic()
-
-    def run_round(keys):
-        """Slice these jobs in the pool until they are done or the deadline passes."""
+    def run_round(keys, round_s):
+        """Slice the jobs `_schedule` expects to finish in `round_s`, in the pool, until they are done or the deadline passes."""
         nonlocal done_count
-        pending, running = deque(keys), {}
+        pending, running = deque(_schedule([wanted[k] for k in keys], round_s, workers)), {}
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="confirm")
         try:
             while pending or running:
                 while pending and len(running) < workers and time.monotonic() < deadline[0]:
                     key = pending.popleft()
-                    if not worth_starting(wanted[key]):
-                        continue   # stays unstarted, on its proxy figures
                     running[executor.submit(work, wanted[key])] = key
                 if not running:
                     break
@@ -271,7 +282,7 @@ def confirm_plans(project_id: int, record: dict, problem: planner.Problem, plans
         for future, key in running.items():
             errors.setdefault(key, "the confirmation budget ran out")
 
-    run_round(list(order))
+    run_round(list(order), budget_s)
 
     # a plate OrcaSlicer failed on is replanned as one plate per Object. If none of those slices either, the slicer itself is
     # at fault (or the Objects can't be sliced at all): the plate stays as it was, marked
@@ -291,7 +302,7 @@ def confirm_plans(project_id: int, record: dict, problem: planner.Problem, plans
     again = [k for k in dict.fromkeys(again) if k not in results and k not in errors]
     if again:
         deadline[0] = time.monotonic() + REPAIR_BUDGET_S
-        run_round(again)
+        run_round(again, REPAIR_BUDGET_S)
     replanned = 0
     for p, old, new in swaps:
         if all(key in hard for _, key in new):
@@ -411,6 +422,8 @@ class ProjectSlicer:
             self.slots.put(slot)
 
     def _slice(self, job: PlateJob, timeout_s: float, slot: int) -> PlateMeasure:
+        # function-local: these pull in the server's project and slicer stack, which only a real slice needs; the rest of
+        # this module (and its tests, with a stand-in slicer) works without it
         import gcode_meta
         import placement_read
         import projects
@@ -423,7 +436,6 @@ class ProjectSlicer:
         process, filament = settings["process"], settings["filament"]
         work = tempfile.mkdtemp(prefix="plan-confirm-", dir=str(projects._data_dir))
         try:
-            from pathlib import Path
             work = Path(work)
             (work / "profile").mkdir()
             (work / "output").mkdir()

@@ -7,15 +7,16 @@ which orientation and where, and which printer prints each plate.
 
   seed        greedy first-fit, grouped by compatibility key (Filament choice, process overrides, plan nozzle, needs-support),
               sorted by height then footprint
-  search      seeded local search for `budget_s` seconds: move, swap, switch to a near-tied orientation, empty the lightest
-              plate. Copies (Objects of one Model) are never swapped with each other. `nesting.nest` is the fit check, memoised
-              per plate content.
+  search      seeded local search for `max_steps` steps (`budget_s` seconds only as a safety cap): move, swap, switch to a
+              near-tied orientation, empty the lightest plate. Copies (Objects of one Model) are never swapped with each
+              other. `nesting.nest` is the fit check, memoised per plate content.
   assignment  every plan evaluated has its plates given to printers whose installed nozzle matches the plate's, by exact
               enumeration (`assign_plates`), LPT above EXACT_MAX_PLATES plates
   cost        `cost()`, in equivalent finish minutes, lower is better
 
-The seed of the random search derives from the problem's content, so the same Project gives the same plans whenever the run
-ends on its step cap (`max_steps`) rather than its time cap.
+The seed of the random search derives from the problem's content and the search ends on its step budget (`max_steps`), so
+the same Project gives the same plans. Only a run that reaches the time cap first (a far larger Project than SEAT, or a
+starved machine) can differ.
 
 Public API: `plan_project` / `greedy_seed_project` (from a Project), `plan_problem` / `seed_plan` (from a `Problem`), `cost`,
 `assign_plates`, and the data classes `Candidate`, `Item`, `Pinned`, `Group`, `Problem`, `Plan`, `PlanPlate`, `Placed`.
@@ -39,8 +40,9 @@ MACHINE_MIN_WEIGHT = 0.1         # per printer-minute, all plates together
 TIPPY_WEIGHT = 120.0             # per Object that is tippy in every orientation
 SPLIT_APART_WEIGHT = 0.5         # per pair of neighbouring Split Parts on different plates
 
-SEARCH_SECONDS = 30.0            # default time budget of the local search
-MAX_STEPS = 20000                # default step cap (the run is reproducible when it ends here rather than on time)
+SEARCH_SECONDS = 30.0            # the search's wall-clock safety cap: a normal run ends on MAX_STEPS well before it
+MAX_STEPS = 500                  # the search's budget, in steps, so the same Project gives the same plans (seat_hip: 500 steps
+                                 # end at about 25 s, its seed included, seat_shell at 18 s; 900-1100 steps fill 30 s)
 EXACT_MAX_PLATES = 20            # above this many plates, printers are assigned by LPT instead of enumeration
 EXACT_MAX_NODES = 400000         # a safety stop for the enumeration
 TOP_PLANS = 3                    # plans returned
@@ -229,10 +231,6 @@ class Plan:
                            for p in self.plates]}
 
 
-def _shoelace(outline) -> float:
-    return abs(sum(x0 * y1 - x1 * y0 for (x0, y0), (x1, y1) in zip(outline, list(outline[1:]) + [outline[0]]))) / 2
-
-
 # --- one run ---------------------------------------------------------------------------------------------------------------
 
 class _Run:
@@ -335,7 +333,7 @@ class _Run:
         if not members:
             return []
         cands = [(k, self.items[k].candidates[c]) for k, c in members]
-        if sum(_shoelace(c.outline) for _, c in cands) > self.room:
+        if sum(nesting._area(c.outline) for _, c in cands) > self.room:
             return None
         fixed = [{"key": pin.key, "group": 0, "slot": 0, "polygon": list(pin.polygon), "clearance": pin.clearance}
                  for pin in self.pinned_on.get(anchor, [])]

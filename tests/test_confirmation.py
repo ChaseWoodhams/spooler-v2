@@ -230,8 +230,8 @@ class ReducedSliceTests(unittest.TestCase):
 
 
 class WorthStartingTests(unittest.TestCase):
-    """Slices that cannot finish in what is left of the budget are not started (ticket 22): they would only take CPU from
-    the ones that can."""
+    """Slices expected (from the plates' proxy times) to end past the budget are not started (ticket 22): they would only
+    take CPU from the ones that can finish."""
 
     def test_a_slice_expected_to_outlast_the_budget_is_not_started(self):
         small, huge = plate([1], seconds=100, x=10), plate([2], seconds=100000, x=50)
@@ -246,6 +246,19 @@ class WorthStartingTests(unittest.TestCase):
         slicer = FakeSlicer()
         confirm([plan(plate([1], seconds=100000))], slicer, budget_s=0.5, workers=1)
         self.assertEqual(len(slicer.calls), 1)
+
+    def test_which_plates_are_sliced_does_not_depend_on_how_fast_the_slices_were(self):
+        # the same plans give the same Proposal: the slices to make are chosen from the plates' proxy figures, not from how
+        # long earlier slices happened to take on this run
+        plates = [plate([k], seconds=1200, printer="A" if k % 2 else "B", x=10 * k) for k in range(1, 9)]
+        fast, slow = FakeSlicer(delay=0.01), FakeSlicer(delay=0.4)
+        quick = confirm([plan(*plates)], fast, n=8, budget_s=1.5, workers=1)
+        sluggish = confirm([plan(*plates)], slow, n=8, budget_s=1.5, workers=1)
+        self.assertEqual([j.keys for j in fast.calls], [j.keys for j in slow.calls])
+        self.assertGreater(len(fast.calls), 1)
+        self.assertLess(len(fast.calls), 8)
+        self.assertEqual([(p.seconds, p.partly_estimated) for p in quick.plans[0].plates],
+                         [(p.seconds, p.partly_estimated) for p in sluggish.plans[0].plates])
 
     def test_shorter_plates_of_a_plan_are_sliced_first(self):
         plates = [plate([1], seconds=900, x=10), plate([2], seconds=100, x=50), plate([3], seconds=500, x=90)]

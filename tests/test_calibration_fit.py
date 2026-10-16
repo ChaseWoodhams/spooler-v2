@@ -3,10 +3,12 @@ import random
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import calibration
 import database
 import health
+import jobs
 import time_estimate
 
 TRUE = {"h1": (30.0, 70.0, 10.0, 5.0), "h2": (36.0, 60.0, 8.0, 6.0)}   # seconds per layer, cm3, support cm3, first-layer cm2
@@ -102,6 +104,32 @@ class TimeFitTests(FitTestCase):
         self.plate(seconds=777777)
         first, second = calibration.fit_models(), calibration.fit_models()
         self.assertEqual(first.time_model("h1", 0.4), second.time_model("h1", 0.4))
+
+
+class BackfilledRowTests(FitTestCase):
+    """Rows logged before the calibration migration carry at most a backfilled bundle id: no settings hash, no nozzle."""
+
+    def machine(self, nozzle):
+        return mock.patch("slicer.bundle_settings", side_effect=lambda bundle: {"machine": {"nozzle_diameter": [nozzle]}})
+
+    def test_a_row_with_a_backfilled_bundle_gets_that_bundles_nozzle_and_trains_the_nozzle_fit(self):
+        self.plates(20, truth=TRUE["h1"], settings_hash=None, nozzle=None, bundle_id="old")
+        with self.machine("0.4"):
+            self.assertEqual(self.predict("unseen", 0.4), self.exact())
+        with database.transaction() as conn:
+            self.assertEqual({r[0] for r in conn.execute("SELECT nozzle FROM slice_log")}, {0.4})
+
+    def test_a_row_without_a_bundle_is_never_fitted(self):
+        self.plates(25, truth=TRUE["h1"], settings_hash=None, nozzle=None, bundle_id=None)
+        with self.machine("0.4"):
+            self.assertEqual(self.predict("unseen", 0.4), self.seed())
+
+    def test_a_row_whose_bundle_is_gone_is_never_fitted(self):
+        self.plates(25, truth=TRUE["h1"], settings_hash=None, nozzle=None, bundle_id="gone")
+        with mock.patch("slicer.bundle_settings", side_effect=jobs.JobError("Profile not found", 404)):
+            self.assertEqual(self.predict("unseen", 0.4), self.seed())
+        with database.transaction() as conn:
+            self.assertEqual({r[0] for r in conn.execute("SELECT nozzle FROM slice_log")}, {None})
 
 
 class SupportFitTests(FitTestCase):

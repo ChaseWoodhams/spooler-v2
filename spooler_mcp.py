@@ -672,9 +672,10 @@ def propose_arrange(ctx: Context, revision: int, plate_ids=None, reason=None) ->
       "Pass the project revision you read. A behind revision returns {superseded: true}. A plan with nothing to change stages nothing. "
       "Returns the Proposal token, a readable diff, notes and problems, never the resulting data. At most 3 Proposals per run.",
       {"revision": {"type": "integer"}, "density": {"type": "string", "enum": ["tight", "normal", "roomy"]},
-       "allow_tilt": {"type": "boolean"}, "reason": {"type": "string"}}, required=["revision"])
-def propose_plan(ctx: Context, revision: int, density=None, allow_tilt=False, reason=None) -> dict:
-    # allow_tilt is accepted for runs that still pass it: the planner picks steady orientations itself and has no tilt opt-in
+       "reason": {"type": "string"}}, required=["revision"])
+def propose_plan(ctx: Context, revision: int, density=None, reason=None) -> dict:
+    # It stages the greedy seed, not a plan job: the job searches for ~30 s and slices in OrcaSlicer inside the Spooler server,
+    # while this server is read-only and socket-free (it may import neither `jobs` nor the slicer) and answers in one step.
     _, project_read, placement_read, _ = ctx.core()
     import calibration
     import plan_layout

@@ -259,6 +259,7 @@ MIGRATIONS = [
     """,
     # 13 — Calibration log (additive): what each slice was made with, and the support grams per Object, to fit time and support later.
     #      Old slice_log rows get a best-effort bundle id from the jobs and slices of the same plate nearest in time; the rest stay without one.
+    #      Their nozzle is filled in later from the bundle (`calibration.backfill_nozzles`); a row with neither nozzle nor settings hash is never fitted.
     """
     ALTER TABLE slice_log ADD COLUMN bundle_id TEXT;
     ALTER TABLE slice_log ADD COLUMN settings_hash TEXT;

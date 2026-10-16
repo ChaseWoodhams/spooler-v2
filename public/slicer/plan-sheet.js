@@ -1,5 +1,5 @@
-/* Spooler workspace - the Plan plates review sheet (auto-plating ticket 19, prototype variant B).
-   Plan plates starts the planner as a background job (POST /api/projects/<id>/plan), shows its progress, then shows the stored
+/* Spooler workspace - the Plan plates review sheet: what a plan would change, laid out so the person can judge it and accept
+   it or not before anything moves. Plan plates starts the planner as a background job (POST /api/projects/<id>/plan), shows its progress, then shows the stored
    Proposal: the time both printers are done and how that changes, Accept and Dismiss, before/after timelines per printer, tiles
    for support, plates and tippy, a "partly estimated" note, a folded plate table, still-tippy Objects, and two "also considered"
    plans that can be reviewed instead. Nothing in the Project changes until Accept, which applies one stored plan as one
@@ -17,7 +17,7 @@ const SUPERSEDED = "The project was changed elsewhere, so this plan no longer fi
 const NO_FIT = "Spooler has no time model for this project yet, so its starting estimates are used";
 
 let host = null;     // { api, toast, flush(), projectId(), applied(result, plan) }
-let run = null;      // the sheet in view: { gen, projectId, job, proposal, index, stale, phase: planning | ready | failed | gone }
+let run = null;      // the sheet in view: { gen, projectId, job, proposal, index, superseded (why it can no longer be accepted), phase: planning | ready | failed | gone }
 let generation = 0;  // bumped per Plan plates, so a poll for an older run is dropped
 
 // -- figures -------------------------------------------------------------------------------------------------------------
@@ -57,14 +57,14 @@ function headline(proposal, plan) {
       <div class="slicer-muted">${before.plates ? `Now ${esc(dur(before.makespan_s))}. ` : ""}Plan nozzle ${esc(proposal.plan_nozzle)} mm. ${esc(plural(plan.plates, "plate"))} planned${proposal.kept.length ? `. Kept as they are: ${esc(plural(proposal.kept.length, "plate"))}` : ""}.</div>
       <div class="ps-actions">
         <button class="btn btn-secondary" type="button" data-ps="dismiss">Dismiss</button>
-        <button class="btn btn-primary" type="button" data-ps="accept"${run.stale || plan.can_accept === false ? " disabled" : ""}>Accept this plan</button>
+        <button class="btn btn-primary" type="button" data-ps="accept"${run.superseded || plan.can_accept === false ? " disabled" : ""}>Accept this plan</button>
       </div>
       <p class="slicer-muted ps-once">One Accept applies every plate change as a single change that Undo reverses. Pinned objects and plates that are queued, printing or printed are not touched.</p>
-      <div class="ps-problem" id="ps-error" role="alert">${run.stale ? staleHtml(run.stale) : ""}</div>
+      <div class="ps-problem" id="ps-error" role="alert">${run.superseded ? supersededHtml(run.superseded) : ""}</div>
     </section>`;
 }
 
-function staleHtml(message) {
+function supersededHtml(message) {
   return `<span class="slicer-error">${esc(message)}</span> <button class="btn btn-secondary btn-sm" type="button" data-ps="again">Plan again</button>`;
 }
 
@@ -228,7 +228,7 @@ function show(title) {
 async function open({ job = null } = {}) {
   await host.flush();
   const mine = ++generation, projectId = host.projectId();
-  run = { gen: mine, projectId, job, proposal: null, index: 0, stale: null, phase: "planning" };
+  run = { gen: mine, projectId, job, proposal: null, index: 0, superseded: null, phase: "planning" };
   show("Plan plates");
   render();
   if (!job) {
@@ -269,7 +269,7 @@ function ready(proposal) {
   run.proposal = proposal;
   run.phase = "ready";
   run.index = 0;
-  run.stale = proposal.superseded ? SUPERSEDED : null;
+  run.superseded = proposal.superseded ? SUPERSEDED : null;
   const dialog = $("dlg-plan");
   if (dialog.open && dialog.classList.contains("ps-mode")) { render(); return; }
   const mine = run.gen, token = proposal.token;
@@ -294,7 +294,7 @@ async function accept(button) {
     host.applied(result, result.plan);
   } catch (err) {
     if (err.status === 409 || err.status === 404) {
-      run.stale = err.status === 404 ? "That plan is gone." : err.message === "The project was changed elsewhere — reload it" ? SUPERSEDED : err.message;
+      run.superseded = err.status === 404 ? "That plan is gone." : err.message === "The project was changed elsewhere — reload it" ? SUPERSEDED : err.message;
       render();
     } else {
       button.disabled = false;

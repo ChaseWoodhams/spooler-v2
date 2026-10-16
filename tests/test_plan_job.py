@@ -182,6 +182,11 @@ class PlanJobApiTests(unittest.TestCase):
         self.assertGreater(proposal["before"]["makespan_s"], 0)
         self.assertEqual([p["status"] for p in proposal["printers"]], ["ok", "ok"])
 
+    def test_planning_the_same_project_twice_gives_the_same_proposal(self):
+        project = self.scattered()
+        first, again = self.plan(project)["proposal"], self.plan(project)["proposal"]
+        self.assertEqual((again["plans"], again["before"]), (first["plans"], first["before"]))
+
     def test_the_proposal_carries_the_calibration_lines_for_the_partly_estimated_tooltip(self):
         proposal = self.plan(self.scattered())["proposal"]
         self.assertIsInstance(proposal["calibration"], list)
@@ -335,18 +340,27 @@ class PlanJobApiTests(unittest.TestCase):
 
     def test_replanned_plates_slices_become_outdated(self):
         project = self.scattered()
-        projects.request_slices(project["id"], [2])
+        projects.request_slices(project["id"], [1, 2, 3, 4])
 
         async def work():
             while await projects.process_next():
                 pass
         asyncio.run(work())
         project = projects.get_project(project["id"])
-        self.assertFalse(project["slices"]["2"]["outdated"])
+        self.assertFalse(any(project["slices"][str(p)]["outdated"] for p in (1, 2, 3, 4)))
         job = self.plan(project)
         self.assertEqual(self.accept(project, job)[0], 200)
-        slice_after = self.current(project)["slices"].get("2")
-        self.assertTrue(slice_after is None or slice_after["outdated"])
+        after = self.current(project)
+
+        def content(data, plate_id):
+            return sorted((o["id"], o["position"], o["rotation"]) for o in data["objects"] if o["plate"] == plate_id)
+        changed = [p["id"] for p in after["data"]["plates"] if content(after["data"], p["id"]) != content(project["data"], p["id"])]
+        self.assertTrue(changed, "the plan should replan at least one plate it keeps")
+        for plate_id in changed:   # a kept plate whose Objects moved has its slice Outdated (by fingerprint), never current
+            got = after["slices"].get(str(plate_id))
+            self.assertTrue(got is not None and got["outdated"], (plate_id, got))
+        for plate_id in {1, 2, 3, 4} - {p["id"] for p in after["data"]["plates"]}:
+            self.assertIsNone(after["slices"].get(str(plate_id)))           # an emptied plate loses its slice
 
     # -- printers ---------------------------------------------------------------------------------------------------------
 
@@ -364,6 +378,8 @@ class PlanJobApiTests(unittest.TestCase):
         for plan in proposal["plans"]:
             self.assertEqual({r["printer"] for r in plan["plate_rows"]}, {"dunt"})
             self.assertEqual(plan["printers"]["og"]["plates"], [])
+        self.assertTrue(proposal["before"]["assigned"])
+        self.assertEqual({r["printer"] for r in proposal["before"]["plate_rows"]}, {"dunt"})   # "now" on the same footing
         result = self.accept(project, job)[1]
         self.assertEqual({p.get("printer_id") for p in result["data"]["plates"]}, {"dunt"})
 
@@ -380,6 +396,11 @@ class PlanJobApiTests(unittest.TestCase):
         self.assertEqual(job["state"], "done", job)
         self.assertEqual(job["proposal"]["plans"], [])
         self.assertEqual(len(job["proposal"]["unplanned"]), 4)
+        before = job["proposal"]["before"]          # no printer can print these plates, so "now" puts them on none
+        self.assertEqual(before["plates"], 4)
+        self.assertFalse(before["assigned"])
+        self.assertEqual({r["printer"] for r in before["plate_rows"]}, {None})
+        self.assertEqual((before["makespan_s"], before["finish"]), (0, {"dunt": 0, "og": 0}))
 
     # -- tippy ------------------------------------------------------------------------------------------------------------
 

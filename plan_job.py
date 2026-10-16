@@ -321,16 +321,16 @@ class _Reading:
 
 
 def _eligible(printers: dict, nozzle: float) -> list:
-    """Indexes (into the sorted printer ids) of the printers a plate of this nozzle may go to; every printer when none does."""
+    """Indexes (into the sorted printer ids) of the printers a plate of this nozzle may go to (none when no printer has it)."""
     ids = sorted(printers, key=str)
-    mine = [i for i, pid in enumerate(ids) if planner._nozzle_matches(printers[pid], nozzle)]
-    return mine or list(range(len(ids)))
+    return [i for i, pid in enumerate(ids) if planner._nozzle_matches(printers[pid], nozzle)]
 
 
 def _before(reading: _Reading, printers: dict) -> dict:
     """The replannable plates as they are now, on the same footing as a plan: their time (the slicer's while a slice is current,
     else the model's), their support grams by the same ray-cast measure, how many Objects stand tippy, and when the printers
-    would finish them, balanced across the printers with the plan nozzle."""
+    would finish them, balanced across the printers with the plan nozzle, as a plan's plates are. With no such printer the
+    plates go to none (`assigned` False, printer None, makespan 0): no plan is made then either."""
     import placement_read
     import time_estimate
     record = reading.record
@@ -360,15 +360,17 @@ def _before(reading: _Reading, printers: dict) -> dict:
     ids = sorted(printers, key=str)
     finish = {pid: 0 for pid in ids}
     span = 0
-    if rows and ids:
-        eligible = _eligible(printers, reading.nozzle)
+    eligible = _eligible(printers, reading.nozzle)
+    for row in rows:
+        row["printer"] = None
+    if rows and eligible:
         got = planner.assign_plates([r["seconds"] for r in rows], [tuple(eligible)] * len(rows))
         for row, printer in zip(rows, got.printers):
             row["printer"] = ids[printer]
             finish[ids[printer]] += row["seconds"]
         span = got.makespan
     return {"plates": len(rows), "support_g": round(sum(r["support_g"] for r in rows), 1), "tippy": sum(r["tippy"] for r in rows),
-            "makespan_s": int(span), "finish": finish, "machine_s": sum(r["seconds"] for r in rows),
+            "makespan_s": int(span), "assigned": bool(eligible), "finish": finish, "machine_s": sum(r["seconds"] for r in rows),
             "partly_estimated": any(r["estimated"] for r in rows), "plate_rows": rows}
 
 

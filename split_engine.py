@@ -459,7 +459,7 @@ def describe_pieces(pieces: list, limits: dict) -> list:
             "volume_cm3": round(volume / 1000, 2),
             "size":       size,
             "fits":       piece_fits(piece, limits),
-            "tippy":      piece_fit(piece, limits)[1],
+            "tippy":      piece_fit_and_tippy(piece, limits)[1],
             "tiny":       is_tiny(piece["man"]),
             "cut":        piece["last"][0] if piece["last"] else None,   # the cut that made this part
         })
@@ -1052,7 +1052,7 @@ def choose_placement(man, cut_normals: list, limits: dict):
     return None
 
 
-def piece_fit(piece: dict, limits: dict) -> tuple:
+def piece_fit_and_tippy(piece: dict, limits: dict) -> tuple:
     """(fits, tippy): whether the piece fits the bed in some orientation, and whether every such orientation is tippy."""
     key = tuple(sorted(limits.items()))
     cache = piece.setdefault("fit_cache", {})
@@ -1067,8 +1067,8 @@ def piece_fit(piece: dict, limits: dict) -> tuple:
 
 def piece_fits(piece: dict, limits: dict) -> bool:
     """Some orientation fits the bed (the same test the plate planner uses, orientation.rank). One with no steady
-    orientation counts: it is accepted and flagged tippy (`piece_fit`)."""
-    return piece_fit(piece, limits)[0]
+    orientation counts: it is accepted and flagged tippy (`piece_fit_and_tippy`)."""
+    return piece_fit_and_tippy(piece, limits)[0]
 
 
 def is_tiny(man) -> bool:

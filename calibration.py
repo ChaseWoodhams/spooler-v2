@@ -1,6 +1,7 @@
 """
-Time and support fits made on demand from the calibration log (`slice_log`, `support_log`). Nothing is stored: the planner
+Time and support fits made on demand from the calibration log (`slice_log`, `support_log`). No fit is stored: the planner
 calls `fit_models()` at the start of a run and holds the result for that run, so the same log always gives the same fit.
+(The one write is `backfill_nozzles`, which fills in the nozzle of rows logged before the calibration migration.)
 
 Time: non-negative least squares on  a*layers + b*volume + c*support volume + d*first-layer area,  per settings hash, from
 full slices only. Support: grams per proxy cm3, per settings hash. Each falls back from the settings hash to the nozzle
@@ -140,8 +141,36 @@ class Models:
         return lines
 
 
+def _bundle_nozzle(bundle_id: str) -> float | None:
+    """The nozzle diameter of a bundle's machine profile, or None when the bundle is gone or names none."""
+    import jobs      # function-local: slicer (and jobs with it) is heavy and not needed for fits alone
+    import slicer
+    try:
+        value = slicer.bundle_settings(bundle_id)["machine"].get("nozzle_diameter")
+        return float(value[0] if isinstance(value, (list, tuple)) else str(value).split(",")[0])
+    except (jobs.JobError, OSError, KeyError, TypeError, ValueError, IndexError):
+        return None
+
+
+def backfill_nozzles() -> None:
+    """Give a nozzle to the rows logged before the calibration migration that got a bundle id from it but have neither a
+    settings hash nor a nozzle, from that bundle's machine profile. Without one of the two a row joins no key and is never
+    fitted. The settings hash is not backfilled: the bundle's content when the slice was made is not known (an in-place
+    edit keeps the id), while its nozzle is part of the machine it was locked for. Rows whose bundle is gone stay as they are."""
+    with database.transaction() as conn:
+        bundles = [r[0] for r in conn.execute("SELECT DISTINCT bundle_id FROM slice_log WHERE bundle_id IS NOT NULL "
+                                              "AND settings_hash IS NULL AND nozzle IS NULL ORDER BY bundle_id")]
+    found = {b: n for b in bundles if (n := _bundle_nozzle(b)) is not None}
+    if found:
+        with database.transaction() as conn:
+            conn.executemany("UPDATE slice_log SET nozzle = ? WHERE bundle_id = ? AND settings_hash IS NULL AND nozzle IS NULL",
+                             [(n, b) for b, n in found.items()])
+
+
 def fit_models() -> Models:
-    """Read the log and return the fits. Full slices with a slicer time train time; supported Objects train support."""
+    """Read the log and return the fits. Full slices with a slicer time train time; supported Objects train support. Old rows
+    get their nozzle first (`backfill_nozzles`); a row with neither a settings hash nor a nozzle is never fitted."""
+    backfill_nozzles()
     with database.transaction() as conn:
         plates = [dict(r) for r in conn.execute(
             "SELECT id, bundle_id, settings_hash, nozzle, layers, volume_cm3, first_layer_cm2, support_volume_cm3, estimate_s FROM slice_log "
