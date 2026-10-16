@@ -54,6 +54,20 @@ def verify_bundle(manifest: dict) -> None:
                            "— lock the profile again", 409)
 
 
+def settings_hash(bundle_id: str) -> str | None:
+    """A hash of the bundle's settings content as the files hold it now. A bundle id names the content it was locked with, so an
+    in-place edit keeps the id and changes this hash."""
+    digest = hashlib.sha256()
+    folder = profiles_dir() / bundle_id
+    for kind in PRESET_KINDS:
+        try:
+            digest.update((folder / f"{kind}.json").read_bytes())
+        except OSError:
+            return None
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def bundle_settings(bundle_id: str) -> dict:
     """A locked profile's manifest and its flattened machine, process and filament settings."""
     manifest = load_bundle(bundle_id)

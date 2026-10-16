@@ -3543,7 +3543,10 @@ def _slice(project_id: int, plate_id: int, slot: int = 0, created_at: float | No
     (work / "analysis.json").write_text(json.dumps(analysis), encoding="utf-8")
     estimates = analysis.get("estimates") or {}
     try:
-        time_estimate.record_slice(project_id, plate_id, plate_features(project_id, record, plate_id), analysis)
+        bundle_id = record["data"]["profile"].get("bundle_id")
+        nozzle = _logged_nozzle(analysis, bundle_id)
+        time_estimate.record_slice(project_id, plate_id, plate_features(project_id, record, plate_id), analysis, bundle_id=bundle_id,
+                                   settings_hash=slicer.settings_hash(bundle_id) if bundle_id else None, nozzle=nozzle, gcode_path=evidence)
     except sqlite3.Error as e:   # the log must never fail a slice
         print(f"[Projects] Could not log the slice of plate {plate_id} of project {project_id}: {e}")
     return {"state": SLICED, "error": None, "fingerprint": stamp, "inputs_version": INPUTS_VERSION, "inputs_revision": record["revision"],
@@ -3553,6 +3556,20 @@ def _slice(project_id: int, plate_id: int, slot: int = 0, created_at: float | No
             "bricklayers": bricks, "observed": observed_output.summary(observed),
             "findings": _placement_findings(project_id, record, plate_id)
                         + [f for f in analysis.get("findings", []) if f["level"] == "fail"][:5]}
+
+
+def _logged_nozzle(analysis: dict, bundle_id: str | None) -> float | None:
+    """The nozzle diameter a slice was made for: the G-code's own config, else the bundle's machine."""
+    value = (analysis.get("config") or {}).get("nozzle_diameter")
+    if value is None and bundle_id:
+        try:
+            value = slicer.bundle_settings(bundle_id)["machine"].get("nozzle_diameter")
+        except jobs.JobError:
+            value = None
+    try:
+        return float(value[0] if isinstance(value, (list, tuple)) else str(value).split(",")[0])
+    except (TypeError, ValueError, IndexError):
+        return None
 
 
 def _placement_findings(project_id: int, record: dict, plate_id: int) -> list:

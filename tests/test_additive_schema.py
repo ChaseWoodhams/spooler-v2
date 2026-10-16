@@ -139,5 +139,39 @@ class AdditiveSchemaTests(unittest.TestCase):
         conn.close()
 
 
+class CalibrationLogMigrationTests(unittest.TestCase):
+    """The calibration migration widens slice_log without losing a row and backfills bundle ids where a slice can be matched."""
+
+    def test_existing_slice_log_rows_survive_and_matchable_ones_get_a_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "spooler.db"
+            before = next(n for n, sql in enumerate(database.MIGRATIONS) if "support_log" in sql)   # the schema before the migration
+            conn = sqlite3.connect(db)
+            for number, sql in enumerate(database.MIGRATIONS[:before], start=1):
+                conn.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = {number};\nCOMMIT;")
+            conn.execute("INSERT INTO projects (id, name, created_at, updated_at) VALUES (1, 'P', 1, 1)")
+            for slice_id, bundle, created in ((1, "aaaaaaaaaaaa", 100), (2, "bbbbbbbbbbbb", 1000)):
+                conn.execute("INSERT INTO slices (id, state, source_name, source_file, bundle_id, bed_type, created_at) "
+                             "VALUES (?, 'done', 'a', 'a', ?, 'textured', ?)", (slice_id, bundle, created))
+                conn.execute("INSERT INTO jobs (name, state, printer_id, source, file_name, project_id, plate_id, slice_id, created_at, updated_at) "
+                             "VALUES ('plate', 'completed', 'p1', 'upload', 'a.gcode', 1, 1, ?, 1, 1)", (slice_id,))
+            for plate, created in ((1, 990), (2, 990), (None, 990)):   # the second has no matching plate, the third no project plate
+                conn.execute("INSERT INTO slice_log (project_id, plate_id, estimate_s, created_at) VALUES (?, ?, 600, ?)",
+                             (1 if plate else None, plate, created))
+            conn.commit()
+            conn.close()
+            database.configure(db)
+            try:
+                database.migrate()
+                conn = sqlite3.connect(db)
+                rows = conn.execute("SELECT plate_id, estimate_s, bundle_id, kind, settings_hash FROM slice_log ORDER BY id").fetchall()
+                self.assertEqual(conn.execute("SELECT count(*) FROM support_log").fetchone()[0], 0)
+                conn.close()
+            finally:
+                database.configure(database.DB_FILE)
+        self.assertEqual(rows, [(1, 600, "bbbbbbbbbbbb", "full", None),   # nearest in time
+                                (2, 600, None, "full", None), (None, 600, None, "full", None)])
+
+
 if __name__ == "__main__":
     unittest.main()
