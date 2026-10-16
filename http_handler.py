@@ -1301,7 +1301,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if len(parts) == 5 and parts[4] in ("layout", "whole", "arrange", "slice", "queue"):
             actions = {
-                "layout":  lambda: (lambda body: projects.lay_out_split(self._job_id(), body.get("parts"), split_of(body)))(self._json_body()),
+                "layout":  lambda: (lambda body: projects.lay_out_parts(self._job_id(), body.get("parts"), split_of(body)))(self._json_body()),
                 "whole":   lambda: projects.place_whole_model(self._job_id(), split_of(self._json_body())),
                 "arrange": lambda: (lambda body: projects.arrange(self._job_id(), body.get("plates"), body.get("engine")))(self._json_body()),
                 "slice":   lambda: (lambda body: projects.request_slices(self._job_id(), body.get("plates"), bool(body.get("send"))))(self._json_body()),

@@ -38,12 +38,12 @@ def plan_nozzle_of(record: dict) -> float:
         raise JobError("The project's profile does not say what nozzle it is for", 409)
 
 
-def kept_and_open(project_id: int, record: dict, ledger=None) -> tuple:
+def kept_and_open(project_id: int, record: dict, ledger=None, ready_extra=()) -> tuple:
     """([{"id", "name", "reason"}] plates a plan leaves alone, [ids] of the plates it may replan)."""
     from project_read import FAILED, READY, read_ledger
     data = record["data"]
-    ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
+    ready = {m["id"] for m in record["models"] if m["state"] == READY} | set(ready_extra)
+    failed = {m["id"] for m in record["models"] if m["state"] == FAILED} - set(ready_extra)
     importing = {o["plate"] for o in data["objects"] if o["model"] not in ready and o["model"] not in failed}
     if ledger is None:
         import database
@@ -147,7 +147,7 @@ def seed_data(project_id: int, record: dict, *, only=None, meshes=None, pack=Non
         models = calibration.fit_models()
     problem = planner.problem_from_project(project_id, record, plan_nozzle=nozzle, printers={SEED_PRINTER: nozzle}, models=models,
                                            ledger=ledger, only=only, meshes=meshes)
-    kept, replannable = kept_and_open(project_id, record, ledger)
+    kept, replannable = kept_and_open(project_id, record, ledger, set(meshes or {}))
     emptiable = None   # a plate the new Objects stood on is the one to free; any other empty plate is the user's
     if only is not None:
         emptiable = [p for p in replannable if any(o["plate"] == p and o["id"] in only for o in record["data"]["objects"])]

@@ -38,6 +38,7 @@ import planner
 SEARCH_SECONDS = planner.SEARCH_SECONDS
 MAX_STEPS = planner.MAX_STEPS
 CONFIRM_BUDGET_S = confirmation.BUDGET_S
+IMPORT_WAIT_S = 300   # how long a run started after an import waits for the Models to be analysed
 TTL_S = 24 * 3600
 EVENT_LIMIT = 300
 FOLDER = ".plans"
@@ -65,6 +66,7 @@ class _Job:
         self.state = "queued"
         self.events, self.error, self.token = [], None, None
         self.cancelled = False
+        self.after_imports = False
         self.thread = None
         self.lock = threading.Lock()
 
@@ -144,11 +146,13 @@ def _printer_names() -> dict:
 
 # --- starting --------------------------------------------------------------------------------------------------------------
 
-def start(project_id: int) -> dict:
-    """Start planning the Project and return the job (`id`, `state`, `progress`…). Changes nothing."""
+def start(project_id: int, after_imports: bool = False) -> dict:
+    """Start planning the Project and return the job (`id`, `state`, `progress`…). Changes nothing. With `after_imports` the
+    run waits for the Project's Models still being analysed (up to `IMPORT_WAIT_S`) and plans the Project as it is then."""
     import projects
     record = projects.get_project(project_id)
     job = _Job(project_id, record, plan_nozzle_of(record), printer_nozzles())
+    job.after_imports = after_imports
     with _registry_lock:
         for other in _jobs.values():
             if other.project_id == project_id and other.state in ("queued", "running"):
@@ -168,7 +172,29 @@ def get_job(project_id: int, job_id) -> dict:
     return job.view()
 
 
+def _wait_for_imports(job: _Job) -> None:
+    """Hold the run until no Model of the Project is still being analysed, then plan the Project as it stands."""
+    import projects
+    from project_read import IMPORTING
+    job.emit("reading", 0, "Waiting for the models to finish importing")
+    deadline = time.monotonic() + IMPORT_WAIT_S
+    while True:
+        record = projects.get_project(job.project_id)
+        if job.cancelled or time.monotonic() > deadline or not any(m["state"] == IMPORTING for m in record["models"]):
+            break
+        time.sleep(0.25)
+    job.record, job.revision = record, record["revision"]
+
+
 def _work(job: _Job) -> None:
+    if job.after_imports and not job.cancelled:
+        try:
+            _wait_for_imports(job)
+        except Exception as e:   # the Project went away: say so rather than leave the job queued
+            job.error = str(e) or type(e).__name__
+            job.state = "failed"
+            job.emit("done", 100, "Planning failed")
+            return
     with _run_lock:
         if job.cancelled:
             job.state = "cancelled"
