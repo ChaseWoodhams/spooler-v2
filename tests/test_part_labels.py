@@ -28,7 +28,7 @@ def cut(cut_id, normal, offset):
 
 
 def as_modelled(man, cut_normals, limits):
-    """choose_orientation stand-in: print every part exactly as modelled."""
+    """orient_part stand-in: print every part exactly as modelled."""
     bb = np.asarray(man.bounding_box(), float)
     size = bb[3:] - bb[:3]
     placed = {"R": np.eye(3), "contact": 0.0, "overhang": 0.0, "height": float(size[2]),
@@ -66,7 +66,7 @@ class PartLabelTests(unittest.TestCase):
         engine.analyze(work)
         (work / "cuts.json").write_text(json.dumps({"mode": "smart", "cuts": cuts}))
         if pinned:
-            with mock.patch.object(engine, "choose_orientation", as_modelled):
+            with mock.patch.object(engine, "orient_part", as_modelled):
                 engine.split(work)
         else:
             engine.split(work)
