@@ -127,6 +127,19 @@ class ToolServerKindTests(unittest.TestCase):
         (self.dir / "assistant_settings.json").write_text("{nope", encoding="utf-8")
         self.assertEqual(len(self.names(self.session())), 11)
 
+    def test_a_terminal_session_applies_the_apps_rule_unknown_version_or_damaged_section_means_all_kinds_on(self):
+        path = self.dir / "assistant_settings.json"
+        off = {"orientation": False}
+        for tuning in ({"version": 2, "proposal_kinds": off}, {"version": 1, "proposal_kinds": 5}, "yes", {"version": "1", "proposal_kinds": off}):
+            path.write_text(json.dumps({"tuning": tuning}), encoding="utf-8")
+            self.assertEqual(len(self.names(self.session())), 11, tuning)
+        path.write_text(json.dumps({"tuning": {"version": 1, "proposal_kinds": {"orientation": False, "plan": "no"}}}), encoding="utf-8")
+        names = self.names(self.session())
+        self.assertNotIn("propose_orientation", names)
+        self.assertIn("propose_plan", names, "a value that is not on or off falls back to on, as in the app")
+        path.write_text(json.dumps({"tuning": {"proposal_kinds": off}}), encoding="utf-8")
+        self.assertNotIn("propose_orientation", self.names(self.session()), "no version written means the current one, as in the app")
+
 
 if __name__ == "__main__":
     unittest.main()

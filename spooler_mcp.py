@@ -42,11 +42,19 @@ PROPOSAL_KINDS = ("orientation", "arrange", "plan", "settings")       # propose_
 SETTINGS_NAME = "assistant_settings.json"
 
 
+TUNING_VERSION = 1                                                    # the saved tuning's version; assistant_tuning reads the same number
+
+
 def kinds_off_in(data_dir) -> frozenset:
-    """The Proposal kinds switched off in the saved tuning of this data dir (nothing off when missing or damaged)."""
+    """The Proposal kinds switched off in the saved tuning of this data dir. Same rule as assistant_tuning.load: a missing or damaged
+    file, an unknown version or a damaged section means every kind on."""
+    # Re-read here because this server runs apart from the app and must not import it (assistant_tuning pulls in sockets).
     try:
         with open(os.path.join(str(data_dir), SETTINGS_NAME), encoding="utf-8") as f:
-            section = json.load(f)["tuning"]["proposal_kinds"]
+            tuning = json.load(f)["tuning"]
+        if tuning.get("version", TUNING_VERSION) != TUNING_VERSION:
+            return frozenset()
+        section = tuning["proposal_kinds"]
         return frozenset(k for k in PROPOSAL_KINDS if section.get(k) is False)
     except Exception:
         return frozenset()
