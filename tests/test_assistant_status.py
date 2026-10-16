@@ -81,8 +81,8 @@ class AssistantStatusTests(unittest.TestCase):
         self.call("POST", "/api/assistant/settings", {"tuning": {"limits": {"deadline_seconds": 7}}})
         with mock.patch.object(assistant, "probe_jev", return_value=None):
             _, body = self.status()
-        self.assertEqual(body["limits"], {"deadline_seconds": 7, "question_chars": 2000, "history_turns": assistant_runner.MAX_HISTORY_TURNS,
-                                          "history_chars": assistant_runner.MAX_HISTORY_CHARS, "turn_chars": assistant_runner.MAX_TURN_CHARS})
+        self.assertEqual(body["limits"], {"deadline_seconds": 7, "question_chars": 2000, "history_turns": 12,
+                                          "history_chars": 6000, "turn_chars": 1500})
 
     def test_a_missing_cli_is_unavailable_with_the_reason(self):
         self.use_cli(str(self.dir / "nope" / "claude.exe"))

@@ -55,13 +55,26 @@ def _settings_file() -> Path:
     return _data_dir / SETTINGS_NAME
 
 
+def read_raw_checked() -> tuple:
+    """(the settings file as saved, a note or None). A missing file is {} with no note; one that is not JSON or not an object is {} with a note."""
+    try:
+        text = _settings_file().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}, None
+    except Exception:
+        return {}, "The Assistant settings file could not be read, so the defaults are in use."
+    try:
+        raw = json.loads(text)
+    except Exception:
+        raw = None
+    if not isinstance(raw, dict):
+        return {}, "The Assistant settings file is not a valid settings object, so the defaults are in use."
+    return raw, None
+
+
 def read_raw() -> dict:
     """The settings file as saved ({} when missing or damaged). Never raises. Connection settings and the tuning section share it."""
-    try:
-        raw = json.loads(_settings_file().read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return raw if isinstance(raw, dict) else {}
+    return read_raw_checked()[0]
 
 
 def write_raw(raw: dict) -> None:

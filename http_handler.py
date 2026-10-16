@@ -767,7 +767,7 @@ class SPHandler(SimpleHTTPRequestHandler):
                 assistant_runlog.clear()
             self._json({"entries": assistant_runlog.entries(), "cap": assistant_runlog.CAP})
         except Exception as e:
-            self._json({"error": f"The run log is unavailable: {e}"}, 500)
+            self._json({"error": f"The Assistant run log is unavailable: {e}"}, 500)
 
     def _assistant_status(self, project_id):
         """GET /api/projects/<id>/assistant/status[?fresh=1]: available, or why not. Never fails the page."""

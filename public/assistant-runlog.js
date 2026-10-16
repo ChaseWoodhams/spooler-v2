@@ -1,4 +1,4 @@
-// Settings > Assistant > Run log: the newest finished Assistant runs, read from /api/assistant/run-log, with a Clear button.
+// Settings > Assistant > Assistant run log: the newest finished Assistant runs, read from /api/assistant/run-log, with a Clear button.
 // Self-contained (own section, own fetches); everything is drawn with textContent, so a question or prompt can never become markup.
 (function () {
   const list = () => document.getElementById("assistant-runlog-list");
@@ -12,6 +12,14 @@
     name.textContent = label + ": ";
     row.append(name, document.createTextNode(String(value)));
     parent.append(row);
+  }
+
+  function block(parent, label, text) {
+    field(parent, label, "(below)");
+    const pre = document.createElement("pre");
+    pre.className = "assistant-runlog-prompt";
+    pre.textContent = text || "";
+    parent.append(pre);
   }
 
   function draw(data) {
@@ -28,15 +36,13 @@
       details.append(summary);
       field(details, "Outcome", e.outcome + (e.reason ? ` (${e.reason})` : ""));
       field(details, "Question", e.question);
-      field(details, "Model", e.model || "not reported");
+      field(details, "Configured model", e.configured_model || "CLI default");
+      field(details, "Model reported by the CLI", e.model || "not reported");
       field(details, "Tools called", (e.steps || []).join(", ") || "none");
       field(details, "Proposals made", (e.proposals || []).length || "none");
       field(details, "Tuning in force", JSON.stringify(e.tuning || {}));
-      field(details, "Prompt sent", "(below)");
-      const prompt = document.createElement("pre");
-      prompt.className = "assistant-runlog-prompt";
-      prompt.textContent = e.prompt || "";
-      details.append(prompt);
+      block(details, "Question prompt", e.prompt);
+      block(details, "System prompt", e.system_prompt);
       item.append(details);
       host.append(item);
     }
@@ -49,7 +55,7 @@
       if (!r.ok) throw new Error(d.error || "unavailable");
       draw(d);
     } catch (err) {
-      say(`Could not load the run log: ${err.message}.`);
+      say(`Could not load the Assistant run log: ${err.message}.`);
     }
   }
 
@@ -60,7 +66,7 @@
       if (!r.ok) throw new Error(d.error || "unavailable");
       draw(d);
     } catch (err) {
-      say(`Could not clear the run log: ${err.message}.`);
+      say(`Could not clear the Assistant run log: ${err.message}.`);
     }
   }
 

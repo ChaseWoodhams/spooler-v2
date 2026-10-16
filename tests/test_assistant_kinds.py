@@ -44,6 +44,15 @@ class ProposalKindTests(unittest.TestCase):
         self.assertNotIn("switched off", self.record()["system_prompt"])
         self.assertEqual(len(self.record()["init"]["tools"]), 11)
 
+    def test_the_settings_group_the_tool_server_and_the_fixed_block_share_one_list_of_kinds(self):
+        fields = self.call("GET", "/api/assistant/settings")[1]["tuning"]["groups"]["proposal_kinds"]["fields"]
+        self.assertEqual(tuple(fields), spooler_mcp.PROPOSAL_KINDS)
+        self.assertEqual({k: f["label"] for k, f in fields.items()}, {"orientation": "Orientation", "arrange": "Arrange", "plan": "Plan plates", "settings": "Settings"})
+        self.assertEqual(tuple(assistant_runner.KIND_WORDS), spooler_mcp.PROPOSAL_KINDS)
+        self.save(plan=False)
+        self.assertEqual(self.finished()["state"], "answer")
+        self.assertIn("switched off in Settings: Plan plates", self.record()["system_prompt"])
+
     def test_a_switched_off_kind_is_not_allowed_not_listed_and_named_in_the_fixed_block(self):
         self.assertEqual(self.save(arrange=False, plan=False)[0], 200)
         self.assertEqual(self.finished()["state"], "answer")
@@ -126,6 +135,19 @@ class ToolServerKindTests(unittest.TestCase):
     def test_a_damaged_settings_file_leaves_everything_on(self):
         (self.dir / "assistant_settings.json").write_text("{nope", encoding="utf-8")
         self.assertEqual(len(self.names(self.session())), 11)
+
+    def test_a_terminal_session_applies_the_apps_rule_unknown_version_or_damaged_section_means_all_kinds_on(self):
+        path = self.dir / "assistant_settings.json"
+        off = {"orientation": False}
+        for tuning in ({"version": 2, "proposal_kinds": off}, {"version": 1, "proposal_kinds": 5}, "yes", {"version": "1", "proposal_kinds": off}):
+            path.write_text(json.dumps({"tuning": tuning}), encoding="utf-8")
+            self.assertEqual(len(self.names(self.session())), 11, tuning)
+        path.write_text(json.dumps({"tuning": {"version": 1, "proposal_kinds": {"orientation": False, "plan": "no"}}}), encoding="utf-8")
+        names = self.names(self.session())
+        self.assertNotIn("propose_orientation", names)
+        self.assertIn("propose_plan", names, "a value that is not on or off falls back to on, as in the app")
+        path.write_text(json.dumps({"tuning": {"proposal_kinds": off}}), encoding="utf-8")
+        self.assertNotIn("propose_orientation", self.names(self.session()), "no version written means the current one, as in the app")
 
 
 if __name__ == "__main__":

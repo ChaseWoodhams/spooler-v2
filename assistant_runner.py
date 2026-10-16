@@ -36,9 +36,6 @@ import proposal_store
 import spooler_mcp
 from errors import JobError
 
-MAX_HISTORY_TURNS = 12
-MAX_HISTORY_CHARS = 6000
-MAX_TURN_CHARS = 1500
 MAX_STEPS = 30
 CANCEL_WAIT = 15                           # how long the cancel route waits for the run to finish ending
 USAGE_LIMIT_ERROR = "AI unavailable: usage limit reached"
@@ -88,7 +85,7 @@ Proposals
 """
 
 
-KIND_WORDS = {"orientation": "Orientation", "arrange": "Arrange", "plan": "Plan plates", "settings": "Settings"}
+KIND_WORDS = spooler_mcp.KIND_WORDS         # the one list of Proposal kinds lives in the tool server
 
 
 def kinds_off(tuning: dict) -> list:
@@ -117,7 +114,7 @@ class AskError(JobError):
 
 
 class Run:
-    def __init__(self, project_id: int):
+    def __init__(self, project_id: int, tuning: dict):
         self.id = uuid.uuid4().hex
         self.project_id = int(project_id)
         self.state = "thinking"
@@ -127,12 +124,16 @@ class Run:
         self.started = time.monotonic()
         self.finished = None
         self.init_ok = False
-        self.tuning = assistant_tuning.snapshot()    # read once: this run uses only these values, whatever is saved while it works
+        self.tuning = tuning                 # the one snapshot `ask` took: this run uses only these values, whatever is saved while it works
         self.proc = None                   # the CLI process, kept so Cancel and the deadline can end its tree
         self.reason = None                 # "cancelled" or "timeout" once either has been asked for
         self.tool_calls = 0                # every tool_use seen (steps are capped, this is not)
         self.proposals: list = []          # Proposal tokens; the log line carries them
-        self.question = self.prompt = self.project_name = self.model = None    # kept for the run log (assistant_runlog)
+        self.question = None               # the next four are kept for the run log (assistant_runlog)
+        self.prompt = None                 # the question prompt, what goes in on stdin
+        self.system_prompt = None          # the instructions plus fixed block, what `--system-prompt-file` holds
+        self.project_name = None
+        self.model = None                  # the model the CLI reports at init (the configured one is in `tuning`)
         self.names: dict = {"models": {}, "plates": {}}    # id -> name, to word the progress steps
         self.done = threading.Event()      # set by _finish
         self.stop = threading.Event()      # set when the run is over, to release the deadline watcher
@@ -205,14 +206,14 @@ def mcp_config(project_id: int, data_dir: Path, run_id: str | None = None, max_p
 
 
 def clean_history(history, context=None) -> list:
-    """The earlier turns of this visit, newest kept: at most MAX_HISTORY_TURNS and MAX_HISTORY_CHARS, oldest dropped first."""
+    """The earlier turns of this visit, newest kept: at most the context's history_turns and history_chars, oldest dropped first.
+    No context means the tuning defaults, which are the one source of these numbers."""
     if history is None:
         return []
     if not isinstance(history, list):
         raise AskError("history must be a list of turns", 400)
-    context = context or {}
-    max_turns, max_chars, turn_chars = (context.get("history_turns", MAX_HISTORY_TURNS), context.get("history_chars", MAX_HISTORY_CHARS),
-                                        context.get("turn_chars", MAX_TURN_CHARS))
+    context = context or assistant_tuning.defaults()["prompt_context"]
+    max_turns, max_chars, turn_chars = context["history_turns"], context["history_chars"], context["turn_chars"]
     turns = []
     for turn in history:
         if not isinstance(turn, dict) or turn.get("role") not in ("user", "assistant") or not isinstance(turn.get("text"), str):
@@ -254,17 +255,23 @@ def build_prompt(record: dict, message: str, history: list, context=None) -> str
 
 def prompt_turns(history, context: dict) -> list:
     """The chat history a run sends: validated always, then sent only when the saved prompt context has history on."""
-    return clean_history(history, context) if context["history_enabled"] else (clean_history(history), [])[1]
+    turns = clean_history(history, context)          # validates the history even when it is then not sent
+    return turns if context["history_enabled"] else []
+
+
+def check_question(message, tuning: dict, empty: str) -> None:
+    """Refuse a question that is not text, is blank (`empty` is the message) or is longer than the snapshot's question length."""
+    if not isinstance(message, str) or not message.strip():
+        raise AskError(empty, 400)
+    longest = tuning["limits"]["question_chars"]
+    if len(message) > longest:
+        raise AskError(f"Keep the question under {longest} characters", 400)
 
 
 def preview(project_id: int, message, history=None) -> dict:
     """What the next run would send for the saved settings, built by the same functions a run uses. Starts nothing."""
-    if not isinstance(message, str) or not message.strip():
-        raise AskError("Type a sample question first", 400)
     snap = assistant_tuning.snapshot()
-    longest = snap["limits"]["question_chars"]
-    if len(message) > longest:
-        raise AskError(f"Keep the question under {longest} characters", 400)
+    check_question(message, snap, "Type a sample question first")
     import projects
     record = projects.get_project(int(project_id))
     context = snap["prompt_context"]
@@ -276,12 +283,9 @@ def preview(project_id: int, message, history=None) -> dict:
 def ask(project_id: int, message, history=None) -> dict:
     """Start a run for one project and return its view. Refuses (AskError/JobError) a bad ask, an unavailable Assistant, an unknown
     project, and a project that already has a run working."""
-    if not isinstance(message, str) or not message.strip():
-        raise AskError("Type a question first", 400)
-    longest = assistant_tuning.snapshot()["limits"]["question_chars"]
-    if len(message) > longest:
-        raise AskError(f"Keep the question under {longest} characters", 400)
-    context = assistant_tuning.snapshot()["prompt_context"]
+    snap = assistant_tuning.snapshot()                # the one snapshot of this run: the question check, the prompt and the Run all read it
+    check_question(message, snap, "Type a question first")
+    context = snap["prompt_context"]
     turns = prompt_turns(history, context)
     import projects                                   # lazy, like assistant.purpose_summary: the app's own record, 404 when unknown
     record = projects.get_project(int(project_id))
@@ -294,7 +298,7 @@ def ask(project_id: int, message, history=None) -> dict:
     cli = assistant.resolve_cli(settings)
     if not cli:
         raise AskError("AI unavailable: no claude CLI found", 503)
-    run = Run(project_id)
+    run = Run(project_id, snap)
     run.names = _names(record)
     with _lock:
         if int(project_id) in _active:
@@ -304,6 +308,7 @@ def ask(project_id: int, message, history=None) -> dict:
         _prune()
     prompt = build_prompt(record, message, turns, context)
     run.question, run.prompt, run.project_name = message, prompt, record.get("name")
+    run.system_prompt = system_prompt(run.tuning)
     _sweep_staging()
     threading.Thread(target=_execute, args=(run, cli, settings["jev_url"], prompt), name=f"assistant-run-{run.id[:8]}", daemon=True).start()
     return with_summaries(run.view())
@@ -494,7 +499,7 @@ def _execute(run: Run, cli: str, jev_url: str, prompt: str) -> None:
         cwd.mkdir(parents=True)                      # empty: nothing but the CLI's own files ever appear here
         mcp_path, prompt_path = folder / "mcp.json", folder / "system-prompt.txt"
         mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir(), run.id, run.tuning["limits"]["proposals_per_run"], kinds_off(run.tuning))), encoding="utf-8")
-        prompt_path.write_text(system_prompt(run.tuning), encoding="utf-8")
+        prompt_path.write_text(run.system_prompt, encoding="utf-8")
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path, run.tuning["limits"]["max_turns"], run.tuning["model"]["name"], allowed_tools(run.tuning)), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=str(cwd), env=build_env(jev_url), creationflags=flags)

@@ -47,9 +47,23 @@ async function run(browser, baseUrl) {
     await page.waitForFunction(() => document.getElementById('settings-assistant').style.display === 'none');
     assert.deepEqual(s.saved.at(-1).tuning, { instructions: { text: 'Be brief.' } });
 
+    const reloaded = page.waitForResponse(r => r.url().endsWith('/api/assistant/settings') && r.request().method() === 'GET');
     await page.locator('#btn-settings-goto-assistant').click();
+    await reloaded;
     await box.waitFor();
     assert.equal(await box.inputValue(), 'Be brief.');
+
+    // Pasted text over the cap is not cut: the box keeps all of it, the counter says so, and the server's refusal is shown on the page.
+    const long = 'x'.repeat(60);
+    await box.fill(long);
+    assert.equal((await box.inputValue()).length, 60, 'nothing is silently truncated');
+    assert.match(await page.locator('#assistant-tuning-instructions-text-count').innerText(), /^60 of 50 characters/);
+    await page.locator('#btn-assistant-save').click();
+    await page.getByText('Instruction text cannot be longer than 50 characters').waitFor();
+    assert.equal(await page.getByText('Instruction text cannot be longer than 50 characters').isVisible(), true, 'the refusal is visible on the page');
+    assert.equal(await box.inputValue(), long, 'what was typed is kept');
+    await box.fill('Be brief.');
+    assert.equal(await page.locator('#btn-assistant-save').isVisible(), true);
     await page.getByRole('button', { name: 'Reset instructions' }).click();
     await page.waitForFunction(() => document.getElementById('assistant-tuning-instructions-text').value === '');
     assert.deepEqual(s.saved.at(-1), { reset_tuning: 'instructions' });
