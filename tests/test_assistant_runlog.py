@@ -54,7 +54,7 @@ class RunLogTests(unittest.TestCase):
         self.assertEqual(entry["prompt"], read_record(self.cli_dir)["stdin"])
         self.assertIn("Why two plates?", entry["prompt"])
 
-    def test_the_logged_system_prompt_is_exactly_the_text_the_cli_was_given(self):
+    def test_the_logged_system_prompt_is_exactly_the_text_the_cli_was_given_and_the_configured_model_is_logged_apart_from_the_reported_one(self):
         self.call("POST", "/api/assistant/settings", {"tuning": {"instructions": {"text": "Be terse."}, "model": {"name": "my-model"},
                                                                   "proposal_kinds": {"plan": False}}})
         self.finished("Why two plates?")
@@ -65,6 +65,15 @@ class RunLogTests(unittest.TestCase):
         self.assertIn("At most 3 Proposals per run.", entry["system_prompt"])
         self.assertIn("Plan plates", entry["system_prompt"], "the fixed block is part of it")
         self.assertEqual(entry["prompt"], record["stdin"], "the question prompt is still logged apart from it")
+        self.assertEqual((entry["configured_model"], entry["model"]), ("my-model", "fake-model"))
+
+    def test_a_run_that_fails_before_init_still_logs_the_configured_model_and_the_system_prompt(self):
+        self.call("POST", "/api/assistant/settings", {"tuning": {"model": {"name": "my-model"}}})
+        self.scenario({"calls": [], "exit_before_init": 4})
+        self.assertEqual(self.finished()["state"], "error")
+        entry, = self.entries(1)
+        self.assertEqual((entry["outcome"], entry["configured_model"], entry["model"]), ("failed", "my-model", None))
+        self.assertIn("At most 3 Proposals per run.", entry["system_prompt"])
 
     def test_a_failed_run_is_logged_with_the_reason_shown_to_the_person(self):
         self.scenario({"calls": [], "no_result": True, "exit_code": 3})

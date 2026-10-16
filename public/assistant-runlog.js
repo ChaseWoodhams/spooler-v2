@@ -36,7 +36,8 @@
       details.append(summary);
       field(details, "Outcome", e.outcome + (e.reason ? ` (${e.reason})` : ""));
       field(details, "Question", e.question);
-      field(details, "Model", e.model || "not reported");
+      field(details, "Configured model", e.configured_model || "CLI default");
+      field(details, "Model reported by the CLI", e.model || "not reported");
       field(details, "Tools called", (e.steps || []).join(", ") || "none");
       field(details, "Proposals made", (e.proposals || []).length || "none");
       field(details, "Tuning in force", JSON.stringify(e.tuning || {}));

@@ -57,7 +57,7 @@ def entry_for(run) -> dict:
     failed = run.state in ("error", "usage_limit", "cancelled", "timeout")
     return {"time": datetime.datetime.now().isoformat(timespec="seconds"), "project_id": run.project_id, "project_name": run.project_name,
             "question": run.question, "outcome": _OUTCOMES.get(run.state, run.state), "reason": run.error if failed else None,
-            "duration_seconds": round(ended - run.started, 1), "model": run.model, "tool_calls": run.tool_calls,
+            "duration_seconds": round(ended - run.started, 1), "configured_model": run.tuning["model"]["name"], "model": run.model, "tool_calls": run.tool_calls,
             "steps": [s.get("label") for s in run.steps], "proposals": list(run.proposals), "prompt": run.prompt, "system_prompt": run.system_prompt, "tuning": run.tuning}
 
 
