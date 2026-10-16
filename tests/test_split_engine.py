@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
     import manifold3d as m3d
@@ -237,6 +238,23 @@ class EngineTests(unittest.TestCase):
         self.assertFalse([p for p in pieces if p["tiny"] or not p["fits"]])
         engine.split(self.work)
         self.assertEqual(self.read("result.json")["summary"]["parts"], len(pieces))
+
+    def test_a_part_that_only_fits_standing_on_a_thin_edge_does_not_fit(self):
+        # 10 x 10 x 200 mm on a 100 mm square bed: too long to lie down, and standing on its 10 x 10 end it would tip
+        limits = {"bed_x": 100.0, "bed_y": 100.0, "height": 250.0}
+        tall = {"man": m3d.Manifold.cube([10, 10, 200]), "normals": []}
+        self.assertFalse(engine.piece_fits(tall, limits))
+        steady = {"man": m3d.Manifold.cube([60, 40, 30]), "normals": []}
+        self.assertTrue(engine.piece_fits(steady, limits))
+
+    def test_the_split_orients_parts_without_choose_orientation(self):
+        self.job(channel(), planner={"mode": "grid", "balanced": True})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        with mock.patch.object(engine, "choose_orientation", create=True, side_effect=AssertionError("old orientation used")):
+            engine.split(self.work)
+        for part in self.read("result.json")["parts"]:
+            self.assertGreater(part["bed_contact_mm2"], 0)
 
     def test_a_model_that_fits_is_one_part(self):
         self.job(m3d.Manifold.cube([60, 40, 30]), planner={"mode": "smart"})
