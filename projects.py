@@ -82,10 +82,10 @@ from values import digest, first
 # The read side of this module lives in project_read, placement_read and profile_read, which import no jobs, printer or
 # Spoolman code (the read-only MCP server builds on them). The names stay reachable here.
 from datapaths import (model_dir, plate_dir, project_dir, projects_dir)
-from placement_read import (arrange_layout, _arrange_plate_ids, _count, _flat_on_face, hard_plate_problems, KEPT_REASONS,
+from placement_read import (arrange_layout, _arrange_plate_ids, _count, hard_plate_problems, KEPT_REASONS,
                             load_mesh, _nest_error, _orient_options, _orientation_for, place, _place_layout,
-                            placement_problems, _plan_data, plate_features, plate_problems, plate_time, _problem_cache,
-                            read_mesh_bin, rotation_matrix, _Shapes, STEADY_RATIO, SUPPORT_OVERHANG_MM2, _turned)
+                            placement_problems, plate_features, plate_problems, plate_time, _problem_cache,
+                            read_mesh_bin, rotation_matrix, _Shapes, SUPPORT_OVERHANG_MM2, _turned)
 from profile_read import (DEFAULT_BED, DEFAULT_EXCLUDE, DEFAULT_HEIGHT, _machine_limits_for, machine_limits)
 from project_read import (_choice_key, choice_label, _clean_pack, effective_purpose, FAILED, fingerprint, IMPORTING,
                           INPUTS_VERSION, MAX_OBJECTS, MAX_PLATES, MAX_PURPOSE_NOTE, _new_plate, _next_id, pack_for,
@@ -390,14 +390,14 @@ def create_draft(project_id: int, name: str, arrange: bool = True) -> dict:
 
 
 def _arrange_new_project(project_id: int):
-    """Apply the plan the New project dialog showed (Plan plates at the chosen density), once. A plan that cannot be made
-    leaves the models as they are and is said in plain words: Create has already succeeded. Returns the plan's summary, or
-    {"error": text}."""
+    """Apply the arrangement the New project dialog showed (the planner's greedy first-fit seed at the chosen density), once. An
+    arrangement that cannot be made leaves the models as they are and is said in plain words: Create has already succeeded.
+    Returns the arrangement's summary, or {"error": text}."""
     try:
         record = get_project(project_id)
-        planned = _plan_data(project_id, record)
+        planned = plan_layout.seed_data(project_id, record)
         view = _plan_view(record, planned)
-        if planned.get("refused") or not planned["plates"]:
+        if not planned["plates"]:
             return {"error": view["summary"]}
         save_data(project_id, record, planned["data"], planned["emptied"])
         return {"summary": view["summary"], "plates": len(planned["plates"]), "too_big": planned.get("too_big", [])}
@@ -3020,28 +3020,23 @@ def _plan_view(record: dict, planned: dict) -> dict:
             "problems": planned.get("problems", []), "refused": planned.get("refused")}
 
 
-def plan_plates(project_id: int, allow_tilt: bool = False, pack=None) -> dict:
-    """Plan the project's plates and change nothing: {"revision", "plates": [{"id", "name", "new", "filament", "parts" (how many
-    objects it holds; the key keeps its name), "turned", "time_estimate" (approximate seconds, layers, volume_cm3), "objects"}] in plan order (longest first by
-    layers, then volume), "kept": [{"id", "name", "reason"}] (plates with a Job or a Print on record, which are never
-    touched), "summary", "tilts_withheld", "too_big" ([{"id", "name"}]: objects too big for any plate, each left centred on a plate of its own),
-    "problems", "refused"}. Only orientations that stand an object on a side of its own box
-    are planned; a tilt onto an angled face needs `allow_tilt`. A plan whose layout would leave an object (other than one too big
-    for any plate) off the bed, over the purge area, overlapping or too close to another is not offered: "plates" is empty, "refused" says why and "problems" lists them.
-    `accept_plan` applies it."""
+def plan_preview(project_id: int, pack=None) -> dict:
+    """The arrangement the planner's greedy first-fit seed makes of the project's plates, changing nothing and starting no run:
+    {"revision", "plates": [{"id", "name", "new", "filament", "parts" (how many objects it holds), "turned", "time_estimate",
+    "objects"}] in plan order, "kept": [{"id", "name", "reason"}] (plates with a Job or a Print on record, which are never
+    touched), "summary", "too_big" ([{"id", "name"}]: objects too big for any plate, each left centred on a plate of its own),
+    "tippy"}. `pack` ({"preset": …}) plans at that density without keeping it. This is what the New project dialog shows and
+    Create applies; Plan plates (`plan_job`) searches for better and asks first."""
     record = get_project(project_id)
-    return _plan_view(record, _plan_data(project_id, record, allow_tilt, pack))
+    return _plan_view(record, plan_layout.seed_data(project_id, record, pack=pack))
 
 
-def plan_densities(project_id: int, allow_tilt: bool = False) -> dict:
-    """How many plates the plan needs at each preset density, changing nothing: {"tight": {"plates", "refused"}, "normal":
-    …, "roomy": …}. "plates" counts the plates the plan fills (plates kept as they are not included)."""
+def plan_densities(project_id: int) -> dict:
+    """How many plates the arrangement needs at each preset density, changing nothing: {"tight": {"plates", "refused"}, "normal":
+    …, "roomy": …}. "plates" counts the plates the arrangement fills (plates kept as they are not included)."""
     record = get_project(project_id)
-    found = {}
-    for preset in PACK_PRESETS:
-        planned = _plan_data(project_id, record, allow_tilt, {"preset": preset})
-        found[preset] = {"plates": len(planned["plates"]), "refused": planned.get("refused")}
-    return found
+    return {preset: {"plates": len(planned["plates"]), "refused": None}
+            for preset in PACK_PRESETS for planned in [plan_layout.seed_data(project_id, record, pack={"preset": preset})]}
 
 
 def set_pack(project_id: int, body: dict) -> dict:
@@ -3068,37 +3063,6 @@ def set_pack(project_id: int, body: dict) -> dict:
         save_data(project_id, record, data)
         _problem_cache.pop(project_id, None)
     return get_project(project_id)
-
-
-def accept_plan(project_id: int, plan, fingerprint=None, allow_tilt: bool = False) -> dict:
-    """Apply the plan as one change: `plan` is the revision it was made at, or the plan itself, and `fingerprint` the plan's
-    own (taken from `plan` when that is the plan). A project that has changed since is refused ("changed elsewhere"), and so
-    is a plan the server would now make differently ("The plan changed"): what is applied is what was reviewed. Slices of
-    replanned plates become Outdated by their fingerprints; plates left empty go. Returns the project (one revision later,
-    so the client records one undo step) plus "plan", the view of what was applied."""
-    if isinstance(plan, dict):
-        revision, fingerprint = plan.get("revision"), plan.get("fingerprint") or fingerprint
-    else:
-        revision = plan
-    try:
-        revision = int(revision)
-    except (TypeError, ValueError):
-        raise jobs.JobError("Send the revision the plan was made at, or the plan itself")
-    if not isinstance(fingerprint, str) or not fingerprint:
-        raise jobs.JobError("Send the fingerprint of the plan that was reviewed")
-    record = get_project(project_id)
-    if revision != record["revision"]:
-        raise jobs.JobError("The project was changed elsewhere — reload it", 409)
-    planned = _plan_data(project_id, record, allow_tilt)
-    if planned["fingerprint"] != fingerprint:
-        raise jobs.JobError("The plan changed, review it again", 409)
-    view = _plan_view(record, planned)
-    if planned.get("refused"):
-        raise jobs.JobError(view["summary"], 409)
-    if not planned["plates"]:
-        return {**record, "plan": view}
-    save_data(project_id, record, planned["data"], planned["emptied"])
-    return {**get_project(project_id), "plan": view}
 
 
 def delete_model(project_id: int, model_id: int) -> dict:

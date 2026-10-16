@@ -7,7 +7,7 @@ import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=5";
 import { projectPage } from "./project-page.js?v=10";
 import { newProject } from "./new-project.js?v=12";
-import { planSheet } from "./plan-sheet.js?v=5";
+import { planSheet } from "./plan-sheet.js?v=6";
 import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
 import { showExport } from "./export-plan.js?v=2";
 import { Viewport, featureColor } from "./viewport.js?v=5";
@@ -2491,14 +2491,22 @@ async function layOutParts() {
     danger: true,
   })) return;
   await flushSave();
-  applyProject(await api("POST", `/api/projects/${state.project.id}/layout`, { split_id: splitId }));
+  const { plan_job: job, plan_job_error: jobError, ...project } = await api("POST", `/api/projects/${state.project.id}/layout`, { split_id: splitId });
+  applyProject(project);
   resetEdits();
   state.plate = data().plates.find(p => plateObjects(p.id).length)?.id || data().plates[0].id;
   renderAll();
   schedulePoll();
   await afterSplitPlaced();
   state.viewport?.fit(state.viewport.objectsBox());
-  toast(`Parts packed onto ${plural(platesWithObjects().length, "plate")} — importing them now`);
+  toast(`Parts laid out on ${plural(platesWithObjects().length, "plate")} — importing them now`);
+  followLayoutPlan(job, jobError);
+}
+
+/** A layout comes with a planner run over the whole project: follow it on the review sheet. Nothing moves until it is accepted. */
+function followLayoutPlan(job, jobError) {
+  if (jobError) { toast(`Laid out, but couldn't look for a better plan: ${jobError}`, true); return; }
+  if (job) planSheet.open({ job }).catch(err => toast(err.message, true));
 }
 
 async function placeWhole() {
@@ -3150,11 +3158,13 @@ function bindUi() {
     btn.disabled = true;
     try {
       await flushSave();
-      applyProject(await api("POST", `/api/projects/${state.project.id}/models/from-split`, { split_id: Number(btn.dataset.addSplit) }));
+      const { plan_job: job, plan_job_error: jobError, ...project } = await api("POST", `/api/projects/${state.project.id}/models/from-split`, { split_id: Number(btn.dataset.addSplit) });
+      applyProject(project);
       $("dlg-split").close();
       renderAll();
       schedulePoll();
-      toast("Adding the parts — packed onto plates");
+      toast("Adding the parts — laid out on plates");
+      followLayoutPlan(job, jobError);
     } catch (err) {
       toast(err.message, true);
       btn.disabled = false;

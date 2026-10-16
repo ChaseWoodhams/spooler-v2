@@ -565,7 +565,7 @@ def propose_orientation(ctx: Context, revision: int, object_ids=None, mode=None,
 
 
 # ── Arrange and plan Proposals ────────────────────────────────────────────────
-# Positions come from Spooler's own non-saving helpers (`arrange_layout` + `_place_layout`, `_plan_data`); the model never chooses
+# Positions come from Spooler's own non-saving helpers (`arrange_layout` + `_place_layout`, the planner's greedy seed); the model never chooses
 # one. Both stage through `stage_proposal`, so review, Accept (one revision), Superseded, sweeps and the cap are the pipeline's.
 
 DIFF_LINES = 12
@@ -664,30 +664,30 @@ def propose_arrange(ctx: Context, revision: int, plate_ids=None, reason=None) ->
         targets={"objects": sorted({line["object"] for line in lines}), "plates": sorted(set(order) | set(used))})
 
 
-@tool("propose_plan", "Propose Plan plates: Spooler's own planner orients every unpinned Object, packs them onto as few Plates as fit "
-      "and orders the Plates longest first; you never choose rotations or positions. Plates that are queued, printing, have a Print on "
-      "record or hold a Model still importing are kept as they are. density is an optional packing preset (tight, normal, roomy); "
-      "omit it to keep the project's density, and accepting a preset also sets it. allow_tilt (default false) lets the planner lean "
-      "Objects onto angled faces. Pass the project revision you read. A behind revision returns {superseded: true}. A plan Spooler would "
-      "refuse comes back as {refused: true, refused_quoted} with proposal null and nothing staged; so does a plan with nothing to "
-      "change. Returns the Proposal token, a readable diff, notes and problems, never the resulting data. At most 3 Proposals per run.",
+@tool("propose_plan", "Propose Plan plates: Spooler's own planner orients every unpinned Object steadily, packs them onto as few Plates as "
+      "fit, keeps supports to the Plates that need them and orders the Plates longest first; you never choose rotations or positions. "
+      "This is the planner's quick first-fit layout; the person's Plan plates button runs the full search and slices the best plans. "
+      "Plates that are queued, printing, have a Print on record or hold a Model still importing are kept as they are. density is an "
+      "optional packing preset (tight, normal, roomy); omit it to keep the project's density, and accepting a preset also sets it. "
+      "Pass the project revision you read. A behind revision returns {superseded: true}. A plan with nothing to change stages nothing. "
+      "Returns the Proposal token, a readable diff, notes and problems, never the resulting data. At most 3 Proposals per run.",
       {"revision": {"type": "integer"}, "density": {"type": "string", "enum": ["tight", "normal", "roomy"]},
        "allow_tilt": {"type": "boolean"}, "reason": {"type": "string"}}, required=["revision"])
 def propose_plan(ctx: Context, revision: int, density=None, allow_tilt=False, reason=None) -> dict:
+    # allow_tilt is accepted for runs that still pass it: the planner picks steady orientations itself and has no tilt opt-in
     _, project_read, placement_read, _ = ctx.core()
+    import calibration
+    import plan_layout
     record = proposal_record(ctx, revision)
     with ctx.reader() as conn:
         ledger = project_read.read_ledger(conn, ctx.project_id)
     try:
-        planned = placement_read._plan_data(ctx.project_id, record, bool(allow_tilt), {"preset": density} if density else None, ledger=ledger)
+        planned = plan_layout.seed_data(ctx.project_id, record, pack={"preset": density} if density else None,
+                                        models=calibration.Models([], [], {}), ledger=ledger)   # the seed estimates: no log is read
     except Exception as e:
         if type(e).__name__ != "JobError":
             raise
         raise _helper_error(e, "Plan is not possible") from None
-    if planned.get("refused"):                   # passed through: Spooler would not offer this plan, so nothing is staged
-        return {"revision": record["revision"], "proposal": None, "refused": True, "refused_quoted": quoted(planned["refused"], 400),
-                "problems": [{"object": p.get("key"), "problem": p.get("problem")} for p in planned.get("problems") or []][:20],
-                "message": "Spooler would not offer this plan, so nothing was staged. Tell the person why."}
     data = planned["data"]
     kept = planned.get("kept") or []
     if not planned["plates"] or (_stand(data) == _stand(record["data"]) and not planned["emptied"] and data.get("pack") == record["data"].get("pack")):
@@ -700,12 +700,12 @@ def propose_plan(ctx: Context, revision: int, density=None, allow_tilt=False, re
                      "text": f"{_plural(len(entry['objects']), 'object')}, {entry['turned']} turned" + (" (new plate)" if entry["new"] else "")})
     if kept:
         notes.append(f"{_plural(len(kept), 'plate')} kept as they are (queued, printing, printed or importing)")
-    if planned.get("tilts_withheld"):
-        notes.append(f"{_plural(planned['tilts_withheld'], 'tilt')} withheld: objects would lean on an angled face (allow_tilt lets them)")
+    if planned.get("unplanned"):
+        notes.append(f"{_plural(len(planned['unplanned']), 'object')} left out: {one_line(planned['unplanned'][0][1])}")
     if planned.get("too_big"):
         notes.append(f"{_plural(len(planned['too_big']), 'object')} bigger than the bed, left on a plate of its own")
     if planned.get("tippy"):
-        notes.append(f"{_plural(len(planned['tippy']), 'object')} would stand on a narrow edge")
+        notes.append(f"{_plural(len(planned['tippy']), 'object')} tippy in every orientation, given a brim")
     if density:
         notes.append(f"Accepting also sets the packing density to {density}")
     emptied = planned["emptied"]

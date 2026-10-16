@@ -1,11 +1,9 @@
 """
 Nesting objects onto build plates by outline.
 
-Where packing.py places footprint rectangles, this places each object's outline (a convex hull or the true
-silhouette from above) turned to many angles. Every object has a clearance `b`, the reach of its supports beyond its
+This places each object's outline (a convex hull or the true silhouette from above) turned to many angles. Every object has a clearance `b`, the reach of its supports beyond its
 outline (research/brim-support-measurements.md): the nester keeps two objects at least max(b_i, b_j) apart, an object
-EDGE_MARGIN_MM from the bed edge and b from the purge area. Pinned objects are fixed outlines on a plate that others pack around. Plates come out in the shape
-packing.pack returns, so an object that fits nowhere on an empty plate gets a plate of its own, marked oversize.
+EDGE_MARGIN_MM from the bed edge and b from the purge area. Pinned objects are fixed outlines on a plate that others pack around. An object that fits nowhere on an empty plate gets a plate of its own, marked oversize.
 
 Placement tries a few hundred bottom-left candidate positions per object and angle, then slides the best one left and
 down until it touches. The best spot keeps the pile's longest side shortest (then its area), so parts gather in a squarish

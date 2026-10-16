@@ -6,8 +6,10 @@ import json
 import unittest
 from unittest import mock
 
+import calibration
 import database
 import placement_read
+import plan_layout
 import project_read
 import projects
 import spooler_mcp
@@ -134,17 +136,21 @@ class ArrangeProposalTests(PlacementProposalCase):
 
 
 class PlanProposalTests(PlacementProposalCase):
-    def test_propose_plan_stages_what_plan_data_returns_and_saves_nothing(self):
+    def seed(self, record, pack=None):
+        return plan_layout.seed_data(record["id"], record, pack=pack, models=calibration.Models([], [], {}), ledger=self.ledger(record))
+
+    def test_propose_plan_stages_the_planners_greedy_layout_and_saves_nothing(self):
         self.spread()
         before = self.current()
         view, is_error, result = self.propose("propose_plan", density="roomy")
         self.assertFalse(is_error, result)
         staged = self.staged(result["token"])
         self.assertEqual((view["state"], staged["kind"], staged["review"]), ("proposal", "plan", "placement"))
-        planned = placement_read._plan_data(before["id"], before, False, {"preset": "roomy"}, ledger=self.ledger(before))
+        planned = self.seed(before, {"preset": "roomy"})
         self.assertEqual(staged["data"], planned["data"])
         self.assertEqual(staged["emptied"], planned["emptied"])
         self.assertEqual(staged["data"]["pack"]["preset"], "roomy")
+        self.assertEqual(placement_read.placement_problems(before["id"], {**before, "data": staged["data"]}), [])   # a layout that can print
         self.assertNotIn("data", result)
         self.assertEqual(self.current()["data"], before["data"])
 
@@ -152,8 +158,7 @@ class PlanProposalTests(PlacementProposalCase):
         self.spread()
         before = self.current()
         _, _, result = self.propose("propose_plan")
-        planned = placement_read._plan_data(before["id"], before, False, None, ledger=self.ledger(before))
-        self.assertEqual(self.staged(result["token"])["data"], planned["data"])
+        self.assertEqual(self.staged(result["token"])["data"], self.seed(before)["data"])
 
     def test_bad_density_is_an_error(self):
         self.spread()
@@ -192,19 +197,6 @@ class PlanProposalTests(PlacementProposalCase):
         status, undone = self.call("PATCH", f"/api/projects/{prior['id']}", {"data": prior["data"], "revision": accepted["revision"]})
         self.assertEqual(status, 200, undone)
         self.assertEqual(self.current()["data"], prior["data"])
-
-    def test_a_plan_spooler_would_refuse_returns_the_refusal_and_stages_nothing(self):
-        self.spread()
-        record = self.current()
-        refusal = {"data": record["data"], "plates": [], "kept": [], "emptied": [], "problems": [{"key": 1}],
-                   "refused": "Part 1 would overlap another object", "fingerprint": "x"}
-        ctx = spooler_mcp.Context(record["id"], str(self.dir), run="refusal-run")
-        with mock.patch.object(placement_read, "_plan_data", return_value=refusal):
-            result = spooler_mcp._TOOLS["propose_plan"]["fn"](ctx, revision=record["revision"])
-        self.assertIs(result["refused"], True)
-        self.assertEqual(result["refused_quoted"], "Part 1 would overlap another object")
-        self.assertIsNone(result["proposal"])
-        self.assertEqual(self.staging(), [])
 
     def test_when_the_plan_would_change_nothing_nothing_is_staged(self):
         self.project = self.edit(self.current(), lambda d: [o.update(pinned=True) for o in d["objects"]])

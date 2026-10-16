@@ -272,15 +272,6 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result["unlabelled"], [])                            # the number is placed for the orientation chosen
         self.assertTrue((self.work / "parts" / "part_01.stl").is_file())
 
-    def test_the_split_orients_parts_without_choose_orientation(self):
-        self.job(channel(), planner={"mode": "grid", "balanced": True})
-        engine.analyze(self.work)
-        engine.plan(self.work)
-        with mock.patch.object(engine, "choose_orientation", create=True, side_effect=AssertionError("old orientation used")):
-            engine.split(self.work)
-        for part in self.read("result.json")["parts"]:
-            self.assertGreater(part["bed_contact_mm2"], 0)
-
     def test_a_model_that_fits_is_one_part(self):
         self.job(m3d.Manifold.cube([60, 40, 30]), planner={"mode": "smart"})
         engine.analyze(self.work)

@@ -10,7 +10,6 @@ from shapely.geometry import Polygon, box
 
 import projects
 from nesting import CLEARANCE_MM, EDGE_MARGIN_MM as EDGE, SUPPORT_CLEARANCE_MM, hull_outline, nest, silhouette_outline
-from packing import pack
 
 BED = (0.0, 0.0, 256.0, 256.0)
 PURGE = (246.0, 0.0, 256.0, 20.0)
@@ -69,7 +68,7 @@ class NestingTests(unittest.TestCase):
         parts = {1: (bar, CLEARANCE_MM), 2: (bar, CLEARANCE_MM), 3: (bar, CLEARANCE_MM)}
         plates = self.run_nest(parts)
         self.check_plates(plates, parts)
-        self.assertEqual(len(plates), 1)   # packing.pack would need a plate each: the bounding boxes are 175 mm square
+        self.assertEqual(len(plates), 1)   # by bounding box each would need a plate: the boxes are 175 mm square
 
     def test_concave_parts_tuck_into_each_other(self):
         parts = {n: (l_shape(150, 40), CLEARANCE_MM) for n in range(1, 4)}   # bounding boxes 150 mm square: three do not fit by box
@@ -143,13 +142,11 @@ class ProjectTwoTests(unittest.TestCase):
     def parts(self):
         return {o["id"]: (self.outlines[o["id"]], CLEARANCE_MM) for o in self.objects}
 
-    def test_seventeen_parts_keep_their_clearance_and_use_no_more_plates_than_packing_pack(self):
+    def test_seventeen_parts_keep_their_clearance_and_are_all_placed(self):
         parts = self.parts()
         plates = nest([{"key": k, "outline": o, "clearance": b, "group": "plain"} for k, (o, b) in parts.items()], BED, PURGE)
         NestingTests().check_plates(plates, parts)
-        packed = pack([{"key": k, "size": self.sizes[k], "group": "plain"} for k in parts], BED, PURGE)
         self.assertEqual(sorted(i["key"] for p in plates for i in p["items"]), sorted(parts))
-        self.assertLessEqual(len(plates), len(packed))
 
     def test_pinned_objects_keep_their_place_and_the_rest_pack_around_them(self):
         parts = self.parts()
