@@ -182,5 +182,30 @@ class ReducedSliceTests(unittest.TestCase):
         self.assertEqual([j.kind for j in slicer.calls], ["full"])
 
 
+class WorthStartingTests(unittest.TestCase):
+    """Slices that cannot finish in what is left of the budget are not started (ticket 22): they would only take CPU from
+    the ones that can."""
+
+    def test_a_slice_expected_to_outlast_the_budget_is_not_started(self):
+        small, huge = plate([1], seconds=100, x=10), plate([2], seconds=100000, x=50)
+        slicer = FakeSlicer(delay=0.2)
+        result = confirm([plan(huge, small)], slicer, budget_s=0.5, workers=1)
+        self.assertEqual([tuple(j.keys) for j in slicer.calls], [(1,)])        # (2,) would have run past the deadline
+        self.assertEqual(result.stats["unstarted"], 1)
+        self.assertEqual(result.stats["failed"], 0)
+        self.assertTrue(result.plans[0].partly_estimated)
+
+    def test_the_first_slice_always_starts(self):
+        slicer = FakeSlicer()
+        confirm([plan(plate([1], seconds=100000))], slicer, budget_s=0.5, workers=1)
+        self.assertEqual(len(slicer.calls), 1)
+
+    def test_shorter_plates_of_a_plan_are_sliced_first(self):
+        plates = [plate([1], seconds=900, x=10), plate([2], seconds=100, x=50), plate([3], seconds=500, x=90)]
+        slicer = FakeSlicer()
+        confirm([plan(*plates)], slicer, workers=1)
+        self.assertEqual([tuple(j.keys) for j in slicer.calls], [(2,), (3,), (1,)])
+
+
 if __name__ == "__main__":
     unittest.main()

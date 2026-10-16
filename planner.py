@@ -39,7 +39,7 @@ MACHINE_MIN_WEIGHT = 0.1         # per printer-minute, all plates together
 TIPPY_WEIGHT = 120.0             # per Object that is tippy in every orientation
 SPLIT_APART_WEIGHT = 0.5         # per pair of neighbouring Split Parts on different plates
 
-SEARCH_SECONDS = 35.0            # default time budget of the local search
+SEARCH_SECONDS = 30.0            # default time budget of the local search
 MAX_STEPS = 20000                # default step cap (the run is reproducible when it ends here rather than on time)
 EXACT_MAX_PLATES = 20            # above this many plates, printers are assigned by LPT instead of enumeration
 EXACT_MAX_NODES = 400000         # a safety stop for the enumeration
@@ -48,6 +48,7 @@ NEAR_TIE_COST = 10.0             # an orientation within this much cost of the b
 MAX_NEAR = 4                     # near-tied orientations kept per Object (the best included)
 NEW_PLATE_SHARE = 0.15           # of the move steps that go to a new plate
 NOZZLE_TOLERANCE = 1e-6
+MAX_FAILED_SETS = 400            # sets that did not fit, remembered per plate to rule out their supersets
 SUPPORT_KEYS = ("enable_support", "support_type")   # plate overrides that supports switch on; not part of a compatibility key
 
 
@@ -258,7 +259,8 @@ class _Run:
             self.room -= (problem.exclude[2] - problem.exclude[0]) * (problem.exclude[3] - problem.exclude[1])
         self.fit_memo, self.metric_memo, self.span_memo, self.eval_memo = {}, {}, {}, {}
         self.pool = {}
-        self.steps = self.nests = 0
+        self.failed = {}   # anchor -> sets of (key, candidate) that did not fit one plate
+        self.steps = self.nests = self.inserts = 0
         blob = json.dumps([problem.seed, [(i.key, str(i.model), i.group, [[round(r, 3) for r in c.rotation] for c in i.candidates])
                                           for i in problem.items], sorted(map(str, problem.printers.items()))], default=str)
         self.rng_seed = int(hashlib.sha256(blob.encode()).hexdigest()[:16], 16)
@@ -267,12 +269,54 @@ class _Run:
 
     def fit(self, anchor, members) -> list | None:
         """The nester's layout of these (key, candidate) members on the plate holding `anchor`'s Pinned Objects, or None when
-        they don't all fit on one plate."""
+        they don't all fit on one plate. Three shortcuts keep the search cheap: a set that did not fit rules out its
+        supersets, a set one Object bigger than a laid-out one is tried by placing just that Object among the others
+        (`inserts`), and only then is the whole plate nested (`nests`)."""
         key = (anchor, members)
         if key not in self.fit_memo:
-            self.nests += 1
-            self.fit_memo[key] = self._fit(anchor, members)
+            self.fit_memo[key] = self._fit_cheap(anchor, members)
         return self.fit_memo[key]
+
+    def _fit_cheap(self, anchor, members):
+        wanted = frozenset(members)
+        if any(known <= wanted for known in self.failed.get(anchor, ())):
+            return None
+        if len(members) > 1:
+            for gone in members:
+                base = self.fit_memo.get((anchor, tuple(m for m in members if m != gone)))
+                if base:
+                    placed = self._insert(anchor, base, gone, members)
+                    if placed is not None:
+                        self.inserts += 1
+                        return placed
+                    break
+        self.nests += 1
+        placed = self._fit(anchor, members)
+        if placed is None:
+            known = self.failed.setdefault(anchor, [])
+            if len(known) < MAX_FAILED_SETS:
+                known.append(wanted)
+        return placed
+
+    def _insert(self, anchor, base, gone, members):
+        """Layout of `members` made by placing the one Object `gone` among the laid-out others, or None if it won't go."""
+        import numpy as np
+        fixed = [{"key": pin.key, "group": 0, "slot": 0, "polygon": list(pin.polygon), "clearance": pin.clearance}
+                 for pin in self.pinned_on.get(anchor, [])]
+        for laid in base:
+            cand = self.items[laid["key"]].candidates[dict(members)[laid["key"]]]
+            a = math.radians(laid["angle"])
+            c, s = math.cos(a), math.sin(a)
+            pts = np.asarray(cand.outline, float) @ np.array([[c, s], [-s, c]])
+            middle = (pts.max(axis=0) + pts.min(axis=0)) / 2
+            fixed.append({"key": laid["key"], "group": 0, "slot": 0, "clearance": cand.clearance,
+                          "polygon": [(float(x), float(y)) for x, y in pts - middle + np.asarray(laid["center"], float)]})
+        cand = self.items[gone[0]].candidates[gone[1]]
+        placed = nesting.nest([{"key": gone[0], "outline": list(cand.outline), "clearance": cand.clearance, "group": 0}],
+                              self.p.bed, self.p.exclude, fixed)
+        if len(placed) != 1 or len(placed[0]["items"]) != 1 or placed[0]["items"][0]["oversize"]:
+            return None
+        return list(base) + placed[0]["items"]
 
     def _fit(self, anchor, members):
         if not members:
@@ -490,7 +534,7 @@ def plan_problem(problem: Problem, *, budget_s: float = SEARCH_SECONDS, max_step
     run.search(seed, started + budget_s, max_steps)
     ranked = sorted(run.pool.items(), key=lambda s: (s[1], repr(s[0])))[:top]
     plans = [run.plan_of(state) for state, _ in ranked]
-    stats = {"steps": run.steps, "nests": run.nests, "seconds": round(time.monotonic() - started, 1)}
+    stats = {"steps": run.steps, "nests": run.nests, "inserts": run.inserts, "seconds": round(time.monotonic() - started, 1)}
     return [Plan(p.plates, p.cost, p.terms, p.makespan_s, p.unplanned, p.exact, stats) for p in plans]
 
 
