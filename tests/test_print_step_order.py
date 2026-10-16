@@ -18,6 +18,7 @@ import jobs
 import projects
 import slicer
 import splits
+from tests.test_plan_plates import legacy_plan
 from tests.test_slicer import cube_stl, fake_runner, make_fake_orca
 
 GEOMETRY = not splits.missing_modules()
@@ -96,7 +97,7 @@ class PrintStepOrderTests(unittest.TestCase):
         return self.save(project, change)
 
     def plan(self, project):
-        return self.call("POST", f"/api/projects/{project['id']}/plan", {})
+        return legacy_plan(project["id"])
 
     def accept(self, project, **body):
         return self.call("POST", f"/api/projects/{project['id']}/plan/accept", {"revision": project["revision"], **body})

@@ -283,22 +283,8 @@ def _footprint(mesh: "Mesh", up: np.ndarray):
     return float(hull.volume), height, inside
 
 
-def rank(verts, tris, scale, rotation, *, angle: float = DEFAULT_OVERHANG_ANGLE, nozzle: float = 0.4,
-         limits: dict | None = None, cut_normals=()) -> dict:
-    """Steady orientations to print this mesh in, best first, for the planner.
-
-    Returns {"candidates": [...], "unavoidably_tippy": bool, "reason": str | None}. Each candidate is
-    {"rotation": [x, y, z], "support_volume": mm3, "support_source": "raycast" | "proxy", "needs_support": bool,
-     "contact": mm2, "height": mm, "cut_face": bool}. The first candidate is the one to use.
-
-    Candidates are the current orientation, the hull, normal-group and axis ones (`Mesh.candidates`) and each cut face
-    (`cut_normals`: outward normals of cut faces in the model's own space, which go on the bed; a small bonus breaks
-    ties in their favour). A steady one has a first-layer contact of at least `MIN_CONTACT_PER_NOZZLE_SQ` x nozzle^2,
-    its centre of mass inside that footprint, and is not taller than `TALL_RATIO` x the footprint's size. The steady
-    ones that fit `limits` are screened with the overhang proxy, and the best `RERANK_TOP` are re-ranked by an embree
-    ray-cast support volume (the proxy's own number when embree isn't installed). With nothing steady that fits an
-    empty bed the part is unavoidably tippy: the best that fits (failing that the best at all) is still returned,
-    with the reason."""
+def _screen(verts, tris, scale, rotation, angle, nozzle, limits, cut_normals=()):
+    """(mesh, options): every up direction worth scoring, the current one first, with its footprint, fit and steadiness."""
     mesh = Mesh(verts, tris, scale)
     points = mesh.hull()[0]
     current_R = rotation_matrix(rotation)
@@ -324,6 +310,38 @@ def rank(verts, tris, scale, rotation, *, angle: float = DEFAULT_OVERHANG_ANGLE,
         size = math.sqrt(o["contact"])
         o["steady"] = (o["contact"] > 0 and o["contact"] >= need and o["height"] <= TALL_RATIO * size
                        and o["inside"] >= min(1.0, COM_MARGIN_SHARE * size))
+    return mesh, options
+
+
+def current(verts, tris, scale, rotation, *, angle: float = DEFAULT_OVERHANG_ANGLE, nozzle: float = 0.4,
+            limits: dict | None = None) -> dict:
+    """How the mesh stands as it is: {"steady": bool, "support_volume": mm3, "needs_support": bool}, judged by the same test
+    and the same support measure as `rank`'s candidates (ray-cast, or the proxy when embree isn't installed)."""
+    mesh, options = _screen(verts, tris, scale, rotation, angle, nozzle, limits)
+    now = options[0]
+    volume = _ray_support_volume(mesh, now["up"], angle)
+    if volume is None:
+        volume = now["metrics"]["support"]
+    return {"steady": bool(now["steady"]), "support_volume": volume, "needs_support": volume > NEEDS_SUPPORT_MM3}
+
+
+def rank(verts, tris, scale, rotation, *, angle: float = DEFAULT_OVERHANG_ANGLE, nozzle: float = 0.4,
+         limits: dict | None = None, cut_normals=()) -> dict:
+    """Steady orientations to print this mesh in, best first, for the planner.
+
+    Returns {"candidates": [...], "unavoidably_tippy": bool, "reason": str | None}. Each candidate is
+    {"rotation": [x, y, z], "support_volume": mm3, "support_source": "raycast" | "proxy", "needs_support": bool,
+     "contact": mm2, "height": mm, "cut_face": bool}. The first candidate is the one to use.
+
+    Candidates are the current orientation, the hull, normal-group and axis ones (`Mesh.candidates`) and each cut face
+    (`cut_normals`: outward normals of cut faces in the model's own space, which go on the bed; a small bonus breaks
+    ties in their favour). A steady one has a first-layer contact of at least `MIN_CONTACT_PER_NOZZLE_SQ` x nozzle^2,
+    its centre of mass inside that footprint, and is not taller than `TALL_RATIO` x the footprint's size. The steady
+    ones that fit `limits` are screened with the overhang proxy, and the best `RERANK_TOP` are re-ranked by an embree
+    ray-cast support volume (the proxy's own number when embree isn't installed). With nothing steady that fits an
+    empty bed the part is unavoidably tippy: the best that fits (failing that the best at all) is still returned,
+    with the reason."""
+    mesh, options = _screen(verts, tris, scale, rotation, angle, nozzle, limits, cut_normals)
 
     def bonus(o):
         return 1 - CUT_FACE_BONUS if o["cut"] else 1.0
