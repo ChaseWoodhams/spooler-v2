@@ -38,7 +38,10 @@ TOOL_NAMES = (
     "get_slice_summary", "propose_orientation", "propose_arrange", "propose_plan", "propose_settings",
 )
 
-PROPOSAL_KINDS = ("orientation", "arrange", "plan", "settings")       # propose_<kind>; each can be switched off in Settings > Assistant
+# The one list of Proposal kinds (propose_<kind>; each can be switched off in Settings > Assistant) and the words for them. The Settings
+# group and the system prompt are built from these; they live here because this server must not import app code.
+KIND_WORDS = {"orientation": "Orientation", "arrange": "Arrange", "plan": "Plan plates", "settings": "Settings"}
+PROPOSAL_KINDS = tuple(KIND_WORDS)
 SETTINGS_NAME = "assistant_settings.json"
 
 

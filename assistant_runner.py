@@ -85,7 +85,7 @@ Proposals
 """
 
 
-KIND_WORDS = {"orientation": "Orientation", "arrange": "Arrange", "plan": "Plan plates", "settings": "Settings"}
+KIND_WORDS = spooler_mcp.KIND_WORDS         # the one list of Proposal kinds lives in the tool server
 
 
 def kinds_off(tuning: dict) -> list:

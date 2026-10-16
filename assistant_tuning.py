@@ -15,8 +15,18 @@ Shape (later groups are added to GROUPS, nothing else is reworked):
 import copy
 
 import assistant
+import spooler_mcp
 
-VERSION = 1
+VERSION = spooler_mcp.TUNING_VERSION
+
+# One hint per Proposal kind, in the order of spooler_mcp.PROPOSAL_KINDS, which owns the list of kinds and their words.
+_KIND_HINTS = {
+    "orientation": "Propose a better orientation for Objects.",
+    "arrange": "Propose an Arrange of the Objects on Plates.",
+    "plan": "Propose Plan plates for the whole project.",
+    "settings": "Propose slicer setting changes.",
+}
+assert tuple(_KIND_HINTS) == spooler_mcp.PROPOSAL_KINDS, "every Proposal kind needs a hint here, in the tool server's order"
 
 GROUPS = {
     "limits": {
@@ -75,12 +85,7 @@ GROUPS = {
         "label": "Proposal kinds",
         "hint": "Which kinds of Proposal the Assistant may make. A kind switched off is taken away from its tools, and it tells the person so. Reading tools are unaffected. "
                 "Applies to the next run and to terminal sessions.",
-        "fields": {
-            "orientation": {"label": "Orientation", "type": "bool", "default": True, "hint": "Propose a better orientation for Objects."},
-            "arrange": {"label": "Arrange", "type": "bool", "default": True, "hint": "Propose an Arrange of the Objects on Plates."},
-            "plan": {"label": "Plan plates", "type": "bool", "default": True, "hint": "Propose Plan plates for the whole project."},
-            "settings": {"label": "Settings", "type": "bool", "default": True, "hint": "Propose slicer setting changes."},
-        },
+        "fields": {kind: {"label": spooler_mcp.KIND_WORDS[kind], "type": "bool", "default": True, "hint": hint} for kind, hint in _KIND_HINTS.items()},
     },
 }
 

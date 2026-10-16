@@ -44,6 +44,15 @@ class ProposalKindTests(unittest.TestCase):
         self.assertNotIn("switched off", self.record()["system_prompt"])
         self.assertEqual(len(self.record()["init"]["tools"]), 11)
 
+    def test_the_settings_group_the_tool_server_and_the_fixed_block_share_one_list_of_kinds(self):
+        fields = self.call("GET", "/api/assistant/settings")[1]["tuning"]["groups"]["proposal_kinds"]["fields"]
+        self.assertEqual(tuple(fields), spooler_mcp.PROPOSAL_KINDS)
+        self.assertEqual({k: f["label"] for k, f in fields.items()}, {"orientation": "Orientation", "arrange": "Arrange", "plan": "Plan plates", "settings": "Settings"})
+        self.assertEqual(tuple(assistant_runner.KIND_WORDS), spooler_mcp.PROPOSAL_KINDS)
+        self.save(plan=False)
+        self.assertEqual(self.finished()["state"], "answer")
+        self.assertIn("switched off in Settings: Plan plates", self.record()["system_prompt"])
+
     def test_a_switched_off_kind_is_not_allowed_not_listed_and_named_in_the_fixed_block(self):
         self.assertEqual(self.save(arrange=False, plan=False)[0], 200)
         self.assertEqual(self.finished()["state"], "answer")
