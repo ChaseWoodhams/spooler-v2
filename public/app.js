@@ -1882,7 +1882,7 @@ function _assistantTuningTextRow(group, key, field, value) {
   label.htmlFor = id;
   label.textContent = field.label;
   const area = document.createElement("textarea");
-  Object.assign(area, { id, rows: 14, value, maxLength: field.max, placeholder: "Empty: the built-in instructions are used." });
+  Object.assign(area, { id, rows: 14, value, placeholder: "Empty: the built-in instructions are used." });
   area.dataset.group = group;
   area.dataset.key = key;
   const count = document.createElement("small");
