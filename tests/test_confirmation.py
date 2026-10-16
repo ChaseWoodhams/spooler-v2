@@ -5,6 +5,9 @@ import unittest
 
 import confirmation
 import planner
+import splits
+
+GEOMETRY = not splits.missing_modules()
 
 BED = (0.0, 0.0, 250.0, 250.0)
 TERMS = {"makespan_min": 0, "support_g": 0, "plates": 0, "machine_min": 0, "unavoidable_tippy": 0, "split_pairs_apart": 0}
@@ -43,8 +46,9 @@ def plan(*plates):
 class FakeSlicer:
     """Answers each plate with 100 s per Object and 1 g of support per Object on a supported plate."""
 
-    def __init__(self, seconds_per_object=100, delay=0.0, fail=()):
+    def __init__(self, seconds_per_object=100, delay=0.0, fail=(), fail_together=()):
         self.calls, self.delay, self.fail, self.per_object = [], delay, set(fail), seconds_per_object
+        self.together = [set(group) for group in fail_together]   # sets of Objects that fail to slice on one plate, not alone
         self.lock = threading.Lock()
 
     def __call__(self, job, timeout_s):
@@ -53,6 +57,8 @@ class FakeSlicer:
         time.sleep(min(self.delay, max(timeout_s, 0)))
         if self.fail & set(job.keys):
             raise RuntimeError("OrcaSlicer failed")
+        if any(group <= set(job.keys) and len(job.keys) > 1 for group in self.together):
+            raise RuntimeError("Toolpaths conflict with each other")
         grams = float(len(job.keys)) if job.supports else 0.0
         return confirmation.PlateMeasure(len(job.keys) * self.per_object if job.kind == "full" else None, grams)
 
@@ -124,9 +130,9 @@ class MeasuredFiguresTests(unittest.TestCase):
 
 class FailureTests(unittest.TestCase):
     def test_a_failed_slice_leaves_the_plate_on_its_proxy_figures_and_the_run_completes(self):
-        result = confirm([plan(plate([1, 2], seconds=777), plate([3, 4], seconds=600))], FakeSlicer(fail=[3]))
+        result = confirm([plan(plate([1, 2], seconds=777), plate([3], seconds=600, printer="B"))], FakeSlicer(fail=[3]))
         by_keys = {tuple(i.key for i in p.plate.items): p for p in result.plans[0].plates}
-        failed, fine = by_keys[(3, 4)], by_keys[(1, 2)]
+        failed, fine = by_keys[(3,)], by_keys[(1, 2)]
         self.assertEqual(failed.seconds, 600)
         self.assertTrue(failed.partly_estimated)
         self.assertIn("OrcaSlicer failed", failed.error)
@@ -140,6 +146,47 @@ class FailureTests(unittest.TestCase):
         result = confirm([b, a], FakeSlicer(fail=[1, 2, 3, 4]))
         self.assertCountEqual([id(c.plan) for c in result.plans], [id(a), id(b)])
         self.assertTrue(all(c.partly_estimated for c in result.plans))
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class DidNotSliceTests(unittest.TestCase):
+    """A plate whose slice fails is never left in a plan as if it were fine (auto-plating follow-up): its Objects go onto
+    plates of their own, and a plate that still does not slice is marked so the plan is not the one to accept."""
+
+    def test_a_plate_that_does_not_slice_is_replanned_as_one_plate_per_object(self):
+        slicer = FakeSlicer(fail_together=[{1, 2}])
+        result = confirm([plan(plate([1, 2], seconds=777), plate([3, 4], seconds=600, printer="B"))], slicer)
+        best = result.plans[0]
+        self.assertEqual(sorted(tuple(i.key for i in p.plate.items) for p in best.plates), [(1,), (2,), (3, 4)])
+        self.assertFalse(best.did_not_slice)
+        self.assertTrue(all(not p.did_not_slice and not p.partly_estimated for p in best.plates))
+        self.assertEqual(best.terms["plates"], 3)
+        self.assertEqual(result.stats["replanned"], 1)
+        self.assertIn((1,), [tuple(j.keys) for j in slicer.calls])     # the new plates were sliced, not assumed to work
+
+    def test_every_plate_failing_is_a_broken_slicer_not_a_bad_plate_so_nothing_is_split(self):
+        result = confirm([plan(plate([1, 2]), plate([3, 4], printer="B"))], FakeSlicer(fail=[1, 2, 3, 4]))
+        self.assertEqual(len(result.plans[0].plates), 2)
+        self.assertEqual(result.stats["replanned"], 0)
+
+    def test_a_plate_that_still_does_not_slice_is_marked_and_its_plan_ranks_last(self):
+        broken = plan(plate([1]), plate([2], printer="B"))
+        fine = plan(plate([3, 4]))
+        cheap = planner.Plan(broken.plates, 1.0, TERMS, 0.0)
+        dear = planner.Plan(fine.plates, 9.0, TERMS, 0.0)
+        result = confirm([cheap, dear], FakeSlicer(fail=[2]))
+        self.assertIs(result.plans[0].plan, dear)
+        self.assertFalse(result.plans[0].did_not_slice)
+        marked = result.plans[1]
+        self.assertTrue(marked.did_not_slice)
+        self.assertEqual([tuple(i.key for i in p.plate.items) for p in marked.plates if p.did_not_slice], [(2,)])
+        self.assertEqual(result.stats["did_not_slice"], 1)
+
+    def test_a_plate_the_budget_left_unsliced_is_estimated_not_marked_as_not_slicing(self):
+        plates = [plate([k], printer="A" if k % 2 else "B", x=10 * k) for k in range(1, 9)]
+        result = confirm([plan(*plates)], FakeSlicer(delay=0.15), n=8, budget_s=0.4, workers=1)
+        self.assertTrue(result.plans[0].partly_estimated)
+        self.assertFalse(result.plans[0].did_not_slice)
 
 
 class BudgetTests(unittest.TestCase):

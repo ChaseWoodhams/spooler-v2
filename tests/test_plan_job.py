@@ -16,6 +16,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
+import confirmation
 import database
 import jobs
 import plan_job
@@ -222,6 +223,41 @@ class PlanJobApiTests(unittest.TestCase):
         self.assertEqual(status, 200, undone)
         self.assertEqual([(o["id"], o["plate"], o["position"]) for o in undone["data"]["objects"]],
                          [(o["id"], o["plate"], o["position"]) for o in project["data"]["objects"]])
+
+    def slicing_never_object(self, bad):
+        """Confirmation with a slicer that fails on any plate holding Object `bad` (OrcaSlicer's "Toolpaths conflict")."""
+        real = confirmation.confirm_plans
+
+        def slice_plate(job, timeout_s):
+            if bad in job.keys:
+                raise RuntimeError("Toolpaths conflict with each other")
+            return confirmation.PlateMeasure(100 * len(job.keys), 0.0)
+        return mock.patch.object(confirmation, "confirm_plans", lambda *a, **k: real(*a, **{**k, "slice_plate": slice_plate}))
+
+    def test_a_plate_that_does_not_slice_is_flagged_and_accept_refuses_it_unless_forced(self):
+        # four different cubes: Copies of one Model would share a cached slice, hiding which Object the fake slicer rejects
+        project = self.lay(self.project_with(*(cube_stl(n) for n in (20, 25, 30, 35))), [(m, m, False) for m in (1, 2, 3, 4)])
+        with self.slicing_never_object(3):
+            job = self.plan(project)
+        plan = job["proposal"]["plans"][0]
+        self.assertEqual(job["state"], "done", job)
+        self.assertFalse(plan["can_accept"])
+        self.assertFalse(plan["recommended"])
+        flagged = [r for r in plan["plate_rows"] if r["did_not_slice"]]
+        self.assertEqual([[o["id"] for o in r["objects"]] for r in flagged], [[3]])      # replanned: Object 3 on a plate of its own
+        self.assertEqual(plan["did_not_slice_plates"], [flagged[0]["name"]])
+        self.assertIn("did not slice", job["proposal"]["summary"])
+        status, refused = self.accept(project, job)
+        self.assertEqual(status, 409, refused)
+        self.assertEqual(self.current(project)["revision"], project["revision"])        # nothing changed
+        status, forced = self.accept(project, job, allow_unsliced=True)
+        self.assertEqual(status, 200, forced)
+
+    def test_plates_that_slice_leave_the_plan_acceptable(self):
+        plan = self.plan(self.scattered())["proposal"]["plans"][0]
+        self.assertTrue(plan["can_accept"])
+        self.assertTrue(plan["recommended"])
+        self.assertEqual(plan["did_not_slice_plates"], [])
 
     def test_an_also_considered_plan_can_be_accepted_instead(self):
         project = self.scattered()

@@ -1286,7 +1286,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             def accept():
                 body = self._json_body()
                 if "proposal" in body:
-                    return plan_job.accept(self._job_id(), body.get("proposal"), body.get("plan", 0))
+                    return plan_job.accept(self._job_id(), body.get("proposal"), body.get("plan", 0), bool(body.get("allow_unsliced")))
                 return projects.accept_plan(self._job_id(), body.get("plan") or body.get("revision"), body.get("fingerprint"), bool(body.get("allow_tilt")))
             self._jobs_call(accept, broadcast=False)
             return

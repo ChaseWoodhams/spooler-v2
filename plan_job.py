@@ -12,8 +12,12 @@ fingerprint; plates a plan empties lose theirs.
               and a message; each is also sent to browsers over the websocket as {"type": "plan_job", "job": …}.
   stored      `<projects dir>/.plans/<token>.json`, swept after a day. It outlives a restart; the job registry does not.
 
+A plate whose slice failed in OrcaSlicer (even after `confirmation` replanned its Objects onto plates of their own) is
+marked `did_not_slice` in its row; its plan has `can_accept` False, is never `recommended`, and `accept` refuses it unless
+`allow_unsliced` is given, so Accept cannot silently apply a plate known to fail. `confirmation` ranks such plans last.
+
 Public API: `start(project_id)`, `get_job(project_id, job_id)`, `get_proposal(project_id, token)`, `accept(project_id, token,
-plan)`, `dismiss(project_id, token)`.
+plan, allow_unsliced)`, `dismiss(project_id, token)`.
 """
 
 import asyncio
@@ -405,7 +409,8 @@ def _summary(plans: list, unplanned: list) -> str:
         return "Nothing to plan" + (f": {len(unplanned)} object{'s' if len(unplanned) != 1 else ''} left unplanned" if unplanned else "")
     best = plans[0]
     return (f"{best['plates']} plate{'s' if best['plates'] != 1 else ''}, done in {best['makespan_s'] // 60} min"
-            + (", partly estimated" if best["partly_estimated"] else ""))
+            + (", partly estimated" if best["partly_estimated"] else "")
+            + (f"; {', '.join(best['did_not_slice_plates'])} did not slice" if best.get("did_not_slice_plates") else ""))
 
 
 def _apply(job: _Job, problem: planner.Problem, reading: _Reading, index: int, cplan) -> dict:
@@ -452,6 +457,7 @@ def _apply(job: _Job, problem: planner.Problem, reading: _Reading, index: int, c
                      "printer": cp.printer, "seconds": int(cp.seconds), "support_g": round(cp.support_g, 1),
                      "time_measured": cp.time_measured, "support_measured": cp.support_measured,
                      "partly_estimated": cp.partly_estimated, "error": cp.error, "supports": bool(cp.plate.supports),
+                     "did_not_slice": bool(cp.did_not_slice),
                      "kind": cp.kind,
                      "objects": [{"id": o["id"], "name": reading.names.get(o["id"], f"Object {o['id']}"),
                                   "turned": placement_read._turned(was[o["id"]], o["rotation"]), "tippy": o["id"] in tippy}
@@ -463,10 +469,12 @@ def _apply(job: _Job, problem: planner.Problem, reading: _Reading, index: int, c
         slot["plates"].append(row["plate"])
     tippy_rows = [{"object": key, "name": reading.names.get(key, f"Object {key}"), "reason": reading.tippy_reason(objects[key]),
                    "brim": True, "plate": plates[objects[key]["plate"]]["name"]} for key in sorted(tippy)]
-    return {"index": index, "recommended": index == 0, "cost": round(cplan.cost, 2), "terms": cplan.terms,
+    unsliced = [r["name"] for r in rows if r["did_not_slice"]]
+    return {"index": index, "recommended": index == 0 and not unsliced, "cost": round(cplan.cost, 2), "terms": cplan.terms,
             "makespan_s": int(cplan.makespan_s), "support_g": round(sum(r["support_g"] for r in rows), 1), "plates": len(rows),
             "tippy": len(tippy), "machine_s": sum(r["seconds"] for r in rows), "partly_estimated": bool(cplan.partly_estimated),
-            "partly_estimated_plates": [r["name"] for r in rows if r["partly_estimated"]], "printers": finish,
+            "partly_estimated_plates": [r["name"] for r in rows if r["partly_estimated"]],
+            "did_not_slice_plates": unsliced, "can_accept": not unsliced, "printers": finish,
             "plate_rows": rows, "tippy_objects": tippy_rows, "emptied": list(emptied), "data": data}
 
 
@@ -542,9 +550,10 @@ def get_proposal(project_id: int, token) -> dict:
 
 # --- accept and dismiss ----------------------------------------------------------------------------------------------------
 
-def accept(project_id: int, token, plan=0) -> dict:
+def accept(project_id: int, token, plan=0, allow_unsliced: bool = False) -> dict:
     """Apply one stored plan (0 the recommended one, 1 and 2 the "also considered") as one change. Returns the Project (one
-    revision later) plus "plan", the plan applied. Refused with 409 when the Project changed since the Proposal was made."""
+    revision later) plus "plan", the plan applied. Refused with 409 when the Project changed since the Proposal was made, and
+    when the plan holds a plate that did not slice (unless `allow_unsliced`)."""
     import projects
     stored = _load(project_id, token)
     try:
@@ -557,6 +566,9 @@ def accept(project_id: int, token, plan=0) -> dict:
     record = projects.get_project(project_id)
     if record["created_at"] != stored["project_created_at"] or record["revision"] != stored["base_revision"]:
         raise jobs.JobError(SUPERSEDED, 409)
+    if not chosen.get("can_accept", True) and not allow_unsliced:
+        names = ", ".join(chosen.get("did_not_slice_plates") or []) or "a plate"
+        raise jobs.JobError(f"OrcaSlicer could not slice {names} in this plan, so it would not print. Review another plan or plan again", 409)
     kept_now = {k["id"] for k in _kept_and_open(project_id, record)[0]}
     if kept_now != {k["id"] for k in stored["kept"]}:   # queued or printed since: not the plan's to move
         raise jobs.JobError("A plate was queued or printed since this plan was made — plan again", 409)

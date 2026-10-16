@@ -57,7 +57,7 @@ function headline(proposal, plan) {
       <div class="slicer-muted">${before.plates ? `Now ${esc(dur(before.makespan_s))}. ` : ""}Plan nozzle ${esc(proposal.plan_nozzle)} mm. ${esc(plural(plan.plates, "plate"))} planned${proposal.kept.length ? `. Kept as they are: ${esc(plural(proposal.kept.length, "plate"))}` : ""}.</div>
       <div class="ps-actions">
         <button class="btn btn-secondary" type="button" data-ps="dismiss">Dismiss</button>
-        <button class="btn btn-primary" type="button" data-ps="accept"${run.stale ? " disabled" : ""}>Accept this plan</button>
+        <button class="btn btn-primary" type="button" data-ps="accept"${run.stale || plan.can_accept === false ? " disabled" : ""}>Accept this plan</button>
       </div>
       <p class="slicer-muted ps-once">One Accept applies every plate change as a single change that Undo reverses. Pinned objects and plates that are queued, printing or printed are not touched.</p>
       <div class="ps-problem" id="ps-error" role="alert">${run.stale ? staleHtml(run.stale) : ""}</div>
@@ -118,11 +118,13 @@ function tiles(proposal, plan) {
 }
 
 function estimateNote(proposal, plan) {
-  if (!plan.partly_estimated) return "";
+  const failed = plan.did_not_slice_plates || [];
+  const broken = failed.length ? `<p class="ps-note">${chip("did not slice", "bad")} OrcaSlicer could not slice ${esc(failed.join(", "))}, so this plan would not print as laid out. Accept is off for it: review another plan or plan again.</p>` : "";
+  if (!plan.partly_estimated) return broken;
   const names = plan.partly_estimated_plates || [];
   const why = names.length ? `${esc(names.join(", "))} could not be sliced by OrcaSlicer, so ${names.length === 1 ? "its" : "their"} time and support are Spooler estimates and the finish time may be off.`
     : "Some figures are Spooler estimates (the slicing time ran out), so the finish time may be off.";
-  return `<p class="ps-note">${chip("partly estimated", "est", estimateTip(proposal))} ${why}</p>`;
+  return `${broken}<p class="ps-note">${chip("partly estimated", "est", estimateTip(proposal))} ${why}</p>`;
 }
 
 function details(proposal, plan) {
@@ -131,7 +133,7 @@ function details(proposal, plan) {
     const names = r.objects.map(o => esc(o.name)).join(", ");
     const turned = r.objects.filter(o => o.turned).length;
     const printer = proposal.printers.find(p => String(p.id) === String(r.printer))?.name || r.printer;
-    return `<tr><th scope="row">${esc(r.name)} ${r.new ? chip("new", "plain") : ""} ${r.partly_estimated ? chip("partly estimated", "est", tip) : ""} ${r.supports ? chip("supports", "plain") : ""}</th>
+    return `<tr><th scope="row">${esc(r.name)} ${r.new ? chip("new", "plain") : ""} ${r.did_not_slice ? chip("did not slice", "bad") : ""} ${r.partly_estimated ? chip("partly estimated", "est", tip) : ""} ${r.supports ? chip("supports", "plain") : ""}</th>
         <td>${esc(printer)}</td><td>${esc(dur(r.seconds))}</td><td>${esc(grams(r.support_g))}</td>
         <td>${esc(plural(r.objects.length, "object"))}${turned ? `, ${turned} turned` : ""}<div class="slicer-muted">${names}</div></td></tr>`;
   }).join("");
