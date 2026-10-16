@@ -40,7 +40,7 @@ from values import first
 # printer code; the names stay reachable here.
 from profile_read import (BED_TYPES, BLOCKED_SETTINGS, bundle_settings, _check_value, _compatible, configuration_issues,
                           DERIVED_NOZZLES, filament_compatibility, filament_snapshot, load_bundle, normalize_overrides,
-                          PRESET_KINDS, PRINTER_FAMILY, profiles_dir, settings_schema, _structured, _tab_keys, verify_bundle)
+                          PRESET_KINDS, PRINTER_FAMILY, profiles_dir, settings_hash, settings_schema, _structured, _tab_keys, verify_bundle)
 
 APP_DIR         = Path(__file__).parent
 SLICE_TIMEOUT_S = int(os.getenv("SLICE_TIMEOUT_S", "900"))

@@ -257,6 +257,34 @@ MIGRATIONS = [
     );
     CREATE INDEX project_splits_by_split ON project_splits (split_id);
     """,
+    # 13 — Calibration log (additive): what each slice was made with, and the support grams per Object, to fit time and support later.
+    #      Old slice_log rows get a best-effort bundle id from the jobs and slices of the same plate nearest in time; the rest stay without one.
+    """
+    ALTER TABLE slice_log ADD COLUMN bundle_id TEXT;
+    ALTER TABLE slice_log ADD COLUMN settings_hash TEXT;
+    ALTER TABLE slice_log ADD COLUMN nozzle REAL;
+    ALTER TABLE slice_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'full' CHECK (kind IN ('full', 'reduced'));
+    ALTER TABLE slice_log ADD COLUMN orca_version TEXT;
+    ALTER TABLE slice_log ADD COLUMN support_volume_cm3 REAL;
+    ALTER TABLE slice_log ADD COLUMN support_g REAL;
+    CREATE TABLE support_log (
+        id                  INTEGER PRIMARY KEY,
+        slice_log_id        INTEGER NOT NULL REFERENCES slice_log (id) ON DELETE CASCADE,
+        object_name         TEXT    NOT NULL,
+        bundle_hash         TEXT,
+        support_volume_cm3  REAL,
+        support_g           REAL,
+        created_at          REAL    NOT NULL
+    );
+    CREATE INDEX support_log_by_slice ON support_log (slice_log_id);
+    UPDATE slice_log SET bundle_id = (
+        SELECT bundle FROM (
+            SELECT s.bundle_id AS bundle, abs(s.created_at - slice_log.created_at) AS gap
+            FROM jobs j JOIN slices s ON s.id = j.slice_id
+            WHERE j.project_id = slice_log.project_id AND j.plate_id = slice_log.plate_id)
+        ORDER BY gap LIMIT 1)
+        WHERE project_id IS NOT NULL AND plate_id IS NOT NULL;
+    """,
 ]
 
 _lock = threading.RLock()
