@@ -2,9 +2,11 @@
 import json
 import time
 import unittest
+from unittest import mock
 
 import assistant
 import assistant_runner
+import assistant_tuning
 from tests import test_assistant_ask as base
 from tests.fake_claude import read_record
 
@@ -321,6 +323,59 @@ class TuningModelTests(unittest.TestCase):
         self.assertEqual((body["tuning"]["values"]["model"], body["tuning"]["values"]["limits"]["max_turns"]), ({"name": ""}, 7))
         self.finished()
         self.assertNotIn("--model", self.argv())
+
+
+@unittest.skipUnless(base.GEOMETRY, "geometry libraries not installed")
+class TuningOneSnapshotTests(unittest.TestCase):
+    setUp, tearDown = base.AskTests.setUp, base.AskTests.tearDown
+    call, make_project, scenario, ask, poll, finished = (base.AskTests.call, base.AskTests.make_project, base.AskTests.scenario, base.AskTests.ask,
+                                                         base.AskTests.poll, base.AskTests.finished)
+
+    def drifting(self):
+        """A snapshot that differs on every call (the n-th call has n proposals, turns, history and model), so a second snapshot shows."""
+        real, calls = assistant_tuning.snapshot, []
+
+        def snap():
+            values = real()
+            calls.append(len(calls) + 1)
+            n = calls[-1]
+            values["limits"].update(proposals_per_run=n, max_turns=10 + n)
+            values["model"]["name"] = f"model-{n}"
+            values["prompt_context"]["history_turns"] = n
+            return values
+        return mock.patch.object(assistant_tuning, "snapshot", side_effect=snap), calls
+
+    def test_one_run_uses_one_snapshot_for_the_prompt_the_cli_args_the_system_prompt_and_the_log(self):
+        history = [{"role": "user", "text": f"turn {i}"} for i in range(5)]
+        patch, calls = self.drifting()
+        self.call("GET", f"/api/projects/{self.project['id']}/assistant/status")        # the status route reads the tuning too: not part of the ask
+        with patch:
+            status, run = self.call("POST", f"/api/projects/{self.project['id']}/assistant/ask", {"message": "Make it stronger", "history": history})
+        self.assertEqual(status, 200, run)
+        self.assertEqual(self.poll(run)["state"], "answer")
+        self.assertEqual(calls, [1], "ask takes one snapshot")
+        record = read_record(self.cli_dir)
+        argv = record["argv"]
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "11")
+        self.assertEqual(argv[argv.index("--model") + 1], "model-1")
+        self.assertIn("At most 1 Proposals per run.", record["system_prompt"])
+        self.assertIn("turn 4", record["stdin"])
+        self.assertNotIn("turn 3", record["stdin"], "history_turns of the same snapshot")
+        deadline = time.monotonic() + 10
+        entries = []
+        while not entries and time.monotonic() < deadline:
+            entries = self.call("GET", "/api/assistant/run-log")[1]["entries"]
+            time.sleep(0.05)
+        tuning = entries[0]["tuning"]
+        self.assertEqual((tuning["limits"]["max_turns"], tuning["model"]["name"], tuning["prompt_context"]["history_turns"]), (11, "model-1", 1))
+
+    def test_a_preview_takes_one_snapshot(self):
+        patch, calls = self.drifting()
+        with patch:
+            status, body = self.call("POST", f"/api/projects/{self.project['id']}/assistant/preview", {"message": "Hello", "history": []})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(calls, [1])
+        self.assertIn("At most 1 Proposals per run.", body["instructions"])
 
 
 @unittest.skipUnless(base.GEOMETRY, "geometry libraries not installed")

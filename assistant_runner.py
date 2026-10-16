@@ -117,7 +117,7 @@ class AskError(JobError):
 
 
 class Run:
-    def __init__(self, project_id: int):
+    def __init__(self, project_id: int, tuning: dict):
         self.id = uuid.uuid4().hex
         self.project_id = int(project_id)
         self.state = "thinking"
@@ -127,7 +127,7 @@ class Run:
         self.started = time.monotonic()
         self.finished = None
         self.init_ok = False
-        self.tuning = assistant_tuning.snapshot()    # read once: this run uses only these values, whatever is saved while it works
+        self.tuning = tuning                 # the one snapshot `ask` took: this run uses only these values, whatever is saved while it works
         self.proc = None                   # the CLI process, kept so Cancel and the deadline can end its tree
         self.reason = None                 # "cancelled" or "timeout" once either has been asked for
         self.tool_calls = 0                # every tool_use seen (steps are capped, this is not)
@@ -257,14 +257,19 @@ def prompt_turns(history, context: dict) -> list:
     return clean_history(history, context) if context["history_enabled"] else (clean_history(history), [])[1]
 
 
-def preview(project_id: int, message, history=None) -> dict:
-    """What the next run would send for the saved settings, built by the same functions a run uses. Starts nothing."""
+def check_question(message, tuning: dict, empty: str) -> None:
+    """Refuse a question that is not text, is blank (`empty` is the message) or is longer than the snapshot's question length."""
     if not isinstance(message, str) or not message.strip():
-        raise AskError("Type a sample question first", 400)
-    snap = assistant_tuning.snapshot()
-    longest = snap["limits"]["question_chars"]
+        raise AskError(empty, 400)
+    longest = tuning["limits"]["question_chars"]
     if len(message) > longest:
         raise AskError(f"Keep the question under {longest} characters", 400)
+
+
+def preview(project_id: int, message, history=None) -> dict:
+    """What the next run would send for the saved settings, built by the same functions a run uses. Starts nothing."""
+    snap = assistant_tuning.snapshot()
+    check_question(message, snap, "Type a sample question first")
     import projects
     record = projects.get_project(int(project_id))
     context = snap["prompt_context"]
@@ -276,12 +281,9 @@ def preview(project_id: int, message, history=None) -> dict:
 def ask(project_id: int, message, history=None) -> dict:
     """Start a run for one project and return its view. Refuses (AskError/JobError) a bad ask, an unavailable Assistant, an unknown
     project, and a project that already has a run working."""
-    if not isinstance(message, str) or not message.strip():
-        raise AskError("Type a question first", 400)
-    longest = assistant_tuning.snapshot()["limits"]["question_chars"]
-    if len(message) > longest:
-        raise AskError(f"Keep the question under {longest} characters", 400)
-    context = assistant_tuning.snapshot()["prompt_context"]
+    snap = assistant_tuning.snapshot()                # the one snapshot of this run: the question check, the prompt and the Run all read it
+    check_question(message, snap, "Type a question first")
+    context = snap["prompt_context"]
     turns = prompt_turns(history, context)
     import projects                                   # lazy, like assistant.purpose_summary: the app's own record, 404 when unknown
     record = projects.get_project(int(project_id))
@@ -294,7 +296,7 @@ def ask(project_id: int, message, history=None) -> dict:
     cli = assistant.resolve_cli(settings)
     if not cli:
         raise AskError("AI unavailable: no claude CLI found", 503)
-    run = Run(project_id)
+    run = Run(project_id, snap)
     run.names = _names(record)
     with _lock:
         if int(project_id) in _active:
