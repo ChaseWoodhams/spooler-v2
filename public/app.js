@@ -1929,13 +1929,14 @@ async function _resetAssistantTuning(group) {
     const r = await fetch("/api/assistant/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reset_tuning: group }) });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || "The tuning was not reset.");
-    const label = _assistantTuning?.groups?.[group]?.label || "Tuning";
+    const label = group === "all" ? "All tuning" : _assistantTuning?.groups?.[group]?.label || "Tuning";
     _renderAssistantTuning(d.tuning);
     _settingsFeedback(`${label} reset to the defaults.`, "ok");
   } catch (err) {
     _settingsFeedback(err.message, "error");
   }
 }
+document.getElementById("btn-assistant-tuning-reset-all")?.addEventListener("click", () => _resetAssistantTuning("all"));
 async function _loadAssistantSettings() {
   const result = document.getElementById("assistant-check-result");
   if (result) result.textContent = "";
