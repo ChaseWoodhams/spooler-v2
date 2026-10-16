@@ -56,7 +56,11 @@ def layer_count(height_mm: float, layer_height: float) -> int:
     return math.ceil(round(height_mm / layer_height, 6)) if height_mm > 0 else 0
 
 
-def predict_seconds(layers: int, volume_cm3: float, first_layer_cm2: float) -> int:
+def predict_seconds(layers: int, volume_cm3: float, first_layer_cm2: float, *, models=None, support_volume_cm3: float = 0.0,
+                    settings_hash: str | None = None, nozzle: float | None = None) -> int:
+    """Plate seconds: the fitted model (`calibration.fit_models()`) when given, else the seeds."""
+    if models is not None:
+        return models.predict_seconds(layers, volume_cm3, first_layer_cm2, support_volume_cm3, settings_hash=settings_hash, nozzle=nozzle)
     a, b, c = COEFFICIENTS
     return round(a * layers + b * volume_cm3 + c * first_layer_cm2)
 
