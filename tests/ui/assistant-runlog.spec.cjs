@@ -1,4 +1,4 @@
-// Settings > Assistant > Run log: entries newest first with outcome and reason, the privacy note, details with the prompt, and Clear.
+// Settings > Assistant > Assistant run log: entries newest first with outcome and reason, the privacy note, details with the prompt, and Clear.
 // The routes are stubbed (nothing real is called), like the other Assistant specs.
 const assert = require('node:assert/strict');
 const fx = require('./fixtures.cjs');
@@ -32,12 +32,15 @@ const entry = (n, outcome, reason) => ({
     await page.locator('#btn-settings-goto-assistant').click();
     await page.locator('#assistant-runlog-list li').first().waitFor();
 
-    assert.match(await page.locator('#assistant-runlog').innerText(), /project name, your question and the exact prompt[\s\S]*never sent to any service/, 'the privacy note is shown');
+    assert.match(await page.locator('#assistant-runlog').innerText(), /project name, your question and the exact prompts[\s\S]*never sent to any service/, 'the privacy note is shown');
+    assert.equal(await page.locator('#assistant-runlog-title').innerText(), 'Assistant run log');
+    assert.equal(await page.getByRole('button', { name: 'Clear Assistant run log' }).count(), 1);
     const items = await page.locator('#assistant-runlog-list li summary').allInnerTexts();
     assert.equal(items.length, 2);
     assert.match(items[0], /failed.*Question 2/, 'newest first, with its outcome');
     await page.locator('#assistant-runlog-list li').first().locator('summary').click();
     assert.match(await page.locator('#assistant-runlog-list li').first().innerText(), /exit code 3/, 'the reason is shown');
+    assert.match(await page.locator('#assistant-runlog-list li').first().innerText(), /Question prompt: \(below\)/);
     assert.equal(await page.locator('#assistant-runlog-list pre').first().innerText(), 'PROMPT <b>2</b>', 'the prompt is shown as text, never as markup');
     assert.equal(await page.locator('#assistant-runlog-list pre').nth(1).innerText(), 'SYSTEM <i>2</i>', 'the system prompt sent is shown too, as text');
     assert.match(await page.locator('#assistant-runlog-list li').first().innerText(), /Configured model: my-model[\s\S]*Model reported by the CLI: fake-model/);

@@ -1,4 +1,4 @@
-// Settings > Assistant > Run log: the newest finished Assistant runs, read from /api/assistant/run-log, with a Clear button.
+// Settings > Assistant > Assistant run log: the newest finished Assistant runs, read from /api/assistant/run-log, with a Clear button.
 // Self-contained (own section, own fetches); everything is drawn with textContent, so a question or prompt can never become markup.
 (function () {
   const list = () => document.getElementById("assistant-runlog-list");
@@ -41,8 +41,8 @@
       field(details, "Tools called", (e.steps || []).join(", ") || "none");
       field(details, "Proposals made", (e.proposals || []).length || "none");
       field(details, "Tuning in force", JSON.stringify(e.tuning || {}));
-      block(details, "Prompt sent", e.prompt);
-      block(details, "System prompt sent", e.system_prompt);
+      block(details, "Question prompt", e.prompt);
+      block(details, "System prompt", e.system_prompt);
       item.append(details);
       host.append(item);
     }
@@ -55,7 +55,7 @@
       if (!r.ok) throw new Error(d.error || "unavailable");
       draw(d);
     } catch (err) {
-      say(`Could not load the run log: ${err.message}.`);
+      say(`Could not load the Assistant run log: ${err.message}.`);
     }
   }
 
@@ -66,7 +66,7 @@
       if (!r.ok) throw new Error(d.error || "unavailable");
       draw(d);
     } catch (err) {
-      say(`Could not clear the run log: ${err.message}.`);
+      say(`Could not clear the Assistant run log: ${err.message}.`);
     }
   }
 
