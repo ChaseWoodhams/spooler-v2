@@ -10,7 +10,7 @@ const STEP = [{ label: 'Reading project', tool: 'get_project' }];
 async function open(browser, baseUrl) {
   const s = { asks: [], cancels: 0, hold: true, final: null, cancelView: null };
   const { page, context } = await sf.openSlicer(browser, baseUrl, { step: 'plates' });
-  await page.route('**/api/projects/1/assistant/status**', route => route.fulfill({ json: { available: true, reason: null, purpose: PURPOSE } }));
+  await page.route('**/api/projects/1/assistant/status**', route => route.fulfill({ json: { available: true, reason: null, purpose: PURPOSE, limits: { deadline_seconds: 60, question_chars: 2000, history_turns: 12, history_chars: 6000, turn_chars: 1500 } } }));
   await page.route('**/api/projects/1/assistant/ask', route => {
     s.asks.push(route.request().postDataJSON());
     return route.fulfill({ json: { id: `run${s.asks.length}`, project_id: 1, state: 'thinking', steps: [], answer: null, error: null } });

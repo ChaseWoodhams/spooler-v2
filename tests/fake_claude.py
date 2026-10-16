@@ -24,9 +24,11 @@ Scenario keys (all optional):
   skip_server      true: do not start the server (tool calls then report an error)
   hang_after_init  seconds to sleep after init (a stalled run)
   hang_after_calls seconds to sleep after the scripted calls, server still running (a run that proposed, then stalled)
+  exit_before_init exit with this code before printing anything (a CLI that dies at start)
   exit_code        exit with this code after the events; with no_result true no result event is printed
   no_result        true: print no final result
   unknown_events   true: print events of unknown types and subtypes the runner must ignore
+  reject_model     a --model value the CLI refuses: it prints an error result with the CLI's message and exits 1
   step_delay       seconds to sleep between events (lets a test watch progress)
 """
 import json
@@ -123,9 +125,11 @@ def main(argv) -> int:
     config = json.loads(Path(config_path).read_text(encoding="utf-8")) if config_path else {}
     record["mcp_config"] = config
     record["system_prompt"] = Path(prompt_path).read_text(encoding="utf-8") if prompt_path and Path(prompt_path).is_file() else None
-    save = lambda: (folder / RECORD).write_text(json.dumps(record), encoding="utf-8")
+    save =lambda: (folder / RECORD).write_text(json.dumps(record), encoding="utf-8")
     save()
 
+    if scenario.get("exit_before_init"):
+        return int(scenario["exit_before_init"])
     server, listed = None, []
     spec = (config.get("mcpServers") or {}).get("spooler")
     if spec and not scenario.get("skip_server"):
@@ -145,6 +149,15 @@ def main(argv) -> int:
     record["init"] = init
     save()
     emit(init)
+    rejected = scenario.get("reject_model")
+    if rejected and flag("--model") == rejected:          # the CLI's own refusal of a model it does not know
+        emit({"type": "result", "subtype": "success", "is_error": True, "session_id": "fake-session",
+              "result": f"There's an issue with the selected model ({rejected}). It may not exist or you may not have access to it."})
+        if server:
+            server.close()
+        record["finished"] = True
+        save()
+        return 1
     if scenario.get("unknown_events"):
         emit({"type": "system", "subtype": "ui_invalidate", "event": "ui.render"})
         emit({"type": "rate_limit_event", "info": {}})

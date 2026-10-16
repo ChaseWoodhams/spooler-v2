@@ -43,6 +43,11 @@ live data directory deliberately; to experiment safely, point at a copy.
   happens in the app, when the person presses Accept in the review sheet.
 - A server started without `--run` names its session `terminal-<random>`. Limits are per session: at most 3 Proposals, and only
   the newest of each kind is kept.
+- The Proposal kinds switches (Settings > Assistant > Tuning > Proposal kinds) apply to terminal sessions too. The tool server reads
+  the saved tuning from `assistant_settings.json` in the `--data-dir` when it starts, so a switched-off kind is missing from
+  `tools/list` and refused if called. Change a switch, then start a new session; a session already running keeps what it read.
+  A missing or damaged file means all kinds on. The other tuning groups (limits, instructions, model, prompt context) do not apply to
+  terminal sessions.
 
 ## In the app
 

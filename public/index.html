@@ -611,10 +611,39 @@
           <small class="input-hint" id="assistant-jev-hint">Leave empty for http://127.0.0.1:3455.</small>
         </div>
         <p id="assistant-check-result" class="input-hint" role="status" aria-live="polite"></p>
+        <section id="assistant-tuning" hidden aria-labelledby="assistant-tuning-title">
+          <h4 id="assistant-tuning-title">Tuning</h4>
+          <p class="input-hint">These settings only change how the Assistant behaves. They do not affect slicing or printing. Each change applies to the next Assistant run; a run already working keeps the values it started with.</p>
+          <p id="assistant-tuning-notes" class="input-hint" role="status" aria-live="polite" hidden></p>
+          <div id="assistant-tuning-groups"></div>
+          <p id="assistant-tuning-dirty" class="input-hint" role="status" aria-live="polite" hidden>Unsaved changes. Press Save to use them.</p>
+          <button id="btn-assistant-tuning-reset-all" class="btn btn-secondary" type="button">Reset all tuning</button>
+        </section>
         <div class="modal-actions">
           <button id="btn-assistant-check" class="btn btn-secondary">Check</button>
           <button id="btn-assistant-save" class="btn btn-primary">Save</button>
         </div>
+        <section id="assistant-runlog" aria-labelledby="assistant-runlog-title">
+          <h4 id="assistant-runlog-title">Assistant run log</h4>
+          <p class="input-hint">Every finished Assistant run is kept here, newest first, up to a limit. Each entry holds the project name, your question and the exact prompts sent, so it stays on this computer and is never sent to any service. Clear it whenever you like.</p>
+          <p id="assistant-runlog-status" class="input-hint" role="status" aria-live="polite"></p>
+          <ol id="assistant-runlog-list" class="assistant-runlog-list"></ol>
+          <button id="btn-assistant-runlog-clear" class="btn btn-secondary" type="button">Clear Assistant run log</button>
+        </section>
+        <section id="assistant-preview" aria-labelledby="assistant-preview-title">
+          <h4 id="assistant-preview-title">Preview</h4>
+          <p class="input-hint">Shows exactly what the next Assistant run would send, using your saved settings (Save first to see a change). Free: nothing is started and nothing leaves this computer.</p>
+          <label for="assistant-preview-project">Project</label>
+          <select id="assistant-preview-project"></select>
+          <label for="assistant-preview-question">Sample question</label>
+          <input id="assistant-preview-question" type="text" value="Make the brackets stronger">
+          <button id="btn-assistant-preview" class="btn btn-secondary" type="button">Show preview</button>
+          <p id="assistant-preview-status" class="input-hint" role="status" aria-live="polite"></p>
+          <h5>Instructions</h5>
+          <pre id="assistant-preview-instructions" class="assistant-runlog-prompt"></pre>
+          <h5>Prompt for this question</h5>
+          <pre id="assistant-preview-prompt" class="assistant-runlog-prompt"></pre>
+        </section>
       </div>
       <!-- Notifications sub-page -->
       <div id="settings-notifications" style="display:none">
@@ -872,6 +901,8 @@
   <script src="preview.js?v=5"></script>
   <script src="history.js?v=11"></script>
   <script src="outcome-prompt.js?v=6"></script>
+  <script src="assistant-runlog.js?v=1"></script>
+  <script src="assistant-preview.js?v=1"></script>
   <script src="app.js?v=80"></script>
   <script src="quick-print.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>

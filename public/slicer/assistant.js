@@ -9,7 +9,6 @@ const OPEN_KEY = "slicer.assistant.open";
 const CHIPS = ["Make these models stronger", "Fit more on this plate", "Why is this plate so slow?"];
 const PURPOSE_NAMES = { general: "General", functional: "Functional", display: "Display", draft: "Draft" };
 const MAX_LISTED = 5;
-const LIMITS = { deadline_seconds: 60, history_turns: 12, history_chars: 6000, turn_chars: 1500 };   // used until the server's own (status.limits) arrive
 const GIVE_UP_EXTRA_MS = 30000;        // the server stops a run at its deadline; if its answer still has not come this long after, stop waiting
 const POLL_FIRST_MS = 400;
 const POLL_MS = 900;
@@ -77,7 +76,7 @@ export const assistantPanel = {
 
   // Called whenever the page re-renders: read the (cached, cheap) status again when the saved project changed.
   limits() {
-    return { ...LIMITS, ...(this.status?.limits || {}) };
+    return this.status?.limits || {};        // the server is the one source: nothing here is hard-coded
   },
 
   update() {
@@ -141,6 +140,7 @@ export const assistantPanel = {
   // The earlier turns of this visit for the next ask: what was said and answered, newest kept, capped like the server does.
   history() {
     const limits = this.limits();
+    if (!(limits.history_turns > 0)) return [];        // the limits have not arrived: send no history rather than guess
     const turns = this.thread.flatMap(entry => {
       if (entry.kind === "user") return [{ role: "user", text: entry.text }];
       if (entry.kind === "answer") return [{ role: "assistant", text: entry.text }];
@@ -224,7 +224,8 @@ export const assistantPanel = {
     const run = this.run;
     if (!run || !this.busy) return;
     if (document.hidden) return;            // resumes on visibilitychange
-    if (Date.now() - run.startedAt > this.limits().deadline_seconds * 1000 + GIVE_UP_EXTRA_MS) { this.finish({ state: "error", error: "The assistant did not report back in time." }); return; }
+    const deadline = this.limits().deadline_seconds;
+    if (deadline && Date.now() - run.startedAt > deadline * 1000 + GIVE_UP_EXTRA_MS) { this.finish({ state: "error", error: "The assistant did not report back in time." }); return; }
     try {
       const view = await this.hooks.api("GET", `/api/projects/${run.project}/assistant/runs/${run.id}`);
       if (this.run !== run) return;
@@ -421,7 +422,7 @@ export const assistantPanel = {
   },
 
   endTitle(kind) {
-    if (kind === "timeout") return `No answer in ${this.limits().deadline_seconds} s`;
+    if (kind === "timeout") return this.limits().deadline_seconds ? `No answer in ${this.limits().deadline_seconds} s` : END_TITLES.error;
     return END_TITLES[kind] || END_TITLES.error;
   },
 
@@ -432,7 +433,7 @@ export const assistantPanel = {
       : `<ol class="assistant-steps"><li class="on">Starting</li></ol>`;
     return `<div class="assistant-notice" role="status"><div class="assistant-working"><span class="assistant-spin" aria-hidden="true"></span><b>Working…</b><span class="assistant-grow"></span>
       <button type="button" class="btn btn-secondary btn-sm" data-action="cancel">Cancel</button></div>${list}
-      <div class="slicer-muted">Stops by itself after ${this.limits().deadline_seconds} s.</div></div>`;
+      ${this.limits().deadline_seconds ? `<div class="slicer-muted">Stops by itself after ${this.limits().deadline_seconds} s.</div>` : ""}</div>`;
   },
 
   threadHtml() {
@@ -479,7 +480,7 @@ export const assistantPanel = {
       <div class="assistant-thread" aria-live="polite"></div>
       <div class="assistant-compose">
         <label class="sr-only" for="assistant-input">Ask the assistant</label>
-        <textarea id="assistant-input" class="assistant-input" rows="2" maxlength="2000" placeholder="${available ? "Ask the assistant…" : "AI unavailable"}" ${available ? "" : "disabled"}></textarea>
+        <textarea id="assistant-input" class="assistant-input" rows="2"${this.limits().question_chars ? ` maxlength="${Number(this.limits().question_chars)}"` : ""} placeholder="${available ? "Ask the assistant…" : "AI unavailable"}" ${available ? "" : "disabled"}></textarea>
         <button type="button" class="btn btn-primary btn-sm" data-action="send" disabled>Send</button>
       </div>`;
     const input = this.panel.querySelector(".assistant-input");

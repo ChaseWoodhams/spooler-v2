@@ -338,7 +338,7 @@ class AskTests(unittest.TestCase):
         self.assertNotIn("turn 00", stdin, "the oldest turns are dropped first")
         self.assertLess(stdin.index("turn 38"), stdin.index("turn 39"))
         self.assertLess(stdin.index("turn 39"), stdin.index("latest question"))
-        self.assertLess(len(stdin), assistant_runner.MAX_HISTORY_CHARS + 4000)
+        self.assertLess(len(stdin), 6000 + 4000)
 
     def test_history_must_be_a_list_of_turns_and_the_server_keeps_no_conversation(self):
         bad = [[{"role": "system", "text": "x"}], [{"role": "user"}], ["a string"], [{"role": "user", "text": 5}]]

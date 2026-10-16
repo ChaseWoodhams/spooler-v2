@@ -38,6 +38,31 @@ TOOL_NAMES = (
     "get_slice_summary", "propose_orientation", "propose_arrange", "propose_plan", "propose_settings",
 )
 
+# The one list of Proposal kinds (propose_<kind>; each can be switched off in Settings > Assistant) and the words for them. The Settings
+# group and the system prompt are built from these; they live here because this server must not import app code.
+KIND_WORDS = {"orientation": "Orientation", "arrange": "Arrange", "plan": "Plan plates", "settings": "Settings"}
+PROPOSAL_KINDS = tuple(KIND_WORDS)
+SETTINGS_NAME = "assistant_settings.json"
+
+
+TUNING_VERSION = 1                                                    # the saved tuning's version; assistant_tuning reads the same number
+
+
+def kinds_off_in(data_dir) -> frozenset:
+    """The Proposal kinds switched off in the saved tuning of this data dir. Same rule as assistant_tuning.load: a missing or damaged
+    file, an unknown version or a damaged section means every kind on."""
+    # Re-read here because this server runs apart from the app and must not import it (assistant_tuning pulls in sockets).
+    try:
+        with open(os.path.join(str(data_dir), SETTINGS_NAME), encoding="utf-8") as f:
+            tuning = json.load(f)["tuning"]
+        if tuning.get("version", TUNING_VERSION) != TUNING_VERSION:
+            return frozenset()
+        section = tuning["proposal_kinds"]
+        return frozenset(k for k in PROPOSAL_KINDS if section.get(k) is False)
+    except Exception:
+        return frozenset()
+
+
 _TOOLS: dict = {}
 
 
@@ -60,10 +85,16 @@ class ToolError(Exception):
 class Context:
     """What a tool may use: the one project it is bound to and a fresh read-only view of the data."""
 
-    def __init__(self, project_id: int, data_dir: str, run: str | None = None):
+    def __init__(self, project_id: int, data_dir: str, run: str | None = None, max_proposals: int | None = None, kinds_off=()):
+        self.kinds_off = frozenset(kinds_off)       # Proposal kinds this server neither lists nor accepts
         self.project_id = int(project_id)
+        self.max_proposals = max_proposals          # the per-run cap this server enforces; None is the built-in one
         self.data_dir = data_dir
         self.run = run or f"terminal-{uuid.uuid4().hex[:12]}"       # the Assistant run that owns the Proposals staged here
+
+    def proposal_cap(self) -> int:
+        import proposal_store
+        return self.max_proposals or proposal_store.MAX_PER_RUN
 
     def core(self):
         """The socket-free read core, imported on first use (after DATA_DIR is set for the modules that read it at import)."""
@@ -410,8 +441,9 @@ class Superseded(Exception):
 def check_proposal_room(ctx: Context) -> None:
     """The server's own per-run cap: the model cannot talk its way past it."""
     import proposal_store
-    if len(proposal_store.listing(ctx.projects_dir(), run=ctx.run)) >= proposal_store.MAX_PER_RUN:
-        raise ToolError(f"At most {proposal_store.MAX_PER_RUN} Proposals per run. Tell the person what you found instead of proposing more.")
+    cap = ctx.proposal_cap()
+    if len(proposal_store.listing(ctx.projects_dir(), run=ctx.run)) >= cap:
+        raise ToolError(f"At most {cap} Proposals per run. Tell the person what you found instead of proposing more.")
 
 
 def one_line(text, cap: int = REASON_CAP) -> str:
@@ -442,7 +474,7 @@ def stage_proposal(ctx: Context, record: dict, *, kind: str, title: str, scope: 
         "reason": reason, "review": review, "data": data, "emptied": list(emptied), "diff": list(diff), "notes": list(notes),
         "pinned": list(pinned), "problems": list(problems), "targets": targets or {},
         **({"settings": list(settings)} if settings is not None else {})})        # a settings Proposal's table: [{key, label, old, new, layer, notes}]
-    left = proposal_store.MAX_PER_RUN - len(proposal_store.listing(ctx.projects_dir(), run=ctx.run))
+    left = ctx.proposal_cap() - len(proposal_store.listing(ctx.projects_dir(), run=ctx.run))
     return {"revision": record["revision"], "token": staged["token"], "kind": kind, "title": title,
             "diff": [{"label_quoted": quoted(line["label"], NAME_CAP), "text": line["text"]} for line in diff],
             "notes": list(notes), "pinned_skipped": [{"object": p["object"], "name_quoted": quoted(p["label"], NAME_CAP)} for p in pinned],
@@ -777,6 +809,10 @@ def _reply(message_id, result=None, error=None) -> dict:
     return out
 
 
+def _is_off(name: str, ctx: Context) -> bool:
+    return name.startswith("propose_") and name[len("propose_"):] in ctx.kinds_off
+
+
 def handle(message: dict, ctx: Context):
     """The reply to one JSON-RPC message, or None for a notification."""
     method = message.get("method")
@@ -791,11 +827,15 @@ def handle(message: dict, ctx: Context):
     if method == "ping":
         return _reply(message_id, {})
     if method == "tools/list":
-        return _reply(message_id, {"tools": [{k: v for k, v in t.items() if k != "fn"} for t in _TOOLS.values()]})
+        return _reply(message_id, {"tools": [{k: v for k, v in t.items() if k != "fn"} for t in _TOOLS.values() if not _is_off(t["name"], ctx)]})
     if method == "tools/call":
         entry = _TOOLS.get(params.get("name"))
         if entry is None:
             return _reply(message_id, error={"code": -32602, "message": f"Unknown tool {str(params.get('name'))[:60]!r}"})
+        if _is_off(entry["name"], ctx):
+            kind = entry["name"][len("propose_"):]
+            return _reply(message_id, {"content": [{"type": "text", "text": f"Proposals of the {kind} kind are switched off in Settings > Assistant > "
+                                                                             f"Proposal kinds. Nothing was staged; tell the person it is switched off."}], "isError": True})
         try:
             arguments = check_arguments(entry["inputSchema"], params.get("arguments"))
             text, failed = json.dumps(entry["fn"](ctx, **arguments), ensure_ascii=False), False
@@ -837,11 +877,17 @@ def main(argv=None) -> int:
     parser.add_argument("--project", type=int, required=True)
     parser.add_argument("--data-dir", required=True, help="the Spooler data directory (never defaulted: pass it explicitly)")
     parser.add_argument("--run", default=None, help="the Assistant run these Proposals belong to (the per-run cap counts them)")
+    parser.add_argument("--max-proposals", type=int, default=None, help="the most Proposals one run may stage (default: the built-in 3)")
+    parser.add_argument("--kinds-off", default=None, help="comma-separated Proposal kinds to switch off (orientation, arrange, plan, settings); "
+                                                          "default: what Settings > Assistant saved in the data dir")
     args = parser.parse_args(argv)
+    if args.max_proposals is not None and args.max_proposals < 1:
+        parser.error("--max-proposals must be at least 1")
     os.environ["DATA_DIR"] = args.data_dir       # persistence reads it once, at import
     if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    serve(Context(args.project, args.data_dir, args.run), sys.stdin.buffer, sys.stdout.buffer)
+    off = kinds_off_in(args.data_dir) if args.kinds_off is None else frozenset(k for k in args.kinds_off.split(",") if k in PROPOSAL_KINDS)
+    serve(Context(args.project, args.data_dir, args.run, args.max_proposals, off), sys.stdin.buffer, sys.stdout.buffer)
     return 0
 
 

@@ -488,10 +488,10 @@ class EndedRunTests(ProposalCase):
 
     def test_a_run_that_times_out_after_proposing_leaves_no_staged_proposal(self):
         self.scenario({"calls": [self.propose_call([1, 2])], "hang_after_calls": 60})
-        with mock.patch.object(assistant_runner, "DEADLINE_SECONDS", 6):
-            run = self.ask()
-            self.wait_staged()
-            view = self.poll(run)
+        self.call("POST", "/api/assistant/settings", {"tuning": {"limits": {"deadline_seconds": 6}}})
+        run = self.ask()
+        self.wait_staged()
+        view = self.poll(run)
         self.assertEqual((view["state"], view["proposals"]), ("timeout", []))
         self.assertEqual(self.staging(), [])
         self.assertEqual(self.current()["revision"], self.project["revision"])
