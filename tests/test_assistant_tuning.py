@@ -143,9 +143,20 @@ class TuningLimitsTests(unittest.TestCase):
             path.write_text(text, encoding="utf-8")
             status, body = self.call("GET", "/api/assistant/settings")
             self.assertEqual((status, body["tuning"]["values"]["limits"]), (200, LIMIT_DEFAULTS), text)
-            self.assertEqual(bool(body["tuning"]["notes"]), text not in ("{not json", "[]"), text)
+            self.assertTrue(body["tuning"]["notes"], text)
         self.assertEqual(self.save(max_turns=4)[0], 200, "a save repairs a damaged file")
         self.assertEqual(self.values()["max_turns"], 4)
+
+    def test_a_settings_file_that_is_not_a_json_object_falls_back_to_the_defaults_with_a_visible_note(self):
+        path = assistant.data_dir() / assistant.SETTINGS_NAME
+        for text in ("{not json", "[]", "5"):
+            path.write_text(text, encoding="utf-8")
+            status, body = self.call("GET", "/api/assistant/settings")
+            self.assertEqual((status, body["tuning"]["values"]["limits"]), (200, LIMIT_DEFAULTS), text)
+            self.assertEqual(len(body["tuning"]["notes"]), 1, text)
+            self.assertIn("settings file", body["tuning"]["notes"][0])
+        path.unlink()
+        self.assertEqual(self.call("GET", "/api/assistant/settings")[1]["tuning"]["notes"], [], "no file is not damage")
 
     def test_unknown_assistant_paths_answer_json_not_html(self):
         import urllib.error

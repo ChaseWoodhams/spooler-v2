@@ -125,7 +125,10 @@ def _check(group: str, key: str, value):
 
 def _stored() -> tuple:
     """(the saved section as a dict, notes). A section that cannot be used at all is {} with a note."""
-    section = assistant.read_raw().get("tuning")
+    raw, damaged = assistant.read_raw_checked()
+    if damaged:
+        return {}, [damaged]
+    section = raw.get("tuning")
     if section is None:
         return {}, []
     if not isinstance(section, dict):
