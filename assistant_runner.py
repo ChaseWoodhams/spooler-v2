@@ -36,9 +36,6 @@ import proposal_store
 import spooler_mcp
 from errors import JobError
 
-MAX_HISTORY_TURNS = 12
-MAX_HISTORY_CHARS = 6000
-MAX_TURN_CHARS = 1500
 MAX_STEPS = 30
 CANCEL_WAIT = 15                           # how long the cancel route waits for the run to finish ending
 USAGE_LIMIT_ERROR = "AI unavailable: usage limit reached"
@@ -209,14 +206,14 @@ def mcp_config(project_id: int, data_dir: Path, run_id: str | None = None, max_p
 
 
 def clean_history(history, context=None) -> list:
-    """The earlier turns of this visit, newest kept: at most MAX_HISTORY_TURNS and MAX_HISTORY_CHARS, oldest dropped first."""
+    """The earlier turns of this visit, newest kept: at most the context's history_turns and history_chars, oldest dropped first.
+    No context means the tuning defaults, which are the one source of these numbers."""
     if history is None:
         return []
     if not isinstance(history, list):
         raise AskError("history must be a list of turns", 400)
-    context = context or {}
-    max_turns, max_chars, turn_chars = (context.get("history_turns", MAX_HISTORY_TURNS), context.get("history_chars", MAX_HISTORY_CHARS),
-                                        context.get("turn_chars", MAX_TURN_CHARS))
+    context = context or assistant_tuning.defaults()["prompt_context"]
+    max_turns, max_chars, turn_chars = context["history_turns"], context["history_chars"], context["turn_chars"]
     turns = []
     for turn in history:
         if not isinstance(turn, dict) or turn.get("role") not in ("user", "assistant") or not isinstance(turn.get("text"), str):
