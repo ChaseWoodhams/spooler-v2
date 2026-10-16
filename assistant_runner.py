@@ -233,6 +233,25 @@ def build_prompt(record: dict, message: str, history: list, context=None) -> str
     return "\n".join(lines)
 
 
+def prompt_turns(history, context: dict) -> list:
+    """The chat history a run sends: validated always, then sent only when the saved prompt context has history on."""
+    return clean_history(history, context) if context["history_enabled"] else (clean_history(history), [])[1]
+
+
+def preview(project_id: int, message, history=None) -> dict:
+    """What the next run would send for the saved settings, built by the same functions a run uses. Starts nothing."""
+    if not isinstance(message, str) or not message.strip():
+        raise AskError("Type a sample question first", 400)
+    snap = assistant_tuning.snapshot()
+    longest = snap["limits"]["question_chars"]
+    if len(message) > longest:
+        raise AskError(f"Keep the question under {longest} characters", 400)
+    import projects
+    record = projects.get_project(int(project_id))
+    context = snap["prompt_context"]
+    return {"instructions": system_prompt(snap), "prompt": build_prompt(record, message, prompt_turns(history, context), context)}
+
+
 # ── Asking ────────────────────────────────────────────────────────────────────
 
 def ask(project_id: int, message, history=None) -> dict:
@@ -244,7 +263,7 @@ def ask(project_id: int, message, history=None) -> dict:
     if len(message) > longest:
         raise AskError(f"Keep the question under {longest} characters", 400)
     context = assistant_tuning.snapshot()["prompt_context"]
-    turns = clean_history(history, context) if context["history_enabled"] else (clean_history(history), [])[1]   # validated, then not sent
+    turns = prompt_turns(history, context)
     import projects                                   # lazy, like assistant.purpose_summary: the app's own record, 404 when unknown
     record = projects.get_project(int(project_id))
     status = assistant.status(wait=False)               # the request thread never waits for a check

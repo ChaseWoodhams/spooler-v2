@@ -1346,6 +1346,12 @@ class SPHandler(SimpleHTTPRequestHandler):
             }
             self._jobs_call(actions[action], broadcast=action in ("queue", "reprint"))
             return
+        if len(parts) == 6 and parts[4] == "assistant" and parts[5] == "preview":
+            def preview(runner):
+                body = self._json_body()
+                return runner.preview(self._job_id(), body.get("message"), body.get("history"))
+            self._assistant_call(preview)
+            return
         if len(parts) == 6 and parts[4] == "assistant" and parts[5] == "ask":
             def ask(runner):
                 body = self._json_body()
