@@ -15,8 +15,8 @@ def rect(w, d):
     return ((-w / 2, -d / 2), (w / 2, -d / 2), (w / 2, d / 2), (-w / 2, d / 2))
 
 
-def cand(w=60, d=60, *, clearance=6.0, needs_support=False):
-    return planner.Candidate((0, 0, 0), rect(w, d), clearance, 20.0, 10.0, w * d / 100, 1.0 if needs_support else 0.0,
+def cand(w=60, d=60, *, clearance=6.0, needs_support=False, height=20.0):
+    return planner.Candidate((0, 0, 0), rect(w, d), clearance, height, 10.0, w * d / 100, 1.0 if needs_support else 0.0,
                              0.0, needs_support, False)
 
 
@@ -70,6 +70,16 @@ class FitTests(unittest.TestCase):
         from shapely.geometry import Polygon
         gap = Polygon(by_key[1]["polygon"]).distance(Polygon(by_key[2]["polygon"]))
         self.assertGreaterEqual(gap, 14.0 - 0.01)
+
+    def test_tall_supported_objects_keep_more_than_the_support_gap_apart(self):
+        # a 185 mm tall Object's tree supports reach about 30 mm past its outline (seat_hip parts 19 and 20, 22 mm apart,
+        # sliced to "Toolpaths conflict"; 30 mm apart they slice), so tall supported Objects on one plate sit further apart
+        tall = cand(80, 80, clearance=22.0, needs_support=True, height=185.0)
+        run = planner._Run(problem([item(1, tall), item(2, tall)]))
+        layout = run.fit(None, ((1, 0), (2, 0)))
+        by_key = {s["key"]: s for s in shapes_of(run, layout)}
+        from shapely.geometry import Polygon
+        self.assertGreaterEqual(Polygon(by_key[1]["polygon"]).distance(Polygon(by_key[2]["polygon"])), 30.0)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,10 @@ handed to the printers again with the measured times.
               partly estimated, and so is a plate whose slice failed. A run therefore always completes.
   reduced     a plate that needs supports and would alone take most of the budget gets a reduced-shell slice (1 wall, no
               infill, no shells): it gives the support grams but no time, so its time stays the proxy.
+  did not slice a plate whose slice failed in OrcaSlicer itself (not for lack of budget), while others sliced, is replanned: its
+              Objects go onto plates of their own, which are sliced in a short second round (`REPAIR_BUDGET_S`). A plate that
+              still fails is marked `did_not_slice`, and a plan holding one ranks after every plan that slices: Accept must
+              not apply a plate known to fail.
   calibration every slice that finishes adds `slice_log` and `support_log` rows (`time_estimate.record_slice`), `kind` being
               `full` or `reduced`.
 
@@ -40,6 +44,7 @@ import planner
 BUDGET_S = 25.0                  # default time for all confirmation slices
 MAX_WORKERS = 4                  # 4-8 parallel slices gave about 2.5x throughput (research 02); more only made each one slower (ticket 22)
 SLICE_S_PER_PRINT_S = 1 / 1000   # rough slicing time per second of print: a 6-7 h supported plate took about 25 s (measured, small_mix)
+REPAIR_BUDGET_S = 12.0           # extra time to slice the plates a failed plate was split into
 HEAVY_SHARE = 0.8                # a plate expected to take more than this share of the budget alone is "heavy"
 REDUCED_PROCESS = {"wall_loops": "1", "sparse_infill_density": "0%", "top_shell_layers": "0", "bottom_shell_layers": "0"}
 SLOT_BASE = 100                  # OrcaSlicer data directories slicer-data-100.. so the project worker's are left alone
@@ -80,6 +85,7 @@ class ConfirmedPlate:
     support_measured: bool
     kind: str | None = None        # "full" / "reduced" for what was sliced, None when nothing was
     error: str | None = None
+    did_not_slice: bool = False    # OrcaSlicer itself failed on this plate (not the budget): applying it would not print
 
     @property
     def partly_estimated(self) -> bool:
@@ -97,6 +103,10 @@ class ConfirmedPlan:
     @property
     def partly_estimated(self) -> bool:
         return any(p.partly_estimated for p in self.plates)
+
+    @property
+    def did_not_slice(self) -> bool:
+        return any(p.did_not_slice for p in self.plates)
 
 
 @dataclass
@@ -164,41 +174,54 @@ def _fits(plate: planner.PlanPlate) -> bool:
 
 # --- the pool -----------------------------------------------------------------------------------------------------------------
 
+def _is_budget_error(error: BaseException) -> bool:
+    """True for a slice that ran out of time, not one OrcaSlicer failed."""
+    text = (str(error) or "").lower()
+    return isinstance(error, TimeoutError) or "budget" in text or "took longer" in text
+
+
 def confirm_plans(project_id: int, record: dict, problem: planner.Problem, plans: list, *, budget_s: float = BUDGET_S,
                   workers: int | None = None, slice_plate=None, progress=None) -> Confirmation:
     """Slice every plate of `plans` (the search's best, cheapest first) and re-rank them with the measured figures.
 
     `slice_plate(job, timeout_s) -> PlateMeasure` makes one slice and raises when it fails; the default is `ProjectSlicer`.
-    `progress(done, total)` is called as slices finish. Returns within about `budget_s` plus a moment, whatever happens."""
+    `progress(done, total)` is called as slices finish. Returns within about `budget_s` plus a moment (plus
+    `REPAIR_BUDGET_S` when a plate failed and was split), whatever happens."""
     started = time.monotonic()
-    deadline = started + budget_s
+    deadline = [started + budget_s]
     slice_plate = slice_plate or ProjectSlicer(project_id, record)
     workers = max(1, workers or min(MAX_WORKERS, os.cpu_count() or 1))
 
-    # the slices, in the order they are worth making: plan by plan, each plan's plates longest first
-    wanted, order, per_plate = {}, [], {}
-    for p_index, plan in enumerate(plans):
-        for index, plate in sorted(enumerate(plan.plates), key=lambda t: (t[1].seconds, t[0])):   # shortest first: most plates measured
-            if not _fits(plate):
-                per_plate[(p_index, index)] = None
-                continue
-            kind = "reduced" if plate.supports and _is_heavy(plate, budget_s) else "full"
-            job = _build_job(record, problem, plate, kind)
-            per_plate[(p_index, index)] = job.key
-            if job.key not in wanted:
-                wanted[job.key] = job
-                order.append(job.key)
-    reused = sum(1 for key in per_plate.values() if key is not None) - len(wanted)
+    # the slices, in the order they are worth making: plan by plan, each plan's plates shortest first
+    wanted, order = {}, []
+    rows = []          # per plan, [plate, job key or None] in the plan's order
+    reused = 0
 
-    results, errors, walls = {}, {}, {}
-    lock = threading.Lock()
-    pending, running = deque(order), {}
+    def register(plate) -> str | None:
+        nonlocal reused
+        if not _fits(plate):
+            return None
+        kind = "reduced" if plate.supports and _is_heavy(plate, budget_s) else "full"
+        job = _build_job(record, problem, plate, kind)
+        if job.key in wanted:
+            reused += 1
+        else:
+            wanted[job.key] = job
+            order.append(job.key)
+        return job.key
+
+    for plan in plans:
+        keyed = {}
+        for index, plate in sorted(enumerate(plan.plates), key=lambda t: (t[1].seconds, t[0])):   # shortest first: most plates measured
+            keyed[index] = register(plate)
+        rows.append([[plate, keyed[index]] for index, plate in enumerate(plan.plates)])
+
+    results, errors, walls, hard = {}, {}, {}, set()
     done_count = 0
-    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="confirm")
 
     def work(job):
         began = time.monotonic()
-        left = deadline - began
+        left = deadline[0] - began
         if left <= 0:
             raise TimeoutError("the confirmation budget ran out")
         try:
@@ -213,54 +236,122 @@ def confirm_plans(project_id: int, record: dict, problem: planner.Problem, plans
         printed = sum(p for _, p in walls.values())
         if not walls or printed <= 0:
             return True
-        return job.proxy_seconds * spent / printed <= deadline - time.monotonic()
+        return job.proxy_seconds * spent / printed <= deadline[0] - time.monotonic()
 
-    try:
-        while pending or running:
-            while pending and len(running) < workers and time.monotonic() < deadline:
-                key = pending.popleft()
-                if not worth_starting(wanted[key]):
-                    continue   # stays unstarted, on its proxy figures
-                running[executor.submit(work, wanted[key])] = key
-            if not running:
-                break
-            finished, _ = wait(list(running), timeout=max(deadline - time.monotonic(), 0), return_when=FIRST_COMPLETED)
-            if not finished:
-                break   # the budget is spent with slices still running: they stay estimated
-            for future in finished:
-                key = running.pop(future)
-                try:
-                    results[key] = future.result()
-                except Exception as e:   # a failed slice leaves its plate on the proxy figures
-                    errors[key] = str(e) or type(e).__name__
-                done_count += 1
-                if progress:
-                    progress(done_count, len(wanted))
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-    for future, key in running.items():
-        errors.setdefault(key, "the confirmation budget ran out")
-    unstarted = [k for k in order if k not in results and k not in errors]
+    def run_round(keys):
+        """Slice these jobs in the pool until they are done or the deadline passes."""
+        nonlocal done_count
+        pending, running = deque(keys), {}
+        executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="confirm")
+        try:
+            while pending or running:
+                while pending and len(running) < workers and time.monotonic() < deadline[0]:
+                    key = pending.popleft()
+                    if not worth_starting(wanted[key]):
+                        continue   # stays unstarted, on its proxy figures
+                    running[executor.submit(work, wanted[key])] = key
+                if not running:
+                    break
+                finished, _ = wait(list(running), timeout=max(deadline[0] - time.monotonic(), 0), return_when=FIRST_COMPLETED)
+                if not finished:
+                    break   # the budget is spent with slices still running: they stay estimated
+                for future in finished:
+                    key = running.pop(future)
+                    try:
+                        results[key] = future.result()
+                    except Exception as e:   # a failed slice leaves its plate on the proxy figures
+                        errors[key] = str(e) or type(e).__name__
+                        if not _is_budget_error(e):
+                            hard.add(key)
+                    done_count += 1
+                    if progress:
+                        progress(done_count, len(wanted))
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        for future, key in running.items():
+            errors.setdefault(key, "the confirmation budget ran out")
 
-    confirmed = [_rescore(problem, plan, [_confirmed(plate, per_plate[(p, i)], wanted, results, errors)
-                                          for i, plate in enumerate(plan.plates)])
-                 for p, plan in enumerate(plans)]
-    confirmed.sort(key=lambda c: (c.cost, plans.index(c.plan)))
+    run_round(list(order))
+
+    # a plate OrcaSlicer failed on is replanned as one plate per Object. If none of those slices either, the slicer itself is
+    # at fault (or the Objects can't be sliced at all): the plate stays as it was, marked
+    swaps, again = [], []
+    for p, plan_rows in enumerate(rows):
+        made = []
+        for pair in plan_rows:
+            solos = _solo_plates(problem, pair[0]) if pair[1] in hard else None
+            if solos:
+                new = [[solo, register(solo)] for solo in solos]
+                swaps.append((p, pair, new))
+                made += new
+                again += [k for _, k in new if k is not None]
+            else:
+                made.append(pair)
+        plan_rows[:] = made
+    again = [k for k in dict.fromkeys(again) if k not in results and k not in errors]
+    if again:
+        deadline[0] = time.monotonic() + REPAIR_BUDGET_S
+        run_round(again)
+    replanned = 0
+    for p, old, new in swaps:
+        if all(key in hard for _, key in new):
+            first = next(n for n, pair in enumerate(rows[p]) if pair is new[0])
+            rows[p][first:first + len(new)] = [old]
+        else:
+            replanned += 1
+    unstarted = [k for k in wanted if k not in results and k not in errors]
+
+    confirmed = []
+    for p, plan in enumerate(plans):
+        new_plates = tuple(plate for plate, _ in rows[p])
+        if new_plates != plan.plates:
+            plan = _with_plates(problem, plan, new_plates)
+        confirmed.append(_rescore(problem, plan, [_confirmed(plate, key, wanted, results, errors, hard) for plate, key in rows[p]]))
+    ranked = {id(c): n for n, c in enumerate(confirmed)}
+    confirmed.sort(key=lambda c: (c.did_not_slice, c.cost, ranked[id(c)]))   # a plan with a plate that does not slice ranks after every plan that does
     stats = {"slices": len(results), "failed": len(errors), "reused": reused, "unstarted": len(unstarted),
-             "reduced": sum(1 for k in results if wanted[k].kind == "reduced"),
+             "reduced": sum(1 for k in results if wanted[k].kind == "reduced"), "replanned": replanned,
+             "did_not_slice": sum(p.did_not_slice for c in confirmed for p in c.plates),
              "budget_exhausted": bool(unstarted) or any("budget" in e for e in errors.values()),
              "seconds": round(time.monotonic() - started, 1)}
     return Confirmation(confirmed, stats)
 
 
-def _confirmed(plate, key, wanted, results, errors) -> ConfirmedPlate:
+def _solo_plates(problem: planner.Problem, plate: planner.PlanPlate):
+    """One plate per Object of a plate that did not slice, each laid out alone, or None when it can't be split (a single
+    Object, a plate holding Pinned Objects, or no layout)."""
+    if len(plate.items) < 2 or plate.anchor is not None or any(p.oversize for p in plate.items):
+        return None
+    run = planner._Run(problem)
+    out = []
+    for placed in sorted(plate.items, key=lambda p: str(p.key)):
+        members = ((placed.key, placed.candidate),)
+        layout = run.fit(None, members)
+        if not layout:
+            return None
+        seconds, grams, _, supports = run.metrics((None, plate.group, members, False))
+        spot = layout[0]
+        out.append(planner.PlanPlate(None, plate.group, (planner.Placed(placed.key, placed.candidate, placed.rotation,
+                                     tuple(spot["center"]), float(spot["angle"])),), seconds, grams, plate.printer, supports))
+    return out
+
+
+def _with_plates(problem: planner.Problem, plan: planner.Plan, plates: tuple) -> planner.Plan:
+    """The plan with these plates, its count and neighbour term following; the rest of its terms are rescored by the caller."""
+    where = {i.key: n for n, plate in enumerate(plates) for i in plate.items}
+    apart = sum(1 for a, b in problem.neighbours if a in where and b in where and where[a] != where[b])
+    terms = {**plan.terms, "plates": len(plates), "split_pairs_apart": apart}
+    return planner.Plan(plates, plan.cost, terms, plan.makespan_s, plan.unplanned, plan.exact, plan.stats)
+
+
+def _confirmed(plate, key, wanted, results, errors, hard=frozenset()) -> ConfirmedPlate:
     """The plate with its slice's figures, or the proxy figures when it has none."""
     if key is None:
         return ConfirmedPlate(plate, plate.printer, plate.seconds, plate.support_g, False, False, None, "does not fit a plate")
     measure = results.get(key)
     if measure is None:
         return ConfirmedPlate(plate, plate.printer, plate.seconds, plate.support_g, False, False, None,
-                              errors.get(key, "not sliced: the confirmation budget ran out"))
+                              errors.get(key, "not sliced: the confirmation budget ran out"), key in hard)
     timed = measure.seconds is not None
     return ConfirmedPlate(plate, plate.printer, int(measure.seconds) if timed else plate.seconds, float(measure.support_g),
                           timed, True, wanted[key].kind)

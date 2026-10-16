@@ -49,6 +49,8 @@ MAX_NEAR = 4                     # near-tied orientations kept per Object (the b
 NEW_PLATE_SHARE = 0.15           # of the move steps that go to a new plate
 NOZZLE_TOLERANCE = 1e-6
 MAX_FAILED_SETS = 400            # sets that did not fit, remembered per plate to rule out their supersets
+TALL_SUPPORT_MM = 150.0          # a supported Object at least this tall has tree supports that reach far past its outline
+TALL_SUPPORT_GAP_MM = 32.0       # so a plate holding one keeps at least this gap between its Objects (seat_hip: 22 mm conflicted, 30 mm sliced)
 SUPPORT_KEYS = ("enable_support", "support_type")   # plate overrides that supports switch on; not part of a compatibility key
 
 
@@ -302,7 +304,8 @@ class _Run:
         """Gap each member keeps from its neighbours. A plate with supports on is arranged with the support gap throughout
         (`projects` chooses the gap by the plate's supports), so one Object that needs supports widens every gap on it."""
         cands = {k: self.items[k].candidates[c] for k, c in members}
-        wide = max((c.clearance for c in cands.values() if c.needs_support), default=0.0)
+        wide = max((max(c.clearance, TALL_SUPPORT_GAP_MM if c.height_mm >= TALL_SUPPORT_MM else 0.0)
+                    for c in cands.values() if c.needs_support), default=0.0)
         return {k: max(c.clearance, wide) for k, c in cands.items()}
 
     def _insert(self, anchor, base, gone, members):
