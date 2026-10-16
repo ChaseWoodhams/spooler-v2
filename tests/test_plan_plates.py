@@ -29,6 +29,16 @@ _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 GREY = {"preset": "Elegoo PETG @ECC", "colour": "grey"}
 
 
+def legacy_plan(project_id, body=None):
+    """The synchronous plan (`projects.plan_plates`, still behind the Assistant and the density check until the cutover), as
+    (status, body). POST /plan now starts the background planner job (tests/test_plan_job.py)."""
+    body = body or {}
+    try:
+        return 200, projects.plan_plates(project_id, bool(body.get("allow_tilt")), body.get("pack"))
+    except jobs.JobError as e:
+        return e.status, {"error": str(e)}
+
+
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
 class PlanPlatesApiTests(unittest.TestCase):
     def setUp(self):
@@ -100,7 +110,7 @@ class PlanPlatesApiTests(unittest.TestCase):
         return self.save(project, change)
 
     def plan(self, project):
-        return self.call("POST", f"/api/projects/{project['id']}/plan", {})
+        return legacy_plan(project["id"])
 
     def accept(self, project, **body):
         """Accept the plan as it is now; pass fingerprint= to send the one of an earlier plan."""
@@ -318,7 +328,7 @@ class PlanPlatesApiTests(unittest.TestCase):
 
     def test_opting_in_to_tilts_applies_them_and_the_summary_counts_them(self):
         project = self.project_with(self.tilted_bar())
-        status, plan = self.call("POST", f"/api/projects/{project['id']}/plan", {"allow_tilt": True})
+        status, plan = legacy_plan(project["id"], {"allow_tilt": True})
         self.assertEqual(status, 200, plan)
         self.assertEqual([p["turned"] for p in plan["plates"]], [1])
         self.assertNotIn("tilt", plan["summary"])

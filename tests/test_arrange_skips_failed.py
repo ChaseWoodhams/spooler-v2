@@ -5,6 +5,7 @@ import unittest
 import database
 import projects
 from tests import test_arrange
+from tests.test_plan_plates import legacy_plan
 from tests.test_slicer import cube_stl
 
 _Base = test_arrange.ArrangeApiTests
@@ -90,7 +91,7 @@ class ArrangeSkipsFailedModelsTests(unittest.TestCase):
 
     def test_plan_plates_plans_the_ready_objects_and_reports_the_skipped_one(self):
         project = self.two_models_one_failed()
-        status, plan = self.call("POST", f"/api/projects/{project['id']}/plan", {})
+        status, plan = legacy_plan(project["id"])
         self.assertEqual(status, 200, plan)
         planned = [o["id"] for p in plan["plates"] for o in p["objects"]]
         self.assertEqual(sorted(planned), [1, 2])
@@ -106,7 +107,7 @@ class ArrangeSkipsFailedModelsTests(unittest.TestCase):
         project = self.project_with(cube_stl(20))
         project = self.lay(project, [(1, 1, (50, 50), False)])
         self.fail_model(project["id"], 1)
-        status, plan = self.call("POST", f"/api/projects/{project['id']}/plan", {})
+        status, plan = legacy_plan(project["id"])
         self.assertEqual(status, 200, plan)
         self.assertEqual(plan["plates"], [])
         self.assertIn("failed", plan["summary"])

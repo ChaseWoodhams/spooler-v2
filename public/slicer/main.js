@@ -6,7 +6,8 @@ import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=5";
 import { projectPage } from "./project-page.js?v=10";
-import { newProject } from "./new-project.js?v=11";
+import { newProject } from "./new-project.js?v=12";
+import { planSheet } from "./plan-sheet.js?v=5";
 import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
 import { showExport } from "./export-plan.js?v=2";
 import { Viewport, featureColor } from "./viewport.js?v=5";
@@ -283,6 +284,7 @@ async function boot() {
   window.slicerBooted = true;   // slicer.html shows a Reload message if the page's scripts never got this far
   document.querySelectorAll("[data-steps], #prepare-tools").forEach(el => { el.hidden = true; });  // shown once a project is open
   newProject.attach({ api, upload, toast, openCreated, importNotes: showImportNotes });
+  planSheet.attach({ api, toast, flush: flushSave, projectId: () => state.project.id, applied: planApplied });
   bindFolds();
   bindPack();
   bindUi();   // first, so "Open or create a project" works even if the slower setup below fails
@@ -671,8 +673,8 @@ function syncShellRoute(id) {
 }
 
 // After a multi-file import the objects all sit on plate 1 at the same spot: once every model has finished importing (so the
-// planner has real sizes), land on Plates and apply the plan (orient, space, split across plates) as one undo step. Only a plan with
-// a problem (an object too big for any plate, no valid layout) opens the review sheet instead.
+// planner has real sizes), land on Plates and start the planner, whose Proposal opens on the review sheet. The plan is a background
+// job and Accept applies it as one undo step.
 async function maybeAutoPlan() {
   const id = state.project?.id;
   let wanted = null;
@@ -684,17 +686,7 @@ async function maybeAutoPlan() {
   if (state.step !== "plates" && !unplacedSplitIds(state.project).length) await setStep("plates", { force: true });   // a split still to be cut keeps its step
   try {
     await flushSave();
-    state.planTilt = false;
-    const plan = await api("POST", `/api/projects/${id}/plan`, { allow_tilt: false });
-    const clean = plan.plates.length && !plan.refused && !plan.problems.length;
-    if (!clean) { await planPlates(); return; }   // no valid layout: show the review sheet
-    // A part too big for any plate does not hold the rest back: it sits on a plate of its own and the toast says so.
-    const result = await api("POST", `/api/projects/${id}/plan/accept`, { revision: plan.revision, fingerprint: plan.fingerprint, allow_tilt: false });
-    applyProject(result);
-    recordEdit();
-    renderAll();
-    state.viewport?.fit(state.viewport.objectsBox());
-    toast(`Arranged automatically: ${result.plan.summary}. Undo puts it back`, !!(plan.too_big.length || plan.tippy?.length));
+    await planSheet.open();   // the planner job runs and its Proposal is reviewed: nothing is applied unseen
   } catch (err) {
     toast(`Couldn't arrange the models automatically: ${err.message}`, true);
   }
@@ -2363,13 +2355,8 @@ async function mergeInto(targetId) {
 }
 
 // ── Plan plates ─────────────────────────────────────────────────────────────────
-// The review sheet for the planner: POST /plan changes nothing; Accept applies it as one revision, so one Undo step reverses it.
-// The seed time coefficients still overshoot about 2x, so the time is hidden until that is settled: flip this to show "≈ 1 h 05 min".
-const SHOW_PLAN_SECONDS = true;  // approximate until a plate is sliced: the seeds in time_estimate.py are fitted to one plate
-const planTime = seconds => {
-  const minutes = Math.max(1, Math.round(seconds / 60));
-  return `≈ ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
-};
+// The review sheet for the planner is slicer/plan-sheet.js: POST /plan starts a job and changes nothing; Accept applies a stored
+// Proposal as one revision, so one Undo step reverses it. The footprint and map helpers below also draw Assistant Proposals.
 
 // An object's footprint on the bed: its model size, scaled, turned by its rotation (degrees, about x then y, then z):
 // returns the half-sides of the box before the turn about z, and that angle
@@ -2402,87 +2389,19 @@ function planMap(plate) {
   return `<svg class="plan-map" viewBox="${x0} ${y0} ${x1 - x0} ${y1 - y0}" role="img" aria-label="${esc(plate.name)}: ${plural(plate.objects.length, "object")}"><rect class="plan-bed" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}"/>${objects}</svg>`;
 }
 
-function planSheetHtml(plan) {
-  const before = platesWithObjects().length;
-  const cards = plan.plates.map(plate => `<div class="plan-card">
-      <div class="plan-card-head"><b>${esc(plate.name)}</b>${plate.new ? ' <span class="slicer-muted">new</span>' : ""}</div>
-      ${planMap(plate)}
-      <div class="slicer-muted">${plural(plate.objects.length, "object")} · ${esc(plate.filament)}${plate.turned ? ` · ${plate.turned} turned` : ""}</div>
-      ${SHOW_PLAN_SECONDS && plate.time_estimate?.seconds ? `<div class="slicer-muted">${planTime(plate.time_estimate.seconds)}</div>` : ""}
-    </div>`).join("");
-  const kept = plan.kept.length ? `<h4>Kept as they are</h4><ul class="plan-kept">${plan.kept.map(k => `<li><b>${esc(k.name)}</b> <span class="slicer-muted">${esc(k.reason)}</span></li>`).join("")}</ul>` : "";
-  const tilt = `<label class="slicer-check" title="Without this an object only goes onto a side of its own box; with it, an object may lean on an angled face"><input type="checkbox" id="plan-tilt"${state.planTilt ? " checked" : ""}> Allow tilting objects onto angled faces</label>`;
-  const here = data().pack || { preset: "normal", gap: 6 };
-  const density = `<label class="slicer-field">Spacing <select id="plan-pack" title="How far apart the plan keeps objects (22 mm for objects that need supports unless you chose otherwise). The same choice is in the toolbar.">${
-    [["tight", "Tight (3 mm)"], ["normal", "Normal (6 mm)"], ["roomy", "Roomy (12 mm)"]].map(([v, l]) => `<option value="${v}"${here.preset === v ? " selected" : ""}>${l}</option>`).join("")
-  }${here.preset === "custom" ? `<option value="custom" selected>Custom (${here.gap} mm)</option>` : ""}</select></label>`;
-  const refused = plan.refused ? `<p class="slicer-error" role="alert">No plan is offered: ${esc(plan.refused)}. Nothing was changed.</p>` : "";
-  const summary = plan.refused ? "" : `<p class="slicer-muted">Now ${plural(before, "plate")}. Plan: ${esc(plan.summary)}${plan.plates.length > 1 ? ", longest first" : ""}.</p>`;
-  return `${summary}
-    ${refused}${density}${tilt}
-    ${plan.plates.length ? `<div class="plan-grid">${cards}</div>` : ""}${kept}`;
-}
-
+/** Plan plates: start the planner job and review its Proposal on the sheet (slicer/plan-sheet.js) */
 async function planPlates() {
-  await flushSave();
-  state.planTilt = false;
-  await withButton($("btn-plan-plates"), async () => {
-    await showPlan();
-    $("dlg-plan").showModal();
-  });
+  await withButton($("btn-plan-plates"), () => planSheet.open());
 }
 
-async function showPlan() {
-  const plan = await api("POST", `/api/projects/${state.project.id}/plan`, { allow_tilt: !!state.planTilt });
-  state.plan = plan;
-  $("plan-body").innerHTML = planSheetHtml(plan);
-  $("plan-tilt").addEventListener("change", async event => {
-    state.planTilt = event.target.checked;
-    try {
-      await showPlan();
-    } catch (err) {
-      event.target.checked = state.planTilt = !state.planTilt;   // the sheet still shows the plan that was asked for
-      $("plan-error").textContent = err.message;
-    }
-  });
-  $("plan-pack").addEventListener("change", async event => {
-    const previous = (data().pack || { preset: "normal" }).preset;
-    try {
-      const { rest, tight_supports } = projectPack();
-      applyProject(await api("POST", `/api/projects/${state.project.id}/pack`, { pack: withSupports({ preset: event.target.value }, tight_supports) }));
-      recordEdit();
-      renderAll();
-      loadProblems();
-      await showPlan();
-    } catch (err) {
-      event.target.value = previous;
-      $("plan-error").textContent = err.message;
-    }
-  });
-  $("plan-error").textContent = "";
-  $("plan-accept").disabled = !plan.plates.length;
-}
-
-async function acceptPlan() {
-  if (state.review) return acceptReview();   // the sheet is showing an Assistant Proposal, not a plan
-  const plan = state.plan;
-  if (!plan) return;
-  await withButton($("plan-accept"), async () => {
-    try {
-      const result = await api("POST", `/api/projects/${state.project.id}/plan/accept`, { revision: plan.revision, fingerprint: plan.fingerprint, allow_tilt: !!state.planTilt });
-      applyProject(result);
-      recordEdit();
-      state.plan = null;
-      $("dlg-plan").close();
-      renderAll();
-      state.viewport?.fit(state.viewport.objectsBox());
-      toast(`Planned: ${result.plan.summary}. Undo puts it back`);
-    } catch (err) {
-      if (err.status !== 409) throw err;
-      $("plan-error").textContent = err.message;   // "changed elsewhere" or "The plan changed, review it again"
-      state.plan = null;   // nothing to accept any more: Accept does nothing until the sheet is opened again
-    }
-  });
+/** The page takes the project an accepted plan produced: one revision, so one Undo step */
+function planApplied(result, plan) {
+  const { plan: _plan, ...project } = result;
+  applyProject(project);
+  recordEdit();
+  renderAll();
+  state.viewport?.fit(state.viewport.objectsBox());
+  toast(`Planned: ${plural(plan.plates, "plate")}, done in ${planSheet.dur(plan.makespan_s)}. Undo puts it back`, !!plan.tippy);
 }
 
 // ── Assistant Proposals in the Plan plates review sheet ──
@@ -2516,6 +2435,7 @@ function proposalSheetHtml(view) {
 }
 
 function openProposalReview(view, { accept }) {
+  planSheet.release();
   state.review = { view, accept };
   $("plan-title").textContent = view.title;
   $("plan-body").innerHTML = proposalSheetHtml(view);
@@ -3469,7 +3389,7 @@ function bindUi() {
   });
   $("btn-orient-all").addEventListener("click", e => orientAll(e.shiftKey));
   $("btn-plan-plates").addEventListener("click", planPlates);
-  $("plan-accept").addEventListener("click", acceptPlan);
+  $("plan-accept").addEventListener("click", acceptReview);
   $("dlg-plan").addEventListener("close", () => { state.review = null; $("plan-title").textContent = "Plan plates"; });
   $("merge-plate").addEventListener("change", e => {
     const target = Number(e.target.value);

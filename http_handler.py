@@ -25,6 +25,7 @@ import farm
 import health
 import jobs
 import outcome_prompt
+import plan_job
 import preflight
 import remembered_defaults
 import print_history
@@ -1085,6 +1086,10 @@ class SPHandler(SimpleHTTPRequestHandler):
                 self._assistant_proposal_call(lambda proposals: proposals.pending(project_id))
             elif len(parts) == 7 and parts[4] == "assistant" and parts[5] == "proposals":
                 self._assistant_proposal_call(lambda proposals: proposals.review(project_id, parts[6]))
+            elif len(parts) == 7 and parts[4] == "plan" and parts[5] == "jobs":
+                self._json(plan_job.get_job(project_id, parts[6]))
+            elif len(parts) == 7 and parts[4] == "plan" and parts[5] == "proposals":
+                self._json(plan_job.get_proposal(project_id, parts[6]))
             elif len(parts) == 5 and parts[4] == "jobs":
                 self._json({"jobs": projects.project_jobs(project_id)})
             elif len(parts) == 5 and parts[4] == "status":
@@ -1253,8 +1258,15 @@ class SPHandler(SimpleHTTPRequestHandler):
             def plan():
                 body = self._json_body()
                 self._guard_draft(self._job_id(), body)
-                return projects.plan_plates(self._job_id(), bool(body.get("allow_tilt")), body.get("pack"))
+                return plan_job.start(self._job_id())
             self._jobs_call(plan, broadcast=False)
+            return
+        if len(parts) == 6 and parts[4] == "plan" and parts[5] == "preview":
+            def preview():     # the quick arrangement Create makes of a draft: instant, changes nothing, starts no job
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                return projects.plan_plates(self._job_id(), bool(body.get("allow_tilt")))
+            self._jobs_call(preview, broadcast=False)
             return
         if len(parts) == 6 and parts[4] == "plan" and parts[5] == "densities":
             def densities():
@@ -1273,8 +1285,13 @@ class SPHandler(SimpleHTTPRequestHandler):
         if len(parts) == 6 and parts[4] == "plan" and parts[5] == "accept":
             def accept():
                 body = self._json_body()
+                if "proposal" in body:
+                    return plan_job.accept(self._job_id(), body.get("proposal"), body.get("plan", 0))
                 return projects.accept_plan(self._job_id(), body.get("plan") or body.get("revision"), body.get("fingerprint"), bool(body.get("allow_tilt")))
             self._jobs_call(accept, broadcast=False)
+            return
+        if len(parts) == 6 and parts[4] == "plan" and parts[5] == "dismiss":
+            self._jobs_call(lambda: plan_job.dismiss(self._job_id(), self._json_body().get("proposal")), broadcast=False)
             return
         if len(parts) == 5 and parts[4] == "orient-all":
             self._jobs_call(lambda: projects.orient_all(self._job_id(), self._json_body()), broadcast=False)
