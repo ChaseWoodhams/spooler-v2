@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 import planner
 
 BUDGET_S = 25.0                  # default time for all confirmation slices
-MAX_WORKERS = 6                  # 4-8 parallel slices gave about 2.5x throughput (research 02)
+MAX_WORKERS = 4                  # 4-8 parallel slices gave about 2.5x throughput (research 02); more only made each one slower (ticket 22)
 SLICE_S_PER_PRINT_S = 1 / 1000   # rough slicing time per second of print: a 6-7 h supported plate took about 25 s (measured, small_mix)
 HEAVY_SHARE = 0.8                # a plate expected to take more than this share of the budget alone is "heavy"
 REDUCED_PROCESS = {"wall_loops": "1", "sparse_infill_density": "0%", "top_shell_layers": "0", "bottom_shell_layers": "0"}
@@ -178,7 +178,7 @@ def confirm_plans(project_id: int, record: dict, problem: planner.Problem, plans
     # the slices, in the order they are worth making: plan by plan, each plan's plates longest first
     wanted, order, per_plate = {}, [], {}
     for p_index, plan in enumerate(plans):
-        for index, plate in enumerate(plan.plates):
+        for index, plate in sorted(enumerate(plan.plates), key=lambda t: (t[1].seconds, t[0])):   # shortest first: most plates measured
             if not _fits(plate):
                 per_plate[(p_index, index)] = None
                 continue
@@ -190,22 +190,37 @@ def confirm_plans(project_id: int, record: dict, problem: planner.Problem, plans
                 order.append(job.key)
     reused = sum(1 for key in per_plate.values() if key is not None) - len(wanted)
 
-    results, errors = {}, {}
+    results, errors, walls = {}, {}, {}
     lock = threading.Lock()
     pending, running = deque(order), {}
     done_count = 0
     executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="confirm")
 
     def work(job):
-        left = deadline - time.monotonic()
+        began = time.monotonic()
+        left = deadline - began
         if left <= 0:
             raise TimeoutError("the confirmation budget ran out")
-        return slice_plate(job, left)
+        try:
+            return slice_plate(job, left)
+        finally:
+            walls[job.key] = (time.monotonic() - began, job.proxy_seconds)
+
+    def worth_starting(job) -> bool:
+        """Slices start freely until one has finished; after that a slice starts only if, at the wall time per print second
+        the finished ones took (under the same parallel load), it would end before the deadline."""
+        spent = sum(w for w, _ in walls.values())
+        printed = sum(p for _, p in walls.values())
+        if not walls or printed <= 0:
+            return True
+        return job.proxy_seconds * spent / printed <= deadline - time.monotonic()
 
     try:
         while pending or running:
             while pending and len(running) < workers and time.monotonic() < deadline:
                 key = pending.popleft()
+                if not worth_starting(wanted[key]):
+                    continue   # stays unstarted, on its proxy figures
                 running[executor.submit(work, wanted[key])] = key
             if not running:
                 break
