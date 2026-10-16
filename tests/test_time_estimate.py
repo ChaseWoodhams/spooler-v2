@@ -153,6 +153,63 @@ class TimeEstimateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plate(project_id)["status"], "unsliced")
         self.assertEqual(self.log(), [])
 
+    # the calibration columns and the per-Object support log
+
+    SUPPORT_GCODE = (SLICED_GCODE + "M83\n;TYPE:Support\nEXCLUDE_OBJECT_START NAME=cube_id_0_copy_0\nG1 X20 Y10 E40\n"
+                     ";TYPE:Support interface\nG1 X30 Y10 E10\nEXCLUDE_OBJECT_END NAME=cube_id_0_copy_0\n"
+                     "; filament_diameter = 1.75\n; filament_density = 1.25\n")
+
+    async def slice_with(self, project_id, gcode=SLICED_GCODE):
+        projects.request_slice(project_id, 1)
+
+        def runner(args, timeout):
+            out = Path(args[args.index("--outputdir") + 1])
+            (out / "plate_1.gcode").write_text(gcode)
+            return 0, ""
+
+        with mock.patch.object(slicer, "runner", runner):
+            await projects.process_next()
+
+    async def test_a_full_slice_logs_its_bundle_settings_hash_nozzle_kind_and_orca_version(self):
+        project_id = await self.cube_project(30)
+        bundle_id = projects.get_project(project_id)["data"]["profile"]["bundle_id"]
+        await self.slice_with(project_id)
+        (row,) = self.log()
+        self.assertEqual((row["bundle_id"], row["kind"]), (bundle_id, "full"))
+        self.assertRegex(row["settings_hash"], r"^[0-9a-f]{64}$")
+        self.assertEqual(row["nozzle"], 0.4)
+        self.assertIn("2.4.2", row["orca_version"])
+        self.assertIsNone(row["support_volume_cm3"])        # filled in by the support proxy (issue 14)
+
+    async def test_editing_a_bundles_settings_in_place_changes_the_settings_hash(self):
+        project_id = await self.cube_project(30)
+        bundle_id = projects.get_project(project_id)["data"]["profile"]["bundle_id"]
+        await self.slice_with(project_id)
+        (row,) = self.log()
+        self.assertEqual(row["settings_hash"], slicer.settings_hash(bundle_id))
+        process = slicer.profiles_dir() / bundle_id / "process.json"       # a slice would now refuse the bundle, so check the hash itself
+        process.write_text(json.dumps({**json.loads(process.read_text()), "layer_height": "0.33"}))
+        self.assertNotEqual(slicer.settings_hash(bundle_id), row["settings_hash"])
+
+    async def test_support_grams_are_logged_for_the_plate_and_for_each_object(self):
+        project_id = await self.cube_project(30)
+        await self.slice_with(project_id, self.SUPPORT_GCODE)
+        per_mm = 3.14159265 * 0.875 ** 2 * 1.25 / 1000
+        data = self.get("/api/slice-log")
+        (row,) = data["slices"]
+        self.assertAlmostEqual(row["support_g"], 50 * per_mm, places=3)
+        (obj,) = data["support_log"]
+        self.assertEqual((obj["slice_log_id"], obj["object_name"], obj["bundle_hash"]), (row["id"], "cube_id_0_copy_0", row["settings_hash"]))
+        self.assertAlmostEqual(obj["support_g"], 50 * per_mm, places=3)
+        self.assertIsNone(obj["support_volume_cm3"])
+
+    async def test_a_failed_slice_logs_no_support_rows_either(self):
+        project_id = await self.cube_project(30)
+        projects.request_slice(project_id, 1)
+        with mock.patch.object(slicer, "runner", fake_runner(code=1)):
+            await projects.process_next()
+        self.assertEqual(self.get("/api/slice-log")["support_log"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
