@@ -213,7 +213,8 @@ function renderSystemHealthDetail() {
   backupRows.push(healthRow(null, "Location", b.dir));
   backupRows.push(healthRow(null, "Recovery", "Keep a verified archive and use the Recovery instructions in the Spooler handoff documentation to restore it."));
 
-  setBody(healthBodyHtml([["Services", services], ["Printers", printerRows], ["Backups", backupRows]]));
+  const timeModelRows = (s.time_models || []).map(line => healthRow(null, line, ""));
+  setBody(healthBodyHtml([["Services", services], ["Printers", printerRows], ["Backups", backupRows], ...(timeModelRows.length ? [["Planner", timeModelRows]] : [])]));
   if (!backupBtn.dataset.busy) backupBtn.disabled = !_wsConnected || b.running;
 }
 

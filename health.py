@@ -141,6 +141,21 @@ def read_supervisor_status(path: Path | None = None, now: float | None = None) -
 
 # ── Snapshot + broadcast ───────────────────────────────────────────────────────
 
+_time_models: dict = {"signature": None, "lines": []}
+
+
+def time_model_lines() -> list:
+    """The read-only "Time model, <bundle>: N slices, +/-E%" lines, refitted only when the calibration log has changed."""
+    try:
+        import calibration
+        signature = calibration.signature()
+        if signature != _time_models["signature"]:
+            _time_models.update(signature=signature, lines=calibration.fit_models().status_lines())
+        return _time_models["lines"]
+    except Exception:
+        return []
+
+
 def snapshot() -> dict:
     now = time.time()
     return {
@@ -156,6 +171,7 @@ def snapshot() -> dict:
         "printers":   [p.link_status(now) for p in list(state.printers.values())],
         "backups":    backup.status_snapshot(now),
         "supervisor": read_supervisor_status(now=now),
+        "time_models": time_model_lines(),
     }
 
 
