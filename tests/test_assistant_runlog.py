@@ -54,6 +54,18 @@ class RunLogTests(unittest.TestCase):
         self.assertEqual(entry["prompt"], read_record(self.cli_dir)["stdin"])
         self.assertIn("Why two plates?", entry["prompt"])
 
+    def test_the_logged_system_prompt_is_exactly_the_text_the_cli_was_given(self):
+        self.call("POST", "/api/assistant/settings", {"tuning": {"instructions": {"text": "Be terse."}, "model": {"name": "my-model"},
+                                                                  "proposal_kinds": {"plan": False}}})
+        self.finished("Why two plates?")
+        entry, = self.entries(1)
+        record = read_record(self.cli_dir)
+        self.assertEqual(entry["system_prompt"], record["system_prompt"])
+        self.assertTrue(entry["system_prompt"].startswith("Be terse."))
+        self.assertIn("At most 3 Proposals per run.", entry["system_prompt"])
+        self.assertIn("Plan plates", entry["system_prompt"], "the fixed block is part of it")
+        self.assertEqual(entry["prompt"], record["stdin"], "the question prompt is still logged apart from it")
+
     def test_a_failed_run_is_logged_with_the_reason_shown_to_the_person(self):
         self.scenario({"calls": [], "no_result": True, "exit_code": 3})
         view = self.finished()

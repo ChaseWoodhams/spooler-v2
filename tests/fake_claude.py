@@ -24,6 +24,7 @@ Scenario keys (all optional):
   skip_server      true: do not start the server (tool calls then report an error)
   hang_after_init  seconds to sleep after init (a stalled run)
   hang_after_calls seconds to sleep after the scripted calls, server still running (a run that proposed, then stalled)
+  exit_before_init exit with this code before printing anything (a CLI that dies at start)
   exit_code        exit with this code after the events; with no_result true no result event is printed
   no_result        true: print no final result
   unknown_events   true: print events of unknown types and subtypes the runner must ignore
@@ -127,6 +128,8 @@ def main(argv) -> int:
     save =lambda: (folder / RECORD).write_text(json.dumps(record), encoding="utf-8")
     save()
 
+    if scenario.get("exit_before_init"):
+        return int(scenario["exit_before_init"])
     server, listed = None, []
     spec = (config.get("mcpServers") or {}).get("spooler")
     if spec and not scenario.get("skip_server"):

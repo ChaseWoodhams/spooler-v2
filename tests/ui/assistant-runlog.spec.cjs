@@ -6,7 +6,7 @@ const { chromium } = require('playwright');
 
 const entry = (n, outcome, reason) => ({
   time: `2026-10-15T10:0${n}:00`, project_id: 1, project_name: 'Brackets', question: `Question ${n}`, outcome, reason, duration_seconds: 1.5,
-  model: 'fake-model', tool_calls: 1, steps: ['Reading project'], proposals: [], prompt: `PROMPT <b>${n}</b>`, tuning: { limits: { deadline_seconds: 60 } },
+  model: 'fake-model', tool_calls: 1, steps: ['Reading project'], proposals: [], prompt: `PROMPT <b>${n}</b>`, system_prompt: `SYSTEM <i>${n}</i>`, tuning: { limits: { deadline_seconds: 60 } },
 });
 
 (async () => {
@@ -39,6 +39,7 @@ const entry = (n, outcome, reason) => ({
     await page.locator('#assistant-runlog-list li').first().locator('summary').click();
     assert.match(await page.locator('#assistant-runlog-list li').first().innerText(), /exit code 3/, 'the reason is shown');
     assert.equal(await page.locator('#assistant-runlog-list pre').first().innerText(), 'PROMPT <b>2</b>', 'the prompt is shown as text, never as markup');
+    assert.equal(await page.locator('#assistant-runlog-list pre').nth(1).innerText(), 'SYSTEM <i>2</i>', 'the system prompt sent is shown too, as text');
 
     await page.locator('#btn-assistant-runlog-clear').click();
     await page.waitForFunction(() => document.querySelectorAll('#assistant-runlog-list li').length === 0);

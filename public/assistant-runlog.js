@@ -14,6 +14,14 @@
     parent.append(row);
   }
 
+  function block(parent, label, text) {
+    field(parent, label, "(below)");
+    const pre = document.createElement("pre");
+    pre.className = "assistant-runlog-prompt";
+    pre.textContent = text || "";
+    parent.append(pre);
+  }
+
   function draw(data) {
     const host = list();
     if (!host) return;
@@ -32,11 +40,8 @@
       field(details, "Tools called", (e.steps || []).join(", ") || "none");
       field(details, "Proposals made", (e.proposals || []).length || "none");
       field(details, "Tuning in force", JSON.stringify(e.tuning || {}));
-      field(details, "Prompt sent", "(below)");
-      const prompt = document.createElement("pre");
-      prompt.className = "assistant-runlog-prompt";
-      prompt.textContent = e.prompt || "";
-      details.append(prompt);
+      block(details, "Prompt sent", e.prompt);
+      block(details, "System prompt sent", e.system_prompt);
       item.append(details);
       host.append(item);
     }

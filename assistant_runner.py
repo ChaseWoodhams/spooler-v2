@@ -132,7 +132,11 @@ class Run:
         self.reason = None                 # "cancelled" or "timeout" once either has been asked for
         self.tool_calls = 0                # every tool_use seen (steps are capped, this is not)
         self.proposals: list = []          # Proposal tokens; the log line carries them
-        self.question = self.prompt = self.project_name = self.model = None    # kept for the run log (assistant_runlog)
+        self.question = None               # the next four are kept for the run log (assistant_runlog)
+        self.prompt = None                 # the question prompt, what goes in on stdin
+        self.system_prompt = None          # the instructions plus fixed block, what `--system-prompt-file` holds
+        self.project_name = None
+        self.model = None                  # the model the CLI reports at init (the configured one is in `tuning`)
         self.names: dict = {"models": {}, "plates": {}}    # id -> name, to word the progress steps
         self.done = threading.Event()      # set by _finish
         self.stop = threading.Event()      # set when the run is over, to release the deadline watcher
@@ -306,6 +310,7 @@ def ask(project_id: int, message, history=None) -> dict:
         _prune()
     prompt = build_prompt(record, message, turns, context)
     run.question, run.prompt, run.project_name = message, prompt, record.get("name")
+    run.system_prompt = system_prompt(run.tuning)
     _sweep_staging()
     threading.Thread(target=_execute, args=(run, cli, settings["jev_url"], prompt), name=f"assistant-run-{run.id[:8]}", daemon=True).start()
     return with_summaries(run.view())
@@ -496,7 +501,7 @@ def _execute(run: Run, cli: str, jev_url: str, prompt: str) -> None:
         cwd.mkdir(parents=True)                      # empty: nothing but the CLI's own files ever appear here
         mcp_path, prompt_path = folder / "mcp.json", folder / "system-prompt.txt"
         mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir(), run.id, run.tuning["limits"]["proposals_per_run"], kinds_off(run.tuning))), encoding="utf-8")
-        prompt_path.write_text(system_prompt(run.tuning), encoding="utf-8")
+        prompt_path.write_text(run.system_prompt, encoding="utf-8")
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path, run.tuning["limits"]["max_turns"], run.tuning["model"]["name"], allowed_tools(run.tuning)), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=str(cwd), env=build_env(jev_url), creationflags=flags)
