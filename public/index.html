@@ -629,6 +629,20 @@
           <ol id="assistant-runlog-list" class="assistant-runlog-list"></ol>
           <button id="btn-assistant-runlog-clear" class="btn btn-secondary" type="button">Clear log</button>
         </section>
+        <section id="assistant-preview" aria-labelledby="assistant-preview-title">
+          <h4 id="assistant-preview-title">Preview</h4>
+          <p class="input-hint">Shows exactly what the next Assistant run would send, using your saved settings (Save first to see a change). Free: nothing is started and nothing leaves this computer.</p>
+          <label for="assistant-preview-project">Project</label>
+          <select id="assistant-preview-project"></select>
+          <label for="assistant-preview-question">Sample question</label>
+          <input id="assistant-preview-question" type="text" value="Make the brackets stronger">
+          <button id="btn-assistant-preview" class="btn btn-secondary" type="button">Show preview</button>
+          <p id="assistant-preview-status" class="input-hint" role="status" aria-live="polite"></p>
+          <h5>Instructions</h5>
+          <pre id="assistant-preview-instructions" class="assistant-runlog-prompt"></pre>
+          <h5>Prompt for this question</h5>
+          <pre id="assistant-preview-prompt" class="assistant-runlog-prompt"></pre>
+        </section>
       </div>
       <!-- Notifications sub-page -->
       <div id="settings-notifications" style="display:none">
@@ -887,6 +901,7 @@
   <script src="history.js?v=11"></script>
   <script src="outcome-prompt.js?v=6"></script>
   <script src="assistant-runlog.js?v=1"></script>
+  <script src="assistant-preview.js?v=1"></script>
   <script src="app.js?v=80"></script>
   <script src="quick-print.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
