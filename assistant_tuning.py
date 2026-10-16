@@ -71,6 +71,17 @@ GROUPS = {
                            "hint": "Longer turns are cut to this."},
         },
     },
+    "proposal_kinds": {
+        "label": "Proposal kinds",
+        "hint": "Which kinds of Proposal the Assistant may make. A kind switched off is taken away from its tools, and it tells the person so. Reading tools are unaffected. "
+                "Applies to the next run and to terminal sessions.",
+        "fields": {
+            "orientation": {"label": "Orientation", "type": "bool", "default": True, "hint": "Propose a better orientation for Objects."},
+            "arrange": {"label": "Arrange", "type": "bool", "default": True, "hint": "Propose an Arrange of the Objects on Plates."},
+            "plan": {"label": "Plan plates", "type": "bool", "default": True, "hint": "Propose Plan plates for the whole project."},
+            "settings": {"label": "Settings", "type": "bool", "default": True, "hint": "Propose slicer setting changes."},
+        },
+    },
 }
 
 
