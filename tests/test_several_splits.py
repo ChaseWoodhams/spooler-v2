@@ -47,6 +47,12 @@ class SeveralSplitsTests(unittest.IsolatedAsyncioTestCase):
             while await splits.process_next() or await projects.process_next():
                 pass
 
+    async def plan_and_split(self, split_id):
+        """Analysis doesn't plan the cuts by itself: plan them, then split."""
+        splits.request_plan(split_id, {})
+        await self.settle()
+        splits.request_split(split_id)
+
     def add(self, project_id, name, size):
         data = box_stl(self.dir / name, size)
         projects.import_model(project_id, io.BytesIO(data), len(data), name)
@@ -92,7 +98,7 @@ class SeveralSplitsTests(unittest.IsolatedAsyncioTestCase):
         project = projects.create_draft((await self.mixed_draft(small=2, big=2))["id"], "Mixed")["project"]
         await self.settle()
         for split_id in project["split_ids"]:
-            splits.request_split(split_id)
+            await self.plan_and_split(split_id)
         await self.settle()
         for split_id in project["split_ids"]:
             projects.lay_out_split(project["id"], split_id=split_id)
@@ -210,7 +216,7 @@ class SeveralSplitsTests(unittest.IsolatedAsyncioTestCase):
         self.add_copies(draft["id"], model["id"], 1)
         project = projects.create_draft(draft["id"], "Big")["project"]
         await self.settle()
-        splits.request_split(project["split_id"])
+        await self.plan_and_split(project["split_id"])
         await self.settle()
         laid = projects.lay_out_split(project["id"], split_id=project["split_id"])
         parts = len(splits.get_split(project["split_id"], detail=True)["result"]["parts"])
@@ -220,7 +226,7 @@ class SeveralSplitsTests(unittest.IsolatedAsyncioTestCase):
         a = projects.create_draft((await self.mixed_draft(small=0, big=1))["id"], "A")["project"]
         b = projects.create_draft((await self.mixed_draft(small=0, big=1))["id"], "B")["project"]
         await self.settle()
-        splits.request_split(b["split_id"])
+        await self.plan_and_split(b["split_id"])
         await self.settle()
         with self.assertRaises(jobs.JobError) as ctx:
             projects.lay_out_split(a["id"], split_id=b["split_id"])

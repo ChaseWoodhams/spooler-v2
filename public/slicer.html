@@ -401,6 +401,27 @@
   <script src="/status-badge.js?v=1"></script>
   <script src="/outcome-prompt.js?v=6"></script>
   <script src="folder-import.js?v=2"></script>
-  <script type="module" src="slicer/main.js?v=66"></script>
+  <script>
+  // When a script of this page fails to load (a dropped connection) the module never starts and the page stays an empty workspace.
+  // Say so, with a way to try again. main.js sets slicerBooted as soon as it runs.
+  window.slicerLoadFailed = function () {
+    if (window.slicerBooted || document.getElementById("slicer-load-failed")) return;
+    const box = document.createElement("div");
+    box.id = "slicer-load-failed";
+    box.setAttribute("role", "alert");
+    box.style.cssText = "position:fixed;inset:0;z-index:1000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:#15171c;color:#e8eaed;text-align:center;padding:24px";
+    const text = document.createElement("p");
+    text.textContent = "Projects didn't finish loading. A file was missing, usually from a dropped connection.";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "btn btn-primary";
+    retry.textContent = "Reload";
+    retry.addEventListener("click", () => location.reload());
+    box.append(text, retry);
+    document.body.appendChild(box);
+  };
+  window.addEventListener("error", e => { if (!window.slicerBooted && /\/slicer\//.test(e.filename || "")) window.slicerLoadFailed(); });
+  </script>
+  <script type="module" src="slicer/main.js?v=67" onerror="slicerLoadFailed()"></script>
 </body>
 </html>

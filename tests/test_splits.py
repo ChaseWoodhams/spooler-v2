@@ -66,8 +66,13 @@ class SplitWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["state"], splits.ANALYZING)
         await self.run_stages()
         detail = splits.get_split(record["id"], detail=True)
-        self.assertEqual(detail["state"], splits.READY)
+        self.assertEqual(detail["state"], splits.READY)   # analysis does not plan: orientation comes first
         self.assertEqual(detail["analysis"]["size"], [520.0, 140.0, 90.0])
+        self.assertFalse(detail["cuts"])
+        self.assertEqual(splits.request_plan(record["id"], {})["state"], splits.PLANNING)
+        await self.run_stages()
+        detail = splits.get_split(record["id"], detail=True)
+        self.assertEqual(detail["state"], splits.READY)
         self.assertTrue(all(p["fits"] for p in detail["check"]["pieces"]))
 
         cuts = detail["cuts"]["cuts"]

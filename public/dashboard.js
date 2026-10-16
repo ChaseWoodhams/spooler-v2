@@ -183,9 +183,16 @@ function syncShellView() {
     if (!frame.getAttribute("src") || ((id || fresh) && frame.dataset.route !== route)) {
       frame.dataset.route = route;
       frame.src = target;
-    } else if (!wasShown) {
+    } else if (!wasShown || (hash === "#projects" && frame.dataset.route && frame.dataset.route !== "0|")) {
       // The same project kept in the frame since Projects was last shown: bring it up to date (a Quick print, another tab, a slice finishing).
-      try { (hash === "#projects" ? frame.contentWindow?.spoolerHome : frame.contentWindow?.spoolerRefresh)?.call(frame.contentWindow); } catch (_) { /* still loading */ }
+      // Clicking Projects while a project or the New project form is open lands here too: back to the list of projects.
+      try {
+        const page = frame.contentWindow, call = hash === "#projects" ? page?.spoolerHome : page?.spoolerRefresh;
+        if (call) call.call(page);
+        else if (hash === "#projects") { frame.dataset.route = "0|"; frame.src = "/slicer.html"; }   // the page never started (a failed load): load it again
+      } catch (_) {
+        if (hash === "#projects") { frame.dataset.route = "0|"; frame.src = "/slicer.html"; }   // an error page sits in the frame
+      }
     }
   } else {
     loadDashboard();

@@ -12,7 +12,7 @@ import { importWithReview, isReviewed } from "./import-review.js?v=2";
 
 const POLL_MS = 1500;
 const POLL_FAILURES = 3;   // consecutive failed checks before the table stops asking
-const MODEL = window.FolderImport.MODEL;
+const MODEL = /\.(stl|obj|3mf)$/i;   // the same test as FolderImport.MODEL, without needing that script to have loaded
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

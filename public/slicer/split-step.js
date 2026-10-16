@@ -922,7 +922,7 @@ async function refresh() {
   }
   if (!current || current.id !== id) return;
   const finished = wasRunning && !RUNNING.has(detail.state);
-  // analysing runs straight into planning: a new stage or a first analysis/result changes what the panel shows
+  // a new stage or a first analysis/result changes what the panel shows
   const moved = detail.stage !== current.stage || !!detail.analysis !== !!current.analysis || !!detail.result !== !!current.result;
   current = detail;
   if (moved && !finished) {

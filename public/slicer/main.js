@@ -6,7 +6,7 @@ import * as orient from "./orient.js?v=2";
 import { SettingsPanel } from "./settings.js?v=5";
 import { splitStep } from "./split-step.js?v=5";
 import { projectPage } from "./project-page.js?v=10";
-import { newProject } from "./new-project.js?v=10";
+import { newProject } from "./new-project.js?v=11";
 import { importWithReview, isReviewed, showRecords } from "./import-review.js?v=2";
 import { showExport } from "./export-plan.js?v=2";
 import { Viewport, featureColor } from "./viewport.js?v=5";
@@ -280,6 +280,7 @@ const plateImporting = plateId => plateObjects(plateId).some(o => state.project.
 
 // ── Loading ─────────────────────────────────────────────────────────────────────
 async function boot() {
+  window.slicerBooted = true;   // slicer.html shows a Reload message if the page's scripts never got this far
   document.querySelectorAll("[data-steps], #prepare-tools").forEach(el => { el.hidden = true; });  // shown once a project is open
   newProject.attach({ api, upload, toast, openCreated, importNotes: showImportNotes });
   bindFolds();

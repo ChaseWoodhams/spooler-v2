@@ -6,7 +6,9 @@ a time — in DATA_DIR/splits/<id>/. This module keeps the records, runs the sta
 in the background, and turns finished parts into slices for the print queue.
 
 States
-  analyzing → planning → ready ⇄ checking → splitting → split → queued
+  analyzing → ready ⇄ planning / checking → splitting → split → queued
+  Analysis stops at `ready` with no cuts, so the user can set orientation and scale first; planning only
+  runs when asked for (request_plan).
   A failed stage leaves the record `failed` with `stage` and `error` set; retrying
   runs that stage again. A stage interrupted by a restart runs again on start.
 """
@@ -50,7 +52,7 @@ ANALYZING, PLANNING, READY, CHECKING = "analyzing", "planning", "ready", "checki
 SPLITTING, SPLIT, QUEUED, FAILED     = "splitting", "split", "queued", "failed"
 STAGE_FOR  = {ANALYZING: "analyze", PLANNING: "plan", CHECKING: "check", SPLITTING: "split"}
 STATE_FOR  = {stage: s for s, stage in STAGE_FOR.items()}
-AFTER      = {ANALYZING: PLANNING, PLANNING: READY, CHECKING: READY, SPLITTING: SPLIT}
+AFTER      = {ANALYZING: READY, PLANNING: READY, CHECKING: READY, SPLITTING: SPLIT}
 
 DEFAULT_SETTINGS = {
     "scale":      1.0,
