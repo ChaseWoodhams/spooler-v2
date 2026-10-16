@@ -41,6 +41,26 @@ GROUPS = {
                      "hint": "For example claude-sonnet-4-5; one word, no spaces."},
         },
     },
+    "prompt_context": {
+        "label": "Prompt context",
+        "hint": "What each question sends along. The revision, the Model list (ids and names) and the project name are always sent. Applies to the next question.",
+        "fields": {
+            "send_purposes": {"label": "Model Purposes", "type": "bool", "default": True,
+                              "hint": "Send each Model's Purpose."},
+            "send_purpose_notes": {"label": "Model Purpose notes", "type": "bool", "default": True,
+                                   "hint": "Send the note written on each Purpose, and on the project default Purpose."},
+            "send_default_purpose": {"label": "Project default Purpose", "type": "bool", "default": True,
+                                     "hint": "Send the Purpose that Models without their own use."},
+            "history_enabled": {"label": "Chat history", "type": "bool", "default": True,
+                                "hint": "Send the earlier turns of this chat. Off, every question stands alone."},
+            "history_turns": {"label": "History turns kept", "type": "int", "unit": "turns", "default": 12, "min": 1, "max": 50,
+                              "hint": "The most earlier turns sent; the oldest are dropped first."},
+            "history_chars": {"label": "History characters kept", "type": "int", "unit": "characters", "default": 6000, "min": 200, "max": 20000,
+                              "hint": "The most characters of history sent in all."},
+            "turn_chars": {"label": "Characters per turn", "type": "int", "unit": "characters", "default": 1500, "min": 100, "max": 5000,
+                           "hint": "Longer turns are cut to this."},
+        },
+    },
 }
 
 
@@ -59,6 +79,10 @@ def _check(group: str, key: str, value):
             raise ValueError(f"{field['label']} cannot be longer than {field['max']} characters")
         if value and (value.startswith("-") or not value.isprintable() or any(c.isspace() for c in value)):
             raise ValueError(f"{field['label']} must be one word without spaces and not start with a dash")
+        return value
+    if field["type"] == "bool":
+        if not isinstance(value, bool):
+            raise ValueError(f"{field['label']} must be on or off")
         return value
     ok = isinstance(value, int) and not isinstance(value, bool)
     if not ok and isinstance(value, float) and value.is_integer():
