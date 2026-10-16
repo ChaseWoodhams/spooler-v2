@@ -255,7 +255,8 @@ def build_prompt(record: dict, message: str, history: list, context=None) -> str
 
 def prompt_turns(history, context: dict) -> list:
     """The chat history a run sends: validated always, then sent only when the saved prompt context has history on."""
-    return clean_history(history, context) if context["history_enabled"] else (clean_history(history), [])[1]
+    turns = clean_history(history, context)          # validates the history even when it is then not sent
+    return turns if context["history_enabled"] else []
 
 
 def check_question(message, tuning: dict, empty: str) -> None:
