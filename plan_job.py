@@ -21,7 +21,6 @@ plan, allow_unsliced)`, `dismiss(project_id, token)`.
 """
 
 import asyncio
-import copy
 import json
 import os
 import threading
@@ -33,6 +32,7 @@ from pathlib import Path
 import confirmation
 import datapaths
 import jobs
+import plan_layout
 import planner
 
 SEARCH_SECONDS = planner.SEARCH_SECONDS
@@ -41,7 +41,7 @@ CONFIRM_BUDGET_S = confirmation.BUDGET_S
 TTL_S = 24 * 3600
 EVENT_LIMIT = 300
 FOLDER = ".plans"
-BRIM = {"brim_type": "outer_only", "brim_width": "5"}   # given to Objects that are tippy in every orientation
+BRIM = plan_layout.BRIM   # given to Objects that are tippy in every orientation
 SUPERSEDED = "The project was changed elsewhere — reload it"
 VERSION = 1
 
@@ -127,15 +127,7 @@ def wait_idle(timeout: float = 60) -> bool:
 
 def plan_nozzle_of(record: dict) -> float:
     """The Project's plan nozzle: its profile bundle's nozzle."""
-    import slicer
-    bundle = ((record.get("data") or {}).get("profile") or {}).get("bundle_id")
-    if not bundle:
-        raise jobs.JobError("Choose a profile for the project before planning", 409)
-    try:
-        value = slicer.bundle_settings(bundle)["machine"].get("nozzle_diameter")
-        return float(value[0] if isinstance(value, list) else value)
-    except (KeyError, TypeError, ValueError, IndexError, jobs.JobError):
-        raise jobs.JobError("The project's profile does not say what nozzle it is for", 409)
+    return plan_layout.plan_nozzle_of(record)
 
 
 def printer_nozzles() -> dict:
@@ -250,25 +242,7 @@ def _names(data: dict) -> dict:
 
 def _kept_and_open(project_id: int, record: dict) -> tuple:
     """([{"id", "name", "reason"}] plates a plan leaves alone, [ids] of the plates it may replan)."""
-    import database
-    import placement_read
-    from project_read import FAILED, READY, read_ledger
-    data = record["data"]
-    ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
-    importing = {o["plate"] for o in data["objects"] if o["model"] not in ready and o["model"] not in failed}
-    with database.transaction() as conn:
-        ledger = read_ledger(conn, project_id)
-    kept, replannable = [], []
-    for plate in data["plates"]:
-        reason = (placement_read.KEPT_REASONS.get(ledger.status(plate["id"]))
-                  or ("A print of it is on record" if plate["id"] in ledger.recorded else None)
-                  or ("Its models are still importing" if plate["id"] in importing else None))
-        if reason:
-            kept.append({"id": plate["id"], "name": plate["name"], "reason": reason})
-        else:
-            replannable.append(plate["id"])
-    return kept, replannable
+    return plan_layout.kept_and_open(project_id, record)
 
 
 class _Reading:
@@ -419,37 +393,13 @@ def _apply(job: _Job, problem: planner.Problem, reading: _Reading, index: int, c
     import projects
     import state
     record = job.record
-    data = copy.deepcopy(record["data"])
-    objects = {o["id"]: o for o in data["objects"]}
-    was = {o["id"]: list(o["rotation"]) for o in data["objects"]}
-    held = {i.key: i for i in problem.items + tuple(problem.oversize)}
     ordered = sorted(cplan.plates, key=lambda p: -p.seconds)    # longest first, ties in the plan's order
-    layout, tippy = [], []
-    for cp in ordered:
-        items = []
-        for placed in cp.plate.items:
-            objects[placed.key]["rotation"] = list(placed.rotation)
-            items.append({"key": placed.key, "center": placed.center, "angle": placed.angle})
-            if held[placed.key].candidates[placed.candidate].tippy:
-                tippy.append(placed.key)
-        layout.append({"plate": cp.plate.anchor, "group": cp.plate.group, "items": items})
-    used = placement_read._place_layout(data, reading.replannable, layout, lambda group: json.loads(group)["overrides"]) if layout else []
-    for key in tippy:   # tippy whatever the orientation: a brim holds it down
-        objects[key]["overrides"] = {**BRIM, **(objects[key].get("overrides") or {})}
+    placed = plan_layout.place_plan(record, problem, reading.replannable, {k["id"] for k in reading.kept},
+                                    [cp.plate for cp in ordered],
+                                    [cp.printer if cp.printer in state.printers else None for cp in ordered])
+    data, objects, was, tippy, used, emptied = (placed[k] for k in ("data", "objects", "was", "tippy", "used", "emptied"))
     plates = {p["id"]: p for p in data["plates"]}
-    for cp, plate_id in zip(ordered, used):
-        if cp.plate.supports:
-            plates[plate_id]["overrides"] = {**(plates[plate_id].get("overrides") or {}), **projects.SUPPORT_OVERRIDES}
-        if cp.printer in state.printers:
-            plates[plate_id]["printer_id"] = cp.printer
-    holding = {o["plate"] for o in data["objects"]}
-    emptied = [p for p in reading.replannable if p not in holding] if used else []
-    if len(data["plates"]) - len(emptied) < 1:
-        emptied = emptied[1:]
-    data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
-    plates = {p["id"]: p for p in data["plates"]}
-    existing = {p["id"] for p in record["data"]["plates"]}
-    _order_and_name(data, record, plates, [p for p in used if p in plates], {k["id"] for k in reading.kept})
+    existing = placed["existing"]
     rows = []
     for cp, plate_id in zip(ordered, used):
         members = sorted((objects[i.key] for i in cp.plate.items), key=lambda o: o["id"])
@@ -476,31 +426,6 @@ def _apply(job: _Job, problem: planner.Problem, reading: _Reading, index: int, c
             "partly_estimated_plates": [r["name"] for r in rows if r["partly_estimated"]],
             "did_not_slice_plates": unsliced, "can_accept": not unsliced, "printers": finish,
             "plate_rows": rows, "tippy_objects": tippy_rows, "emptied": list(emptied), "data": data}
-
-
-def _order_and_name(data: dict, record: dict, plates: dict, ordered: list, kept_ids: set) -> None:
-    """Put the plates in plan order (kept plates keep their place) and renumber the default names ("Plate 3") to follow it,
-    leaving the numbers kept plates hold free of clashes; a name the user gave stays."""
-    import re
-    default = re.compile(r"^Plate (\d+)$")
-    kept_at = {p["id"]: i for i, p in enumerate(record["data"]["plates"]) if p["id"] in kept_ids and p["id"] in plates}
-    order, queue, later = [], list(ordered), sorted(kept_at, key=kept_at.get)
-    for position in range(len(kept_at) + len(ordered)):
-        holder = next((k for k in later if kept_at[k] == position), None)
-        if holder is not None:
-            order.append(holder)
-            later.remove(holder)
-        elif queue:
-            order.append(queue.pop(0))
-    order += later
-    seen = set(order)
-    order += [p["id"] for p in data["plates"] if p["id"] not in seen]    # plates the plan did not touch
-    taken = {int(m.group(1)) for p in data["plates"] if p["id"] in kept_ids and (m := default.match(p["name"] or ""))}
-    free = (n for n in range(1, 10000) if n not in taken)
-    for plate_id in ordered:
-        if not plates[plate_id]["name"] or default.match(plates[plate_id]["name"]):
-            plates[plate_id]["name"] = f"Plate {next(free)}"
-    data["plates"] = [plates[plate_id] for plate_id in order]
 
 
 # --- storing ---------------------------------------------------------------------------------------------------------------
