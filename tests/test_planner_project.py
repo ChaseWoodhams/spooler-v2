@@ -124,6 +124,32 @@ class PlannerProjectTests(unittest.TestCase):
         self.assertEqual(self.keys(plan), [])
         self.assertEqual([k for k, _ in plan.unplanned], [1])
 
+    def test_only_the_named_objects_are_planned_and_the_others_stay_as_obstacles(self):
+        pid = self.project_with(cube_stl(20), placements=[(1, 1, False), (1, 1, False), (1, 2, False)])
+        record = projects.get_project(pid)
+        problem = planner.problem_from_project(pid, record, plan_nozzle=0.7, printers=PRINTERS, only={3})
+        self.assertEqual([i.key for i in problem.items], [3])
+        self.assertEqual(sorted(p.key for p in problem.pinned), [1, 2])      # fixed where they stand
+        self.assertEqual(set(problem.anchors), {1})                           # plate 2 holds only the new object: not an anchor
+
+    def test_meshes_given_stand_in_for_a_model_still_importing(self):
+        import trimesh
+        import numpy as np
+        pid = self.project_with(cube_stl(20), placements=[(1, 1, False)])
+        data = cube_stl(25)
+        projects.import_model(pid, io.BytesIO(data), len(data), "late.stl")      # not analysed: still importing
+        record = projects.get_project(pid)
+        late = record["models"][-1]
+        self.assertNotEqual(late["state"], "ready")
+        box_mesh = trimesh.creation.box((25, 25, 25))
+        mesh = (np.asarray(box_mesh.vertices, float), np.asarray(box_mesh.faces))
+        record = projects.get_project(pid)
+        without = planner.problem_from_project(pid, record, plan_nozzle=0.7, printers=PRINTERS, only={2})
+        self.assertEqual([i.key for i in without.items], [])
+        problem = planner.problem_from_project(pid, record, plan_nozzle=0.7, printers=PRINTERS, only={2},
+                                               meshes={late["id"]: {"full": mesh, "preview": mesh}})
+        self.assertEqual([i.key for i in problem.items], [2])
+
 
 if __name__ == "__main__":
     unittest.main()

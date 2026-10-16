@@ -171,18 +171,6 @@ class ReadCoreParityTests(SliceCase):
             self.assertIs(getattr(slicer, name), getattr(profile_read, name), name)
         self.assertIs(jobs.JobError, errors.JobError)
 
-    async def test_the_plan_reads_the_queue_through_a_read_only_connection_and_agrees_with_the_app(self):
-        try:
-            import nesting  # noqa: F401
-        except ImportError:
-            self.skipTest("shapely is not installed")
-        project = await self.petg_project()
-        with self.reader() as conn:
-            ledger = project_read.read_ledger(conn, project["id"])
-        record = projects.get_project(project["id"])
-        self.assertEqual(placement_read._plan_data(project["id"], record, ledger=ledger),
-                         projects._plan_data(project["id"], record))
-
 
 if __name__ == "__main__":
     unittest.main()

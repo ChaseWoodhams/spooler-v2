@@ -18,7 +18,6 @@ import jobs
 import projects
 import slicer
 import splits
-from tests.test_plan_plates import legacy_plan
 from tests.test_slicer import cube_stl, fake_runner, make_fake_orca
 
 GEOMETRY = not splits.missing_modules()
@@ -95,12 +94,6 @@ class PrintStepOrderTests(unittest.TestCase):
             if filaments:
                 data["filaments"] = filaments
         return self.save(project, change)
-
-    def plan(self, project):
-        return legacy_plan(project["id"])
-
-    def accept(self, project, **body):
-        return self.call("POST", f"/api/projects/{project['id']}/plan/accept", {"revision": project["revision"], **body})
 
     def two_plates(self):
         """Plate 1 holds a small cube, plate 2 a big one: the big one is longer by the model estimate."""

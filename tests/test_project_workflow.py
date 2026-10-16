@@ -14,6 +14,7 @@ from unittest import mock
 
 import database
 import jobs
+import plan_job
 import projects
 import slicer
 import splits
@@ -45,6 +46,8 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         projects.configure(self.dir)
         projects.init()
         state.printers = {"p1": FakePrinter("p1", "Printer 1"), "p2": FakePrinter("p2", "Printer 2")}
+        self._plan = mock.patch.object(plan_job, "start", return_value={"id": 1, "state": "queued"})   # the run itself is tests/test_cutover.py's
+        self._plan.start()
 
     async def asyncTearDown(self):
         for task in list(jobs._start_tasks.values()):
@@ -52,6 +55,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
 
     def tearDown(self):
+        self._plan.stop()
         state.printers = self._saved_printers
         database.configure(database.DB_FILE)
         jobs._data_dir = jobs.DATA_DIR
@@ -69,6 +73,8 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def split_project(self, size=(400, 40, 20)):
         data = box_stl(self.dir / "beam.stl", size)
         project = projects.create_project_from_upload(io.BytesIO(data), len(data), "beam.stl")
+        await self.settle()
+        splits.request_plan(project["split_id"], {})     # the cuts are planned before they are made
         await self.settle()
         splits.request_split(project["split_id"])
         await self.settle()
@@ -88,11 +94,11 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(jobs.JobError):
             splits.get_split(split["id"])
 
-    async def test_parts_are_packed_onto_as_few_plates_as_fit(self):
+    async def test_parts_are_laid_out_onto_as_few_plates_as_fit(self):
         project = await self.split_project()
         parts = splits.get_split(project["split_id"], detail=True)["result"]["parts"]
         self.assertGreater(len(parts), 1)
-        laid = projects.lay_out_split(project["id"])
+        laid = projects.lay_out_parts(project["id"])
         self.assertEqual(len(laid["data"]["plates"]), 1)                     # small beam halves share the plate
         self.assertEqual(len(laid["data"]["objects"]), len(parts))
         self.assertEqual([m["split"]["part"] for m in laid["models"]], [p["number"] for p in parts])
@@ -102,21 +108,9 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         sliced = projects.get_project(project["id"])
         self.assertEqual(sliced["slices"]["1"]["state"], "sliced", sliced["slices"]["1"].get("error"))  # the fit check passed
 
-        again = projects.lay_out_split(project["id"])                        # laying out again replaces the parts
+        again = projects.lay_out_parts(project["id"])                        # laying out again replaces the parts
         self.assertEqual((len(again["models"]), len(again["data"]["objects"]), len(again["data"]["plates"])),
                          (len(parts), len(parts), 1))
-
-    async def test_parts_needing_supports_get_their_own_plate_with_supports_on(self):
-        project = await self.split_project()
-        work = splits.work_dir(project["split_id"])
-        result = json.loads((work / "result.json").read_text())
-        result["parts"][0]["needs_supports"] = True
-        (work / "result.json").write_text(json.dumps(result))
-        laid = projects.lay_out_split(project["id"])
-        plates = laid["data"]["plates"]
-        self.assertEqual([p["overrides"] for p in plates], [{}, {"enable_support": "1", "support_type": "tree(auto)"}])
-        supported = [o for o in laid["data"]["objects"] if o["plate"] == plates[1]["id"]]
-        self.assertEqual([laid["models"][o["model"] - 1]["split"]["part"] for o in supported], [result["parts"][0]["number"]])
 
     async def test_a_model_that_fits_goes_on_a_plate_whole(self):
         data = cube_stl(30)
@@ -130,7 +124,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_plate_settings_sit_between_the_profile_and_the_object(self):
         project = await self.split_project()
-        project = projects.lay_out_split(project["id"])
+        project = projects.lay_out_parts(project["id"])
         await self.settle()
         project = projects.get_project(project["id"])
         profile = {**project["data"]["profile"], "process": {"wall_loops": "3", "sparse_infill_density": "10%"}}

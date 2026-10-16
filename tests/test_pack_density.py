@@ -9,6 +9,7 @@ from pathlib import Path
 
 import database
 import jobs
+import plan_layout
 import projects
 import slicer
 import splits
@@ -131,14 +132,15 @@ class PackDensityProjectTests(unittest.IsolatedAsyncioTestCase):
         plates = [counts[p]["plates"] for p in ("tight", "normal", "roomy")]
         self.assertTrue(all(n >= 1 for n in plates), counts)
         self.assertEqual(plates, sorted(plates), f"a roomier plate holds no more: {counts}")
-        what_if = projects.plan_plates(project["id"], pack={"preset": "roomy"})
+        what_if = projects.plan_preview(project["id"], pack={"preset": "roomy"})
         self.assertEqual(len(what_if["plates"]), counts["roomy"]["plates"])
 
     async def test_a_plan_keeps_objects_as_far_apart_as_the_density_says(self):
         project = await self.project_of_cubes(4, 40)
         projects.set_pack(project["id"], {"pack": {"preset": "roomy"}})
-        plan = projects.plan_plates(project["id"])
-        projects.accept_plan(project["id"], plan)
+        record = projects.get_project(project["id"])
+        planned = plan_layout.seed_data(project["id"], record)      # what Create applies to a new project
+        projects.save_data(project["id"], record, planned["data"], planned["emptied"])
         record = projects.get_project(project["id"])
         self.assertEqual(projects.plate_problems(project["id"], record), [], "a plan is valid at its own density")
         on_first = [o["position"] for o in record["data"]["objects"] if o["plate"] == record["data"]["objects"][0]["plate"]]

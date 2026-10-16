@@ -607,11 +607,14 @@ def _split_neighbours(keys, data: dict, record: dict) -> tuple:
 
 
 def problem_from_project(project_id: int, record: dict, *, plan_nozzle: float, printers: dict, models=None, ledger=None,
-                         seed: int = 0) -> Problem:
+                         seed: int = 0, only=None, meshes=None) -> Problem:
     """Read the Project into a Problem. Planned: every Object that is not Pinned, on a plate that is not queued, printing,
     printed, recorded or still importing, whose model is ready. Pinned Objects on those plates are fixed obstacles. `printers`
     maps printer id to its installed nozzle in mm (None: unknown, matches nothing); `plan_nozzle` is the nozzle planned for;
-    `models` is `calibration.fit_models()` (fitted now when not given). Objects of one Model are Copies."""
+    `models` is `calibration.fit_models()` (fitted now when not given). Objects of one Model are Copies. `only` (object ids)
+    narrows what is planned to those Objects: every other Object on a plate that may be planned stays where it is, as a fixed
+    obstacle like a Pinned one. `meshes` ({model id: {"full": (verts, tris), "preview": (verts, tris)}}) supplies the
+    geometry of Models that are not analysed yet, which then count as ready."""
     import calibration
     import database
     import orientation
@@ -622,8 +625,9 @@ def problem_from_project(project_id: int, record: dict, *, plan_nozzle: float, p
     if models is None:
         models = calibration.fit_models()
     data = record["data"]
-    ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
+    given = dict(meshes or {})
+    ready = {m["id"] for m in record["models"] if m["state"] == READY} | set(given)
+    failed = {m["id"] for m in record["models"] if m["state"] == FAILED} - set(given)
     importing = {o["plate"] for o in data["objects"] if o["model"] not in ready and o["model"] not in failed}
     if ledger is None:
         with database.transaction() as conn:
@@ -654,15 +658,19 @@ def problem_from_project(project_id: int, record: dict, *, plan_nozzle: float, p
     grams = models.support_g_per_cm3(shash, plan_nozzle)
     matching = [pid for pid, nozzle in printers.items() if _nozzle_matches(nozzle, plan_nozzle)]
     shapes = placement_read._Shapes(project_id, record, data)
-    meshes, previews, ranked = {}, {}, {}
+    shapes.meshes.update({model: given[model]["full"] for model in given})
+    full_meshes, previews, ranked = {}, {}, {}
     items, oversize, unplanned, pinned, anchors = [], [], [], [], {}
     for obj in sorted((o for o in data["objects"] if o["plate"] in open_plates and o["model"] in ready), key=lambda o: o["id"]):
         group = group_for(obj)
-        if obj["model"] not in meshes:
-            meshes[obj["model"]] = placement_read.load_mesh(project_id, obj["model"])
-            previews[obj["model"]] = placement_read.load_mesh(project_id, obj["model"], preview=True)
-        verts, tris = meshes[obj["model"]]
-        if obj.get("pinned"):
+        if obj["model"] not in full_meshes:
+            if obj["model"] in given:
+                full_meshes[obj["model"]], previews[obj["model"]] = given[obj["model"]]["full"], given[obj["model"]]["preview"]
+            else:
+                full_meshes[obj["model"]] = placement_read.load_mesh(project_id, obj["model"])
+                previews[obj["model"]] = placement_read.load_mesh(project_id, obj["model"], preview=True)
+        verts, tris = full_meshes[obj["model"]]
+        if obj.get("pinned") or (only is not None and obj["id"] not in only):
             anchors.setdefault(obj["plate"], group)
             _, height, volume, first = _measure(verts, tris, obj, obj["rotation"], group_settings[group])
             pinned.append(Pinned(obj["id"], obj["plate"], group, tuple(map(tuple, shapes.polygon(obj))),

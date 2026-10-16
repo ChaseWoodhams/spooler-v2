@@ -66,7 +66,7 @@ import observed_output
 import jobs  # used as a module: jobs.JobError, jobs.create_upload_job, …
 import orca_3mf
 import preflight
-import packing
+import plan_layout
 import problem_kinds
 import proposal_store
 import remembered_defaults
@@ -82,10 +82,10 @@ from values import digest, first
 # The read side of this module lives in project_read, placement_read and profile_read, which import no jobs, printer or
 # Spoolman code (the read-only MCP server builds on them). The names stay reachable here.
 from datapaths import (model_dir, plate_dir, project_dir, projects_dir)
-from placement_read import (arrange_layout, _arrange_plate_ids, _count, _flat_on_face, hard_plate_problems, KEPT_REASONS,
+from placement_read import (arrange_layout, _arrange_plate_ids, _count, hard_plate_problems, KEPT_REASONS,
                             load_mesh, _nest_error, _orient_options, _orientation_for, place, _place_layout,
-                            placement_problems, _plan_data, plate_features, plate_problems, plate_time, _problem_cache,
-                            read_mesh_bin, rotation_matrix, _Shapes, STEADY_RATIO, SUPPORT_OVERHANG_MM2, _turned)
+                            placement_problems, plate_features, plate_problems, plate_time, _problem_cache,
+                            read_mesh_bin, rotation_matrix, _Shapes, SUPPORT_OVERHANG_MM2, _turned)
 from profile_read import (DEFAULT_BED, DEFAULT_EXCLUDE, DEFAULT_HEIGHT, _machine_limits_for, machine_limits)
 from project_read import (_choice_key, choice_label, _clean_pack, effective_purpose, FAILED, fingerprint, IMPORTING,
                           INPUTS_VERSION, MAX_OBJECTS, MAX_PLATES, MAX_PURPOSE_NOTE, _new_plate, _next_id, pack_for,
@@ -96,7 +96,7 @@ from project_read import (_choice_key, choice_label, _clean_pack, effective_purp
 MAX_FILAMENT_NAME, MAX_FILAMENT_COLOUR = 80, 40
 # Plates sliced at the same time. Each OrcaSlicer process can use a few GB for a big plate, so the default is modest.
 SLICE_WORKERS = max(1, int(os.getenv("SLICE_WORKERS", str(max(1, min(2, (os.cpu_count() or 2) // 4))))))
-SUPPORT_OVERRIDES = {"enable_support": "1", "support_type": "tree(auto)"}  # plates for split parts that need supports
+SUPPORT_OVERRIDES = plan_layout.SUPPORT_OVERRIDES  # plates holding Objects that need supports
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 CONTENT_TYPES = ('<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
@@ -390,14 +390,14 @@ def create_draft(project_id: int, name: str, arrange: bool = True) -> dict:
 
 
 def _arrange_new_project(project_id: int):
-    """Apply the plan the New project dialog showed (Plan plates at the chosen density), once. A plan that cannot be made
-    leaves the models as they are and is said in plain words: Create has already succeeded. Returns the plan's summary, or
-    {"error": text}."""
+    """Apply the arrangement the New project dialog showed (the planner's greedy first-fit seed at the chosen density), once. An
+    arrangement that cannot be made leaves the models as they are and is said in plain words: Create has already succeeded.
+    Returns the arrangement's summary, or {"error": text}."""
     try:
         record = get_project(project_id)
-        planned = _plan_data(project_id, record)
+        planned = plan_layout.seed_data(project_id, record)
         view = _plan_view(record, planned)
-        if planned.get("refused") or not planned["plates"]:
+        if not planned["plates"]:
             return {"error": view["summary"]}
         save_data(project_id, record, planned["data"], planned["emptied"])
         return {"summary": view["summary"], "plates": len(planned["plates"]), "too_big": planned.get("too_big", [])}
@@ -1975,8 +1975,8 @@ def export_orca_project(project_id: int) -> bytes:
 
 
 def add_split_parts(project_id: int, split_id: int, numbers=None) -> dict:
-    """Bring the parts of any split model into the project, packed onto plates (see lay_out_split)."""
-    return lay_out_split(project_id, numbers, split_id=split_id, adopt=True)
+    """Bring the parts of any split model into the project and lay them out (see lay_out_parts)."""
+    return lay_out_parts(project_id, numbers, split_id=split_id, adopt=True)
 
 
 # ── Laying out plates ──────────────────────────────────────────────────────────
@@ -1994,12 +1994,6 @@ def _split_or_first(record: dict, split_id: int | None) -> int | None:
     return split_id if split_id is not None else record.get("split_id")
 
 
-def _gap_for(process: dict, data: dict | None = None) -> float:
-    """Room to leave between objects printed with these process settings: supports need far more than the objects alone."""
-    pack = pack_for(data or {})
-    return pack["support_gap"] if str((process or {}).get("enable_support")) == "1" else pack["gap"]
-
-
 def _drop_split_models(data: dict, models: list, split_id: int) -> tuple:
     """Remove a split's models, their objects and the plates that held only them (in place).
     Returns (removed model ids, removed plate ids)."""
@@ -2014,8 +2008,8 @@ def _drop_split_models(data: dict, models: list, split_id: int) -> tuple:
 
 
 def _replace_split_models(project_id: int, split_id: int, new_models: list, layout: list) -> dict:
-    """Swap the split's models in the project for `new_models`, placed as `layout` says (packing.pack's plates, keyed
-    by part number). A project whose only plate is empty uses that plate first."""
+    """Swap the split's models in the project for `new_models`, placed as `layout` says (the nester's plates, keyed by
+    (part number, copy)). A project whose only plate is empty uses that plate first."""
     by_part = {m["split"]["part"]: m for m in new_models}
     try:
         with database.transaction() as conn:
@@ -2041,7 +2035,8 @@ def _replace_split_models(project_id: int, split_id: int, new_models: list, layo
                     model = by_part[item["key"][0]]
                     data["objects"].append({"id": next_object, "model": model["id"], "name": model["name"], "plate": target["id"],
                                             "position": [round(item["center"][0], 3), round(item["center"][1], 3)],
-                                            "rotation": [0.0, 0.0, 90.0 if item["turned"] else 0.0], "scale": [1.0, 1.0, 1.0],
+                                            "rotation": [0.0, 0.0, round(float(item["angle"]), 4) % 360 if "angle" in item
+                                                         else 90.0 if item["turned"] else 0.0], "scale": [1.0, 1.0, 1.0],
                                             "overrides": {}})
                     next_object += 1
             models.extend(new_models)
@@ -2062,31 +2057,18 @@ def _replace_split_models(project_id: int, split_id: int, new_models: list, layo
     return get_project(project_id)
 
 
-def _file_footprint(path: Path) -> tuple:
-    """Width and depth of a part file as it lies on the bed. (A split result's print_size is the oriented footprint,
-    smallest side first, which needn't line up with the file's X and Y.)"""
-    import numpy as np
-    data = path.read_bytes()
-    count = struct.unpack_from("<I", data, 80)[0] if len(data) >= 84 else -1
-    if len(data) == 84 + 50 * count:
-        records = np.frombuffer(data, dtype=[("normal", "<f4", 3), ("vertices", "<f4", (3, 3)), ("attr", "<u2")], count=count, offset=84)
-        verts = records["vertices"].reshape(-1, 3)
-    else:
-        import trimesh
-        verts = np.asarray(trimesh.load(path, force="mesh").vertices)
-    size = verts.max(axis=0) - verts.min(axis=0)
-    return float(size[0]), float(size[1])
-
-
 def _split_copies(record: dict, split_id: int) -> int:
     """How many of the split (every part of it, or the whole model) the project asked for."""
     return int((record["data"].get("split_copies") or {}).get(str(split_id), 1))
 
 
-def lay_out_split(project_id: int, numbers=None, split_id: int | None = None, adopt: bool = False) -> dict:
-    """Put a split model's parts on plates, packed onto as few as fit the printer profile's bed. Parts that need
-    supports get plates of their own with tree supports on. Laying out again replaces the parts placed before. The split
-    must belong to the project unless `adopt` (bringing in the parts of another split model)."""
+def lay_out_parts(project_id: int, numbers=None, split_id: int | None = None, adopt: bool = False) -> dict:
+    """Bring a split model's Parts into the Project and lay them out: the Parts are imported (replacing the ones placed before),
+    the planner's greedy first-fit seed puts the new Objects on plates at once, and a planner run over the whole Project starts
+    for a Proposal to review. Objects already in the Project stay where they are until a plan is accepted. The split must belong
+    to the Project unless `adopt` (bringing in the parts of another split model).
+    Returns the Project plus "plan_job", the started run (None, with "plan_job_error", when it could not start)."""
+    import plan_job
     _require_geometry()
     record = get_project(project_id)
     split_id = _split_or_first(record, split_id)
@@ -2096,17 +2078,13 @@ def lay_out_split(project_id: int, numbers=None, split_id: int | None = None, ad
         raise jobs.JobError("That split model doesn't belong to this project", 409)
     split = splits.get_split(split_id, detail=True)
     wanted = {int(n) for n in numbers} if numbers else None
-    parts = [p for p in (split.get("result") or {}).get("parts", []) if wanted is None or p["number"] in wanted]
+    all_parts = (split.get("result") or {}).get("parts", [])
+    parts = [p for p in all_parts if wanted is None or p["number"] in wanted]
     if not parts:
         raise jobs.JobError("Split the model before laying out its parts", 409)
     limits = _machine_limits_for(record)
+    plan_layout.plan_nozzle_of(record)    # the planner needs the profile's nozzle: refuse before anything is imported
     copies = _split_copies(record, split_id)
-    items = [{"key": (p["number"], copy), "size": _file_footprint(splits.work_dir(split_id) / "parts" / p["file"]),
-              "group": bool(p["needs_supports"])} for p in parts for copy in range(copies)]
-    profile = record["data"]["profile"]["process"]
-    layout = [plate for supported in (False, True)   # plain plates first, then the ones with supports
-              for plate in packing.pack([i for i in items if i["group"] == supported], limits["bed"], limits["exclude"],
-                                        gap=_gap_for({**profile, **(SUPPORT_OVERRIDES if supported else {})}, record["data"]))]
     stem, first_id, new_models = Path(split["source_name"]).stem, _next_id(record["models"]), []
     try:
         for offset, part in enumerate(parts):
@@ -2118,7 +2096,51 @@ def lay_out_split(project_id: int, numbers=None, split_id: int | None = None, ad
         for model in new_models:
             shutil.rmtree(model_dir(project_id, model["id"]), ignore_errors=True)
         raise
-    return _replace_split_models(project_id, split_id, new_models, layout)
+    x0, y0, x1, y1 = limits["bed"]
+    centre = ((x0 + x1) / 2, (y0 + y1) / 2)    # until the seed places them, every new Object stands in the middle of one plate
+    stacked = [{"group": False, "items": [{"key": (p["number"], c), "center": centre, "turned": False, "oversize": False}
+                                          for p in parts for c in range(copies)]}]
+    placed = _replace_split_models(project_id, split_id, new_models, stacked)
+    placed = _seed_new_objects(project_id, placed, {m["id"] for m in new_models}, split_id, all_parts, parts, new_models)
+    try:
+        job = plan_job.start(project_id, after_imports=True)
+        return {**placed, "plan_job": job}
+    except Exception as e:   # the layout stands; the person can plan again
+        print(f"[Projects] Could not start the plan for project {project_id}: {e}")
+        return {**placed, "plan_job": None, "plan_job_error": str(e) or type(e).__name__}
+
+
+def _part_meshes(split_id: int, all_parts: list, parts: list, models: list) -> dict:
+    """{model id: {"full", "preview"}} for the Parts just imported, read from the split's own files: the Models are not analysed
+    yet, and the planner needs their shape now."""
+    import numpy as np
+    import trimesh
+    from placement_read import read_mesh_bin
+    work = splits.work_dir(split_id)
+    try:
+        previews = read_mesh_bin(work / "parts_preview.bin")
+    except (OSError, jobs.JobError):
+        previews = []
+    found = {}
+    for part, model in zip(parts, models):
+        mesh = trimesh.load(work / "parts" / part["file"], force="mesh")
+        full = (np.asarray(mesh.vertices, float), np.asarray(mesh.faces))
+        index = all_parts.index(part)
+        found[model["id"]] = {"full": full, "preview": previews[index] if len(previews) == len(all_parts) else full}
+    return found
+
+
+def _seed_new_objects(project_id: int, record: dict, model_ids: set, split_id: int, all_parts: list, parts: list, models: list) -> dict:
+    """Put the Objects of these Models where the planner's greedy first-fit seed puts them (the rest of the Project stays), as
+    one change. A seed that cannot be made leaves them where they were stacked, and says so in the log."""
+    only = {o["id"] for o in record["data"]["objects"] if o["model"] in model_ids}
+    try:
+        planned = plan_layout.seed_data(project_id, record, only=only, meshes=_part_meshes(split_id, all_parts, parts, models))
+        if planned["plates"]:
+            save_data(project_id, record, planned["data"], planned["emptied"])
+    except Exception as e:
+        print(f"[Projects] Could not lay out the parts of project {project_id}: {e}")
+    return get_project(project_id)
 
 
 def _whole_position(size, limits: dict):
@@ -2159,8 +2181,13 @@ def place_whole_model(project_id: int, split_id: int | None = None) -> dict:
                           _copy_from(splits.work_dir(split_id) / split["source_file"]), split["settings"]["scale"], split["settings"]["up"])
     model["split"] = {"id": split_id, "part": 0, "supports": False}
     copies = _split_copies(record, split_id)
-    if copies > 1:
-        layout = packing.pack([{"key": (0, i), "size": tuple(size[:2]), "group": False} for i in range(copies)], limits["bed"], limits["exclude"])
+    if copies > 1:   # the user's orientation stays; the copies only spin on the bed, as the nester finds room
+        import nesting
+        verts, _ = _split_mesh(split)
+        outline = nesting.hull_outline((verts @ rotation_matrix(rotation).T)[:, :2])
+        gap = pack_for(record["data"])["gap"]
+        layout = nesting.nest([{"key": (0, i), "outline": outline, "clearance": gap, "group": 0} for i in range(copies)],
+                              limits["bed"], limits["exclude"])
     else:
         layout = [{"group": False, "items": [{"key": (0, 0), "center": center, "turned": False, "oversize": False}]}]
     placed = _replace_split_models(project_id, split_id, [model], layout)
@@ -2993,28 +3020,23 @@ def _plan_view(record: dict, planned: dict) -> dict:
             "problems": planned.get("problems", []), "refused": planned.get("refused")}
 
 
-def plan_plates(project_id: int, allow_tilt: bool = False, pack=None) -> dict:
-    """Plan the project's plates and change nothing: {"revision", "plates": [{"id", "name", "new", "filament", "parts" (how many
-    objects it holds; the key keeps its name), "turned", "time_estimate" (approximate seconds, layers, volume_cm3), "objects"}] in plan order (longest first by
-    layers, then volume), "kept": [{"id", "name", "reason"}] (plates with a Job or a Print on record, which are never
-    touched), "summary", "tilts_withheld", "too_big" ([{"id", "name"}]: objects too big for any plate, each left centred on a plate of its own),
-    "problems", "refused"}. Only orientations that stand an object on a side of its own box
-    are planned; a tilt onto an angled face needs `allow_tilt`. A plan whose layout would leave an object (other than one too big
-    for any plate) off the bed, over the purge area, overlapping or too close to another is not offered: "plates" is empty, "refused" says why and "problems" lists them.
-    `accept_plan` applies it."""
+def plan_preview(project_id: int, pack=None) -> dict:
+    """The arrangement the planner's greedy first-fit seed makes of the project's plates, changing nothing and starting no run:
+    {"revision", "plates": [{"id", "name", "new", "filament", "parts" (how many objects it holds), "turned", "time_estimate",
+    "objects"}] in plan order, "kept": [{"id", "name", "reason"}] (plates with a Job or a Print on record, which are never
+    touched), "summary", "too_big" ([{"id", "name"}]: objects too big for any plate, each left centred on a plate of its own),
+    "tippy"}. `pack` ({"preset": …}) plans at that density without keeping it. This is what the New project dialog shows and
+    Create applies; Plan plates (`plan_job`) searches for better and asks first."""
     record = get_project(project_id)
-    return _plan_view(record, _plan_data(project_id, record, allow_tilt, pack))
+    return _plan_view(record, plan_layout.seed_data(project_id, record, pack=pack))
 
 
-def plan_densities(project_id: int, allow_tilt: bool = False) -> dict:
-    """How many plates the plan needs at each preset density, changing nothing: {"tight": {"plates", "refused"}, "normal":
-    …, "roomy": …}. "plates" counts the plates the plan fills (plates kept as they are not included)."""
+def plan_densities(project_id: int) -> dict:
+    """How many plates the arrangement needs at each preset density, changing nothing: {"tight": {"plates", "refused"}, "normal":
+    …, "roomy": …}. "plates" counts the plates the arrangement fills (plates kept as they are not included)."""
     record = get_project(project_id)
-    found = {}
-    for preset in PACK_PRESETS:
-        planned = _plan_data(project_id, record, allow_tilt, {"preset": preset})
-        found[preset] = {"plates": len(planned["plates"]), "refused": planned.get("refused")}
-    return found
+    return {preset: {"plates": len(planned["plates"]), "refused": None}
+            for preset in PACK_PRESETS for planned in [plan_layout.seed_data(project_id, record, pack={"preset": preset})]}
 
 
 def set_pack(project_id: int, body: dict) -> dict:
@@ -3041,37 +3063,6 @@ def set_pack(project_id: int, body: dict) -> dict:
         save_data(project_id, record, data)
         _problem_cache.pop(project_id, None)
     return get_project(project_id)
-
-
-def accept_plan(project_id: int, plan, fingerprint=None, allow_tilt: bool = False) -> dict:
-    """Apply the plan as one change: `plan` is the revision it was made at, or the plan itself, and `fingerprint` the plan's
-    own (taken from `plan` when that is the plan). A project that has changed since is refused ("changed elsewhere"), and so
-    is a plan the server would now make differently ("The plan changed"): what is applied is what was reviewed. Slices of
-    replanned plates become Outdated by their fingerprints; plates left empty go. Returns the project (one revision later,
-    so the client records one undo step) plus "plan", the view of what was applied."""
-    if isinstance(plan, dict):
-        revision, fingerprint = plan.get("revision"), plan.get("fingerprint") or fingerprint
-    else:
-        revision = plan
-    try:
-        revision = int(revision)
-    except (TypeError, ValueError):
-        raise jobs.JobError("Send the revision the plan was made at, or the plan itself")
-    if not isinstance(fingerprint, str) or not fingerprint:
-        raise jobs.JobError("Send the fingerprint of the plan that was reviewed")
-    record = get_project(project_id)
-    if revision != record["revision"]:
-        raise jobs.JobError("The project was changed elsewhere — reload it", 409)
-    planned = _plan_data(project_id, record, allow_tilt)
-    if planned["fingerprint"] != fingerprint:
-        raise jobs.JobError("The plan changed, review it again", 409)
-    view = _plan_view(record, planned)
-    if planned.get("refused"):
-        raise jobs.JobError(view["summary"], 409)
-    if not planned["plates"]:
-        return {**record, "plan": view}
-    save_data(project_id, record, planned["data"], planned["emptied"])
-    return {**get_project(project_id), "plan": view}
 
 
 def delete_model(project_id: int, model_id: int) -> dict:

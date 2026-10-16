@@ -223,18 +223,21 @@ function show(title) {
   if (!dialog.open) dialog.showModal();
 }
 
-/** Plan this project's plates: start the planner job and show its progress, then its Proposal */
-async function open() {
+/** Plan this project's plates: start the planner job and show its progress, then its Proposal. With `job` (a run the server
+ *  already started, as Lay out on plates does) it follows that run instead of starting one. */
+async function open({ job = null } = {}) {
   await host.flush();
   const mine = ++generation, projectId = host.projectId();
-  run = { gen: mine, projectId, job: null, proposal: null, index: 0, stale: null, phase: "planning" };
+  run = { gen: mine, projectId, job, proposal: null, index: 0, stale: null, phase: "planning" };
   show("Plan plates");
   render();
-  try {
-    run.job = await host.api("POST", `/api/projects/${projectId}/plan`, {});
-  } catch (err) {
-    if (mine === generation) { run.phase = "failed"; run.message = err.message; render(); }
-    return;
+  if (!job) {
+    try {
+      run.job = await host.api("POST", `/api/projects/${projectId}/plan`, {});
+    } catch (err) {
+      if (mine === generation) { run.phase = "failed"; run.message = err.message; render(); }
+      return;
+    }
   }
   render();
   poll(mine, 0);

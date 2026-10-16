@@ -1265,14 +1265,14 @@ class SPHandler(SimpleHTTPRequestHandler):
             def preview():     # the quick arrangement Create makes of a draft: instant, changes nothing, starts no job
                 body = self._json_body()
                 self._guard_draft(self._job_id(), body)
-                return projects.plan_plates(self._job_id(), bool(body.get("allow_tilt")))
+                return projects.plan_preview(self._job_id())
             self._jobs_call(preview, broadcast=False)
             return
         if len(parts) == 6 and parts[4] == "plan" and parts[5] == "densities":
             def densities():
                 body = self._json_body()
                 self._guard_draft(self._job_id(), body)
-                return projects.plan_densities(self._job_id(), bool(body.get("allow_tilt")))
+                return projects.plan_densities(self._job_id())
             self._jobs_call(densities, broadcast=False)
             return
         if len(parts) == 5 and parts[4] == "pack":
@@ -1285,9 +1285,9 @@ class SPHandler(SimpleHTTPRequestHandler):
         if len(parts) == 6 and parts[4] == "plan" and parts[5] == "accept":
             def accept():
                 body = self._json_body()
-                if "proposal" in body:
-                    return plan_job.accept(self._job_id(), body.get("proposal"), body.get("plan", 0), bool(body.get("allow_unsliced")))
-                return projects.accept_plan(self._job_id(), body.get("plan") or body.get("revision"), body.get("fingerprint"), bool(body.get("allow_tilt")))
+                if "proposal" not in body:
+                    raise jobs.JobError("Send the token of the proposal to apply")
+                return plan_job.accept(self._job_id(), body.get("proposal"), body.get("plan", 0), bool(body.get("allow_unsliced")))
             self._jobs_call(accept, broadcast=False)
             return
         if len(parts) == 6 and parts[4] == "plan" and parts[5] == "dismiss":
@@ -1301,7 +1301,7 @@ class SPHandler(SimpleHTTPRequestHandler):
             return
         if len(parts) == 5 and parts[4] in ("layout", "whole", "arrange", "slice", "queue"):
             actions = {
-                "layout":  lambda: (lambda body: projects.lay_out_split(self._job_id(), body.get("parts"), split_of(body)))(self._json_body()),
+                "layout":  lambda: (lambda body: projects.lay_out_parts(self._job_id(), body.get("parts"), split_of(body)))(self._json_body()),
                 "whole":   lambda: projects.place_whole_model(self._job_id(), split_of(self._json_body())),
                 "arrange": lambda: (lambda body: projects.arrange(self._job_id(), body.get("plates"), body.get("engine")))(self._json_body()),
                 "slice":   lambda: (lambda body: projects.request_slices(self._job_id(), body.get("plates"), bool(body.get("send"))))(self._json_body()),

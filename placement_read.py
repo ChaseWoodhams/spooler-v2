@@ -7,19 +7,15 @@ all, Accept plan) stay there. The read-only MCP server imports this module direc
 
 import json
 import math
-import re
 import struct
 from pathlib import Path
 
-import database
 import problem_kinds
 import time_estimate
 from datapaths import model_dir, read_json
 from errors import JobError
 from profile_read import _machine_limits_for, bundle_settings
-from project_read import (FAILED, MAX_PLATES, READY, SLICED, _choice_key, _clean_pack, _new_plate, _next_id, fingerprint,
-                          pack_for, read_ledger)
-from values import digest
+from project_read import FAILED, MAX_PLATES, READY, SLICED, _choice_key, _new_plate, _next_id, fingerprint, pack_for
 
 
 
@@ -129,7 +125,7 @@ def plate_time(project_id: int, record: dict, plate_id: int, entry: dict) -> dic
 # ── Laying out plates ──────────────────────────────────────────────────────────
 
 def _place_layout(data: dict, free: list, layout: list, overrides_for) -> list:
-    """Move the objects in `data` as a layout (packing.pack's, or the nester's; keyed by object id) says, onto the plates in
+    """Move the objects in `data` as a layout (the nester's; keyed by object id) says, onto the plates in
     `free` in order and new plates after them. A layout plate with a "plate" goes onto that plate and keeps its settings; an
     item turns by its "angle" degrees about Z, else a quarter turn when "turned". Returns the ids of the plates used."""
     objects = {o["id"]: o for o in data["objects"]}
@@ -437,9 +433,6 @@ KEPT_REASONS = {"queued": "In the print queue", "waiting": "In the print queue, 
                 "printed_ok": "Printed", "failed": "A print of it is on record, and it didn't finish"}
 
 
-_DEFAULT_PLATE_NAME = re.compile(r"^Plate (\d+)$")
-
-
 def _turned(before, after) -> bool:
     """Whether the object now stands on another side: its X or Y rotation changed. A turn about Z only spins it on the bed."""
     return any(abs((a - b + 180) % 360 - 180) > 0.01 for a, b in zip(before[:2], after[:2]))
@@ -447,155 +440,3 @@ def _turned(before, after) -> bool:
 
 def _count(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
-
-
-def _flat_on_face(rotation) -> bool:
-    """Whether an orientation stands the object on a side of its own box: X and Y are quarter turns (a degree of slack).
-    Any other tilt leans it on an angled face, which Plan plates only does when the user opts in."""
-    return all(abs((r + 45) % 90 - 45) <= 1.0 for r in rotation[:2])
-
-
-def _plan_problems(project_id: int, record: dict, data: dict, plate_ids, oversize=()) -> list:
-    """What is wrong with the plan's layout on these plates, by the one validity check (`placement_problems`). A pinned object
-    stays where its owner put it, so a problem that only involves pinned objects is not the plan's doing and is left out;
-    nor is an `oversize` object (one too big for any plate), which the plan puts on a plate of its own and reports."""
-    pinned = {o["id"] for o in data["objects"] if o.get("pinned")}
-    return [p for p in placement_problems(project_id, {**record, "data": data}, plate_ids)
-            if p["key"] not in oversize and not (p["key"] in pinned and (p["other"] is None or p["other"] in pinned))]
-
-
-def _plan_data(project_id: int, record: dict, allow_tilt: bool = False, pack=None, ledger=None) -> dict:
-    """The project data as Plan plates would leave it, changing nothing. Plates that are queued, printing, have a Print on
-    record, or hold a model still importing are kept as they are. On the others, every unpinned object is oriented
-    (in memory, as Orient all would) and packed with `arrange_layout` (a pinned object keeps its plate and place; a plate
-    never mixes filament choices), then the plates are ordered longest first by `time_estimate.rank_key`; plates keep their
-    ids, which are what slices and jobs follow, while the order and the default names ("Plate 3") follow the plan, filling
-    the numbers the kept plates leave free. Returns {"data", "plates": [{"id", "new", "objects", "turned", "features"}],
-    "kept": [{"id", "name", "reason"}], "emptied": [plate ids removed]}; "plates" is empty when there is nothing to plan.
-    `ledger` is the project's Queue and Print history (`project_read.read_ledger`); the app lets this read it, a reader with
-    its own read-only connection passes one."""
-    data = json.loads(json.dumps(record["data"]))
-    if pack is not None:   # "what if": plan with this density without keeping it
-        chosen = _clean_pack({"tight_supports": bool((data.get("pack") or {}).get("tight_supports")), **pack})
-        data["pack"] = chosen
-        for plate in data["plates"]:
-            plate.pop("pack", None)
-    ready = {m["id"] for m in record["models"] if m["state"] == READY}
-    failed = {m["id"] for m in record["models"] if m["state"] == FAILED}
-    importing = {o["plate"] for o in data["objects"] if o["model"] not in ready and o["model"] not in failed}
-    if ledger is None:
-        with database.transaction() as conn:
-            ledger = read_ledger(conn, project_id)
-    kept, replannable = [], []
-    for plate in data["plates"]:
-        reason = (KEPT_REASONS.get(ledger.status(plate["id"])) or ("A print of it is on record" if plate["id"] in ledger.recorded else None)
-                  or ("Its models are still importing" if plate["id"] in importing else None))
-        if reason:
-            kept.append({"id": plate["id"], "name": plate["name"], "reason": reason})
-        else:
-            replannable.append(plate["id"])
-    before = {o["id"]: list(o["rotation"]) for o in data["objects"]}
-    options = _orient_options(record, {})
-    suggested, withheld = {}, 0
-    for obj in data["objects"]:
-        if obj["plate"] not in replannable or obj.get("pinned") or obj["model"] not in ready:
-            continue
-        key = (obj["model"], tuple(obj["scale"]), tuple(obj["rotation"]))
-        if key not in suggested:
-            try:
-                suggested[key] = _orientation_for(project_id, obj, options)
-            except JobError:
-                suggested[key] = None   # nothing to suggest for it: it stays as it is
-        if suggested[key] and suggested[key]["changed"]:
-            if allow_tilt or _flat_on_face(suggested[key]["rotation"]):
-                obj["rotation"] = list(suggested[key]["rotation"])
-            else:
-                withheld += 1   # it would lean on an angled face: left as it is unless the user opts in
-    layout = arrange_layout(project_id, {**record, "data": data}, replannable)
-    # The orientation chosen for printing can make a part too big for the bed that it fit in as it was (a long, thin part laid
-    # on a broad face, say): such a part goes back to the orientation it came in, and the layout is made again, but only when
-    # it stands steady that way. A sheet stood on its edge to squeeze it in would not print; it stays too big and is reported.
-    unfit = {item["key"] for plate in layout for item in plate["items"] if item["oversize"]}
-    back = [o for o in data["objects"] if o["id"] in unfit and list(o["rotation"]) != before[o["id"]]
-            and _steady(project_id, {**o, "rotation": before[o["id"]]})]
-    if back:
-        for obj in back:
-            obj["rotation"] = list(before[obj["id"]])
-        layout = arrange_layout(project_id, {**record, "data": data}, replannable)
-    if not layout:
-        return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "fingerprint": _plan_fingerprint(record["data"], [])}
-    used = _place_layout(data, replannable, layout, lambda group: json.loads(group)["overrides"])
-    names = problem_kinds.object_names(data)
-    too_big = [{"id": item["key"], "name": names[item["key"]]} for plate in layout for item in plate["items"] if item["oversize"]]
-    big_ids = {big["id"] for big in too_big}
-    tippy = [{"id": o["id"], "name": names[o["id"]]} for o in data["objects"]   # fits the bed only standing on a narrow edge
-             if o["plate"] in used and o["model"] in ready and not o.get("pinned") and o["id"] not in big_ids
-             and not _steady(project_id, o)]
-    problems = _plan_problems(project_id, record, data, used, {big["id"] for big in too_big})
-    if problems:   # a plan that is not valid is not offered: nothing is proposed and the reason is said
-        return {"data": record["data"], "plates": [], "kept": kept, "emptied": [], "problems": problems,
-                "refused": problem_kinds.planned_reason(problems, names, _count), "fingerprint": _plan_fingerprint(record["data"], [])}
-    holding = {o["plate"] for o in data["objects"] if o["model"] in failed}
-    for plate in data["plates"]:   # a plate left holding only a failed model's objects stays as it is
-        if plate["id"] in replannable and plate["id"] not in used and plate["id"] in holding:
-            kept.append({"id": plate["id"], "name": plate["name"], "reason": "Holds an object whose model failed to import"})
-    kept_now = {k["id"] for k in kept}
-    emptied = [plate_id for plate_id in replannable if plate_id not in used and plate_id not in kept_now]
-    data["plates"] = [p for p in data["plates"] if p["id"] not in emptied]
-    plates = {p["id"]: p for p in data["plates"]}
-    for plate_id in used:   # a plate that now holds other objects isn't the plate the printer was chosen for
-        if {o["id"] for o in data["objects"] if o["plate"] == plate_id} != {o["id"] for o in record["data"]["objects"] if o["plate"] == plate_id}:
-            plates[plate_id].pop("printer_id", None)
-    existing = {p["id"] for p in record["data"]["plates"]}
-    features = {plate_id: plate_features(project_id, {**record, "data": data}, plate_id) for plate_id in used}
-    ordered = (sorted((p for p in used if features[p]), key=lambda p: time_estimate.rank_key(features[p]), reverse=True)
-               + [p for p in used if not features[p]])
-    kept_ids = {k["id"] for k in kept}
-    kept_at = {p["id"]: i for i, p in enumerate(record["data"]["plates"]) if p["id"] in kept_ids}   # kept plates keep their place
-    order, queue, later = [], list(ordered), sorted(kept_at, key=kept_at.get)
-    for index in range(len(kept) + len(ordered)):
-        holder = next((k for k in later if kept_at[k] == index), None)
-        if holder is not None:
-            order.append(holder)
-            later.remove(holder)
-        elif queue:
-            order.append(queue.pop(0))
-    order += later
-    taken = {int(m.group(1)) for p in data["plates"] if p["id"] in kept_ids and (m := _DEFAULT_PLATE_NAME.match(p["name"] or ""))}
-    free = (n for n in range(1, 10000) if n not in taken)
-    for plate_id in ordered:   # default names follow the plan; a name the user gave stays
-        if not plates[plate_id]["name"] or _DEFAULT_PLATE_NAME.match(plates[plate_id]["name"]):
-            plates[plate_id]["name"] = f"Plate {next(free)}"
-    data["plates"] = [plates[plate_id] for plate_id in order]
-    proposed = [{"id": plate_id, "new": plate_id not in existing, "features": features[plate_id],
-                 "objects": sorted((o for o in data["objects"] if o["plate"] == plate_id and o["model"] in ready),
-                                   key=lambda o: o["id"])} for plate_id in ordered]
-    for entry in proposed:
-        entry["turned"] = sum(1 for o in entry["objects"] if _turned(before[o["id"]], o["rotation"]))
-    return {"data": data, "plates": proposed, "kept": kept, "emptied": emptied, "tilts_withheld": withheld, "too_big": too_big,
-            "tippy": tippy, "fingerprint": _plan_fingerprint(data, emptied)}
-
-
-STEADY_RATIO = 3.0   # a part taller than this many times its narrowest width on the bed is too tippy to print as it stands
-
-
-def _steady(project_id: int, obj: dict) -> bool:
-    """Whether the object, posed as `obj` says, stands steady: its height is at most STEADY_RATIO times the narrowest width
-    of its footprint (measured across every turn about Z, so a part lying diagonally isn't mistaken for a wide one)."""
-    import numpy as np
-    try:
-        verts = place(np.asarray(load_mesh(project_id, obj["model"], preview=True)[0], float), obj)
-    except (OSError, ValueError):
-        return False
-    height = np.ptp(verts[:, 2])
-    xy = verts[:, :2]
-    widths = []
-    for degrees in range(0, 180, 5):
-        a = np.radians(degrees)
-        widths.append(np.ptp(xy @ np.array([np.cos(a), np.sin(a)])))
-    return height <= STEADY_RATIO * min(widths)
-
-
-def _plan_fingerprint(data: dict, emptied: list) -> str:
-    """Identifies what a plan would do: the data it would leave and the plates it would remove."""
-    return digest({"data": data, "emptied": sorted(emptied)}, length=16, compact=False)

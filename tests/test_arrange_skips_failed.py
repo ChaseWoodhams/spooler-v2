@@ -1,11 +1,10 @@
-"""Arrange and Plan plates lay out the ready objects, skip those of failed models and say so, through the project HTTP API."""
+"""Arrange and the plan preview lay out the ready objects, skip those of failed models and say so, through the project HTTP API."""
 import json
 import unittest
 
 import database
 import projects
 from tests import test_arrange
-from tests.test_plan_plates import legacy_plan
 from tests.test_slicer import cube_stl
 
 _Base = test_arrange.ArrangeApiTests
@@ -89,25 +88,21 @@ class ArrangeSkipsFailedModelsTests(unittest.TestCase):
         self.assertTrue(second["outcome"])
         self.assertTrue(self.arrange(second, plate=1)[1]["outcome"])
 
-    def test_plan_plates_plans_the_ready_objects_and_reports_the_skipped_one(self):
+    def test_the_plan_preview_plans_the_ready_objects_and_reports_the_skipped_one(self):
         project = self.two_models_one_failed()
-        status, plan = legacy_plan(project["id"])
+        status, plan = self.call("POST", f"/api/projects/{project['id']}/plan/preview", {})
         self.assertEqual(status, 200, plan)
         planned = [o["id"] for p in plan["plates"] for o in p["objects"]]
         self.assertEqual(sorted(planned), [1, 2])
         self.assertIn("skipped", plan["summary"])
         self.assertIn("failed", plan["summary"])
-        status, accepted = self.call("POST", f"/api/projects/{project['id']}/plan/accept",
-                                     {"revision": plan["revision"], "fingerprint": plan["fingerprint"]})
-        self.assertEqual(status, 200, accepted)
-        self.assertEqual({o["id"]: o["plate"] for o in accepted["data"]["objects"]}[3], 1)
-        self.assertIn("skipped", accepted["plan"]["summary"])
+        self.assertEqual(projects.get_project(project["id"])["revision"], project["revision"])      # a preview keeps nothing
 
-    def test_plan_plates_with_nothing_ready_says_why(self):
+    def test_the_plan_preview_with_nothing_ready_says_why(self):
         project = self.project_with(cube_stl(20))
         project = self.lay(project, [(1, 1, (50, 50), False)])
         self.fail_model(project["id"], 1)
-        status, plan = legacy_plan(project["id"])
+        status, plan = self.call("POST", f"/api/projects/{project['id']}/plan/preview", {})
         self.assertEqual(status, 200, plan)
         self.assertEqual(plan["plates"], [])
         self.assertIn("failed", plan["summary"])

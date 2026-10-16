@@ -15,6 +15,7 @@ from unittest import mock
 
 import database
 import jobs
+import plan_job
 import projects
 import slicer
 import splits
@@ -725,10 +726,14 @@ class ProjectTests(unittest.IsolatedAsyncioTestCase):
         split = splits.create_split(io.BytesIO(data), len(data), "beam.stl", {})
         while await splits.process_next():
             pass
+        splits.request_plan(split["id"], {})
+        while await splits.process_next():
+            pass
         splits.request_split(split["id"])
         while await splits.process_next():
             pass
-        with_parts = projects.add_split_parts(project["id"], split["id"])
+        with mock.patch.object(plan_job, "start", return_value={"id": 1, "state": "queued"}):    # the run itself is tests/test_cutover.py's
+            with_parts = projects.add_split_parts(project["id"], split["id"])
         await self.run_worker()
         with_parts = projects.get_project(project["id"])
         parts = splits.get_split(split["id"], detail=True)["result"]["parts"]

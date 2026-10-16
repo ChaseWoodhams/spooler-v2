@@ -9,6 +9,7 @@ from unittest import mock
 
 import database
 import jobs
+import plan_job
 import projects
 import slicer
 import splits
@@ -32,8 +33,11 @@ class SeveralSplitsTests(unittest.IsolatedAsyncioTestCase):
         projects.configure(self.dir)
         projects.init()
         state.printers = {"p1": FakePrinter("p1", "Printer 1")}
+        self._plan = mock.patch.object(plan_job, "start", return_value={"id": 1, "state": "queued"})   # the run itself is tests/test_cutover.py's
+        self._plan.start()
 
     def tearDown(self):
+        self._plan.stop()
         state.printers = self._saved_printers
         database.configure(database.DB_FILE)
         jobs._data_dir = jobs.DATA_DIR
@@ -101,7 +105,7 @@ class SeveralSplitsTests(unittest.IsolatedAsyncioTestCase):
             await self.plan_and_split(split_id)
         await self.settle()
         for split_id in project["split_ids"]:
-            projects.lay_out_split(project["id"], split_id=split_id)
+            projects.lay_out_parts(project["id"], split_id=split_id)
         await self.settle()
         laid = projects.get_project(project["id"])
         parts = sum(len(splits.get_split(s, detail=True)["result"]["parts"]) for s in laid["split_ids"])
@@ -218,7 +222,7 @@ class SeveralSplitsTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         await self.plan_and_split(project["split_id"])
         await self.settle()
-        laid = projects.lay_out_split(project["id"], split_id=project["split_id"])
+        laid = projects.lay_out_parts(project["id"], split_id=project["split_id"])
         parts = len(splits.get_split(project["split_id"], detail=True)["result"]["parts"])
         self.assertEqual(len(laid["data"]["objects"]), 2 * parts)
 
@@ -229,7 +233,7 @@ class SeveralSplitsTests(unittest.IsolatedAsyncioTestCase):
         await self.plan_and_split(b["split_id"])
         await self.settle()
         with self.assertRaises(jobs.JobError) as ctx:
-            projects.lay_out_split(a["id"], split_id=b["split_id"])
+            projects.lay_out_parts(a["id"], split_id=b["split_id"])
         self.assertEqual(ctx.exception.status, 409)
         self.assertEqual(projects.get_project(a["id"])["models"], [])
 

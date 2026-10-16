@@ -195,6 +195,26 @@ class PlanJobApiTests(unittest.TestCase):
         self.assertNotIn("proposal_token", preview)
         self.assertEqual(self.current(project)["revision"], project["revision"])
 
+    def test_preview_is_the_greedy_seed_it_folds_the_open_plates_and_leaves_kept_and_pinned_ones(self):
+        project = self.lay(self.project_with(cube_stl(20), cube_stl(30)), [(1, 1, False), (2, 2, False), (1, 3, True), (2, 4, False)])
+        self.queued_job(project, 4)
+        status, preview = self.call("POST", f"/api/projects/{project['id']}/plan/preview", {})
+        self.assertEqual(status, 200, preview)
+        self.assertEqual([k["id"] for k in preview["kept"]], [4])                                   # the queued plate is not the seed's to move
+        planned = {o["id"]: p["id"] for p in preview["plates"] for o in p["objects"]}
+        self.assertEqual(sorted(planned), [1, 2, 3])                                                # the queued plate's object is not in it
+        self.assertEqual(planned[3], 3)                                                             # the pinned cube keeps its plate
+        self.assertEqual(len({p["id"] for p in preview["plates"]}), 1, "the small cubes fit one plate, pinned one's")
+        status, densities = self.call("POST", f"/api/projects/{project['id']}/plan/densities", {})
+        self.assertEqual(status, 200, densities)
+        self.assertEqual(sorted(densities), ["normal", "roomy", "tight"])
+
+    def test_accept_without_a_proposal_token_is_refused_there_is_no_synchronous_plan_to_apply(self):
+        project = self.scattered()
+        status, refused = self.call("POST", f"/api/projects/{project['id']}/plan/accept", {"revision": project["revision"]})
+        self.assertEqual(status, 400, refused)
+        self.assertEqual(self.current(project)["revision"], project["revision"])
+
     def print_on_record(self, project, plate_id):
         with database.transaction() as conn:
             conn.execute("INSERT INTO prints (printer_id, printer_name, file_name, started_at, ended_at, outcome, project_id, plate_id) "
