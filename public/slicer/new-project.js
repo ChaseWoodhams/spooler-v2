@@ -199,7 +199,8 @@ function maybePreview() {
 async function runPreview(key) {
   const run = ++previewRun, mine = generation, id = projectId;
   try {
-    const plan = await host.api("POST", guarded(`/api/projects/${id}/plan`), {});
+    // the quick arrangement Create makes (instant), not the planner job: a draft changes with every edit and a job takes a minute
+    const plan = await host.api("POST", guarded(`/api/projects/${id}/plan/preview`), {});
     if (run !== previewRun || mine !== generation) return;
     preview = { key, state: "ready", plan, counts: null };
     renderPack();

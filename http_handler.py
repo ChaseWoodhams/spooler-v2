@@ -1261,6 +1261,13 @@ class SPHandler(SimpleHTTPRequestHandler):
                 return plan_job.start(self._job_id())
             self._jobs_call(plan, broadcast=False)
             return
+        if len(parts) == 6 and parts[4] == "plan" and parts[5] == "preview":
+            def preview():     # the quick arrangement Create makes of a draft: instant, changes nothing, starts no job
+                body = self._json_body()
+                self._guard_draft(self._job_id(), body)
+                return projects.plan_plates(self._job_id(), bool(body.get("allow_tilt")))
+            self._jobs_call(preview, broadcast=False)
+            return
         if len(parts) == 6 and parts[4] == "plan" and parts[5] == "densities":
             def densities():
                 body = self._json_body()

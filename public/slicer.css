@@ -814,3 +814,59 @@ body.print-step .assistant-panel, body.print-step #btn-assistant { display: none
 .proposal-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
 .proposal-table th, .proposal-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .proposal-note td { border-bottom: 0; padding-top: 0; }
+
+/* Plan plates review sheet (slicer/plan-sheet.js): printer timelines, tiles, folded plate table, also-considered cards */
+#dlg-plan.ps-mode { width: min(920px, 96vw); max-height: 94vh; display: flex; flex-direction: column; }
+#dlg-plan.ps-mode #plan-body { overflow-y: auto; min-height: 0; padding-right: 2px; }
+#dlg-plan.ps-mode > #plan-error, #dlg-plan.ps-mode > .slicer-dialog-actions { display: none; }
+.ps-head { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); padding: 12px 14px; margin-bottom: 12px; }
+.ps-label { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
+.ps-big { font-size: 28px; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+.ps-delta { font-size: 16px; font-weight: 600; }
+.ps-delta.good, .ps-tile-note.good { color: var(--green); }
+.ps-delta.bad, .ps-tile-note.bad { color: var(--red); }
+.ps-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 12px; }
+.ps-once { margin: 8px 0 0; }
+.ps-problem:empty { display: none; }
+.ps-problem { margin-top: 8px; font-size: 13px; }
+.ps-banner { margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--yellow); border-radius: var(--radius-sm); font-size: 13px; }
+#dlg-plan.ps-mode h4 { margin: 14px 0 6px; font-size: 14px; }
+.ps-printer { margin-bottom: 14px; }
+.ps-printer-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ps-lane-label { font-size: 12px; margin-top: 4px; }
+.ps-lane { display: flex; min-height: 34px; margin: 2px 0; }
+.ps-track { display: flex; gap: 2px; min-width: 0; }
+.ps-blk { display: flex; align-items: center; justify-content: center; min-width: 0; padding: 0 2px; font-size: 11px; white-space: nowrap; overflow: hidden;
+  border: 1px solid var(--accent); border-radius: 4px; background: var(--surface2); color: var(--text); }
+.ps-blk.old { border-color: var(--border); color: var(--text-muted); background: transparent; }
+.ps-blk.long { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
+.ps-blk.est { border-style: dashed; }
+.ps-empty { align-self: center; }
+.ps-warn { color: var(--yellow); font-size: 13px; margin: 2px 0; }
+.ps-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.ps-tile, .ps-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--bg); }
+.ps-figure { font-size: 18px; }
+.ps-tile-note { font-size: 13px; font-weight: 600; }
+.ps-note { margin: 12px 0 0; font-size: 13px; }
+.ps-chip { display: inline-block; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+.ps-chip.est, .ps-chip.warn { border-color: var(--yellow); color: var(--yellow); }
+.ps-chip.bad { border-color: var(--red); color: var(--red); }
+.ps-chip[tabindex] { cursor: help; }
+.ps-fold { margin-top: 14px; }
+.ps-fold > summary { cursor: pointer; min-height: var(--hit-fine); display: flex; align-items: center; }
+.ps-scroll { overflow-x: auto; }
+.ps-scroll .proposal-table { min-width: 560px; }
+.ps-list { list-style: none; margin: 0; padding: 0; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.ps-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.ps-card { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.ps-progress { padding: 8px 0; }
+.ps-bar { height: 10px; border-radius: 999px; background: var(--surface2); border: 1px solid var(--border); overflow: hidden; margin: 8px 0; }
+.ps-bar > i { display: block; height: 100%; background: var(--accent-fill); transition: width .4s ease; }
+@media (prefers-reduced-motion: reduce) { .ps-bar > i { transition: none; } }
+@media (max-width: 640px) {
+  .ps-tiles, .ps-cards { grid-template-columns: 1fr; }
+  .ps-big { font-size: 22px; }
+  .ps-actions .btn { flex: 1 1 auto; }
+  #dlg-plan.ps-mode { padding: 14px; }
+}
+@media (pointer: coarse), (max-width: 1100px) { .ps-fold > summary { min-height: var(--hit-min); } }
