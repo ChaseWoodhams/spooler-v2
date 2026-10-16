@@ -88,10 +88,28 @@ Proposals
 """
 
 
+KIND_WORDS = {"orientation": "Orientation", "arrange": "Arrange", "plan": "Plan plates", "settings": "Settings"}
+
+
+def kinds_off(tuning: dict) -> list:
+    """The Proposal kinds switched off in this run's tuning, in the usual order."""
+    return [k for k in spooler_mcp.PROPOSAL_KINDS if tuning.get("proposal_kinds", {}).get(k) is False]
+
+
+def allowed_tools(tuning: dict) -> tuple:
+    off = {f"mcp__{SERVER_NAME}__propose_{k}" for k in kinds_off(tuning)}
+    return tuple(t for t in ALLOWED_TOOLS if t not in off)
+
+
 def system_prompt(tuning: dict) -> str:
     """The instructions for one run: the saved text (empty means the built-in text) then the fixed block Spooler adds."""
     text = (tuning.get("instructions", {}).get("text") or "").strip() or SYSTEM_PROMPT.strip()
-    return f"{text}\n\nFixed by Spooler\n- At most {tuning['limits']['proposals_per_run']} Proposals per run.\n"
+    block = f"- At most {tuning['limits']['proposals_per_run']} Proposals per run.\n"
+    off = kinds_off(tuning)
+    if off:
+        block += (f"- These kinds of Proposal are switched off in Settings: {', '.join(KIND_WORDS[k] for k in off)}. You cannot make them. "
+                  f"If the person asks for one, say it is switched off.\n")
+    return f"{text}\n\nFixed by Spooler\n{block}"
 
 
 class AskError(JobError):
@@ -151,9 +169,9 @@ def _inside_profile(path: Path) -> bool:
 
 # ── The recipe ────────────────────────────────────────────────────────────────
 
-def build_argv(cli: str, mcp_config: Path, system_prompt: Path, max_turns: int, model: str = "") -> list:
+def build_argv(cli: str, mcp_config: Path, system_prompt: Path, max_turns: int, model: str = "", allowed: tuple | None = None) -> list:
     return [cli, *(["--model", model] if model else []), "-p", "--bare", "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--mcp-config", str(mcp_config),
-            "--tools", "", "--allowedTools", *ALLOWED_TOOLS, "--permission-mode", "dontAsk", "--permission-prompts", "none",
+            "--tools", "", "--allowedTools", *(ALLOWED_TOOLS if allowed is None else allowed), "--permission-mode", "dontAsk", "--permission-prompts", "none",
             "--no-session-persistence", "--max-turns", str(max_turns), "--disable-slash-commands", "--system-prompt-file", str(system_prompt)]
 
 
@@ -175,13 +193,14 @@ def build_env(jev_url: str, base: dict | None = None) -> dict:
     return env
 
 
-def mcp_config(project_id: int, data_dir: Path, run_id: str | None = None, max_proposals: int | None = None) -> dict:
+def mcp_config(project_id: int, data_dir: Path, run_id: str | None = None, max_proposals: int | None = None, kinds_off: list | None = None) -> dict:
     import sys
     args = [str(Path(spooler_mcp.__file__).resolve()), "--project", str(int(project_id)), "--data-dir", str(data_dir)]
     if run_id:
         args += ["--run", run_id]               # the server stamps the Proposals it stages with it, and caps them per run
     if max_proposals:
         args += ["--max-proposals", str(int(max_proposals))]
+    args += ["--kinds-off", ",".join(kinds_off or [])]      # always explicit: the run uses its own snapshot, not whatever is saved later
     return {"mcpServers": {SERVER_NAME: {"type": "stdio", "command": sys.executable, "args": args, "env": {"DATA_DIR": str(data_dir)}}}}
 
 
@@ -455,10 +474,10 @@ def _execute(run: Run, cli: str, jev_url: str, prompt: str) -> None:
         cwd = folder / "cwd"
         cwd.mkdir(parents=True)                      # empty: nothing but the CLI's own files ever appear here
         mcp_path, prompt_path = folder / "mcp.json", folder / "system-prompt.txt"
-        mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir(), run.id, run.tuning["limits"]["proposals_per_run"])), encoding="utf-8")
+        mcp_path.write_text(json.dumps(mcp_config(run.project_id, assistant.data_dir(), run.id, run.tuning["limits"]["proposals_per_run"], kinds_off(run.tuning))), encoding="utf-8")
         prompt_path.write_text(system_prompt(run.tuning), encoding="utf-8")
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
-        proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path, run.tuning["limits"]["max_turns"], run.tuning["model"]["name"]), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        proc = subprocess.Popen(build_argv(cli, mcp_path, prompt_path, run.tuning["limits"]["max_turns"], run.tuning["model"]["name"], allowed_tools(run.tuning)), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 cwd=str(cwd), env=build_env(jev_url), creationflags=flags)
         run.proc = proc
         if run.reason:                               # cancelled while it was starting
