@@ -9,3 +9,4 @@ history.json
 data/
 spooler.*.log
 node_modules/
+worktrees/
