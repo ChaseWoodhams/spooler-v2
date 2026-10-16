@@ -396,7 +396,7 @@ def _proposal(job: _Job, problem: planner.Problem, models, confirmed) -> dict:
     return {"version": VERSION, "token": uuid.uuid4().hex, "project_id": job.project_id,
             "project_created_at": record["created_at"], "base_revision": record["revision"], "created_at": time.time(),
             "job_id": job.id, "plan_nozzle": nozzle, "printers": statuses, "before": before, "plans": plans,
-            "unplanned": unplanned, "kept": reading.kept, "stats": dict(confirmed.stats) if confirmed else {},
+            "unplanned": unplanned, "kept": reading.kept, "calibration": models.status_lines(), "stats": dict(confirmed.stats) if confirmed else {},
             "summary": _summary(plans, unplanned)}
 
 

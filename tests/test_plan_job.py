@@ -181,6 +181,19 @@ class PlanJobApiTests(unittest.TestCase):
         self.assertGreater(proposal["before"]["makespan_s"], 0)
         self.assertEqual([p["status"] for p in proposal["printers"]], ["ok", "ok"])
 
+    def test_the_proposal_carries_the_calibration_lines_for_the_partly_estimated_tooltip(self):
+        proposal = self.plan(self.scattered())["proposal"]
+        self.assertIsInstance(proposal["calibration"], list)
+        self.assertTrue(all(isinstance(line, str) for line in proposal["calibration"]))
+
+    def test_preview_is_the_instant_arrangement_and_changes_nothing(self):
+        project = self.scattered()
+        status, preview = self.call("POST", f"/api/projects/{project['id']}/plan/preview", {})
+        self.assertEqual(status, 200, preview)
+        self.assertIn("plates", preview)
+        self.assertNotIn("proposal_token", preview)
+        self.assertEqual(self.current(project)["revision"], project["revision"])
+
     def print_on_record(self, project, plate_id):
         with database.transaction() as conn:
             conn.execute("INSERT INTO prints (printer_id, printer_name, file_name, started_at, ended_at, outcome, project_id, plate_id) "
