@@ -239,13 +239,38 @@ class EngineTests(unittest.TestCase):
         engine.split(self.work)
         self.assertEqual(self.read("result.json")["summary"]["parts"], len(pieces))
 
-    def test_a_part_that_only_fits_standing_on_a_thin_edge_does_not_fit(self):
-        # 10 x 10 x 200 mm on a 100 mm square bed: too long to lie down, and standing on its 10 x 10 end it would tip
+    def test_a_part_that_only_fits_standing_on_a_thin_edge_fits_and_is_tippy(self):
+        # 10 x 10 x 200 mm on a 100 mm square bed: too long to lie down, and standing on its 10 x 10 end it would tip. It fits
+        # the bed in that one orientation, so it is accepted and flagged unavoidably tippy (the planner gives it a brim)
         limits = {"bed_x": 100.0, "bed_y": 100.0, "height": 250.0}
         tall = {"man": m3d.Manifold.cube([10, 10, 200]), "normals": []}
-        self.assertFalse(engine.piece_fits(tall, limits))
+        self.assertTrue(engine.piece_fits(tall, limits))
+        placed, _ = engine.orient_part(tall["man"], [], limits)
+        self.assertIsNotNone(placed)
+        self.assertTrue(placed["tippy"])
+        self.assertAlmostEqual(placed["height"], 200.0, delta=0.01)       # standing, the only way it fits
         steady = {"man": m3d.Manifold.cube([60, 40, 30]), "normals": []}
         self.assertTrue(engine.piece_fits(steady, limits))
+        placed, _ = engine.orient_part(steady["man"], [], limits)
+        self.assertFalse(placed["tippy"])
+
+    def test_a_part_that_fits_the_bed_in_no_orientation_does_not_fit(self):
+        limits = {"bed_x": 100.0, "bed_y": 100.0, "height": 250.0}
+        too_long = {"man": m3d.Manifold.cube([10, 10, 300]), "normals": []}      # 300 > 250 tall and > the 141 mm diagonal
+        self.assertFalse(engine.piece_fits(too_long, limits))
+        self.assertIsNone(engine.orient_part(too_long["man"], [], limits)[0])
+
+    def test_a_part_tippy_in_every_orientation_splits_flagged_and_numbered(self):
+        self.job(m3d.Manifold.cube([20, 20, 240]), printer={"bed_x": 100, "bed_y": 100, "height": 250}, planner={"mode": "smart"})
+        engine.analyze(self.work)
+        engine.plan(self.work)
+        pieces = self.read("check.json")["pieces"]
+        self.assertEqual([(p["fits"], p["tippy"]) for p in pieces], [(True, True)])
+        engine.split(self.work)
+        result = self.read("result.json")
+        self.assertEqual([p["unavoidably_tippy"] for p in result["parts"]], [True])
+        self.assertEqual(result["unlabelled"], [])                            # the number is placed for the orientation chosen
+        self.assertTrue((self.work / "parts" / "part_01.stl").is_file())
 
     def test_the_split_orients_parts_without_choose_orientation(self):
         self.job(channel(), planner={"mode": "grid", "balanced": True})

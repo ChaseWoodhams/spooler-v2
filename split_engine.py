@@ -459,6 +459,7 @@ def describe_pieces(pieces: list, limits: dict) -> list:
             "volume_cm3": round(volume / 1000, 2),
             "size":       size,
             "fits":       piece_fits(piece, limits),
+            "tippy":      piece_fit(piece, limits)[1],
             "tiny":       is_tiny(piece["man"]),
             "cut":        piece["last"][0] if piece["last"] else None,   # the cut that made this part
         })
@@ -1026,14 +1027,48 @@ def steady_candidates(man, cut_normals: list, limits: dict) -> dict:
     return orientation.rank(verts, tris, 1.0, (0, 0, 0), limits=limits, cut_normals=both)
 
 
-def piece_fits(piece: dict, limits: dict) -> bool:
-    """Some steady orientation fits the bed: the same test the plate planner uses (orientation.rank)."""
+def choose_placement(man, cut_normals: list, limits: dict):
+    """How the part stands on the bed: (R, height, footprint, tippy), or None when it fits the bed in no orientation.
+    The planner's top steady candidate (orientation.rank) that fits, turned about Z to the smallest footprint. A part with
+    no steady orientation that fits is not refused for that: it stands in the fitting orientation with the most contact and
+    is flagged `tippy` (unavoidably; the plate planner gives it a brim). Only a part that fits in no orientation needs a
+    smaller split."""
+    import orientation
+    ranked = steady_candidates(man, cut_normals, limits)
+    tippy = bool(ranked["unavoidably_tippy"])
+    candidates = ranked["candidates"]
+    if tippy:
+        candidates = sorted(candidates, key=lambda c: -c["contact"])   # none is steady: take the one with most on the bed
+    hull = hull_points(man)
+    for candidate in candidates:
+        R = np.asarray(orientation.rotation_matrix(candidate["rotation"]), float)
+        hp = hull @ R.T
+        height = float(np.ptp(hp[:, 2]))
+        turn = footprint_turn(hp[:, :2], limits) if height <= limits["height"] + FIT_EPS else None
+        if turn is None:
+            continue
+        rot2, footprint = turn
+        return np.block([[rot2, np.zeros((2, 1))], [np.zeros((1, 2)), np.ones((1, 1))]]) @ R, height, footprint, tippy
+    return None
+
+
+def piece_fit(piece: dict, limits: dict) -> tuple:
+    """(fits, tippy): whether the piece fits the bed in some orientation, and whether every such orientation is tippy."""
     key = tuple(sorted(limits.items()))
     cache = piece.setdefault("fit_cache", {})
     if key not in cache:
-        cache[key] = (next(fitting_placements(piece["man"], piece["normals"], limits), None) is not None  # cheap reject first
-                      and not steady_candidates(piece["man"], piece["normals"], limits)["unavoidably_tippy"])
+        if next(fitting_placements(piece["man"], piece["normals"], limits), None) is None:   # cheap reject first
+            cache[key] = (False, False)
+        else:
+            chosen = choose_placement(piece["man"], piece["normals"], limits)
+            cache[key] = (chosen is not None, bool(chosen and chosen[3]))
     return cache[key]
+
+
+def piece_fits(piece: dict, limits: dict) -> bool:
+    """Some orientation fits the bed (the same test the plate planner uses, orientation.rank). One with no steady
+    orientation counts: it is accepted and flagged tippy (`piece_fit`)."""
+    return piece_fit(piece, limits)[0]
 
 
 def is_tiny(man) -> bool:
@@ -1055,9 +1090,8 @@ def ordered(pieces: list) -> list:
 
 
 def orient_part(man, cut_normals: list, limits: dict):
-    """The split's print orientation: the planner's top steady candidate (orientation.rank), turned about Z to the
-    smallest footprint that fits. Returns (placement, total surface area), placement None when no steady one fits."""
-    import orientation
+    """The split's print orientation (`choose_placement`). Returns (placement, total surface area), placement None when no
+    orientation fits the bed; `placement["tippy"]` says none of the orientations that fit is steady."""
     verts, tris = arrays(man)
     tri = verts[tris].astype(float)
     cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
@@ -1065,22 +1099,16 @@ def orient_part(man, cut_normals: list, limits: dict):
     keep = doubled > 1e-12
     normals, areas, centres = cross[keep] / doubled[keep, None], doubled[keep] / 2, tri[keep].mean(axis=1)
     surface = float(areas.sum())
-    ranked = steady_candidates(man, cut_normals, limits)
-    if ranked["unavoidably_tippy"] or not ranked["candidates"]:
+    chosen = choose_placement(man, cut_normals, limits)
+    if chosen is None:
         return None, surface
+    R, height, footprint, tippy = chosen
     hull = hull_points(man)
-    R = np.asarray(orientation.rotation_matrix(ranked["candidates"][0]["rotation"]), float)
-    hp = hull @ R.T
-    turn = footprint_turn(hp[:, :2], limits)
-    if turn is None:
-        return None, surface
-    rot2, footprint = turn
-    R = np.block([[rot2, np.zeros((2, 1))], [np.zeros((1, 2)), np.ones((1, 1))]]) @ R
     nz = normals @ R[2]
     z = centres @ R[2] - float((hull @ R[2]).min())
     contact = float(areas[(nz < -0.985) & (z < 0.3)].sum())
     overhang = float(areas[(nz < -OVERHANG_SIN) & (z >= 0.3)].sum())
-    return {"R": R, "contact": contact, "overhang": overhang, "height": float(np.ptp(hp[:, 2])), "footprint": footprint}, surface
+    return {"R": R, "contact": contact, "overhang": overhang, "height": height, "footprint": footprint, "tippy": tippy}, surface
 
 
 # ── Stages ─────────────────────────────────────────────────────────────────────
@@ -1342,6 +1370,7 @@ def split(work: Path) -> None:
             "overhang_pct":    round(100 * placed["overhang"] / surface, 1) if surface else 0,
             "needs_supports":  placed["overhang"] > max(500.0, 0.02 * surface),
             "tall_on_small_base": placed["height"] > 150 and placed["contact"] < 1500,
+            "unavoidably_tippy": bool(placed.get("tippy")),
             "rotation":        np.round(placed["R"], 6).tolist(),
             "holes":           sum(number in pin["parts"] for pin in pins),
             "neighbours":      neighbours,
