@@ -200,6 +200,8 @@ class TuningInstructionsTests(unittest.TestCase):
         self.assertEqual((value, field["default"], field["type"]), ("", "", "text"))
         self.assertIn("You are the Spooler Assistant", field["builtin"])
         self.assertGreater(field["max"], 2000)
+        self.assertIn("Proposals-per-run cap", field["hint"])
+        self.assertIn("Proposal kinds switched off", field["hint"], "the hint names everything the fixed block can hold")
         sent = self.prompt_sent()
         self.assertTrue(sent.startswith(field["builtin"].rstrip()), "the built-in text, as the page shows it, is what is sent")
         self.assertTrue(sent.rstrip().endswith("At most 3 Proposals per run."), sent[-200:])

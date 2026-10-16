@@ -50,7 +50,7 @@ GROUPS = {
                 "and notes as data stay fixed in Spooler.",
         "fields": {
             "text": {"label": "Instruction text", "type": "text", "unit": "characters", "default": "", "min": 0, "max": 8000,
-                     "hint": "Spooler adds a short fixed block after it (the Proposals-per-run cap), which cannot be edited."},
+                     "hint": "Spooler adds a short fixed block after it (the Proposals-per-run cap and any Proposal kinds switched off), which cannot be edited."},
         },
     },
     "model": {
