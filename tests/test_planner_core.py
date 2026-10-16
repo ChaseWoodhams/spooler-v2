@@ -93,6 +93,14 @@ class SearchTests(unittest.TestCase):
         again = planner.plan_problem(problem(items), budget_s=60, max_steps=80)
         self.assertEqual([p.as_dict() for p in first], [p.as_dict() for p in again])
 
+    def test_a_default_run_ends_on_its_step_budget_so_two_runs_give_the_same_plans(self):
+        # the time cap is only a safety net: a normal run ends on MAX_STEPS, which a slower moment cannot change
+        items = [item(k, cand(60 + 5 * k, 70, 10 + 2 * k)) for k in range(1, 10)]
+        first, again = planner.plan_problem(problem(items)), planner.plan_problem(problem(items))
+        self.assertEqual(first[0].stats["steps"], planner.MAX_STEPS)
+        self.assertLess(first[0].stats["seconds"], planner.SEARCH_SECONDS)
+        self.assertEqual([p.as_dict() for p in first], [p.as_dict() for p in again])
+
     def test_plates_never_mix_groups_and_go_to_a_printer_with_that_nozzle(self):
         groups = {"fine": planner.Group(0.4, 0.2, seconds_by_layers), "coarse": planner.Group(0.7, 0.2, seconds_by_layers)}
         items = [item(1, cand(50, 50), group="fine"), item(2, cand(50, 50), group="coarse"),
