@@ -1018,11 +1018,21 @@ def fitting_placements(man, cut_normals: list, limits: dict):
         yield R, height, footprint
 
 
+def steady_candidates(man, cut_normals: list, limits: dict) -> dict:
+    """orientation.rank on a part (a cut's normal may face either way on a part, so both ways go on the bed)."""
+    import orientation
+    verts, tris = arrays(man)
+    both = [n for c in cut_normals for n in (c, [-x for x in c])]
+    return orientation.rank(verts, tris, 1.0, (0, 0, 0), limits=limits, cut_normals=both)
+
+
 def piece_fits(piece: dict, limits: dict) -> bool:
+    """Some steady orientation fits the bed: the same test the plate planner uses (orientation.rank)."""
     key = tuple(sorted(limits.items()))
     cache = piece.setdefault("fit_cache", {})
     if key not in cache:
-        cache[key] = next(fitting_placements(piece["man"], piece["normals"], limits), None) is not None
+        cache[key] = (next(fitting_placements(piece["man"], piece["normals"], limits), None) is not None  # cheap reject first
+                      and not steady_candidates(piece["man"], piece["normals"], limits)["unavoidably_tippy"])
     return cache[key]
 
 
@@ -1044,8 +1054,10 @@ def ordered(pieces: list) -> list:
     return sorted(pieces, key=key)
 
 
-def choose_orientation(man, cut_normals: list, limits: dict):
-    """Pick a print orientation that fits, keeps overhangs low and stands on a big flat face."""
+def orient_part(man, cut_normals: list, limits: dict):
+    """The split's print orientation: the planner's top steady candidate (orientation.rank), turned about Z to the
+    smallest footprint that fits. Returns (placement, total surface area), placement None when no steady one fits."""
+    import orientation
     verts, tris = arrays(man)
     tri = verts[tris].astype(float)
     cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
@@ -1053,19 +1065,22 @@ def choose_orientation(man, cut_normals: list, limits: dict):
     keep = doubled > 1e-12
     normals, areas, centres = cross[keep] / doubled[keep, None], doubled[keep] / 2, tri[keep].mean(axis=1)
     surface = float(areas.sum())
-    hull = hull_points(man)
-    options = []
-    for R, height, footprint in fitting_placements(man, cut_normals, limits):
-        nz = normals @ R[2]
-        z = centres @ R[2] - float((hull @ R[2]).min())
-        contact = float(areas[(nz < -0.985) & (z < 0.3)].sum())
-        overhang = float(areas[(nz < -OVERHANG_SIN) & (z >= 0.3)].sum())
-        options.append({"R": R, "contact": contact, "overhang": overhang, "height": height, "footprint": footprint})
-    if not options:
+    ranked = steady_candidates(man, cut_normals, limits)
+    if ranked["unavoidably_tippy"] or not ranked["candidates"]:
         return None, surface
-    best_contact = max(o["contact"] for o in options)
-    stable = [o for o in options if o["contact"] >= max(300.0, 0.4 * best_contact)] or options
-    return min(stable, key=lambda o: (round(o["overhang"] / 500), -o["contact"])), surface
+    hull = hull_points(man)
+    R = np.asarray(orientation.rotation_matrix(ranked["candidates"][0]["rotation"]), float)
+    hp = hull @ R.T
+    turn = footprint_turn(hp[:, :2], limits)
+    if turn is None:
+        return None, surface
+    rot2, footprint = turn
+    R = np.block([[rot2, np.zeros((2, 1))], [np.zeros((1, 2)), np.ones((1, 1))]]) @ R
+    nz = normals @ R[2]
+    z = centres @ R[2] - float((hull @ R[2]).min())
+    contact = float(areas[(nz < -0.985) & (z < 0.3)].sum())
+    overhang = float(areas[(nz < -OVERHANG_SIN) & (z >= 0.3)].sum())
+    return {"R": R, "contact": contact, "overhang": overhang, "height": float(np.ptp(hp[:, 2])), "footprint": footprint}, surface
 
 
 # ── Stages ─────────────────────────────────────────────────────────────────────
@@ -1295,7 +1310,7 @@ def split(work: Path) -> None:
     for number, part in enumerate(parts, start=1):
         stage.progress(65 + 30 * (number - 1) / len(parts), f"Orienting and saving part {number} of {len(parts)}")
         # oriented on the body before the holes, exactly as the check judged it; holes only remove material
-        placed, surface = choose_orientation(part["body"], part["normals"], limits)
+        placed, surface = orient_part(part["body"], part["normals"], limits)
         if placed is None:
             raise EngineError(f"Part {number} has no orientation that fits the printer")
         oriented = rotate(part["man"], placed["R"])
