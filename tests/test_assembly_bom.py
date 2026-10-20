@@ -10,7 +10,7 @@ from unittest import mock
 import assembly_bom
 import assembly_pdf
 import splits
-from tests.test_assembly_guide import GuideCase, GEOMETRY, page_texts
+from tests.test_assembly_guide import GuideCase, GEOMETRY, page_texts, text_positions
 from tests.test_assembly_plan import cut, grid_split, joint, part, pins, stack_split
 
 
@@ -96,6 +96,14 @@ class RodPageTests(GuideCase):
         self.assertTrue(any(abs(w - 12 * mm) < 0.01 for w in widths))
         self.assertTrue(any(abs(w - 7 * mm) < 0.01 for w in widths))
         self.assertIn(b"/PrintScaling /None", self.pdf(split_id))
+
+    def test_the_rod_page_ruler_labels_stay_inside_the_safe_area(self):
+        split_id = self.make_split(*rods_split(4, 2))
+        for paper in ("letter", "a4"):
+            self.generate(split_id, paper)
+            safe = assembly_pdf.safe_area(paper)
+            for x, y, text in text_positions(self.pdf(split_id))[1]:
+                self.assertGreaterEqual(x, safe.left - 0.01, f"{paper}: {text}")
 
     def test_a_glue_only_split_has_no_rod_page(self):
         result, cuts = stack_split(3)

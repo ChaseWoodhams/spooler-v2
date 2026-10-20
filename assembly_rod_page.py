@@ -110,7 +110,8 @@ def _ruler(flow) -> None:
         c.line(left + mark * MM, y, left + mark * MM, y - (2.5 if mark % 50 == 0 else 1.5) * MM)
     c.setFont(FONT, 9)
     c.drawString(left, y + 5 * MM, RULER_NOTE)
-    for mark in (0, 50, 100):
+    c.drawString(left, y - 6 * MM, "0")     # left aligned: a centred "0" would stick out of the safe area
+    for mark in (50, 100):
         c.drawCentredString(left + mark * MM, y - 6 * MM, str(mark))
 
 
