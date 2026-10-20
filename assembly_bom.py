@@ -108,6 +108,17 @@ def _counts(counts: dict) -> str:
     return ", ".join(f"{n} x {label}" for label, n in sorted(counts.items())) or "none"
 
 
+def depth_text(bom: Bom, labels) -> str:
+    """How deep a rod sits in each part, for the rod sizes `labels` (derived from the cut length: depth = (cut + 1) / 2)."""
+    depths = {size.label: (size.length + 1) / 2 for size in bom.sizes}
+    found = [(label, depths[label]) for label in sorted(labels) if label in depths]
+    if not found:
+        return ""
+    if len(found) == 1:
+        return f"Each {bom.kind} sits {mm_text(found[0][1])} mm deep in each part."
+    return "In each part: " + ", ".join(f"the {label} sits {mm_text(depth)} mm deep" for label, depth in found) + "."
+
+
 def inches(mm: float) -> str:
     value = mm / 25.4
     return f"about {value:.0f} in" if value >= 10 else f"about {value:.1f} in"

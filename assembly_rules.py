@@ -19,11 +19,18 @@ PICTURE_MIN_BIT_PX = 12       # the same for the small pictures (Section thumbna
 RENDER_PX = 1200              # width of a frame's depth buffer (kept small enough for a quick run)
 SAMPLE_PX = 0.5               # spacing of the visibility samples along an edge
 FACE_TOLERANCE_MM = 0.5       # vertices this close to the join plane belong to the join face
+STRAY_MARK_MM = 6.0           # a small surface mark whose lines total less than this is suppressed ...
+STRAY_NEIGHBOUR_MM = 8.0      # ... unless another small mark is this close (the digits and underline of a part number) ...
+                              # ... or it is a hole (it lies by a rod's axis)
+JOIN_REACH_MM = 0.3           # a face edge within this of the other side's face is part of the join edge
 
 # ── Greys and weights of the step frames ───────────────────────────────────────
 RECEIVER = (0.25, 0.7)        # the receiving unit, frame 1
-TOUCHING = (0.55, 0.35)       # placed parts touching the moving unit, frame 2
-PLACED = (0.8, 0.2)           # every other placed part, frame 2
+TOUCHING = (0.4, 0.35)        # placed parts touching the moving unit, frame 2
+PLACED = (0.55, 0.25)         # every other placed part, frame 2
+GHOST_FLOOR = 0.55            # no placed part is drawn lighter than this grey, so it survives a laser printer or a photocopy
+GHOST_HAIRLINE_PT = 0.4       # a placed part's outline is a hairline: never heavier than this
+JOIN_EDGE_STEP = 0.3          # the join edge is this much heavier than the surface creases of the same part (kept under BOLD)
 BOLD = 1.2                    # the moving unit: black with a white halo
 HALO = 1.8
 PICTURE = (0.3, 0.45)         # a small picture of finished parts
@@ -86,3 +93,9 @@ THUMB_CAMERA = 0              # "Where this is" and the Section pictures use the
 ZOOM_LEADER = (0.45, 0.5)     # the thin leader from the zoom circle to the rods it magnifies
 ZOOM_RING_PT = 0.9            # the ring round the zoom circle
 ZOOM_LINE_SCALE = 1.4         # lines inside the circle are this much heavier than in the frame, before magnifying
+
+# ── Inventory cards ────────────────────────────────────────────────────────────
+THIN_WIDTH_MM = 12.0          # a part whose middle dimension is under this gets a second view at another angle
+TALL_ASPECT = 3.0             # a part this many times longer than wide, or any thin part, gets a taller cell
+TALL_FACTOR = 1.6             # a tall cell is this many times an ordinary row height
+STRIP_MM = 14.0               # height of the strip of all parts at one common scale

@@ -104,8 +104,60 @@ class Scene:
             boundary = group_rows(mesh.edges_sorted, require_count=1)
             if len(boundary):
                 edges = np.vstack([edges, mesh.edges_sorted[boundary]])
-            self._creases[part] = mesh.vertices[edges]
+            self._creases[part] = self._without_stray_marks(part, mesh.vertices[edges])
         return self._creases[part]
+
+    def _without_stray_marks(self, part: int, edges: np.ndarray) -> np.ndarray:
+        """Drop small, lonely surface marks: groups of connected crease lines under rules.STRAY_MARK_MM in total, unless
+        they sit in a hole (by a rod's axis) or beside another small mark (the digits and underline of a part number)."""
+        if len(edges) < 2:
+            return edges
+        _, inverse = np.unique(np.round(edges.reshape(-1, 3), 3), axis=0, return_inverse=True)
+        inverse = inverse.reshape(-1, 2)
+        n = inverse.max() + 1
+        _, label = connected_components(coo_matrix((np.ones(len(edges)), (inverse[:, 0], inverse[:, 1])), shape=(n, n)), directed=False)
+        label = label[inverse[:, 0]]
+        count = label.max() + 1
+        length = np.bincount(label, weights=np.linalg.norm(edges[:, 1] - edges[:, 0], axis=1), minlength=count)
+        small = length < rules.STRAY_MARK_MM
+        if not small.any():
+            return edges
+        middle = edges.mean(axis=1)
+        sizes = np.maximum(np.bincount(label, minlength=count), 1)
+        centre = np.stack([np.bincount(label, weights=middle[:, k], minlength=count) / sizes for k in range(3)], axis=1)
+        ids = np.where(small)[0]
+        keep = ~small
+        for i in ids:
+            near = np.linalg.norm(centre[ids] - centre[i], axis=1) <= rules.STRAY_NEIGHBOUR_MM
+            keep[i] = near.sum() > 1 or self._in_hole(part, centre[i])
+        return edges[keep[label]]
+
+    def _in_hole(self, part: int, point: np.ndarray) -> bool:
+        for pin in self.pins:
+            if part not in pin["parts"]:
+                continue
+            axis = unit(pin["axis"])
+            offset = point - np.array(pin["p"], float)
+            along = float(offset @ axis)
+            if abs(along) <= pin["depth"] + 1.0 and float(np.linalg.norm(offset - along * axis)) <= pin["hole_diameter"]:
+                return True
+        return False
+
+    def join_edges(self, part: int, face: "ContactFace", against: np.ndarray, direction: np.ndarray) -> np.ndarray:
+        """The lines of `part` that lie in the join plane and run along the other side's face `against` (triangles in plane
+        coordinates): the join edge between the moving unit and the receiving face (n, 2, 3)."""
+        edges = self.creases(part)
+        if not len(edges) or not len(against):
+            return edges[:0]
+        edges = edges[(abs(edges @ direction - face.plane) <= rules.FACE_TOLERANCE_MM).all(axis=1)]
+        if not len(edges):
+            return edges
+        middle = edges.mean(axis=1)
+        flat = np.stack([middle @ face.e1, middle @ face.e2], axis=1)
+        reach, near = rules.JOIN_REACH_MM, np.zeros(len(edges), bool)
+        for shift in ((0, 0), (reach, 0), (-reach, 0), (0, reach), (0, -reach)):
+            near |= _points_in_triangles(flat + shift, against)
+        return edges[near]
 
     def feature_edges(self, part: int, toward_camera: np.ndarray) -> np.ndarray:
         mesh = self.meshes[part]
@@ -237,10 +289,16 @@ class View:
                      self.H / 2 - (screen[:, 1] - self.centre[1]) * self.scale,
                      (screen[:, 2] - self.lo[2]) * self.scale]
 
-    def render(self, scene: Scene, items: list, bridge_px: "float | None" = None, min_bit_px: "float | None" = None) -> dict:
-        """items: [(key, part, offset)]. Returns {key: [(p0, p1), ...]}: the visible line runs in pixels."""
+    def render(self, scene: Scene, items: list, bridge_px: "float | None" = None, min_bit_px: "float | None" = None,
+               lines: "dict | None" = None) -> dict:
+        """items: [(key, part, offset)]. Returns {key: [(p0, p1), ...]}: the visible line runs in pixels. `lines` gives some
+        keys their own world-space lines (n, 2, 3) to draw instead of the part's feature edges; such a key adds nothing to
+        the depth buffer (its part is among the items under another key)."""
+        lines = lines or {}
         depth = np.full((self.H, self.W), -np.inf, np.float32)
-        for _key, part, offset in items:
+        for key, part, offset in items:
+            if key in lines:
+                continue
             mesh = scene.meshes[part]
             raster_depth(self.project(mesh.vertices + offset), mesh.faces, self.W, self.H, depth)
         bridge_px = rules.BRIDGE_PX if bridge_px is None else bridge_px
@@ -248,7 +306,8 @@ class View:
         bridge = int(round(bridge_px / rules.SAMPLE_PX))
         out = {}
         for key, part, offset in items:
-            edges = self.project(scene.feature_edges(part, self.camera).reshape(-1, 3) + offset).reshape(-1, 2, 3)
+            own = lines[key] if key in lines else scene.feature_edges(part, self.camera)
+            edges = self.project(own.reshape(-1, 3) + offset).reshape(-1, 2, 3)
             length = np.linalg.norm(edges[:, 1, :2] - edges[:, 0, :2], axis=1)
             count = np.maximum(2, np.ceil(length / rules.SAMPLE_PX).astype(int) + 1)
             owner = np.repeat(np.arange(len(edges)), count)
@@ -310,6 +369,8 @@ class StepArt:
     face: "ContactFace | None" = None
     label: str = ""                 # what the moving bubble says when the unit is a Section
     extras: dict = field(default_factory=dict)    # room for later tickets' per-step material (zoom, hole map...)
+    join_one: dict = field(default_factory=dict)  # frame 1: {("r", part): runs} of the join edge of the receiving face
+    join_two: dict = field(default_factory=dict)  # frame 2: {("m", part): runs} of the join edge of the moving unit
 
 
 @dataclass
@@ -392,11 +453,18 @@ def _prepare_posed_step(scene: Scene, step: dict, camera) -> StepArt:
     moving = [(("m", p), p, offset) for p in mover]
     fit = np.vstack([scene.corners(p, o) for _, p, o in items + moving])
     view = View(camera, fit)
-    runs_one = view.render(scene, items)
+    face = contact_face(scene, mover, touching, u)
+    joins_one, joins_two = {}, {}
+    if face is not None:
+        joins_one = {("j", p): scene.join_edges(p, face, face.mover, u) for p in touching}
+        joins_two = {("j", p): scene.join_edges(p, face, face.receiver, u) for p in mover}
+    runs_one = view.render(scene, items + [(key, key[1], np.zeros(3)) for key in joins_one], lines=joins_one)
     keyed = [(("t" if p in touching else "r", p), p, o) for (_, p, o) in items]
-    runs_two = view.render(scene, keyed + moving)
+    runs_two = view.render(scene, keyed + moving + [(key, key[1], offset) for key in joins_two], lines=joins_two)
+    join_one = {("r", key[1]): runs_one.pop(key) for key in joins_one}
+    join_two = {("m", key[1]): runs_two.pop(key) for key in joins_two}
     return StepArt(step, view, u, receiver, mover, touching, offset, pins, runs_one, runs_two,
-                   face=contact_face(scene, mover, touching, u), label=step.get("section") or "")
+                   face=face, label=step.get("section") or "", join_one=join_one, join_two=join_two)
 
 
 # ── Camera quality: pose, scored fallback, close-up ────────────────────────────
@@ -810,11 +878,47 @@ def _ink_points(box: Box, runs_by_key: dict) -> np.ndarray:
     return np.vstack(pts) if pts else np.zeros((0, 2))
 
 
+@dataclass
+class Stroke:
+    """One set of lines of a frame as it is drawn: `role` is "r" (receiver), "t" (placed, touching the moving unit), "p"
+    (placed, clear of it) or "m" (the moving unit, where grey 1.0 is its white halo); `kind` is "crease" or "join"."""
+    role: str
+    part: int
+    kind: str
+    grey: float
+    weight: float
+    runs: list
+
+
+def frame_one_strokes(art: StepArt) -> list:
+    """What frame 1 draws, in order: the receiving unit's lines, then the join edge one weight step heavier."""
+    grey, weight = rules.RECEIVER
+    strokes = [Stroke("r", key[1], "crease", grey, weight, runs) for key, runs in art.runs_one.items()]
+    return strokes + [Stroke("r", key[1], "join", grey, weight + rules.JOIN_EDGE_STEP, runs) for key, runs in art.join_one.items()]
+
+
+def frame_two_strokes(art: StepArt) -> list:
+    """What frame 2 draws, in order: the placed parts, never lighter than rules.GHOST_FLOOR nor heavier than a hairline; then
+    the moving unit, black on a white halo, its join edge one weight step heavier."""
+    strokes = []
+    for (role, part), runs in art.runs_two.items():
+        if role != "m":
+            grey, weight = rules.TOUCHING if role == "t" else rules.PLACED
+            strokes.append(Stroke(role if role == "t" else "p", part, "crease", min(grey, rules.GHOST_FLOOR), min(weight, rules.GHOST_HAIRLINE_PT), runs))
+    for (role, part), runs in art.runs_two.items():
+        if role == "m":
+            strokes.append(Stroke("m", part, "crease", 1.0, rules.BOLD + rules.HALO, runs))
+            strokes.append(Stroke("m", part, "crease", 0.0, rules.BOLD, runs))
+    for key, runs in art.join_two.items():
+        strokes.append(Stroke("m", key[1], "join", 0.0, rules.BOLD + rules.JOIN_EDGE_STEP, runs))
+    return strokes
+
+
 def draw_frame_one(canvas, art: StepArt, frame) -> None:
     """Frame 1: the receiving unit in normal weight, the join face stippled for glue, the rods bold in the face, a glue drop."""
     box = Box(frame, art.view)
-    for runs in art.runs_one.values():
-        stroke_runs(canvas, runs, box, *rules.RECEIVER)
+    for stroke in frame_one_strokes(art):
+        stroke_runs(canvas, stroke.runs, box, stroke.grey, stroke.weight)
     _stipple_face(canvas, box, art.face)
     _draw_rods(canvas, box, _rods(art, box))
     marks = glue_marks(art, frame)
@@ -874,13 +978,8 @@ def frame_two_marks(art: StepArt, frame) -> tuple:
 def draw_frame_two(canvas, art: StepArt, frame) -> None:
     """Frame 2: the same view with the moving unit exploded and bold, placed parts grey, a dashed path, the arrow."""
     box = Box(frame, art.view)
-    for (role, _part), runs in art.runs_two.items():
-        if role != "m":
-            stroke_runs(canvas, runs, box, *(rules.TOUCHING if role == "t" else rules.PLACED))
-    for (role, _part), runs in art.runs_two.items():
-        if role == "m":
-            stroke_runs(canvas, runs, box, 1.0, rules.BOLD + rules.HALO)
-            stroke_runs(canvas, runs, box, 0.0, rules.BOLD)
+    for stroke in frame_two_strokes(art):
+        stroke_runs(canvas, stroke.runs, box, stroke.grey, stroke.weight)
     _draw_rods(canvas, box, _rods(art, box))
     (start, end), (lo, hi) = frame_two_marks(art, frame)
     mover_runs = {key: runs for key, runs in art.runs_two.items() if key[0] == "m"}
