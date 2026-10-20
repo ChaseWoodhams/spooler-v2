@@ -4,6 +4,7 @@
     draw_inventory(flow, data)                          new pages of 15 parts each (3 across, 5 down), in part-number order
     draw_last_page(flow, data)                          new page: the finished model and the "nothing left over" tick
     label_note(label)                                   the cell's "number is here" or "no number" line
+    unnumbered_note(scene, parts)                       the note naming the parts with no printed number, with their size
 
 Layout only; the pictures come from assembly_render and the label and plate facts from the split result
 (GuideData.labels: part -> saved label record or None, GuideData.plates: part -> plate name).
@@ -18,6 +19,9 @@ PER_PAGE, COLUMNS, ROWS = 15, 3, 5
 NO_NUMBER = "no number: identify by shape"
 NOTHING_LEFT = "No parts or rods left over."
 TITLE_H = 12 * MM
+NOT_ON_A_PLATE = "not on a plate yet"
+LEGEND = "Small circle on a picture: where the printed number is."
+LINE_H = 11
 
 
 def label_note(label) -> str:
@@ -29,6 +33,20 @@ def label_note(label) -> str:
     if label.get("neighbour") is not None:
         return f"number is here (face against part {label['neighbour']})"
     return "number is here"
+
+
+def largest_mm(scene, part: int) -> int:
+    """The part's largest overall dimension in millimetres, rounded."""
+    return int(round(float(np.ptp(scene.meshes[part].bounds, axis=0).max())))
+
+
+def unnumbered_note(scene, parts) -> str:
+    """The note about parts with no printed number: each with its size, so it can be found by measuring. Empty when none."""
+    parts = sorted(parts)
+    if not parts:
+        return ""
+    who = ", ".join(f"Part {p} ({largest_mm(scene, p)} mm)" for p in parts)
+    return f"No number printed on: {who}. Tell them apart by size and shape."
 
 
 def _bubble(canvas, x: float, y: float, text: str, radius: float = 8.5) -> None:
@@ -88,7 +106,7 @@ def part_picture(scene, part: int, label):
     return assembly_render.Picture(view, view.render(scene, [(part, part, np.zeros(3))], min_bit_px=12)), spot
 
 
-def _cell(canvas, scene, part: int, label, plate, left: float, top: float, width: float, height: float) -> None:
+def _cell(canvas, scene, part: int, label, plate, show_plates: bool, left: float, top: float, width: float, height: float) -> None:
     pad = 2 * MM
     canvas.setStrokeGray(0.6)
     canvas.setLineWidth(0.5)
@@ -109,7 +127,11 @@ def _cell(canvas, scene, part: int, label, plate, left: float, top: float, width
     canvas.setFont(BOLD, 30)
     canvas.drawString(text_left, top - pad - 24, str(part))
     canvas.setFont(FONT, 10)
-    canvas.drawString(text_left, top - pad - 38, fit(f"Plate: {plate or '-'}", FONT, 10, room))
+    if show_plates:
+        size = 10 if plate else MIN_FONT
+        canvas.setFont(FONT, size)
+        canvas.drawString(text_left, top - pad - 38, fit(f"Plate: {plate}" if plate else NOT_ON_A_PLATE, FONT, size, room))
+        canvas.setFont(FONT, 10)
     canvas.setStrokeGray(0)
     canvas.setLineWidth(0.9)
     canvas.rect(text_left, top - pad - 56, 4 * MM, 4 * MM, stroke=1, fill=0)    # tick box
@@ -122,6 +144,8 @@ def _cell(canvas, scene, part: int, label, plate, left: float, top: float, width
 def draw_inventory(flow, data) -> None:
     numbers = sorted(data.scene.meshes)
     labels, plates = data.labels or {}, data.plates or {}
+    show_plates = any(plates.get(p) for p in numbers)
+    note = unnumbered_note(data.scene, [p for p in data.plan.get("unlabelled") or [] if p in data.scene.meshes])
     pages = max(1, -(-len(numbers) // PER_PAGE))
     width = flow.content.width / COLUMNS
     for page in range(pages):
@@ -134,11 +158,16 @@ def draw_inventory(flow, data) -> None:
                           "Parts inventory" + (f" ({page + 1} of {pages})" if pages > 1 else ""))
         canvas.setFont(FONT, 10)
         canvas.drawString(flow.content.left + 62 * MM, top - 8 * MM, "Tick each part off when you have found it.")
-        height = (top - TITLE_H - flow.content.bottom) / ROWS
+        lines = [LEGEND] + (wrap(note, FONT, MIN_FONT, flow.content.width) if note and page == 0 else [])
+        canvas.setFont(FONT, MIN_FONT)
+        for n, line in enumerate(lines):
+            canvas.drawString(flow.content.left, top - TITLE_H - 3 - n * LINE_H, line)
+        grid_top = top - TITLE_H - len(lines) * LINE_H - 2 * MM
+        height = (grid_top - flow.content.bottom) / ROWS
         for slot, part in enumerate(numbers[page * PER_PAGE:(page + 1) * PER_PAGE]):
             row, column = divmod(slot, COLUMNS)
-            _cell(canvas, data.scene, part, labels.get(part), plates.get(part),
-                  flow.content.left + column * width, top - TITLE_H - row * height, width, height)
+            _cell(canvas, data.scene, part, labels.get(part), plates.get(part), show_plates,
+                  flow.content.left + column * width, grid_top - row * height, width, height)
 
 
 def draw_last_page(flow, data) -> None:
