@@ -166,6 +166,10 @@ class RecordingCanvas(pdfcanvas.Canvas if GEOMETRY else object):
         self.texts.append(text)
         super().drawString(x, y, text, *args, **kwargs)
 
+    def drawCentredString(self, x, y, text, *args, **kwargs):
+        self.texts.append(text)
+        super().drawCentredString(x, y, text, *args, **kwargs)
+
     def drawRightString(self, x, y, text, *args, **kwargs):
         self.texts.append(text)
         super().drawRightString(x, y, text, *args, **kwargs)
@@ -274,6 +278,129 @@ class DrawingRulesTests(unittest.TestCase):
             self.assertTrue(hasattr(rules, name), name)
             self.assertFalse(hasattr(render, name) and getattr(render, name) is not getattr(rules, name), name)
 
+
+# a tall, thin stack (60 mm tall on a 10 mm footprint) that part 2 joins from the -x side
+TALL = {1: (0, 0, 0, 10, 10, 60), 2: (-10, 0, 0, 0, 10, 10)}
+EDGE_ON = render.unit([-1.0, 0.1, 0.8]) if GEOMETRY else None      # looks straight at the -x side of the stack: one side only
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class TallStackCameraTests(unittest.TestCase):
+    def choose(self, boxes, previous):
+        scene = make_scene(boxes)
+        step = step_of([n for n in boxes if n != 2], [2], (1.0, 0.0, 0.0))
+        return render.choose_view(scene, step, previous)
+
+    def sides_seen(self, camera, bounds=(10, 10)):
+        # the stack's side faces face +-x and +-y: a side is seen when the camera is clearly in front of it
+        return sum(1 for axis in (0, 1) for sign in (1, -1) if sign * camera[axis] > rules.TALL_SIDE_FACING)
+
+    def test_a_tall_stack_seen_edge_on_gets_a_three_quarter_camera_showing_two_sides(self):
+        self.assertEqual(self.sides_seen(EDGE_ON), 1)
+        choice = self.choose(TALL, EDGE_ON)
+        self.assertGreaterEqual(self.sides_seen(choice.camera), 2)
+        self.assertGreater(choice.camera[2], 0, "from above")
+        self.assertGreater(choice.camera @ np.array([-1.0, 0, 0]), rules.SEES_FACING, "the join face is still seen")
+
+    def test_a_stack_that_is_not_tall_keeps_the_reused_camera(self):
+        choice = self.choose(OPEN, EDGE_ON)
+        np.testing.assert_allclose(choice.camera, EDGE_ON)
+
+    def test_a_tall_stack_already_shown_from_two_sides_keeps_its_camera(self):
+        diagonal = render.unit([-1.0, 1.0, 0.8])
+        np.testing.assert_allclose(self.choose(TALL, diagonal).camera, diagonal)
+
+    def test_the_tall_ratio_is_a_rule_and_the_choice_is_deterministic(self):
+        with mock.patch.object(rules, "TALL_STACK_RATIO", 50.0):
+            np.testing.assert_allclose(self.choose(TALL, EDGE_ON).camera, EDGE_ON)
+        a, b = self.choose(TALL, EDGE_ON).camera, self.choose(TALL, EDGE_ON).camera
+        np.testing.assert_array_equal(a, b)
+
+
+# two stacked moving parts (2 and 4) against placed parts (1 and 3) and a wall (5): the number bubbles crowd each other
+STACKED = {1: (0, 0, 0, 20, 10, 10), 2: (-10, 0, 0, 0, 10, 10), 3: (0, 0, 10, 20, 10, 20), 4: (-10, 0, 10, 0, 10, 20),
+           5: (-30, 0, 0, -12, 10, 40)}    # part 5 stands left of the moving parts, where their badges would first go
+
+
+def _ink_samples(art, box, step_pt=1.5):
+    """Points along every line the second frame draws, in page points."""
+    out = []
+    for runs in art.runs_two.values():
+        for a, b in runs:
+            p, q = box.px(np.array([a, b]))
+            n = max(2, int(np.hypot(*(q - p)) / step_pt))
+            out.extend(p + (q - p) * t for t in np.linspace(0, 1, n))
+    return np.array(out)
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class BadgeAndTurnCueTests(unittest.TestCase):
+    FRAME = (0.0, 0.0, 300.0, 200.0)
+
+    def stacked_art(self):
+        scene = make_scene(STACKED)
+        step = step_of([1, 3, 5], [2, 4], (1.0, 0.0, 0.0))
+        return render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+
+    def test_no_badge_overlaps_another_badge_or_hides_behind_a_part(self):
+        art = self.stacked_art()
+        badges = render.badge_layout(art, self.FRAME)
+        self.assertEqual(sorted(b.text for b in badges), ["1", "2", "4"])
+        for i, a in enumerate(badges):
+            for b in badges[i + 1:]:
+                self.assertGreaterEqual(float(np.hypot(*(a.centre - b.centre))), a.radius + b.radius, (a.text, b.text))
+        ink = _ink_samples(art, render.Box(self.FRAME, art.view))
+        for badge in badges:
+            gap = np.min(np.hypot(*(ink - badge.centre).T))
+            self.assertGreaterEqual(gap, badge.radius, f"badge {badge.text} sits on a part")
+
+    def test_badges_keep_inside_the_frame_and_clear_of_the_frame_number(self):
+        art = self.stacked_art()
+        x, y, w, h = self.FRAME
+        corner = np.array([x + 9, y + h - 9])
+        for badge in render.badge_layout(art, self.FRAME):
+            self.assertTrue(x <= badge.centre[0] - badge.radius and badge.centre[0] + badge.radius <= x + w)
+            self.assertTrue(y <= badge.centre[1] - badge.radius and badge.centre[1] + badge.radius <= y + h)
+            self.assertGreaterEqual(float(np.hypot(*(badge.centre - corner))), badge.radius + rules.BADGE_RADIUS)
+
+    def test_a_badge_that_had_to_move_is_marked_and_the_layout_is_deterministic(self):
+        art = self.stacked_art()
+        first = render.badge_layout(art, self.FRAME)
+        again = render.badge_layout(art, self.FRAME)
+        self.assertEqual([(b.text, tuple(b.centre), b.moved) for b in first], [(b.text, tuple(b.centre), b.moved) for b in again])
+        self.assertTrue(any(b.moved for b in first), "the crowded stack forces at least one badge off its first corner")
+        for badge in first:
+            self.assertEqual(len(badge.anchor), 2, "every badge has a leader to the part it names")
+
+    def test_the_turn_cue_sits_between_the_frames_and_shows_the_flip_axis(self):
+        boxes = {1: (0, 0, 10, 10, 10, 20), 2: (0, 0, 0, 10, 10, 10)}
+        up = step_of([1], [2], (0, 0, 1))
+        scene = make_scene(boxes, rods_at=((5.0, 5.0, 10.0),))
+        art = render.prepare_step(scene, up, render.choose_camera(scene, up, None))
+        width = 190 * render.MM
+        first, second = render.layout_frames(art, width)
+        cue = render.turn_cue_layout(art, 100.0, 800.0, width)
+        gap_middle = 100.0 + first[2] + render.FRAME_GAP / 2
+        self.assertAlmostEqual(cue.centre[0], gap_middle, delta=0.5)
+        self.assertLess(cue.centre[0] - cue.radius, 100.0 + second[0], "it reaches into the first frame's side")
+        self.assertGreater(cue.centre[0] + cue.radius, 100.0 + second[0], "and into the second's")
+        self.assertAlmostEqual(float(np.hypot(*cue.axis)), 1.0, places=6)
+        # the model is turned half a turn about a horizontal axis: world x or y, never up
+        np.testing.assert_allclose(sorted(np.abs(art.extras["turn_axis"])), [0, 0, 1], atol=1e-9)
+        self.assertAlmostEqual(art.extras["turn_axis"][2], 0.0, places=9)
+
+    def test_the_cue_is_drawn_on_exactly_the_turned_steps(self):
+        width = 190 * render.MM
+        turned_boxes = {1: (0, 0, 10, 10, 10, 20), 2: (0, 0, 0, 10, 10, 10)}
+        up = step_of([1], [2], (0, 0, 1))
+        flat = step_of([1], [2], (1.0, 0, 0))
+        for step, boxes, rods, turned in ((up, turned_boxes, ((5.0, 5.0, 10.0),), True), (flat, OPEN, ((-6.0, 5.0, 5.0),), False)):
+            scene = make_scene(boxes, rods_at=rods)
+            art = render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+            canvas = RecordingCanvas()
+            render.draw_step(canvas, art, 0.0, 800.0, width)
+            self.assertEqual("Turn it over" in canvas.texts, turned)
+            self.assertEqual(render.turn_cue_layout(art, 0.0, 800.0, width) is not None, turned)
 
 # part 1 is a wide receiver, so the join (the 10 x 10 face of part 2) is only part of its face
 WIDE = {1: (0, 0, 0, 20, 30, 10), 2: (-10, 0, 0, 0, 10, 10)}

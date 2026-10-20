@@ -91,6 +91,10 @@ THUMB_CAMERA = 0              # "Where this is" and the Section pictures use the
 ZOOM_LEADER = (0.45, 0.5)     # the thin leader from the zoom circle to the rods it magnifies
 ZOOM_RING_PT = 0.9            # the ring round the zoom circle
 ZOOM_LINE_SCALE = 1.4         # lines inside the circle are this much heavier than in the frame, before magnifying
+TALL_STACK_RATIO = 2.0        # a built group this many times taller than its widest side is a tall, thin stack
+TALL_SIDE_FACING = 0.3        # a side of a stack counts as seen when the camera is this far in front of it (dot with its normal)
+TALL_MIN_SIDES = 2            # a tall stack is drawn from a view that shows at least this many sides
+
 
 # ── Inventory cards ────────────────────────────────────────────────────────────
 THIN_WIDTH_MM = 12.0          # a part whose middle dimension is under this gets a second view at another angle

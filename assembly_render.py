@@ -491,6 +491,12 @@ def pose_for(step: dict) -> "np.ndarray | None":
     return rotation_between(u, -UP)
 
 
+def _turn_axis(step: dict) -> np.ndarray:
+    """The horizontal axis `pose_for` turns the model about (the same before and after the turn)."""
+    axis = np.cross(unit(step["direction"]), -UP)
+    return unit(axis) if np.linalg.norm(axis) > 1e-9 else np.array([1.0, 0.0, 0.0])
+
+
 def posed(scene: "Scene | None", step: dict) -> tuple:
     """(scene, step, turn) as the step is drawn: the receiver, the moving unit and their rods rotated by `turn`. In the
     finished pose `turn` is None and nothing is copied (the scene may be None then or when only the step is wanted)."""
@@ -575,6 +581,30 @@ def scoring_candidates(u: np.ndarray) -> list:
     return camera_candidates() + [unit(-u + 0.5 * ref + 0.5 * s * side) for s in (1, -1)]
 
 
+def _sides_seen(camera) -> int:
+    """How many of the four sides of an upright box (facing +x, -x, +y, -y) the camera is clearly in front of."""
+    return sum(1 for axis in (0, 1) for sign in (1, -1) if sign * float(camera[axis]) > rules.TALL_SIDE_FACING)
+
+
+def is_tall_stack(scene: Scene, parts) -> bool:
+    """A built group much taller than its widest side (see `rules.TALL_STACK_RATIO`)."""
+    size = np.ptp(np.vstack([scene.corners(p) for p in parts]), axis=0)
+    return float(size[2]) >= rules.TALL_STACK_RATIO * max(float(size[:2].max()), 1e-9)
+
+
+def _three_quarter(scene: Scene, step: dict, camera) -> np.ndarray:
+    """`camera`, unless it would draw a tall, thin receiving stack edge-on (fewer than `rules.TALL_MIN_SIDES` sides seen):
+    then the diagonal view that sees the join face and shows the most sides (from above, then the first, on a tie). Other
+    steps keep `camera`, so first fit and in-Section reuse stay as they were."""
+    if _sides_seen(camera) >= rules.TALL_MIN_SIDES or not is_tall_stack(scene, step["receiver"]):
+        return camera
+    u = unit(step["direction"])
+    seen = [c for c in camera_candidates() if float(np.dot(c, -u)) > rules.SEES_FACING]
+    if not seen:
+        return camera
+    return max(seen, key=lambda c: (_sides_seen(c), bool(c[2] > 0)))
+
+
 @dataclass
 class CameraChoice:
     camera: np.ndarray           # in the pose of the step
@@ -592,6 +622,7 @@ def choose_view(scene, step: dict, previous) -> CameraChoice:
     first = _first_fit(u, previous)
     if scene is None:
         return CameraChoice(first, None)
+    first = _three_quarter(pose_scene, pose_step, first)
     probe = _StepProbe(pose_scene, pose_step)
     quality = probe.quality(first)
     if quality["face"] >= rules.CLEAR_SHARE and quality["rods"] >= rules.CLEAR_SHARE:
@@ -633,6 +664,7 @@ def prepare_step(scene: Scene, step: dict, camera, close_up: bool = False) -> St
     art.step = step
     if turn is not None:
         art.extras["turn"] = turn
+        art.extras["turn_axis"] = _turn_axis(step)
     if close_up:
         art.extras["close_up"] = _close_up(pose_scene, art, camera)
     return art
@@ -776,23 +808,88 @@ def _bubble(canvas, xy, text: str, bold: bool = True, radius: "float | None" = N
     canvas.drawCentredString(xy[0], xy[1] - 3.2, str(text))
 
 
-def _place_bubble(canvas, box: Box, frame, runs, text, corner: str, bold: bool, slot: int = 0) -> None:
-    """A bubble outside the geometry, in a corner of the part's own bounds, on a short leader to its nearest line."""
-    bounds = _bounds_pt(box, runs)
-    if bounds is None:
-        return
+@dataclass
+class Badge:
+    """A part number bubble of frame 2: where it sits, the point of its part the leader runs to, and whether it had to leave
+    its first-choice corner."""
+    text: str
+    centre: np.ndarray
+    radius: float
+    anchor: np.ndarray
+    bold: bool
+    moved: bool
+
+
+def _ink_samples(box: Box, runs_by_key: dict, step_pt: float = 2.0) -> np.ndarray:
+    """Points along every line of a frame, in page points, about `step_pt` apart."""
+    out = []
+    for runs in runs_by_key.values():
+        for a, b in runs:
+            p, q = box.px(np.array([a, b]))
+            n = max(2, int(np.hypot(*(q - p)) / step_pt) + 1)
+            out.append(p + (q - p) * np.linspace(0, 1, n)[:, None])
+    return np.vstack(out) if out else np.zeros((0, 2))
+
+
+def _badge_spots(frame, bounds, r: float, corner: str, slot: int) -> list:
+    """Where a badge may sit, best first: beside a corner of the part's own bounds (the preferred corner first, `slot`
+    steps along), then the other corners, then a grid over the frame nearest the part. Always inside the frame."""
     lo, hi = bounds
-    r = (rules.BUBBLE_BOLD if bold else rules.BUBBLE_LIGHT)[0]
-    x = lo[0] - r - 2 if "l" in corner else hi[0] + r + 2
-    y = hi[1] + r + 2 + slot * (2 * r + 3) if "t" in corner else lo[1] - r - 2 - slot * (2 * r + 3)
-    x = float(np.clip(x, frame[0] + r + 1, frame[0] + frame[2] - r - 1))
-    y = float(np.clip(y, frame[1] + r + 1, frame[1] + frame[3] - r - 1))
-    ends = np.vstack([box.px(np.array([a, b])) for a, b in runs[::max(1, len(runs) // 400)]])
-    nearest = ends[np.argmin(np.linalg.norm(ends - [x, y], axis=1))]
-    canvas.setStrokeGray(0 if bold else rules.TOUCHING[0])
+    spots = []
+    for c in [corner] + [c for c in ("tl", "tr", "bl", "br") if c != corner]:
+        for k in ([slot] if c == corner else []) + [0, 1, 2, 3]:
+            x = lo[0] - r - 2 if "l" in c else hi[0] + r + 2
+            y = hi[1] + r + 2 + k * (2 * r + 3) if "t" in c else lo[1] - r - 2 - k * (2 * r + 3)
+            spots.append((x, y))
+    centre, step = (lo + hi) / 2, 2 * r + 2
+    grid = [(x, y) for x in np.arange(frame[0] + r + 1, frame[0] + frame[2] - r, step) for y in np.arange(frame[1] + r + 1, frame[1] + frame[3] - r, step)]
+    spots += sorted(grid, key=lambda g: (float(np.hypot(g[0] - centre[0], g[1] - centre[1])), g))
+    clipped = [(float(np.clip(x, frame[0] + r + 1, frame[0] + frame[2] - r - 1)), float(np.clip(y, frame[1] + r + 1, frame[1] + frame[3] - r - 1))) for x, y in spots]
+    return list(dict.fromkeys(clipped))
+
+
+def badge_layout(art: StepArt, frame) -> list:
+    """The part number bubbles of frame 2: the moving parts' (a Section is one bubble, its letter) and the touching placed
+    parts'. Each takes the first spot that is clear of the lines of every part, of the bubbles already placed and of the
+    frame number (and the turn cue, when the step is turned); a bubble that cannot have its first choice is `moved`."""
+    box = Box(frame, art.view)
+    ink = _ink_samples(box, art.runs_two)
+    placed = [(np.array([frame[0] + 9, frame[1] + frame[3] - 9]), rules.BADGE_RADIUS)]
+    if "turn" in art.extras:
+        placed.append((np.array([frame[0] - FRAME_GAP / 2, frame[1] + frame[3] / 2]), rules.CUE_MM * MM / 2 + 2))
+    mover_runs = {key: runs for key, runs in art.runs_two.items() if key[0] == "m"}
+    if art.step["kind"] == "section":
+        wanted = [(art.label, [r for runs in mover_runs.values() for r in runs], "tl", True, 0)]
+    else:
+        wanted = [(str(part), mover_runs.get(("m", part), []), "tl", True, slot) for slot, part in enumerate(art.mover)]
+    wanted += [(str(part), art.runs_two.get(("t", part), []), "tr", False, slot) for slot, part in enumerate(art.touching)]
+    out = []
+    for text, runs, corner, bold, slot in wanted:
+        bounds = _bounds_pt(box, runs)
+        if bounds is None:
+            continue
+        r = (rules.BUBBLE_BOLD if bold else rules.BUBBLE_LIGHT)[0]
+        spots = _badge_spots(frame, bounds, r, corner, slot)
+
+        def clear(spot):
+            p = np.array(spot)
+            if any(np.hypot(*(p - c)) < r + cr for c, cr in placed):
+                return False
+            return not len(ink) or float(np.min(np.hypot(*(ink - p).T))) >= r + 0.5
+        index = next((i for i, spot in enumerate(spots) if clear(spot)), 0)
+        centre = np.array(spots[index])
+        ends = np.vstack([box.px(np.array([a, b])) for a, b in runs[::max(1, len(runs) // 400)]])
+        out.append(Badge(text, centre, r, ends[np.argmin(np.linalg.norm(ends - centre, axis=1))], bold, index > 0))
+        placed.append((centre, r))
+    return out
+
+
+def _draw_badge(canvas, badge: Badge) -> None:
+    """The bubble on a short leader to the nearest line of its part."""
+    canvas.setStrokeGray(0 if badge.bold else rules.TOUCHING[0])
     canvas.setLineWidth(rules.LEADER_WEIGHT)
-    canvas.line(x, y, *nearest)
-    _bubble(canvas, (x, y), text, bold, r)
+    canvas.line(*badge.centre, *badge.anchor)
+    _bubble(canvas, badge.centre, badge.text, badge.bold, badge.radius)
 
 
 def _frame_badge(canvas, frame, number: int) -> None:
@@ -900,7 +997,6 @@ def draw_frame_two(canvas, art: StepArt, frame) -> None:
         stroke_runs(canvas, stroke.runs, box, stroke.grey, stroke.weight)
     _draw_rods(canvas, box, _rods(art, box))
     (start, end), (lo, hi) = frame_two_marks(art, frame)
-    mover_runs = {key: runs for key, runs in art.runs_two.items() if key[0] == "m"}
     travel = box.world(np.zeros(3))[0] - box.world(art.offset)[0]
     centre = (lo + hi) / 2
     canvas.setStrokeGray(rules.PATH_LINE[0])
@@ -909,15 +1005,8 @@ def draw_frame_two(canvas, art: StepArt, frame) -> None:
     canvas.line(*centre, *(centre + travel))
     canvas.setDash()
     _arrow(canvas, start, end)
-    if art.step["kind"] == "section":      # a whole Section is one bubble: its letter
-        _place_bubble(canvas, box, frame, [r for runs in mover_runs.values() for r in runs], art.label, "tl", True)
-    else:
-        for slot, part in enumerate(art.mover):
-            _place_bubble(canvas, box, frame, mover_runs.get(("m", part), []), str(part), "tl", True, slot)
-    for slot, part in enumerate(art.touching):
-        _place_bubble(canvas, box, frame, art.runs_two.get(("t", part), []), str(part), "tr", False, slot)
-    if "turn" in art.extras:
-        draw_turn_cue(canvas, frame)
+    for badge in badge_layout(art, frame):
+        _draw_badge(canvas, badge)
     _frame_badge(canvas, frame, 2)
 
 
@@ -936,6 +1025,9 @@ def draw_step(canvas, art: StepArt, left: float, top: float, width: float) -> fl
         canvas.setStrokeGray(rules.FRAME_BORDER[0])
         canvas.setLineWidth(rules.FRAME_BORDER[1])
         canvas.rect(*placed)
+    cue = turn_cue_layout(art, left, top, width)
+    if cue is not None:
+        draw_turn_cue(canvas, cue)
     if "close_up" in art.extras:
         height += draw_close_up(canvas, art, left, top - height, width)
     return height
@@ -979,17 +1071,41 @@ def draw_close_up(canvas, art: StepArt, left: float, top: float, width: float) -
     return FRAME_GAP + h
 
 
-def draw_turn_cue(canvas, frame) -> None:
-    """A curved arrow about 12 mm across with "Turn it over" beside it, in the top right corner of the frame."""
-    r = rules.CUE_MM * MM / 2
+@dataclass
+class TurnCue:
+    centre: np.ndarray           # on the page, in the gap between the two frames
+    radius: float
+    axis: np.ndarray             # unit vector of the flip axis as it runs on the page
+
+
+def turn_cue_layout(art: StepArt, left: float, top: float, width: float) -> "TurnCue | None":
+    """Where the "turn it over" cue goes for a step drawn at (`left`, `top`) `width` wide: centred on the gap between the two
+    frames, halfway down them, with the flip axis as it runs on the page. None when the step is not drawn turned."""
+    if "turn" not in art.extras:
+        return None
+    first, second = layout_frames(art, width)
+    on_page = art.view.R[:2] @ art.extras["turn_axis"]       # right and up on the page
+    length = float(np.hypot(*on_page))
+    axis = on_page / length if length > 1e-6 else np.array([1.0, 0.0])
+    return TurnCue(np.array([left + first[2] + FRAME_GAP / 2, top - first[3] / 2]), rules.CUE_MM * MM / 2, axis)
+
+
+def draw_turn_cue(canvas, cue: TurnCue) -> None:
+    """A curved arrow about 12 mm across round a dashed line along the flip axis, with "Turn it over" under it."""
+    cx, cy = cue.centre
+    r = cue.radius
     text = "Turn it over"
     text_w = canvas.stringWidth(text, "Helvetica-Bold", MIN_FONT)
-    cx, cy = frame[0] + frame[2] - 6 - r, frame[1] + frame[3] - 6 - r
     canvas.setFillGray(1)
-    canvas.rect(cx - r - 6 - text_w - 3, cy - r - 3, text_w + 2 * r + 12, 2 * r + 6, stroke=0, fill=1)
+    canvas.circle(cx, cy, r + 2, stroke=0, fill=1)
+    canvas.rect(cx - text_w / 2 - 2, cy - r - MIN_FONT - 3, text_w + 4, MIN_FONT + 2, stroke=0, fill=1)
+    canvas.setStrokeGray(0)
+    canvas.setLineWidth(rules.LEADER_WEIGHT)
+    canvas.setDash(*rules.PATH_DASH)
+    canvas.line(*(cue.centre - cue.axis * (r + 1)), *(cue.centre + cue.axis * (r + 1)))
+    canvas.setDash()
     angles = np.radians(np.linspace(30, 300, 28))
     pts = np.c_[cx + r * 0.8 * np.cos(angles), cy + r * 0.8 * np.sin(angles)]
-    canvas.setStrokeGray(0)
     canvas.setLineWidth(rules.CUE_WEIGHT)
     canvas.setLineCap(1)
     path = canvas.beginPath()
@@ -1001,7 +1117,7 @@ def draw_turn_cue(canvas, frame) -> None:
     _arrow(canvas, pts[-1] - tangent / np.linalg.norm(tangent) * 6, pts[-1] + tangent / np.linalg.norm(tangent) * 1.5, weight=rules.CUE_WEIGHT, head=7)
     canvas.setFillGray(0)
     canvas.setFont("Helvetica-Bold", MIN_FONT)
-    canvas.drawRightString(cx - r - 4, cy - 3, text)
+    canvas.drawCentredString(cx, cy - r - MIN_FONT, text)
 
 
 # ── Pictures of finished parts (Section headers) ───────────────────────────────
