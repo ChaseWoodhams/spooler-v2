@@ -90,7 +90,8 @@ class GuideTextTests(GuideCase):
         body = " ".join(page_texts(self.pdf(split_id))[1:])
         plan = splits.assembly_plan(split_id)
         step = next(w["step"] for w in plan["warnings"] if w["kind"] == "heavy_join")
-        self.assertIn("Part 1 has no number", body)
+        self.assertIn("Part 1 (", body)
+        self.assertIn("No number printed on", body)
         self.assertLess(re.search(rf"\b{step} (Add|Join)", body).start(), body.index("Warning: Heavy join: get a helper or support it."))
 
     def test_the_helpers_are_empty_for_a_plain_plan(self):

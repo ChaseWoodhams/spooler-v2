@@ -25,15 +25,39 @@ class InventoryTests(GuideCase):
         result, cuts = lattice_split(n=4)
         pages = self.inventory(self.texts(self.make_split(result, cuts)))
         self.assertEqual(len(pages), 2)
-        shown = [int(n) for t in pages for n in re.findall(r"(?<![\w:])(\d+)(?= Plate:)", t)]
+        shown = [int(n) for t in pages for n in re.findall(r"(?<![\w:])(\d+)(?= (?:Plate:|not on a plate yet|have it))", t)]
         self.assertEqual(shown, list(range(1, 17)))
-        self.assertEqual(pages[0].count("Plate:"), 15)
-        self.assertEqual(pages[1].count("Plate:"), 1)
+        self.assertEqual(pages[0].count("have it"), 15)
+        self.assertEqual(pages[1].count("have it"), 1)
 
-    def test_a_part_shows_its_plate_or_a_dash(self):
+    def test_a_part_shows_its_plate_or_says_it_is_not_on_a_plate_yet(self):
         pages = self.inventory(self.texts(self.make_split(*grid_split()), {2: "Plate 3"}))
         self.assertIn("2 Plate: Plate 3", pages[0])
-        self.assertIn("1 Plate: -", pages[0])
+        self.assertIn("1 not on a plate yet", pages[0])
+        self.assertNotIn("Plate: -", pages[0])
+
+    def test_the_plate_line_is_left_out_when_no_part_is_on_a_plate(self):
+        text = " ".join(self.inventory(self.texts(self.make_split(*grid_split()))))
+        self.assertNotIn("Plate", text)
+        self.assertNotIn("not on a plate yet", text)
+
+    def test_unnumbered_parts_are_listed_with_their_size_on_the_inventory_page_and_not_on_a_section_page(self):
+        result, cuts = grid_split()
+        result["unlabelled"] = [1]
+        pages = self.texts(self.make_split(result, cuts))
+        inventory = self.inventory(pages)
+        self.assertRegex(inventory[0], r"Part 1 \(\d+ mm\)")
+        self.assertIn("No number printed", inventory[0])
+        others = " ".join(t for t in pages if not t.startswith("Parts inventory"))
+        self.assertNotIn("No number printed", others)
+
+    def test_there_is_no_unnumbered_note_when_every_part_has_a_number(self):
+        text = " ".join(self.inventory(self.texts(self.make_split(*grid_split()))))
+        self.assertNotIn("No number printed", text)
+
+    def test_a_one_line_legend_explains_the_number_marker(self):
+        text = self.inventory(self.texts(self.make_split(*grid_split())))[0]
+        self.assertIn("Small circle on a picture: where the printed number is.", text)
 
     def test_a_part_with_a_label_says_where_its_number_is_and_one_without_says_to_use_the_shape(self):
         result, cuts = grid_split()
