@@ -130,7 +130,7 @@ class TurnTests(unittest.TestCase):
         used = render.draw_step(c, art, 0, 800, width)
         self.assertAlmostEqual(used, render.step_height(art, width))
         flow = assembly_pdf.PageFlow(c, "a4")
-        block, _lines = assembly_pdf._step_block(flow, art, step)
+        block, _lines = assembly_pdf._step_block(flow, art, step, {})
         self.assertGreater(block, flow.content.height / 2, "no second step fits on the page")
         c.showPage()
         c.save()
