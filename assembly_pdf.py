@@ -197,10 +197,32 @@ def parts_text(parts) -> str:
     return f"part {parts[0]}" if len(parts) == 1 else "parts " + ", ".join(str(p) for p in parts)
 
 
-def step_text(step: dict) -> str:
+SMALL_GROUP = 4   # a built-so-far group of up to this many parts is named by its parts
+
+
+def built_groups(plan: dict) -> dict:
+    """{frozenset of parts: what to call that built group}: the step that finished it ("the stack from A3"), or the
+    Section when a finished Section is the group. The first step (in plan order) that makes a group names it."""
+    groups = {}
+    for section in plan["sections"]:
+        groups.setdefault(frozenset(section["parts"]), f"Section {section['letter']}")
+    for section in plan["sections"]:
+        for step in section["steps"]:
+            groups.setdefault(frozenset(step["receiver"]) | frozenset(step["parts"]), f"the stack from {step['id']}")
+    return groups
+
+
+def receiver_text(receiver, groups: dict | None = None) -> str:
+    """What a step joins to: the parts when the group is small, else the step that finished the group."""
+    if len(receiver) <= SMALL_GROUP:
+        return parts_text(receiver)
+    return (groups or {}).get(frozenset(receiver)) or f"the {len(receiver)} parts built so far"
+
+
+def step_text(step: dict, groups: dict | None = None) -> str:
     action = f"Join Section {step['section']} ({parts_text(step['parts'])})" if step["kind"] == "section" else f"Add {parts_text(step['parts'])}"
     receiver = step["receiver"]
-    where = f"the {len(receiver)} parts built so far" if len(receiver) > 4 else parts_text(receiver)
+    where = receiver_text(receiver, groups)
     how = "glue the face, no rods" if step["glue_only"] else plural(step["rods"], "rod")
     return f"{step['id']}: {action} to {where} along {direction_text(step['direction'])}, {how}."
 
@@ -247,16 +269,16 @@ TICK_MM = 5          # side of a step's tick box
 SET_ASIDE_H = 7 * MM
 
 
-def step_title(step: dict) -> str:
+def step_title(step: dict, groups: dict | None = None) -> str:
     receiver = step["receiver"]
-    where = f"the {len(receiver)} parts built so far" if len(receiver) > 4 else parts_text(receiver)
+    where = receiver_text(receiver, groups)
     moved = f"Section {step['section']} ({parts_text(step['parts'])})" if step["kind"] == "section" else parts_text(step["parts"])
     return f"{'Join' if step['kind'] == 'section' else 'Add'} {moved} to {where}"
 
 
-def step_caption(step: dict, depth: str = "") -> str:
+def step_caption(step: dict, groups: dict | None = None, depth: str = "") -> str:
     receiver = step["receiver"]
-    where = f"the {len(receiver)} parts built so far" if len(receiver) > 4 else parts_text(receiver)
+    where = receiver_text(receiver, groups)
     moved = f"Section {step['section']}" if step["kind"] == "section" else parts_text(step["parts"])
     if step["glue_only"]:
         return f"No rods: glue the face of {where} and slide {moved} on."
@@ -269,17 +291,17 @@ def _room(block: float, aside: float = 0) -> tuple:
     return (block - STEP_GAP + aside, 0) if aside else (block, STEP_GAP)
 
 
-def _step_block(flow: PageFlow, art, step: dict, depth: str = "") -> tuple:
+def _step_block(flow: PageFlow, art, step: dict, groups: dict, depth: str = "") -> tuple:
     """(height of the whole step block, caption lines): number and title, two frames, caption."""
     import assembly_render
-    lines = [(FONT, line) for line in wrap(step_caption(step, depth), FONT, 10.5, flow.content.width)]
+    lines = [(FONT, line) for line in wrap(step_caption(step, groups, depth), FONT, 10.5, flow.content.width)]
     lines += [(BOLD, line) for text in step_warning_lines(step) for line in wrap(f"Warning: {text}", BOLD, 10, flow.content.width)]
     import assembly_extras
     return (STEP_TITLE_H + assembly_render.step_height(art, flow.content.width) + 3 * MM + len(lines) * 10.5 * 1.3
             + assembly_extras.STRIP_GAP + assembly_extras.strip_height(art) + STEP_GAP), lines
 
 
-def _draw_step_block(flow: PageFlow, art, step: dict, top: float, lines: list) -> None:
+def _draw_step_block(flow: PageFlow, art, step: dict, top: float, lines: list, groups: dict) -> None:
     import assembly_extras
     import assembly_render
     c, left = flow.canvas, flow.content.left
@@ -287,7 +309,7 @@ def _draw_step_block(flow: PageFlow, art, step: dict, top: float, lines: list) -
     c.setFont(BOLD, 26)
     c.drawString(left, top - 9 * MM, step["id"])
     c.setFont(BOLD, 12)
-    c.drawString(left + 17 * MM, top - 7 * MM, fit(step_title(step), BOLD, 12, flow.content.width - 17 * MM - 8 * MM))
+    c.drawString(left + 17 * MM, top - 7 * MM, fit(step_title(step, groups), BOLD, 12, flow.content.width - 17 * MM - 8 * MM))
     c.setLineWidth(1)
     c.rect(flow.content.right - TICK_MM * MM, top - 2 * MM - TICK_MM * MM, TICK_MM * MM, TICK_MM * MM, stroke=1, fill=0)
     frames = assembly_render.draw_step(c, art, left, top - STEP_TITLE_H, flow.content.width)
@@ -337,6 +359,7 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
         raise ValueError("The guide needs the part previews of the split")
     sections, total, done, camera = data.plan["sections"], max(data.plan["summary"]["steps"], 1), 0, None
     import assembly_bom
+    groups = built_groups(data.plan)
     flow.new_page()
     c = flow.canvas
     for index, section in enumerate(sections):
@@ -352,7 +375,7 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
             assembly_extras.attach(art, data.scene, section["parts"])
             depth = assembly_bom.depth_text(data.bom, steps[0]["connectors"]) if depth_due and steps[0]["rods"] else ""
             depth_due = depth_due and not depth
-            prepared = (art, *_step_block(flow, art, steps[0], depth))
+            prepared = (art, *_step_block(flow, art, steps[0], groups, depth))
         first_h, slack = _room(prepared[1], aside if len(steps) == 1 else 0) if prepared else (aside, 0)
         top = flow.reserve((STEP_GAP if index else 0) + SECTION_HEADER_H + first_h, section=section["letter"], slack=slack)
         if index:
@@ -371,12 +394,12 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
                 assembly_extras.attach(art, data.scene, section["parts"])
                 depth = assembly_bom.depth_text(data.bom, step["connectors"]) if depth_due and step["rods"] else ""
                 depth_due = depth_due and not depth
-                prepared = (art, *_step_block(flow, art, step, depth))
+                prepared = (art, *_step_block(flow, art, step, groups, depth))
                 last = n == len(steps) - 1
                 height, slack = _room(prepared[1], aside if last else 0)
                 y = flow.reserve(height, section=section["letter"], slack=slack)
             art, height, lines = prepared
-            _draw_step_block(flow, art, step, y, lines)
+            _draw_step_block(flow, art, step, y, lines, groups)
             if n == len(steps) - 1 and aside:
                 c.setFillGray(0)
                 c.setFont(BOLD, 10)

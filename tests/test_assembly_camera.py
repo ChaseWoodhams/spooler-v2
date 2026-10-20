@@ -6,6 +6,7 @@ are small boxes written straight into a Scene, as the guide would see a split. T
 turn, which steps get a close-up, which side the camera is on, determinism), never on pixels."""
 import io
 import unittest
+from unittest import mock
 
 from tests.test_assembly_plan import GEOMETRY, part, joint
 
@@ -13,8 +14,10 @@ if GEOMETRY:
     import numpy as np
     from reportlab.pdfgen import canvas as pdfcanvas
 
+    import assembly_extras
     import assembly_pdf
     import assembly_render as render
+    import assembly_rules as rules
     from tests.test_assembly_guide import box_mesh
 
 
@@ -69,7 +72,7 @@ class QualityCameraTests(unittest.TestCase):
         _, _, choice = self.view(TUNNEL)
         self.assertTrue(choice.scored)
         self.assertTrue(choice.close_up)
-        self.assertLess(choice.quality["score"], render.CLOSE_UP_BELOW)
+        self.assertLess(choice.quality["score"], rules.CLOSE_UP_BELOW)
 
     def test_the_candidates_are_ten_and_the_choice_is_deterministic(self):
         self.assertEqual(len(render.scoring_candidates(np.array([1.0, 0, 0]))), 10)
@@ -127,7 +130,7 @@ class TurnTests(unittest.TestCase):
         used = render.draw_step(c, art, 0, 800, width)
         self.assertAlmostEqual(used, render.step_height(art, width))
         flow = assembly_pdf.PageFlow(c, "a4")
-        block, _lines = assembly_pdf._step_block(flow, art, step)
+        block, _lines = assembly_pdf._step_block(flow, art, step, {})
         self.assertGreater(block, flow.content.height / 2, "no second step fits on the page")
         c.showPage()
         c.save()
@@ -138,3 +141,135 @@ class TurnTests(unittest.TestCase):
         c = pdfcanvas.Canvas(io.BytesIO())
         render.draw_step(c, turned, 0, 800, width)
         c.save()
+
+
+class RecordingCanvas(pdfcanvas.Canvas if GEOMETRY else object):
+    """A canvas that remembers the greys, line weights and text it was asked for, and the lines it drew."""
+
+    def __init__(self):
+        super().__init__(io.BytesIO())
+        self.greys, self.weights, self.texts, self.segments = [], [], [], []
+
+    def setStrokeGray(self, gray, alpha=None):
+        self.greys.append(round(gray, 4))
+        super().setStrokeGray(gray, alpha)
+
+    def setFillGray(self, gray, alpha=None):
+        self.greys.append(round(gray, 4))
+        super().setFillGray(gray, alpha)
+
+    def setLineWidth(self, width):
+        self.weights.append(round(width, 4))
+        super().setLineWidth(width)
+
+    def drawString(self, x, y, text, *args, **kwargs):
+        self.texts.append(text)
+        super().drawString(x, y, text, *args, **kwargs)
+
+    def drawRightString(self, x, y, text, *args, **kwargs):
+        self.texts.append(text)
+        super().drawRightString(x, y, text, *args, **kwargs)
+
+    def line(self, x1, y1, x2, y2):
+        self.segments.append(float(np.hypot(x2 - x1, y2 - y1)))
+        super().line(x1, y1, x2, y2)
+
+
+# part 3 sits clear of the join (a placed part that does not touch the moving part 2); part 1 receives it
+APART = {**OPEN, 3: (0, 30, 0, 20, 40, 10)}
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class DrawingRulesTests(unittest.TestCase):
+    """The drawing rules (greys, weights, mark sizes, zoom, camera preference) live in assembly_rules: changing a rule there
+    changes the drawing, and nothing else in the drawing code carries its own copy."""
+
+    def art(self, boxes=OPEN, receiver=(1,), close_up=False):
+        scene = make_scene(boxes)
+        step = step_of(receiver, [2], (1.0, 0.0, 0.0))
+        return scene, step, render.prepare_step(scene, step, render.choose_camera(scene, step, None), close_up=close_up)
+
+    def drawn(self, draw, art, frame=(0.0, 0.0, 300.0, 200.0)):
+        canvas = RecordingCanvas()
+        draw(canvas, art, frame)
+        return canvas
+
+    def test_frame_one_uses_the_receiver_rule(self):
+        _, _, art = self.art()
+        with mock.patch.object(rules, "RECEIVER", (0.123, 0.777)):
+            canvas = self.drawn(render.draw_frame_one, art)
+        self.assertIn(0.123, canvas.greys)
+        self.assertIn(0.777, canvas.weights)
+
+    def test_frame_two_uses_the_touching_placed_and_bold_rules(self):
+        _, _, art = self.art(APART, receiver=(1, 3))
+        with mock.patch.object(rules, "TOUCHING", (0.211, 0.371)), mock.patch.object(rules, "PLACED", (0.733, 0.137)), \
+                mock.patch.object(rules, "BOLD", 1.91), mock.patch.object(rules, "HALO", 2.77):
+            canvas = self.drawn(render.draw_frame_two, art)
+        for grey in (0.211, 0.733):
+            self.assertIn(grey, canvas.greys)
+        for weight in (0.371, 0.137, 1.91, round(1.91 + 2.77, 4)):
+            self.assertIn(weight, canvas.weights)
+
+    def test_the_rod_length_floor_is_a_rule(self):
+        _, _, art = self.art()
+        before = max(self.drawn(render.draw_frame_one, art).segments)
+        with mock.patch.object(rules, "MIN_ROD_PT", 200.0):
+            after = max(self.drawn(render.draw_frame_one, art).segments)
+        self.assertGreater(after, 2 * before)
+
+    def test_the_bit_size_threshold_is_a_rule(self):
+        scene, step, art = self.art()
+        self.assertTrue(art.runs_one[("r", 1)])
+        with mock.patch.object(rules, "MIN_BIT_PX", 1e9):
+            bare = render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+        self.assertFalse(bare.runs_one[("r", 1)], "every disconnected bit is under the threshold, so no line survives")
+
+    def test_the_close_up_zoom_is_a_rule(self):
+        with mock.patch.object(rules, "CLOSE_UP_ZOOM", 5.0):
+            _, _, art = self.art(close_up=True)
+            canvas = RecordingCanvas()
+            render.draw_close_up(canvas, art, 0.0, 800.0, 400.0)
+        self.assertEqual(art.extras["close_up"].zoom, 5.0)
+        self.assertIn("Close-up, about 5x", canvas.texts)
+
+    def test_the_zoom_circle_size_is_a_rule(self):
+        _, _, art = self.art()
+        frame = (0.0, 0.0, 400.0, 300.0)
+        with mock.patch.object(rules, "ZOOM_MM", 40.0):
+            found = assembly_extras.zoom_circle(art, frame)
+        self.assertIsNotNone(found)
+        self.assertAlmostEqual(found[1], 20.0 * render.MM)
+
+    def test_the_thumbnail_greys_are_rules(self):
+        scene, _, art = self.art(APART, receiver=(1, 3))
+        assembly_extras.attach(art, scene, [1])           # part 3 is outside the Section, so it takes the light grey
+        with mock.patch.object(rules, "THUMB_SECTION", (0.151, 0.41)), mock.patch.object(rules, "THUMB_REST", (0.919, 0.29)):
+            canvas = RecordingCanvas()
+            assembly_extras.draw_thumbnail(canvas, art, 0.0, 200.0, 140.0, 100.0)
+        for grey in (0.151, 0.919):
+            self.assertIn(grey, canvas.greys)
+        for weight in (0.41, 0.29):
+            self.assertIn(weight, canvas.weights)
+
+    def test_the_camera_elevation_is_a_rule(self):
+        base = render.camera_candidates()[0]
+        with mock.patch.object(rules, "CAMERA_ELEVATION", 2.0):
+            steep = render.camera_candidates()[0]
+        self.assertGreater(steep[2], base[2])
+        np.testing.assert_allclose(steep, render.unit([1, 1, 2.0]))
+
+    def test_the_first_fit_angle_is_a_rule(self):
+        # of two views that both see the face, the one whose angle to the insertion axis is nearest the preferred angle wins
+        step = {"direction": (0.6, 0.8, 0.0)}
+        base = render.choose_camera(None, step, None)
+        with mock.patch.object(rules, "FIRST_FIT_DEGREES", 85.0):
+            flatter = render.choose_camera(None, step, None)
+        self.assertLess(base[0], 0)
+        self.assertGreater(flatter[0], 0)
+
+    def test_the_rules_are_the_only_home_of_the_values(self):
+        for name in ("RECEIVER", "TOUCHING", "PLACED", "BOLD", "HALO", "CLOSE_UP_BELOW", "MIN_ARROW_PT", "THUMB_SECTION", "THUMB_REST",
+                     "ZOOM_MM", "CAMERA_ELEVATION", "FIRST_FIT_DEGREES", "MIN_ROD_PT", "MIN_BIT_PX", "PICTURE_MIN_BIT_PX"):
+            self.assertTrue(hasattr(rules, name), name)
+            self.assertFalse(hasattr(render, name) and getattr(render, name) is not getattr(rules, name), name)

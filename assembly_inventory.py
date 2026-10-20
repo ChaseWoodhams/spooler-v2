@@ -13,6 +13,7 @@ Layout only; the pictures come from assembly_render and the label and plate fact
 import numpy as np
 
 import assembly_render
+import assembly_rules
 from assembly_pdf import BOLD, FONT, MIN_FONT, MM, fit, wrap
 
 PER_PAGE, COLUMNS, ROWS = 15, 3, 5
@@ -103,13 +104,13 @@ def part_picture(scene, part: int, label):
         camera = assembly_render.unit(2.0 * np.asarray(label["normal"], float) + camera)
         spot = np.asarray(label["position"], float)
     view = assembly_render.View(camera, scene.corners(part), width=500, aspect=(0.8, 1.25))
-    return assembly_render.Picture(view, view.render(scene, [(part, part, np.zeros(3))], min_bit_px=12)), spot
+    return assembly_render.Picture(view, view.render(scene, [(part, part, np.zeros(3))], min_bit_px=assembly_rules.PICTURE_MIN_BIT_PX)), spot
 
 
 def _cell(canvas, scene, part: int, label, plate, show_plates: bool, left: float, top: float, width: float, height: float) -> None:
     pad = 2 * MM
-    canvas.setStrokeGray(0.6)
-    canvas.setLineWidth(0.5)
+    canvas.setStrokeGray(assembly_rules.CARD_BORDER[0])
+    canvas.setLineWidth(assembly_rules.CARD_BORDER[1])
     canvas.rect(left, top - height, width, height, stroke=1, fill=0)
     side = min(height - 2 * pad, width * 0.52)
     picture, spot = part_picture(scene, part, label)
