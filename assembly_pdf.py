@@ -136,11 +136,12 @@ class PageFlow:
         self.y = self.content.top
         self.canvas.page_sections = [self.section] if carry and self.section else []
 
-    def reserve(self, height: float, section: str | None = None) -> float:
-        """Room for a block `height` tall; returns its top y and moves the cursor below it."""
-        if height > self.content.height:
+    def reserve(self, height: float, section: str | None = None, slack: float = 0) -> float:
+        """Room for a block `height` tall; returns its top y and moves the cursor below it. `slack` is empty space at the
+        end of the block (a trailing gap) that may hang below the content area, so it never pushes the block to a new page."""
+        if height - slack > self.content.height:
             raise ValueError("A block is taller than the safe area")
-        if self.y - height < self.content.bottom:
+        if self.y - height + slack < self.content.bottom:
             self.new_page(carry=section is None)
         if section:
             self.section = section
@@ -261,6 +262,12 @@ def step_caption(step: dict) -> str:
     return f"Push {plural(step['rods'], 'rod')} into the holes of {where}, glue the face, slide {moved} on."
 
 
+def _room(block: float, aside: float = 0) -> tuple:
+    """(height, slack) to reserve for a step block `block` tall (its trailing gap included). The set-aside line of a side
+    Section's last step stands where that gap would, so the two are not added."""
+    return (block - STEP_GAP + aside, 0) if aside else (block, STEP_GAP)
+
+
 def _step_block(flow: PageFlow, art, step: dict) -> tuple:
     """(height of the whole step block, caption lines): number and title, two frames, caption."""
     import assembly_render
@@ -314,7 +321,9 @@ def _section_header(flow: PageFlow, section: dict, picture, top: float) -> None:
 
 
 def _steps(flow: PageFlow, data: GuideData, progress) -> None:
-    """Section headers inline, then each Section's steps, two to a page, none split across pages."""
+    """Section headers inline, then each Section's steps, as many to a page as fit, none split across pages. A Section
+    starts on the page the last one ended on when its header and first step fit there; the gap that follows a step
+    is not counted when the step is the last thing that fits."""
     import assembly_extras
     import assembly_render
     if data.scene is None:
@@ -333,8 +342,8 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
             art = assembly_render.prepare_step(data.scene, steps[0], camera, close_up=view.close_up)
             assembly_extras.attach(art, data.scene, section["parts"])
             prepared = (art, *_step_block(flow, art, steps[0]))
-        first_h = (prepared[1] + (aside if len(steps) == 1 else 0)) if prepared else aside
-        top = flow.reserve((STEP_GAP if index else 0) + SECTION_HEADER_H + first_h, section=section["letter"])
+        first_h, slack = _room(prepared[1], aside if len(steps) == 1 else 0) if prepared else (aside, 0)
+        top = flow.reserve((STEP_GAP if index else 0) + SECTION_HEADER_H + first_h, section=section["letter"], slack=slack)
         if index:
             if top < flow.content.top - 1 * MM:
                 c.setStrokeGray(0)
@@ -351,7 +360,8 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
                 assembly_extras.attach(art, data.scene, section["parts"])
                 prepared = (art, *_step_block(flow, art, step))
                 last = n == len(steps) - 1
-                y = flow.reserve(prepared[1] + (aside if last else 0), section=section["letter"])
+                height, slack = _room(prepared[1], aside if last else 0)
+                y = flow.reserve(height, section=section["letter"], slack=slack)
             art, height, lines = prepared
             _draw_step_block(flow, art, step, y, lines)
             if n == len(steps) - 1 and aside:
