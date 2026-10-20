@@ -73,7 +73,7 @@ class ZoomPlacementTests(unittest.TestCase):
     def art(self, result_and_cuts, direction=(1.0, 0.0, 0.0), mover=(2,), receiver=(1,)):
         result, _ = result_and_cuts
         meshes = [box_mesh(p["bbox"]) for p in sorted(result["parts"], key=lambda p: p["number"])]
-        scene = assembly_render.Scene.from_split(result, meshes)
+        scene = self.scene = assembly_render.Scene.from_split(result, meshes)
         step = {"id": "A1", "kind": "part", "parts": mover, "receiver": receiver, "direction": direction, "rods": 2,
                 "connectors": {}, "glue_only": False, "section": None}
         return assembly_render.prepare_step(scene, step, assembly_render.choose_camera(scene, step, None))
@@ -94,6 +94,53 @@ class ZoomPlacementTests(unittest.TestCase):
         self.check(self.art(wide_split(8)))
         self.check(self.art(wide_split(8), direction=(-1.0, 0.0, 0.0), mover=(1,), receiver=(2,)))
         self.check(self.art(stack_split(3), mover=(3,), receiver=(1, 2)))
+
+    def canvas(self):
+        from tests.test_assembly_camera import RecordingCanvas
+        return RecordingCanvas()
+
+    def test_the_hole_map_numbers_every_hole_and_marks_which_way_is_up(self):
+        art = self.art(wide_split(8), mover=(1,), receiver=(2,))
+        canvas = self.canvas()
+        facts = assembly_extras.draw_hole_map(canvas, art, 0.0, 400.0, assembly_extras.STRIP_MAP_H)
+        self.assertEqual(facts["numbers"], list(range(1, 9)))
+        for number in range(1, 9):
+            self.assertIn(str(number), canvas.texts)
+        self.assertEqual(facts["up"]["kind"], "arrow")
+        self.assertGreater(facts["up"]["to"][1], facts["up"]["from"][1], "the model's up points up the page")
+        self.assertIn("Up", canvas.texts)
+
+    def test_the_hole_map_is_drawn_over_a_picture_of_the_join_face(self):
+        art = self.art(wide_split(8), mover=(1,), receiver=(2,))
+        facts = assembly_extras.draw_hole_map(self.canvas(), art, 0.0, 400.0, assembly_extras.STRIP_MAP_H)
+        self.assertTrue(facts["face_drawn"])
+        self.assertGreaterEqual(facts["face_edges"], 4)
+        for number, (x, y), r in facts["holes"]:           # each number sits clear of every rod
+            for other, (ox, oy), orad in facts["holes"]:
+                if other != number:
+                    self.assertGreater(float(np.hypot(x - ox, y - oy)), orad)
+
+    def test_a_flat_join_face_says_which_way_it_looks(self):
+        parts = [part(1, (0, 0, 0, 40, 40, 40)), part(2, (0, 0, 40, 40, 40, 80))]
+        spread = [p for i in range(6) for p in pins(1, 2, "z", (8 + 10 * (i % 3), 10 + 14 * (i // 3), 40), count=1)]
+        art = self.art(({"parts": parts, "joints": [joint(1, 2, 1, rods=6)], "pins": spread}, [cut(1, "z", 40.0)]),
+                       direction=(0.0, 0.0, -1.0))
+        canvas = self.canvas()
+        facts = assembly_extras.draw_hole_map(canvas, art, 0.0, 400.0, assembly_extras.STRIP_MAP_H)
+        self.assertEqual(facts["up"]["kind"], "flat")
+        self.assertIn("Faces up", canvas.texts)
+        self.assertEqual(facts["numbers"], list(range(1, 7)))
+
+    def test_the_thumbnail_highlights_the_steps_parts_even_on_an_early_step(self):
+        art = self.art(wide_split(8))
+        assembly_extras.attach(art, art.extras.get("scene") or self.scene, [1, 2, 3])    # the Section is every part
+        canvas = self.canvas()
+        facts = assembly_extras.draw_thumbnail(canvas, art, 0.0, 400.0, 50 * assembly_render.MM, 30 * assembly_render.MM)
+        self.assertLessEqual(facts["highlight_grey"], 0.3)
+        self.assertGreaterEqual(facts["rest_grey"], 0.75, "the rest, Section included, is very light")
+        self.assertGreater(facts["highlight_area"], 0)
+        self.assertGreaterEqual(facts["picture_h"], 17 * assembly_render.MM)
+        self.assertGreaterEqual(assembly_extras.strip_height(art) - 12, 17 * assembly_render.MM, "the real strip leaves that room")
 
     def test_a_step_without_rods_has_no_zoom_circle(self):
         art = self.art(wide_split(8))

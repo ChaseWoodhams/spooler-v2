@@ -45,9 +45,10 @@ CURVED_SHARE = 0.25           # ... and a part with this share of such edges amo
 BOLD = 1.2                  # the moving unit: black with a white halo
 HALO = 1.8
 PICTURE = (0.3, 0.45)         # a small picture of finished parts
-THUMB_SECTION = (0.35, 0.5)   # "Where this is": the step's Section
-THUMB_REST = (0.82, 0.3)      # "Where this is": everything else
+THUMB_SECTION = (0.78, 0.4)   # "Where this is": the step's Section, light so the step's own parts stand out even on an early step
+THUMB_REST = (0.88, 0.3)      # "Where this is": everything else, very light
 THUMB_HALO = 0.8              # extra white halo of the step's own parts in "Where this is"
+THUMB_STEP_FILL = 0.2         # "Where this is": the step's own parts are a filled dark shape of this grey
 FRAME_BORDER = (0.82, 0.5)    # the box round a frame
 PATH_LINE = (0.35, 0.6)       # the dashed path of the moving unit
 PATH_DASH = (3, 3)
@@ -75,6 +76,16 @@ BUBBLE_LIGHT_TEXT = 0.4
 BADGE_RADIUS = 7.5            # the frame number in the corner of a frame
 CUE_MM = 12.0                 # the "turn it over" cue
 CUE_WEIGHT = 1.6
+
+# ── Hole map ───────────────────────────────────────────────────────────────────
+HOLE_FACE_FILL = 0.93         # the picture of the join face the holes are drawn over
+HOLE_FACE_EDGE = (0.45, 0.6)  # its outline
+HOLE_MIN_RADIUS_PT = 1.8      # a rod seen end on is never drawn smaller than this
+HOLE_NUMBER_GAP_PT = 4.0      # a hole's number stands this far from the rod's rim
+HOLE_ROW_MM = 4.0             # holes within this of each other across the page are one row when they are numbered (reading order)
+HOLE_UP_PT = 24.0             # length of the arrow that marks which way is up
+HOLE_UP_WEIGHT = 1.4
+HOLE_FLAT_BELOW = 0.3         # a face whose up direction is shorter than this on the picture is flat: it is named by where it looks
 
 # ── Zoom, close-up and the camera ──────────────────────────────────────────────
 CLOSE_UP_ZOOM = 3.0           # the close-up frame shows the join this many times larger than frame 1

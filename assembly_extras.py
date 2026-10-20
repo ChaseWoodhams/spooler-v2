@@ -21,10 +21,11 @@ FONT, BOLD = "Helvetica", "Helvetica-Bold"
 SIZE = render.MIN_FONT                # nothing smaller is printed
 
 STRIP_MIN_H = 21 * MM                 # a step without a hole map keeps two steps to a page
-STRIP_MAP_H = 34 * MM                 # a step with a hole map gets a taller strip
+STRIP_MAP_H = 36 * MM                 # a step with a hole map gets a taller strip
 STRIP_GAP = 2 * MM
 HOLE_MAP_MIN_RODS = 5
-NEED_W, MAP_X, MAP_W, THUMB_W = 76 * MM, 78 * MM, 30 * MM, 50 * MM
+NEED_W, MAP_X, MAP_W, THUMB_W = 76 * MM, 78 * MM, 34 * MM, 54 * MM
+MAP_UP_W = 10 * MM                    # the column at the map's right edge that holds the "Up" marker
 
 
 def attach(art, scene, section_parts) -> None:
@@ -371,29 +372,109 @@ def hole_map_points(art) -> tuple:
     return rods, sizes, outline
 
 
-def draw_hole_map(canvas, art, x: float, top: float, height: float) -> None:
+def _hole_up(art, turn) -> np.ndarray:
+    """The model's up direction in the map's turned plane coordinates (shorter than 1 when the face leans away from up)."""
+    face = art.face
+    up = np.array([0.0, 0.0, 1.0])
+    return np.array([np.dot(up, face.e1), np.dot(up, face.e2)]) @ turn.T
+
+
+def _number_spots(centres, radii) -> list:
+    """Where each hole's number stands: beside the rod, in the direction with most room to the other rods and numbers."""
+    placed, spots = [], []
+    angles = np.linspace(0, 2 * np.pi, 8, endpoint=False)
+    for i, (c, r) in enumerate(zip(centres, radii)):
+        best, best_room = None, -1.0
+        others = [o for j, o in enumerate(centres) if j != i]
+        for angle in angles:
+            spot = c + (r + rules.HOLE_NUMBER_GAP_PT) * np.array([np.cos(angle), np.sin(angle)])
+            room = min((float(np.linalg.norm(spot - o)) for o in others + placed), default=1e9)
+            if room > best_room + 1e-9:
+                best, best_room = spot, room
+        spots.append(best)
+        placed.append(best)
+    return spots
+
+
+def _draw_up_marker(canvas, up, centre) -> dict:
+    """The arrow that says which way is up on the face; a flat face has none (the caller names where it looks)."""
+    length = float(np.linalg.norm(up))
+    if length < rules.HOLE_FLAT_BELOW:
+        return {"kind": "flat"}
+    way = up / length
+    start, end = np.array(centre) - way * rules.HOLE_UP_PT / 2, np.array(centre) + way * rules.HOLE_UP_PT / 2
+    side = np.array([-way[1], way[0]])
+    canvas.setStrokeGray(0)
+    canvas.setFillGray(0)
+    canvas.setLineWidth(rules.HOLE_UP_WEIGHT)
+    canvas.setLineCap(0)
+    canvas.line(*start, *(end - way * 3))
+    head = canvas.beginPath()
+    head.moveTo(*(end + way * 3))
+    head.lineTo(*(end - way * 3 + side * 3.5))
+    head.lineTo(*(end - way * 3 - side * 3.5))
+    head.close()
+    canvas.drawPath(head, stroke=0, fill=1)
+    canvas.setFont(BOLD, SIZE)
+    low = start if start[1] <= end[1] else end
+    canvas.drawCentredString(centre[0], low[1] - SIZE - 1, "Up")
+    return {"kind": "arrow", "from": tuple(float(v) for v in start), "to": tuple(float(v) for v in end)}
+
+
+def draw_hole_map(canvas, art, x: float, top: float, height: float) -> "dict | None":
+    """The hole map: a picture of the join face (filled, with its outline) with each hole's rod seen end on and numbered in
+    reading order, and a marker for which way is up. Returns what it drew: the `numbers`, the `holes` as (number, page
+    point, radius), the `face_edges` drawn, whether the face is `face_drawn`, and the `up` marker."""
     if art.face is None:
-        return
+        return None
     rods, sizes, outline = hole_map_points(art)
+    turn = _screen_turn(art)
     pts = np.vstack([rods, outline.reshape(-1, 2)]) if len(outline) else rods
     lo, hi = pts.min(axis=0), pts.max(axis=0)
-    room_w, room_h = MAP_W, height - SIZE - 6
+    room_w, room_h = MAP_W - MAP_UP_W, height - SIZE - 6
     span = np.maximum(hi - lo, 1e-6)
     k = min(room_w / span[0], room_h / span[1])
     ox = x + (room_w - span[0] * k) / 2
     oy = top - SIZE - 4 - (room_h - span[1] * k) / 2 - span[1] * k
     to_page = lambda p: (ox + (p[0] - lo[0]) * k, oy + (p[1] - lo[1]) * k)
-    canvas.setStrokeGray(0.45)
-    canvas.setLineWidth(0.6)
+    face = art.face
+    tris = face.receiver if len(face.receiver) else face.mover
+    canvas.setFillGray(rules.HOLE_FACE_FILL)
+    canvas.setStrokeGray(rules.HOLE_FACE_FILL)
+    canvas.setLineWidth(0.3)
+    for tri in tris:
+        path = canvas.beginPath()
+        corners = [to_page(c) for c in tri @ turn.T]
+        path.moveTo(*corners[0])
+        for c in corners[1:]:
+            path.lineTo(*c)
+        path.close()
+        canvas.drawPath(path, stroke=1, fill=1)
+    canvas.setStrokeGray(rules.HOLE_FACE_EDGE[0])
+    canvas.setLineWidth(rules.HOLE_FACE_EDGE[1])
     for a, b in outline:
         canvas.line(*to_page(a), *to_page(b))
-    for (rx, ry), diameter in zip(rods, sizes):
-        r = max(diameter * k / 2, 1.8)
-        cx, cy = to_page((rx, ry))
+    order = sorted(range(len(rods)), key=lambda i: (-round(float(rods[i][1]) / rules.HOLE_ROW_MM), float(rods[i][0])))
+    centres = np.array([to_page(rods[i]) for i in order])
+    radii = [max(float(sizes[i]) * k / 2, rules.HOLE_MIN_RADIUS_PT) for i in order]
+    for (cx, cy), r in zip(centres, radii):
         render.draw_rod_end(canvas, cx, cy, r)
     canvas.setFillGray(0)
     canvas.setFont(BOLD, SIZE)
+    for number, spot in enumerate(_number_spots(centres, radii), 1):
+        canvas.drawCentredString(spot[0], spot[1] - SIZE / 3, str(number))
     canvas.drawString(x, top - SIZE, f"Hole map: {len(rods)} rods")
+    middle = (x + MAP_W - MAP_UP_W / 2, top - height / 2 - SIZE / 2)
+    marker = _draw_up_marker(canvas, _hole_up(art, turn), middle)
+    if marker["kind"] == "flat":
+        looks_up = -float(art.direction[2]) > 0
+        canvas.setFillGray(0)
+        canvas.setFont(BOLD, SIZE)
+        canvas.drawCentredString(middle[0], middle[1], "Faces up" if looks_up else "Faces down")
+        marker["looks"] = "up" if looks_up else "down"
+    return {"numbers": list(range(1, len(rods) + 1)),
+            "holes": [(n, (float(c[0]), float(c[1])), float(r)) for n, (c, r) in enumerate(zip(centres, radii), 1)],
+            "face_edges": len(outline), "face_drawn": len(tris) > 0, "up": marker}
 
 
 # ── Thumbnail ──────────────────────────────────────────────────────────────────
@@ -408,22 +489,64 @@ def _thumbnail(scene):
     return scene._thumbnail
 
 
-def draw_thumbnail(canvas, art, x: float, top: float, w: float, h: float) -> None:
+def _hull(points) -> np.ndarray:
+    """Convex hull of 2-D points (monotone chain), counter-clockwise."""
+    pts = sorted(set(map(tuple, np.round(points, 3))))
+    if len(pts) < 3:
+        return np.array(pts, float)
+    def half(seq):
+        out = []
+        for p in seq:
+            while len(out) >= 2 and (out[-1][0] - out[-2][0]) * (p[1] - out[-2][1]) - (out[-1][1] - out[-2][1]) * (p[0] - out[-2][0]) <= 0:
+                out.pop()
+            out.append(p)
+        return out[:-1]
+    return np.array(half(pts) + half(pts[::-1]), float)
+
+
+def _area(polygon) -> float:
+    if len(polygon) < 3:
+        return 0.0
+    x, y = polygon[:, 0], polygon[:, 1]
+    return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2)
+
+
+def draw_thumbnail(canvas, art, x: float, top: float, w: float, h: float) -> "dict | None":
+    """"Where this is": the finished model very light, with the step's own parts a filled dark shape. Returns what it drew:
+    the `highlight_grey` and `highlight_area` (points squared), the lightest grey of any other part (`rest_grey`) and the
+    `picture_h` it was given."""
     scene = art.extras.get("scene")
     canvas.setFillGray(0)
     canvas.setFont(BOLD, SIZE)
     canvas.drawString(x, top - SIZE, "Where this is")
     if scene is None:
-        return
+        return None
     view, runs = _thumbnail(scene)
     box = render.Box((x, top - h, w, h - SIZE - 3), view)
     moving, section = set(art.mover), set(art.extras.get("section_parts") or ()) | set(art.mover)
+    others = [rules.THUMB_SECTION if part in section else rules.THUMB_REST for part in runs if part not in moving]
     for part in sorted(runs):
         if part not in moving:
             render.stroke_runs(canvas, runs[part], box, *(rules.THUMB_SECTION if part in section else rules.THUMB_REST))
+    area = 0.0
     for part in sorted(moving):
-        render.stroke_runs(canvas, runs[part], box, 1.0, rules.BOLD + rules.THUMB_HALO)
+        if not runs[part]:
+            continue
+        hull = _hull(np.vstack([box.px(np.array([a, b])) for a, b in runs[part]]))
+        if len(hull) >= 3:
+            path = canvas.beginPath()
+            path.moveTo(*hull[0])
+            for point in hull[1:]:
+                path.lineTo(*point)
+            path.close()
+            canvas.setFillGray(rules.THUMB_STEP_FILL)
+            canvas.setStrokeGray(1.0)
+            canvas.setLineWidth(rules.THUMB_HALO)
+            canvas.drawPath(path, stroke=1, fill=1)
+            area += _area(hull)
         render.stroke_runs(canvas, runs[part], box, 0.0, rules.BOLD)
+    return {"highlight_grey": rules.THUMB_STEP_FILL, "highlight_area": area, "picture_h": h - SIZE - 3,
+            "rest_grey": min((g for g, _ in others), default=1.0)}
 
 
 def draw_strip(canvas, art, left: float, top: float, width: float) -> None:

@@ -354,18 +354,18 @@ def _section_header(flow: PageFlow, section: dict, picture, top: float) -> None:
     c.drawString(text_left, top - 8 * MM, f"Section {letter}" + (" (main)" if section["main"] else ""))
     c.setFont(FONT, 10)
     y = top - 14 * MM
-    for line in wrap(f"Made of {parts_text(section['parts'])}", FONT, 10, flow.content.width - 22 * MM - 60 * MM)[:3]:
+    for line in wrap(f"Made of {parts_text(section['parts'])}", FONT, 10, flow.content.width - 22 * MM - 68 * MM)[:3]:
         c.drawString(text_left, y, line)
         y -= 13
     if section["note"]:
-        for line in wrap(section["note"], FONT, 10, flow.content.width - 22 * MM - 60 * MM)[:2]:
+        for line in wrap(section["note"], FONT, 10, flow.content.width - 22 * MM - 68 * MM)[:2]:
             c.drawString(text_left, y, line)
             y -= 13
     rods = sum(step["rods"] for step in section["steps"])
     if rods:
         c.setFont(BOLD, 10)
         c.drawString(text_left + 55 * MM, top - 8 * MM, f"{plural(rods, 'rod')} in this Section")
-    assembly_render.draw_picture(c, picture, flow.content.right - 56 * MM, top - SECTION_HEADER_H + 2 * MM, 56 * MM, SECTION_HEADER_H - 4 * MM)
+    assembly_render.draw_picture(c, picture, flow.content.right - 64 * MM, top - SECTION_HEADER_H + 2 * MM, 64 * MM, SECTION_HEADER_H - 4 * MM)
 
 
 def _steps(flow: PageFlow, data: GuideData, progress) -> None:
