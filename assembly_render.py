@@ -655,6 +655,28 @@ def _close_up(scene: Scene, art: StepArt, camera) -> CloseUp:
     return CloseUp(view, view.render(scene, [(("r", p), p, np.zeros(3)) for p in art.receiver]), rules.CLOSE_UP_ZOOM)
 
 
+@dataclass
+class ZoomSpec:
+    """What a step's zoom circle magnifies: the join face, the holes in it (world point on the face, hole diameter in mm), the
+    rods standing in them, and the margin of neighbouring surface to keep round the holes."""
+    face: "ContactFace | None"
+    holes: list
+    rods: list
+    margin_mm: float
+
+
+def _zoom_spec(art: StepArt) -> "ZoomSpec | None":
+    if not art.pins:
+        return None
+    u = art.direction
+    holes = []
+    for pin in art.pins:
+        p = np.array(pin["p"], float)
+        plane = art.face.plane if art.face is not None else float(p @ u)
+        holes.append((p - u * (float(p @ u) - plane), float(pin.get("hole_diameter") or pin["diameter"])))
+    return ZoomSpec(art.face, holes, list(art.pins), rules.ZOOM_MARGIN_MM)
+
+
 def prepare_step(scene: Scene, step: dict, camera, close_up: bool = False) -> StepArt:
     """Both frames of a step from `camera` (as `choose_camera` gives it), in the step's pose: turned over when the join goes
     upward (`art.extras["turn"]` is then the rotation, and frame 2 carries the "turn it over" cue). `close_up` adds the
@@ -662,6 +684,9 @@ def prepare_step(scene: Scene, step: dict, camera, close_up: bool = False) -> St
     pose_scene, pose_step, turn = posed(scene, step)
     art = _prepare_posed_step(pose_scene, pose_step, camera)
     art.step = step
+    zoom = _zoom_spec(art)
+    if zoom is not None:
+        art.extras["zoom"] = zoom
     if turn is not None:
         art.extras["turn"] = turn
         art.extras["turn_axis"] = _turn_axis(step)
@@ -721,41 +746,85 @@ def _rods(art: StepArt, box: Box) -> list:
     return out
 
 
+def draw_rod(canvas, start, end, width: float) -> None:
+    """The one rod style, side on: a thin black rim round a white bar, with a filled black cap at the free end (`start`).
+    `width` is the bar's width in points; the rim stays the same thin line at any magnification."""
+    start, end = np.asarray(start, float), np.asarray(end, float)
+    along = end - start
+    length = float(np.linalg.norm(along))
+    canvas.setLineCap(0)
+    canvas.setStrokeGray(0)
+    canvas.setLineWidth(width + rules.ROD_OUTLINE_PT)
+    canvas.line(*start, *end)
+    canvas.setStrokeGray(1)
+    canvas.setLineWidth(width)
+    canvas.line(*start, *end)
+    cap_end = start + along / (length or 1.0) * min(rules.ROD_CAP_PT, length)
+    canvas.setStrokeGray(0)
+    canvas.setLineWidth(width + rules.ROD_OUTLINE_PT)
+    canvas.line(*start, *cap_end)
+
+
+def draw_rod_end(canvas, x: float, y: float, radius: float) -> None:
+    """The same rod seen end on (the hole map): the rim, the white bar and the filled cap."""
+    canvas.setFillGray(0)
+    canvas.circle(x, y, radius + rules.ROD_OUTLINE_PT / 2, stroke=0, fill=1)
+    canvas.setFillGray(1)
+    canvas.circle(x, y, radius, stroke=0, fill=1)
+    canvas.setFillGray(0)
+    canvas.circle(x, y, max(radius * 0.45, 0.8), stroke=0, fill=1)
+
+
+def rod_width(diameter: float, pt_per_mm: float) -> float:
+    return max(diameter * pt_per_mm, rules.ROD_MIN_WIDTH_PT)
+
+
 def _draw_rods(canvas, box: Box, rods: list) -> None:
     for a, b, diameter in rods:
         start, end = box.world(np.array([a, b]))
-        width = max(diameter * box.pt_per_mm, rules.ROD_MIN_WIDTH_PT)
-        canvas.setLineCap(0)
-        canvas.setStrokeGray(0)
-        canvas.setLineWidth(width + rules.ROD_OUTLINE_PT)
-        canvas.line(*start, *end)
-        canvas.setStrokeGray(1)
-        canvas.setLineWidth(max(width - rules.ROD_CORE_TRIM_PT, rules.ROD_CORE_MIN_PT))
-        canvas.line(*start, *end)
+        draw_rod(canvas, start, end, rod_width(diameter, box.pt_per_mm))
 
 
-def _stipple_face(canvas, box: Box, face: ContactFace, spacing_pt: "float | None" = None) -> None:
-    """Dots over the real contact area (where the receiver's face and the moving unit's face overlap)."""
+def stipple_dots(box: Box, face: "ContactFace | None", spacing_pt: "float | None" = None) -> np.ndarray:
+    """Page points of the glue stipple over the real contact area (where the receiver's face and the moving unit's face
+    overlap). A face that would need more than STIPPLE_MAX_DOTS is stippled more coarsely, never left bare."""
     if face is None or not len(face.receiver):
-        return
+        return np.zeros((0, 2))
     step = (rules.STIPPLE_SPACING_PT if spacing_pt is None else spacing_pt) / box.pt_per_mm
     both = face.receiver.reshape(-1, 2)
     lo, hi = both.min(axis=0), both.max(axis=0)
+    wanted = float(np.prod(np.maximum(hi - lo, 1e-6))) / (step * step * 0.87)
+    if wanted > rules.STIPPLE_MAX_DOTS:
+        step *= float(np.sqrt(wanted / rules.STIPPLE_MAX_DOTS))
     gx, gy = np.meshgrid(np.arange(lo[0], hi[0], step), np.arange(lo[1], hi[1], step * 0.87))
     gx = gx + (np.arange(gx.shape[0]) % 2)[:, None] * step / 2
     dots = np.c_[gx.ravel(), gy.ravel()]
-    if len(dots) > rules.STIPPLE_MAX_DOTS:
-        return
     keep = _points_in_triangles(dots, face.receiver)
     if len(face.mover):
         keep &= _points_in_triangles(dots, face.mover)
     if not keep.any():
-        return
+        return np.zeros((0, 2))
     u = np.cross(face.e1, face.e2)
     world = face.plane * u + dots[keep, :1] * face.e1 + dots[keep, 1:] * face.e2
+    return box.world(world)
+
+
+def _stipple_face(canvas, box: Box, face: ContactFace, spacing_pt: "float | None" = None) -> None:
+    dots = stipple_dots(box, face, spacing_pt)
+    if not len(dots):
+        return
     canvas.setFillGray(rules.STIPPLE_GREY)
-    for x, y in box.world(world):
+    for x, y in dots:
         canvas.circle(x, y, rules.STIPPLE_DOT_PT, stroke=0, fill=1)
+
+
+def face_outline(face: ContactFace) -> np.ndarray:
+    """The outline of the join face as (n, 2, 2) segments in the face's plane coordinates (mm): the edges used by one triangle."""
+    tris = face.receiver if len(face.receiver) else face.mover
+    edges = np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
+    key = np.round(np.sort(edges, axis=1).reshape(-1, 4) * 100).astype(np.int64)
+    _, index, count = np.unique(key, axis=0, return_index=True, return_counts=True)
+    return edges[index[count == 1]]
 
 
 def glue_drop(canvas, xy, size: "float | None" = None) -> None:
@@ -948,20 +1017,33 @@ def draw_frame_one(canvas, art: StepArt, frame) -> None:
     for stroke in frame_one_strokes(art):
         stroke_runs(canvas, stroke.runs, box, stroke.grey, stroke.weight)
     _stipple_face(canvas, box, art.face)
-    rods = _rods(art, box)
-    _draw_rods(canvas, box, rods)
-    anchor_world = np.mean([p["p"] for p in art.pins], axis=0) if art.pins else (art.face.centre if art.face else None)
-    if anchor_world is not None:
-        anchor = box.world(anchor_world)[0]
-        ink = _ink_points(box, art.runs_one)
-        spots = [anchor + rules.GLUE_DROP_GAP_PT * np.array([np.cos(a), np.sin(a)]) for a in np.radians((45, 135, 315, 225, 90, 0, 180, 270))]
-        inside = [s for s in spots if frame[0] + 10 < s[0] < frame[0] + frame[2] - 10 and frame[1] + 10 < s[1] < frame[1] + frame[3] - 10] or spots[:1]
-        drop = min(inside, key=lambda s: int((np.linalg.norm(ink - s, axis=1) < 12).sum()) if len(ink) else 0)
+    _draw_rods(canvas, box, _rods(art, box))
+    marks = glue_marks(art, frame)
+    if marks["drop"] is not None:
+        drop, target = np.array(marks["drop"]), np.array(marks["target"])
         canvas.setStrokeGray(0)
         canvas.setLineWidth(rules.LEADER_WEIGHT)
-        canvas.line(*(drop + (anchor - drop) * 0.12), *anchor)
+        canvas.line(*(drop + (target - drop) * 0.12), *target)
         glue_drop(canvas, drop)
     _frame_badge(canvas, frame, 1)
+
+
+def glue_marks(art: StepArt, frame) -> dict:
+    """What frame 1 draws for the glue, in page points: the stipple `dots` over the join face, the glue `drop` and the `target`
+    its leader ends on (the stipple dot nearest the rods, or the rods' own spot when the face has no stipple). Drop and
+    target are None when the step has nothing to hang the drop on."""
+    box = Box(frame, art.view)
+    dots = stipple_dots(box, art.face)
+    anchor_world = np.mean([p["p"] for p in art.pins], axis=0) if art.pins else (art.face.centre if art.face else None)
+    if anchor_world is None:
+        return {"dots": dots, "drop": None, "target": None}
+    anchor = box.world(anchor_world)[0]
+    target = dots[int(np.argmin(np.linalg.norm(dots - anchor, axis=1)))] if len(dots) else anchor
+    ink = _ink_points(box, art.runs_one)
+    spots = [anchor + rules.GLUE_DROP_GAP_PT * np.array([np.cos(a), np.sin(a)]) for a in np.radians((45, 135, 315, 225, 90, 0, 180, 270))]
+    inside = [s for s in spots if frame[0] + 10 < s[0] < frame[0] + frame[2] - 10 and frame[1] + 10 < s[1] < frame[1] + frame[3] - 10] or spots[:1]
+    drop = min(inside, key=lambda s: int((np.linalg.norm(ink - s, axis=1) < 12).sum()) if len(ink) else 0)
+    return {"dots": dots, "drop": tuple(drop), "target": target}
 
 
 def frame_two_marks(art: StepArt, frame) -> tuple:
