@@ -415,6 +415,73 @@ class StepPageTests(GuideCase):
             splits.start_guide(split_id, {})
 
 
+def tick_boxes(pdf: bytes) -> list:
+    """The number of small square tick boxes (5 mm) drawn on each page of an uncompressed PDF."""
+    objects = pdf.split(b"endobj")
+    pages = [o for o in objects if re.search(rb"/Type /Page\s*>>", o)]
+    contents = {int(m.group(1)): m.group(2) for m in re.finditer(rb"(\d+) 0 obj\s*<<[^>]*?>>\s*stream\r?\n(.*?)endstream", pdf, re.S)}
+    out = []
+    for page in pages:
+        body = contents[int(re.search(rb"/Contents (\d+) 0 R", page).group(1))].decode("latin-1")
+        squares = [m for m in re.finditer(r"([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) re\b", body)
+                   if abs(float(m.group(3)) - 5 * assembly_pdf.MM) < 0.05 and abs(float(m.group(4)) - 5 * assembly_pdf.MM) < 0.05]
+        out.append(len(squares))
+    return out
+
+
+class GluingGuidanceTests(GuideCase):
+    def pages(self, split_id):
+        self.generate(split_id)
+        return page_texts(self.pdf(split_id))
+
+    def test_the_rod_page_and_first_rod_step_of_each_section_say_how_deep_a_rod_sits(self):
+        split_id = self.make_split(*lattice_split())
+        pages = self.pages(split_id)
+        plan = splits.assembly_plan(split_id)
+        self.assertIn("Sits 6.5 mm deep in each part", pages[1])
+        body = " ".join(body_text(t) for t in step_pages(pages))
+        sections = [sec for sec in plan["sections"] if any(st["rods"] for st in sec["steps"])]
+        self.assertGreater(len(sections), 1)
+        self.assertEqual(body.count("Each rod sits 6.5 mm deep in each part."), len(sections))
+
+    def test_each_section_opens_with_its_rod_count(self):
+        split_id = self.make_split(*lattice_split())
+        body = " ".join(body_text(t) for t in step_pages(self.pages(split_id)))
+        for section in splits.assembly_plan(split_id)["sections"]:
+            count = sum(step["rods"] for step in section["steps"])
+            if count:
+                self.assertIn(f"{assembly_pdf.plural(count, 'rod')} in this Section", body)
+
+    def test_the_rod_page_has_a_dry_fit_and_a_cure_sentence_without_times(self):
+        page = self.pages(self.make_split(*lattice_split()))[1]
+        self.assertIn("Dry-fit every part and rod before gluing", page)
+        self.assertIn("Let the glue cure as its label says", page)
+        self.assertNotRegex(page, r"\d+\s*(minutes|min|hours|h)\b")
+
+    def test_every_step_has_a_tick_box_and_the_last_page_keeps_its_check(self):
+        split_id = self.make_split(*lattice_split())
+        pages = self.pages(split_id)
+        boxes = tick_boxes(self.pdf(split_id))
+        for text, found in zip(pages[1:-1], boxes[1:-1]):
+            self.assertEqual(found, len(step_ids(text)), text[:80])
+        self.assertGreater(sum(boxes), 0)
+        self.assertIn("No parts or rods left over.", pages[-1])
+
+    def test_a_glue_only_split_gets_no_rod_depth_or_count_text(self):
+        result, cuts = grid_split()
+        result["pins"] = []
+        for joint_ in result["joints"]:
+            joint_["rods"], joint_["connectors"] = 0, {}
+        split_id = self.make_split(result, cuts)
+        pages = self.pages(split_id)
+        text = " ".join(pages)
+        self.assertNotIn("deep in each part", text)
+        self.assertNotIn("in this Section", text)
+        self.assertNotIn("Dry-fit", text)
+        self.assertGreater(sum(len(step_ids(t)) for t in pages), 0)
+        self.assertEqual(sum(tick_boxes(self.pdf(split_id))[1:-1]), sum(len(step_ids(t)) for t in pages))
+
+
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
 class CameraTests(unittest.TestCase):
     def test_the_first_fit_camera_sees_the_receiving_face_from_above(self):
