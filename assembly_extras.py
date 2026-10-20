@@ -21,11 +21,8 @@ FONT, BOLD = "Helvetica", "Helvetica-Bold"
 SIZE = render.MIN_FONT                # nothing smaller is printed
 
 STRIP_MIN_H = 21 * MM                 # a step without a hole map keeps two steps to a page
-STRIP_MAP_H = 36 * MM                 # a step with a hole map gets a taller strip
 STRIP_GAP = 2 * MM
 HOLE_MAP_MIN_RODS = 5
-NEED_W, MAP_X, MAP_W, THUMB_W = 76 * MM, 78 * MM, 34 * MM, 54 * MM
-MAP_UP_W = 10 * MM                    # the column at the map's right edge that holds the "Up" marker
 
 
 def attach(art, scene, section_parts) -> None:
@@ -299,7 +296,7 @@ def _moving_label(art) -> str:
 def strip_height(art) -> float:
     rows = max(1, min(len(_rods_needed(art)), 3))
     need = 17 + 12 * rows + 11 + 6
-    return max(STRIP_MAP_H if hole_map_wanted(art) else STRIP_MIN_H, need)
+    return max(rules.STRIP_MAP_H if hole_map_wanted(art) else STRIP_MIN_H, need)
 
 
 def draw_you_need(canvas, art, x: float, top: float) -> None:
@@ -319,7 +316,7 @@ def draw_you_need(canvas, art, x: float, top: float) -> None:
         canvas.setFont(BOLD, SIZE)
         canvas.drawString(x, y - 9, f"{count} x {label}")
         icon_x = x + 25 * MM
-        room = NEED_W - 25 * MM - 11 * MM
+        room = rules.NEED_W - 25 * MM - 11 * MM
         drawn = min(length * MM, room)                       # true size, unless it would not fit: then it is shown broken
         canvas.setLineWidth(0.5)
         canvas.setStrokeGray(0)
@@ -431,7 +428,7 @@ def draw_hole_map(canvas, art, x: float, top: float, height: float) -> "dict | N
     turn = _screen_turn(art)
     pts = np.vstack([rods, outline.reshape(-1, 2)]) if len(outline) else rods
     lo, hi = pts.min(axis=0), pts.max(axis=0)
-    room_w, room_h = MAP_W - MAP_UP_W, height - SIZE - 6
+    room_w, room_h = rules.MAP_W - rules.MAP_UP_W, height - SIZE - 6
     span = np.maximum(hi - lo, 1e-6)
     k = min(room_w / span[0], room_h / span[1])
     ox = x + (room_w - span[0] * k) / 2
@@ -441,7 +438,7 @@ def draw_hole_map(canvas, art, x: float, top: float, height: float) -> "dict | N
     tris = face.receiver if len(face.receiver) else face.mover
     canvas.setFillGray(rules.HOLE_FACE_FILL)
     canvas.setStrokeGray(rules.HOLE_FACE_FILL)
-    canvas.setLineWidth(0.3)
+    canvas.setLineWidth(rules.HOLE_FACE_LINE_PT)
     for tri in tris:
         path = canvas.beginPath()
         corners = [to_page(c) for c in tri @ turn.T]
@@ -464,7 +461,7 @@ def draw_hole_map(canvas, art, x: float, top: float, height: float) -> "dict | N
     for number, spot in enumerate(_number_spots(centres, radii), 1):
         canvas.drawCentredString(spot[0], spot[1] - SIZE / 3, str(number))
     canvas.drawString(x, top - SIZE, f"Hole map: {len(rods)} rods")
-    middle = (x + MAP_W - MAP_UP_W / 2, top - height / 2 - SIZE / 2)
+    middle = (x + rules.MAP_W - rules.MAP_UP_W / 2, top - height / 2 - SIZE / 2)
     marker = _draw_up_marker(canvas, _hole_up(art, turn), middle)
     if marker["kind"] == "flat":
         looks_up = -float(art.direction[2]) > 0
@@ -555,5 +552,5 @@ def draw_strip(canvas, art, left: float, top: float, width: float) -> None:
     height = strip_height(art)
     draw_you_need(canvas, art, left, top)
     if hole_map_wanted(art):
-        draw_hole_map(canvas, art, left + MAP_X, top, height)
-    draw_thumbnail(canvas, art, left + width - THUMB_W, top, THUMB_W, height)
+        draw_hole_map(canvas, art, left + rules.MAP_X, top, height)
+    draw_thumbnail(canvas, art, left + width - rules.THUMB_W, top, rules.THUMB_W, height)

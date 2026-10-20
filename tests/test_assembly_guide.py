@@ -456,6 +456,15 @@ class GluingGuidanceTests(GuideCase):
             if count:
                 self.assertIn(f"{assembly_pdf.plural(count, 'rod')} in this Section", body)
 
+    def test_a_one_section_split_has_no_per_section_rod_count_or_depth_caption(self):
+        split_id = self.make_split(*stack_split(3))
+        pages = self.pages(split_id)
+        body = " ".join(body_text(t) for t in step_pages(pages))
+        self.assertGreater(len(step_ids(body)), 0)
+        self.assertNotIn("in this Section", body)
+        self.assertNotIn("sits", body)
+        self.assertRegex(rod_page(pages), r"Sits [\d.]+ mm deep in each part")     # the rods page still states depth
+
     def test_the_rod_page_has_a_dry_fit_and_a_cure_sentence_without_times(self):
         page = rod_page(self.pages(self.make_split(*lattice_split())))
         self.assertIn("Dry-fit every part and rod before gluing", page)

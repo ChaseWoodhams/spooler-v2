@@ -18,18 +18,14 @@ import numpy as np
 
 import assembly_render as render
 import assembly_rules as rules
-from assembly_pdf import BOLD, FONT, MIN_FONT, MM, parts_text, plural
+from assembly_pdf import BOLD, FONT, MIN_FONT, parts_text, plural
 
 AXES = [np.array(v, float) for v in ((1, 0, 0), (0, 1, 0), (0, 0, 1), (-1, 0, 0), (0, -1, 0), (0, 0, -1))]
-TREE_ROW_H = 17 * MM
-TREE_HEAD_H = 14 * MM
-TREE_INDENT = 14 * MM
-CHIP_R = 5.5 * MM
 
 
 # ── Section tree ───────────────────────────────────────────────────────────────
 
-def own_parts(section: dict, plan: dict) -> list:
+def own_parts(section: dict) -> list:
     """The parts a Section holds itself: its parts less the ones that came in with the Sections joined into it."""
     joined = {p for step in section["steps"] if step["kind"] == "section" for p in step["parts"]}
     return sorted(set(section["parts"]) - joined)
@@ -59,7 +55,7 @@ def section_tree(plan: dict) -> list:
     def walk(letter: str, depth: int) -> None:
         section = by_letter[letter]
         parent, step = joins_at.get(letter, (None, None))
-        nodes.append({"letter": letter, "main": section["main"], "parts": own_parts(section, plan), "depth": depth,
+        nodes.append({"letter": letter, "main": section["main"], "parts": own_parts(section), "depth": depth,
                       "parent": parent, "step": step, "rods": sum(s["rods"] for s in section["steps"])})
         for child in children[letter]:
             walk(child, depth + 1)
@@ -76,24 +72,24 @@ def section_colours(plan: dict) -> dict:
     """{part: colour} with each part in the colour of the Section that holds it."""
     out = {}
     for section in plan["sections"]:
-        for part in own_parts(section, plan):
+        for part in own_parts(section):
             out[part] = colour_of(section["letter"], plan)
     return out
 
 
 def part_sections(plan: dict) -> dict:
-    return {part: section["letter"] for section in plan["sections"] for part in own_parts(section, plan)}
+    return {part: section["letter"] for section in plan["sections"] for part in own_parts(section)}
 
 
 def _heading(flow, text: str, intro: str = "") -> None:
-    top = flow.reserve(TREE_HEAD_H)
+    top = flow.reserve(rules.TREE_HEAD_H)
     c = flow.canvas
     c.setFillGray(0)
-    c.setFont(BOLD, 16)
-    c.drawString(flow.content.left, top - 8 * MM, text)
+    c.setFont(BOLD, rules.TREE_HEAD_FONT)
+    c.drawString(flow.content.left, top - rules.TREE_HEAD_TITLE_DROP, text)
     if intro:
         c.setFont(FONT, MIN_FONT)
-        c.drawString(flow.content.left, top - 12.5 * MM, intro)
+        c.drawString(flow.content.left, top - rules.TREE_HEAD_INTRO_DROP, intro)
 
 
 def draw_tree(flow, plan: dict) -> None:
@@ -106,41 +102,42 @@ def draw_tree(flow, plan: dict) -> None:
     flow.new_page(carry=False)
     _heading(flow, "Section tree", "Each Section is built on its own, then joined to the Section above it at the step shown.")
     rows, page = {}, flow.pages
+    row_h, indent, chip_r = rules.TREE_ROW_H, rules.TREE_INDENT, rules.CHIP_R
     for node in nodes:
-        if flow.y - TREE_ROW_H < flow.content.bottom:
+        if flow.y - row_h < flow.content.bottom:
             flow.new_page(carry=False)
             _heading(flow, "Section tree (continued)")
             page = flow.pages
-        top = flow.reserve(TREE_ROW_H)
-        x = flow.content.left + node["depth"] * TREE_INDENT
-        mid = top - TREE_ROW_H / 2
+        top = flow.reserve(row_h)
+        x = flow.content.left + node["depth"] * indent
+        mid = top - row_h / 2
         if node["parent"] is not None:
             parent_top, parent_page = rows.get(node["parent"], (flow.content.top, page))
-            stem = x - TREE_INDENT / 2
-            c.setStrokeGray(0.45)
-            c.setLineWidth(1)
-            c.line(stem, mid, x - 1 * MM, mid)
-            c.line(stem, mid, stem, parent_top - TREE_ROW_H / 2 - CHIP_R if parent_page == page else flow.content.top)
+            stem = x - indent / 2
+            c.setStrokeGray(rules.TREE_STEM[0])
+            c.setLineWidth(rules.TREE_STEM[1])
+            c.line(stem, mid, x - rules.TREE_STEM_GAP, mid)
+            c.line(stem, mid, stem, parent_top - row_h / 2 - chip_r if parent_page == page else flow.content.top)
         rows[node["letter"]] = (top, page)
         colour = colour_of(node["letter"], plan)
         c.setFillColorRGB(*colour)
-        c.circle(x + CHIP_R, mid, CHIP_R, stroke=0, fill=1)
+        c.circle(x + chip_r, mid, chip_r, stroke=0, fill=1)
         c.setFillGray(1)
-        c.setFont(BOLD, 14)
-        c.drawCentredString(x + CHIP_R, mid - 5, node["letter"])
+        c.setFont(BOLD, rules.TREE_CHIP_FONT)
+        c.drawCentredString(x + chip_r, mid - rules.TREE_CHIP_LETTER_DROP, node["letter"])
         c.setFillGray(0)
-        text_x = x + 2 * CHIP_R + 3 * MM
-        c.setFont(BOLD, 12)
-        c.drawString(text_x, mid + 4, f"Section {node['letter']}" + (" (main)" if node["main"] else ""))
-        c.setFont(FONT, 10)
+        text_x = x + 2 * chip_r + rules.TREE_TEXT_GAP
+        c.setFont(BOLD, rules.TREE_NAME_FONT)
+        c.drawString(text_x, mid + rules.TREE_NAME_RISE, f"Section {node['letter']}" + (" (main)" if node["main"] else ""))
+        c.setFont(FONT, rules.TREE_TEXT_FONT)
         rods = f", {plural(node['rods'], 'rod')}" if node["rods"] else ""
-        c.drawString(text_x, mid - 8, f"Holds {parts_text(node['parts'])}{rods}")
-        c.setFont(FONT, 10)
+        c.drawString(text_x, mid - rules.TREE_HOLDS_DROP, f"Holds {parts_text(node['parts'])}{rods}")
+        c.setFont(FONT, rules.TREE_TEXT_FONT)
         if node["parent"] is None:
-            c.drawString(text_x + 90 * MM, mid + 4, "The other Sections join it.")
+            c.drawString(text_x + rules.TREE_JOIN_X, mid + rules.TREE_NAME_RISE, "The other Sections join it.")
         else:
             at = f" at step {node['step']}" if node["step"] else ""
-            c.drawString(text_x + 90 * MM, mid + 4, f"It joins Section {node['parent']}{at}.")
+            c.drawString(text_x + rules.TREE_JOIN_X, mid + rules.TREE_NAME_RISE, f"It joins Section {node['parent']}{at}.")
 
 
 # ── Rough build time ───────────────────────────────────────────────────────────
@@ -308,14 +305,14 @@ def _badge(canvas, centre, anchor, text: str, colour, radius: float, filled: boo
         canvas.setLineWidth(rules.LEADER_WEIGHT)
         canvas.line(anchor[0], anchor[1], centre[0], centre[1])
         canvas.setFillColorRGB(*ring)
-        canvas.circle(anchor[0], anchor[1], 1.4, stroke=0, fill=1)
+        canvas.circle(anchor[0], anchor[1], rules.BADGE_LEADER_DOT_PT, stroke=0, fill=1)
     canvas.setStrokeColorRGB(*ring)
-    canvas.setLineWidth(1.6 if colour else 1.0)
+    canvas.setLineWidth(rules.BADGE_RING_SECTION_PT if colour else rules.BADGE_RING_PT)
     canvas.setFillColorRGB(*ring) if filled else canvas.setFillGray(1)
     canvas.circle(centre[0], centre[1], radius, stroke=1, fill=1)
     canvas.setFillGray(1 if filled else 0)
     canvas.setFont(BOLD, MIN_FONT)
-    canvas.drawCentredString(centre[0], centre[1] - 3.2, text)
+    canvas.drawCentredString(centre[0], centre[1] - rules.BADGE_TEXT_DROP_PT, text)
 
 
 def draw_overview(canvas, scene, rect, numbers: bool = True, camera=None, plan: "dict | None" = None, colours: bool = False) -> None:
@@ -332,7 +329,7 @@ def draw_overview(canvas, scene, rect, numbers: bool = True, camera=None, plan: 
         wanted += [(str(p), tint.get(p), False, scene.meshes[p].vertices.mean(axis=0)) for p in parts]
     if tint:
         for section in plan["sections"]:
-            own = own_parts(section, plan)
+            own = own_parts(section)
             if own:
                 wanted.append((section["letter"], colour_of(section["letter"], plan), True,
                                np.mean([scene.meshes[p].vertices.mean(axis=0) for p in own], axis=0)))
@@ -347,20 +344,21 @@ def draw_overview(canvas, scene, rect, numbers: bool = True, camera=None, plan: 
 
 def draw_legend(canvas, plan: dict, x: float, y: float, width: float) -> float:
     """A row of colour chips with each Section's letter, wrapped to `width`; `y` is its top. Returns the height used."""
-    line_h, cursor, row = 7 * MM, x, 0
+    line_h, cursor, row = rules.LEGEND_LINE_H, x, 0
+    chip_r = rules.LEGEND_CHIP_R
     for section in sorted(plan["sections"], key=lambda s: s["letter"]):
         label = f"Section {section['letter']}" + (" (main)" if section["main"] else "")
-        need = 2 * 3.2 * MM + 2 * MM + len(label) * 5.2 + 5 * MM
+        need = 2 * chip_r + rules.LEGEND_CHIP_GAP + len(label) * rules.LEGEND_CHAR_W + rules.LEGEND_ENTRY_GAP
         if cursor + need > x + width and cursor > x:
             cursor, row = x, row + 1
         mid = y - row * line_h - line_h / 2
         canvas.setFillColorRGB(*colour_of(section["letter"], plan))
-        canvas.circle(cursor + 3.2 * MM, mid, 3.2 * MM, stroke=0, fill=1)
+        canvas.circle(cursor + chip_r, mid, chip_r, stroke=0, fill=1)
         canvas.setFillGray(1)
         canvas.setFont(BOLD, MIN_FONT)
-        canvas.drawCentredString(cursor + 3.2 * MM, mid - 3.2, section["letter"])
+        canvas.drawCentredString(cursor + chip_r, mid - rules.BADGE_TEXT_DROP_PT, section["letter"])
         canvas.setFillGray(0)
-        canvas.setFont(FONT, 10)
-        canvas.drawString(cursor + 7.5 * MM, mid - 3.5, label)
+        canvas.setFont(FONT, rules.LEGEND_LABEL_FONT)
+        canvas.drawString(cursor + rules.LEGEND_LABEL_X, mid - rules.LEGEND_LABEL_DROP, label)
         cursor += need
     return (row + 1) * line_h

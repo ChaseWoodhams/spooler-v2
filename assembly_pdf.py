@@ -101,7 +101,8 @@ class _GuideCanvas(pdfcanvas.Canvas):
     """A canvas that remembers each page so footers can say "page n of N" once the page count is known."""
 
     footer = None            # set by render_guide: footer(canvas, page_number, page_count, sections)
-    late = None              # set by the cover: late(canvas, page_count) draws what needs the page count on page 1
+    late = None              # set by the cover: late(canvas, page_count, starts) draws what needs the page count on page 1;
+                             # starts is {Section letter: the page it starts on}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -114,10 +115,14 @@ class _GuideCanvas(pdfcanvas.Canvas):
 
     def save(self):
         count = len(self._saved)
+        starts = {}
+        for number, (_, sections) in enumerate(self._saved, start=1):
+            for letter in sections:
+                starts.setdefault(letter, number)
         for number, (state, sections) in enumerate(self._saved, start=1):
             self.__dict__.update(state)
             if number == 1 and self.late:
-                self.late(self, count)
+                self.late(self, count, starts)
             if number > 1 and self.footer:
                 self.footer(self, number, count, sections)
             super().showPage()
@@ -202,9 +207,6 @@ def parts_text(parts) -> str:
     return f"part {parts[0]}" if len(parts) == 1 else "parts " + ", ".join(str(p) for p in parts)
 
 
-SMALL_GROUP = 4   # a built-so-far group of up to this many parts is named by its parts
-
-
 def built_groups(plan: dict) -> dict:
     """{frozenset of parts: what to call that built group}: the step that finished it ("the stack from A3"), or the
     Section when a finished Section is the group. The first step (in plan order) that makes a group names it."""
@@ -219,7 +221,7 @@ def built_groups(plan: dict) -> dict:
 
 def receiver_text(receiver, groups: dict | None = None) -> str:
     """What a step joins to: the parts when the group is small, else the step that finished the group."""
-    if len(receiver) <= SMALL_GROUP:
+    if len(receiver) <= rules.SMALL_GROUP:
         return parts_text(receiver)
     return (groups or {}).get(frozenset(receiver)) or f"the {len(receiver)} parts built so far"
 
@@ -239,9 +241,20 @@ def step_warning_lines(step: dict) -> list:
     return [w["message"] for w in step.get("warnings") or []]
 
 
-def plan_note_lines(plan: dict) -> list:
-    """Plan-level notes for the front of the step list, e.g. parts with no number printed on them."""
-    return [w["message"] for w in plan.get("warnings") or [] if w["kind"] == "unlabelled"]
+TOC_LINE_H = 12      # points between the lines of the cover's table of contents
+
+
+def toc_lines(letters: list, starts: dict, width: float) -> list:
+    """The cover's table of contents as printable lines: "Section B: page 5" for each Section, as many to a line as fit."""
+    lines, line = [], ""
+    for letter in letters:
+        entry = f"Section {letter}: page {starts.get(letter, '?')}"
+        joined = f"{line}     {entry}" if line else entry
+        if line and stringWidth(joined, FONT, MIN_FONT) > width:
+            lines.append(line)
+            joined = entry
+        line = joined
+    return lines + ([line] if line else [])
 
 
 def _cover(flow: PageFlow, data: GuideData) -> None:
@@ -250,8 +263,8 @@ def _cover(flow: PageFlow, data: GuideData) -> None:
     c.drawString(area.left, area.top - 40 * MM, fit(data.model_name, BOLD, 30, area.width))
     c.setFont(FONT, 16)
     c.drawString(area.left, area.top - 52 * MM, "Assembly guide")
-    counts = ", ".join([plural(summary["parts"], "part"), plural(summary["sections"], "Section"),
-                        plural(summary["steps"], "step"), plural(summary["rods"], "rod")])
+    counts = ", ".join([plural(summary["parts"], "part"), plural(summary["sections"], "Section"), plural(summary["steps"], "step")]
+                       + ([plural(summary["rods"], "rod")] if summary["rods"] else []))
     c.setFont(FONT, 12)
     c.drawString(area.left, area.top - 70 * MM, counts)
     c.drawString(area.left, area.top - 78 * MM, data.plan_line)
@@ -268,15 +281,28 @@ def _cover(flow: PageFlow, data: GuideData) -> None:
     for n, line in enumerate(lines):
         c.drawString(area.left, area.top - 114 * MM - n * 11, line)
 
-    def page_count(canvas, count: int) -> None:
+    letters = [s["letter"] for s in data.plan["sections"]] if len(data.plan["sections"]) > 1 else []
+    contents = toc_lines(letters, {letter: 999 for letter in letters}, area.width)      # reserve room for the widest page numbers
+    toc_top = area.top - 114 * MM - len(lines) * 11 - 2 * MM
+    toc_h = (len(contents) + 1) * TOC_LINE_H + 2 * MM if contents else 0
+
+    def late(canvas, count: int, starts: dict) -> None:
         canvas.setFillGray(0)
         canvas.setFont(FONT, 12)
         canvas.drawString(area.left + 60 * MM, area.top - 94 * MM, plural(count, "page"))
-    c.late = page_count
+        if letters:
+            canvas.setFont(BOLD, MIN_FONT)
+            canvas.drawString(area.left, toc_top - TOC_LINE_H, "Contents")
+            canvas.setFont(FONT, MIN_FONT)
+            for n, line in enumerate(toc_lines(letters, starts, area.width), start=2):
+                canvas.drawString(area.left, toc_top - n * TOC_LINE_H, line)
+    c.late = late
     if data.scene is not None:
         legend_h = 16 * MM
         assembly_overview.draw_legend(c, data.plan, area.left, area.bottom + legend_h, area.width)
-        assembly_overview.draw_overview(c, data.scene, (area.left, area.bottom + legend_h + 2 * MM, area.width, area.height - 128 * MM - legend_h),
+        art_top = min(area.top - 126 * MM, toc_top - toc_h) if toc_h else area.top - 126 * MM
+        assembly_overview.draw_overview(c, data.scene, (area.left, area.bottom + legend_h + 2 * MM, area.width,
+                                                        max(art_top - (area.bottom + legend_h + 2 * MM), 30 * MM)),
                                         plan=data.plan, colours=True)
     flow.y = area.bottom   # the cover is a page of its own
 
@@ -342,7 +368,7 @@ def _draw_step_block(flow: PageFlow, art, step: dict, top: float, lines: list, g
     assembly_extras.draw_strip(c, art, left, y - assembly_extras.STRIP_GAP, flow.content.width)
 
 
-def _section_header(flow: PageFlow, section: dict, picture, top: float) -> None:
+def _section_header(flow: PageFlow, section: dict, picture, top: float, show_rods: bool = True) -> None:
     import assembly_render
     c, left = flow.canvas, flow.content.left
     letter = section["letter"]
@@ -362,7 +388,7 @@ def _section_header(flow: PageFlow, section: dict, picture, top: float) -> None:
             c.drawString(text_left, y, line)
             y -= 13
     rods = sum(step["rods"] for step in section["steps"])
-    if rods:
+    if rods and show_rods:
         c.setFont(BOLD, 10)
         c.drawString(text_left + 55 * MM, top - 8 * MM, f"{plural(rods, 'rod')} in this Section")
     assembly_render.draw_picture(c, picture, flow.content.right - 64 * MM, top - SECTION_HEADER_H + 2 * MM, 64 * MM, SECTION_HEADER_H - 4 * MM)
@@ -386,7 +412,8 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
         steps = section["steps"]
         aside = SET_ASIDE_H if not section["main"] else 0
         prepared = None
-        depth_due = bool(data.bom)       # the first step with rods in the Section says how deep a rod sits
+        depth_due = bool(data.bom) and len(sections) > 1     # the first step with rods in a Section says how deep a rod sits
+                                                             # (a one-Section split leaves it to the rods page)
         if steps:
             view = assembly_render.choose_view(data.scene, steps[0], camera)
             camera = view.camera
@@ -403,7 +430,7 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
                 c.setLineWidth(2)
                 c.line(flow.content.left, top - 2 * MM, flow.content.right, top - 2 * MM)
             top -= STEP_GAP
-        _section_header(flow, section, picture, top)
+        _section_header(flow, section, picture, top, show_rods=len(sections) > 1)
         y = top - SECTION_HEADER_H
         for n, step in enumerate(steps):
             if n:
