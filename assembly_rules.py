@@ -46,9 +46,8 @@ CARD_BORDER = (0.6, 0.5)      # the box round an inventory card
 # ── Marks: rods, glue, arrows, badges ──────────────────────────────────────────
 MIN_ROD_PT = 15.0             # rods stand out of the face at least this long, so they stay visible
 ROD_MIN_WIDTH_PT = 3.0        # a rod is never drawn thinner than this
-ROD_OUTLINE_PT = 1.4          # the black outline round a rod's white core
-ROD_CORE_TRIM_PT = 0.6        # the white core is this much thinner than the rod
-ROD_CORE_MIN_PT = 0.8
+ROD_OUTLINE_PT = 1.4          # the black rim round a rod's white core (total, so half of it each side), at any magnification
+ROD_CAP_PT = 3.0              # the filled black cap at a rod's free end is this long
 ROD_TIP_MM = 0.4              # a rod's far end stands this far past the face
 MIN_ARROW_PT = 46.0
 ARROW_WEIGHT = 2.6
@@ -76,9 +75,12 @@ FACE_SAMPLES = 300
 ZOOM_MM = 26.0                # the zoom circle is about this wide
 ZOOM_CLEAR_PT = 3.0           # points kept between the circle and the nearest rod
 ZOOM_LABEL_PT = 12.0          # room under the circle for its "Zoom 3x" label
-ZOOM_FILL = 0.8               # share of the circle the rods may spread over
 ZOOM_RANGE = (2.0, 8.0)       # the magnification is kept between these
-ZOOM_MIN_SPREAD_PT = 6.0
+ZOOM_MARGIN_MM = 3.0          # the circle shows this much neighbouring surface round the holes
+ZOOM_HOLE_GAP_PT = 24.0       # neighbouring holes are at least this far apart inside the circle
+ZOOM_MAX_ROD_SHARE = 0.8      # side by side, the rods may cover this share of the circle's width, or it reads as a barcode of bars
+ZOOM_FLOOR = 1.5              # the barcode rule may lower the magnification down to this
+ZOOM_HOLE_SIDES = 24          # a hole is drawn as a polygon with this many sides
 
 CAMERA_ELEVATION = 0.8        # the diagonal views look down (or up) at this height against a unit sideways
 FIRST_FIT_DEGREES = 55        # first fit prefers the view nearest this angle to the insertion axis
@@ -91,6 +93,10 @@ THUMB_CAMERA = 0              # "Where this is" and the Section pictures use the
 ZOOM_LEADER = (0.45, 0.5)     # the thin leader from the zoom circle to the rods it magnifies
 ZOOM_RING_PT = 0.9            # the ring round the zoom circle
 ZOOM_LINE_SCALE = 1.4         # lines inside the circle are this much heavier than in the frame, before magnifying
+TALL_STACK_RATIO = 2.0        # a built group this many times taller than its widest side is a tall, thin stack
+TALL_SIDE_FACING = 0.3        # a side of a stack counts as seen when the camera is this far in front of it (dot with its normal)
+TALL_MIN_SIDES = 2            # a tall stack is drawn from a view that shows at least this many sides
+
 
 # ── Inventory cards ────────────────────────────────────────────────────────────
 THIN_WIDTH_MM = 12.0          # a part whose middle dimension is under this gets a second view at another angle

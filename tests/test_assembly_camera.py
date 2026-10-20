@@ -166,6 +166,10 @@ class RecordingCanvas(pdfcanvas.Canvas if GEOMETRY else object):
         self.texts.append(text)
         super().drawString(x, y, text, *args, **kwargs)
 
+    def drawCentredString(self, x, y, text, *args, **kwargs):
+        self.texts.append(text)
+        super().drawCentredString(x, y, text, *args, **kwargs)
+
     def drawRightString(self, x, y, text, *args, **kwargs):
         self.texts.append(text)
         super().drawRightString(x, y, text, *args, **kwargs)
@@ -273,6 +277,297 @@ class DrawingRulesTests(unittest.TestCase):
                      "ZOOM_MM", "CAMERA_ELEVATION", "FIRST_FIT_DEGREES", "MIN_ROD_PT", "MIN_BIT_PX", "PICTURE_MIN_BIT_PX"):
             self.assertTrue(hasattr(rules, name), name)
             self.assertFalse(hasattr(render, name) and getattr(render, name) is not getattr(rules, name), name)
+
+
+# a tall, thin stack (60 mm tall on a 10 mm footprint) that part 2 joins from the -x side
+TALL = {1: (0, 0, 0, 10, 10, 60), 2: (-10, 0, 0, 0, 10, 10)}
+EDGE_ON = render.unit([-1.0, 0.1, 0.8]) if GEOMETRY else None      # looks straight at the -x side of the stack: one side only
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class TallStackCameraTests(unittest.TestCase):
+    def choose(self, boxes, previous):
+        scene = make_scene(boxes)
+        step = step_of([n for n in boxes if n != 2], [2], (1.0, 0.0, 0.0))
+        return render.choose_view(scene, step, previous)
+
+    def sides_seen(self, camera, bounds=(10, 10)):
+        # the stack's side faces face +-x and +-y: a side is seen when the camera is clearly in front of it
+        return sum(1 for axis in (0, 1) for sign in (1, -1) if sign * camera[axis] > rules.TALL_SIDE_FACING)
+
+    def test_a_tall_stack_seen_edge_on_gets_a_three_quarter_camera_showing_two_sides(self):
+        self.assertEqual(self.sides_seen(EDGE_ON), 1)
+        choice = self.choose(TALL, EDGE_ON)
+        self.assertGreaterEqual(self.sides_seen(choice.camera), 2)
+        self.assertGreater(choice.camera[2], 0, "from above")
+        self.assertGreater(choice.camera @ np.array([-1.0, 0, 0]), rules.SEES_FACING, "the join face is still seen")
+
+    def test_a_stack_that_is_not_tall_keeps_the_reused_camera(self):
+        choice = self.choose(OPEN, EDGE_ON)
+        np.testing.assert_allclose(choice.camera, EDGE_ON)
+
+    def test_a_tall_stack_already_shown_from_two_sides_keeps_its_camera(self):
+        diagonal = render.unit([-1.0, 1.0, 0.8])
+        np.testing.assert_allclose(self.choose(TALL, diagonal).camera, diagonal)
+
+    def test_the_tall_ratio_is_a_rule_and_the_choice_is_deterministic(self):
+        with mock.patch.object(rules, "TALL_STACK_RATIO", 50.0):
+            np.testing.assert_allclose(self.choose(TALL, EDGE_ON).camera, EDGE_ON)
+        a, b = self.choose(TALL, EDGE_ON).camera, self.choose(TALL, EDGE_ON).camera
+        np.testing.assert_array_equal(a, b)
+
+
+# two stacked moving parts (2 and 4) against placed parts (1 and 3) and a wall (5): the number bubbles crowd each other
+STACKED = {1: (0, 0, 0, 20, 10, 10), 2: (-10, 0, 0, 0, 10, 10), 3: (0, 0, 10, 20, 10, 20), 4: (-10, 0, 10, 0, 10, 20),
+           5: (-30, 0, 0, -12, 10, 40)}    # part 5 stands left of the moving parts, where their badges would first go
+
+
+def _ink_samples(art, box, step_pt=1.5):
+    """Points along every line the second frame draws, in page points."""
+    out = []
+    for runs in art.runs_two.values():
+        for a, b in runs:
+            p, q = box.px(np.array([a, b]))
+            n = max(2, int(np.hypot(*(q - p)) / step_pt))
+            out.extend(p + (q - p) * t for t in np.linspace(0, 1, n))
+    return np.array(out)
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class BadgeAndTurnCueTests(unittest.TestCase):
+    FRAME = (0.0, 0.0, 300.0, 200.0)
+
+    def stacked_art(self):
+        scene = make_scene(STACKED)
+        step = step_of([1, 3, 5], [2, 4], (1.0, 0.0, 0.0))
+        return render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+
+    def test_no_badge_overlaps_another_badge_or_hides_behind_a_part(self):
+        art = self.stacked_art()
+        badges = render.badge_layout(art, self.FRAME)
+        self.assertEqual(sorted(b.text for b in badges), ["1", "2", "4"])
+        for i, a in enumerate(badges):
+            for b in badges[i + 1:]:
+                self.assertGreaterEqual(float(np.hypot(*(a.centre - b.centre))), a.radius + b.radius, (a.text, b.text))
+        ink = _ink_samples(art, render.Box(self.FRAME, art.view))
+        for badge in badges:
+            gap = np.min(np.hypot(*(ink - badge.centre).T))
+            self.assertGreaterEqual(gap, badge.radius, f"badge {badge.text} sits on a part")
+
+    def test_badges_keep_inside_the_frame_and_clear_of_the_frame_number(self):
+        art = self.stacked_art()
+        x, y, w, h = self.FRAME
+        corner = np.array([x + 9, y + h - 9])
+        for badge in render.badge_layout(art, self.FRAME):
+            self.assertTrue(x <= badge.centre[0] - badge.radius and badge.centre[0] + badge.radius <= x + w)
+            self.assertTrue(y <= badge.centre[1] - badge.radius and badge.centre[1] + badge.radius <= y + h)
+            self.assertGreaterEqual(float(np.hypot(*(badge.centre - corner))), badge.radius + rules.BADGE_RADIUS)
+
+    def test_a_badge_that_had_to_move_is_marked_and_the_layout_is_deterministic(self):
+        art = self.stacked_art()
+        first = render.badge_layout(art, self.FRAME)
+        again = render.badge_layout(art, self.FRAME)
+        self.assertEqual([(b.text, tuple(b.centre), b.moved) for b in first], [(b.text, tuple(b.centre), b.moved) for b in again])
+        self.assertTrue(any(b.moved for b in first), "the crowded stack forces at least one badge off its first corner")
+        for badge in first:
+            self.assertEqual(len(badge.anchor), 2, "every badge has a leader to the part it names")
+
+    def test_the_turn_cue_sits_between_the_frames_and_shows_the_flip_axis(self):
+        boxes = {1: (0, 0, 10, 10, 10, 20), 2: (0, 0, 0, 10, 10, 10)}
+        up = step_of([1], [2], (0, 0, 1))
+        scene = make_scene(boxes, rods_at=((5.0, 5.0, 10.0),))
+        art = render.prepare_step(scene, up, render.choose_camera(scene, up, None))
+        width = 190 * render.MM
+        first, second = render.layout_frames(art, width)
+        cue = render.turn_cue_layout(art, 100.0, 800.0, width)
+        gap_middle = 100.0 + first[2] + render.FRAME_GAP / 2
+        self.assertAlmostEqual(cue.centre[0], gap_middle, delta=0.5)
+        self.assertLess(cue.centre[0] - cue.radius, 100.0 + second[0], "it reaches into the first frame's side")
+        self.assertGreater(cue.centre[0] + cue.radius, 100.0 + second[0], "and into the second's")
+        self.assertAlmostEqual(float(np.hypot(*cue.axis)), 1.0, places=6)
+        # the model is turned half a turn about a horizontal axis: world x or y, never up
+        np.testing.assert_allclose(sorted(np.abs(art.extras["turn_axis"])), [0, 0, 1], atol=1e-9)
+        self.assertAlmostEqual(art.extras["turn_axis"][2], 0.0, places=9)
+
+    def test_the_cue_is_drawn_on_exactly_the_turned_steps(self):
+        width = 190 * render.MM
+        turned_boxes = {1: (0, 0, 10, 10, 10, 20), 2: (0, 0, 0, 10, 10, 10)}
+        up = step_of([1], [2], (0, 0, 1))
+        flat = step_of([1], [2], (1.0, 0, 0))
+        for step, boxes, rods, turned in ((up, turned_boxes, ((5.0, 5.0, 10.0),), True), (flat, OPEN, ((-6.0, 5.0, 5.0),), False)):
+            scene = make_scene(boxes, rods_at=rods)
+            art = render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+            canvas = RecordingCanvas()
+            render.draw_step(canvas, art, 0.0, 800.0, width)
+            self.assertEqual("Turn it over" in canvas.texts, turned)
+            self.assertEqual(render.turn_cue_layout(art, 0.0, 800.0, width) is not None, turned)
+
+
+class LineLog(RecordingCanvas if GEOMETRY else object):
+    """A canvas that also remembers each line with the grey and weight it was drawn in: (grey, weight, start, end)."""
+
+    def __init__(self):
+        super().__init__()
+        self.lines, self._grey, self._weight = [], 0.0, 1.0
+
+    def setStrokeGray(self, gray, alpha=None):
+        self._grey = gray
+        super().setStrokeGray(gray, alpha)
+
+    def setLineWidth(self, width):
+        self._weight = width
+        super().setLineWidth(width)
+
+    def line(self, x1, y1, x2, y2):
+        self.lines.append((self._grey, self._weight, (x1, y1), (x2, y2)))
+        super().line(x1, y1, x2, y2)
+
+
+def face_rods(gap, count=2, mid=(5.0, 5.0)):
+    """`count` rods standing in the join face (x = 0) of part 1 about `mid`, `gap` mm apart."""
+    return tuple((0.0, mid[0] + gap * (i - (count - 1) / 2), mid[1]) for i in range(count))
+
+
+# a join face 100 x 100 mm, so frame 1 shows it at about 1 pt per mm, as a real split's frames do
+BIG = {1: (0, 0, 0, 200, 100, 100), 2: (-100, 0, 0, 0, 100, 100)}
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class ZoomCloseUpTests(unittest.TestCase):
+    FRAME = (0.0, 0.0, 260.0, 170.0)
+
+    def art(self, gap=4.0, count=2, mid=(50.0, 50.0)):
+        scene = make_scene(BIG, rods_at=face_rods(gap, count, mid))
+        step = step_of((1,), [2], (1.0, 0.0, 0.0))
+        return render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+
+    def test_the_step_art_records_the_face_the_holes_and_the_rods_for_the_zoom(self):
+        art = self.art()
+        zoom = art.extras["zoom"]
+        self.assertIs(zoom.face, art.face)
+        self.assertIsNotNone(zoom.face)
+        self.assertEqual(len(zoom.holes), 2)
+        self.assertEqual(len(zoom.rods), 2)
+        self.assertEqual({round(d, 2) for _, d in zoom.holes}, {2.34})
+        for point, _ in zoom.holes:                       # every hole is in the join face
+            self.assertAlmostEqual(float(np.dot(point, art.direction)), art.face.plane, places=6)
+        self.assertEqual(zoom.margin_mm, rules.ZOOM_MARGIN_MM)
+        self.assertGreater(zoom.margin_mm, 0)
+
+    def test_a_step_without_rods_records_no_zoom(self):
+        scene = make_scene(BIG, rods_at=())
+        step = step_of((1,), [2], (1.0, 0.0, 0.0))
+        art = render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+        self.assertNotIn("zoom", art.extras)
+
+    def test_the_zoom_factor_follows_the_hole_spacing(self):
+        close, wide = self.art(gap=9.0), self.art(gap=20.0)
+        k_close = assembly_extras.zoom_facts(close, self.FRAME)["factor"]
+        k_wide = assembly_extras.zoom_facts(wide, self.FRAME)["factor"]
+        self.assertGreater(k_close, k_wide)
+        for art in (close, wide):
+            facts = assembly_extras.zoom_facts(art, self.FRAME)
+            self.assertGreaterEqual(facts["hole_gap_pt"], rules.ZOOM_HOLE_GAP_PT - 1e-6)
+            self.assertEqual(facts["holes_shown"], 2)
+            self.assertTrue(facts["face_shown"])
+
+    def test_the_label_shows_the_factor(self):
+        art = self.art()
+        canvas = RecordingCanvas()
+        assembly_extras.draw_zoom(canvas, art, self.FRAME)
+        k = assembly_extras.zoom_facts(art, self.FRAME)["factor"]
+        self.assertIn(f"Zoom {k:g}x", canvas.texts)
+
+    def test_a_circle_that_would_be_only_bars_gets_a_lower_factor(self):
+        art = self.art(gap=4.0, count=4)
+        loose = assembly_extras.zoom_facts(art, self.FRAME)
+        self.assertGreater(loose["rod_share"], 0.3, "the rods fill a good part of the circle's width")
+        with mock.patch.object(rules, "ZOOM_MAX_ROD_SHARE", 0.3):
+            tight = assembly_extras.zoom_facts(art, self.FRAME)
+        self.assertLess(tight["factor"], loose["factor"])
+        self.assertLessEqual(tight["rod_share"], 0.3)
+
+    def test_the_circle_draws_the_hole_outlines_and_the_face(self):
+        art = self.art(mid=(50.0, 5.0))                   # close to the bottom edge of the face, so the circle holds a piece of it
+        facts = assembly_extras.draw_zoom(LineLog(), art, self.FRAME)
+        self.assertEqual(facts["holes_drawn"], 2)
+        self.assertGreater(facts["face_edges_drawn"], 0)
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class RodStyleTests(unittest.TestCase):
+    def art(self, close_up=False, count=2):
+        scene = make_scene(OPEN, rods_at=face_rods(4.0 if count == 2 else 2.0, count))
+        step = step_of((1,), [2], (1.0, 0.0, 0.0))
+        return render.prepare_step(scene, step, render.choose_camera(scene, step, None), close_up=close_up)
+
+    def test_a_rod_is_a_thin_outlined_bar_with_a_filled_cap_at_its_free_end(self):
+        canvas = LineLog()
+        render.draw_rod(canvas, (10.0, 10.0), (10.0, 70.0), 6.0)
+        black = [l for l in canvas.lines if l[0] == 0]
+        white = [l for l in canvas.lines if l[0] == 1]
+        self.assertEqual(len(white), 1)
+        self.assertAlmostEqual(white[0][1], 6.0)
+        outline = max(black, key=lambda l: l[1])
+        self.assertAlmostEqual((outline[1] - white[0][1]) / 2, rules.ROD_OUTLINE_PT / 2)     # the black rim is thin
+        cap = [l for l in black if l is not outline]
+        self.assertEqual(len(cap), 1)
+        self.assertEqual(cap[0][2], (10.0, 10.0))                       # the cap sits at the free end
+        self.assertAlmostEqual(cap[0][3][1] - cap[0][2][1], rules.ROD_CAP_PT)
+
+    def test_every_frame_draws_rods_with_the_one_style(self):
+        art = self.art(close_up=True)
+        frame = (0.0, 0.0, 400.0, 300.0)
+        for name, draw in (("one", lambda c: render.draw_frame_one(c, art, frame)),
+                           ("two", lambda c: render.draw_frame_two(c, art, frame)),
+                           ("zoom", lambda c: assembly_extras.draw_zoom(c, art, frame)),
+                           ("close-up", lambda c: render.draw_close_up(c, art, 0.0, 800.0, 400.0))):
+            with self.subTest(name), mock.patch.object(render, "draw_rod", wraps=render.draw_rod) as spy:
+                draw(RecordingCanvas())
+            self.assertGreaterEqual(spy.call_count, 2, name)
+
+    def test_the_hole_map_draws_each_rod_as_a_ring_with_a_cap(self):
+        art = self.art(count=5)
+        with mock.patch.object(render, "draw_rod_end", wraps=render.draw_rod_end) as spy:
+            assembly_extras.draw_hole_map(RecordingCanvas(), art, 0.0, 100.0, 90.0)
+        self.assertEqual(spy.call_count, 5)
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class GlueFaceTests(unittest.TestCase):
+    FRAME = (0.0, 0.0, 260.0, 170.0)
+
+    def art(self, rods=True):
+        scene = make_scene(OPEN, rods_at=face_rods(4.0) if rods else ())
+        step = step_of((1,), [2], (1.0, 0.0, 0.0))
+        return render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+
+    def test_a_step_with_rods_draws_the_stippled_face_and_a_leader_to_it(self):
+        marks = render.glue_marks(self.art(), self.FRAME)
+        self.assertGreater(len(marks["dots"]), 0)
+        self.assertTrue(any(np.allclose(marks["target"], d) for d in marks["dots"]), "the leader ends on a stipple dot")
+        self.assertGreater(float(np.linalg.norm(np.array(marks["drop"]) - marks["target"])), 0)
+
+    def test_a_glue_only_step_is_stippled_with_a_leader_too(self):
+        marks = render.glue_marks(self.art(rods=False), self.FRAME)
+        self.assertGreater(len(marks["dots"]), 0)
+        self.assertIsNotNone(marks["target"])
+
+    def test_a_large_face_is_stippled_more_coarsely_not_left_bare(self):
+        art = self.art()
+        fine = len(render.glue_marks(art, self.FRAME)["dots"])
+        with mock.patch.object(rules, "STIPPLE_MAX_DOTS", 20):
+            coarse = len(render.glue_marks(art, self.FRAME)["dots"])
+        self.assertGreater(coarse, 0)
+        self.assertLess(coarse, fine)
+
+    def test_frame_one_draws_the_leader_from_the_drop_to_the_target(self):
+        art = self.art()
+        canvas = LineLog()
+        render.draw_frame_one(canvas, art, self.FRAME)
+        marks = render.glue_marks(art, self.FRAME)
+        ends = [l[3] for l in canvas.lines if l[1] == rules.LEADER_WEIGHT]
+        self.assertTrue(any(np.allclose(e, marks["target"]) for e in ends))
 
 
 # part 1 is a wide receiver, so the join (the 10 x 10 face of part 2) is only part of its face
