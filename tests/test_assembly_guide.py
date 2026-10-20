@@ -244,13 +244,13 @@ class ContentTests(GuideCase):
             self.assertIn(code, text)
             self.assertIn("model", text)
             self.assertIn(f"Split {split_id}", text)
-            if "Rods to cut" not in text and not text.startswith("Parts inventory"):   # the rod page and inventory belong to no Section
+            if "Rods to cut" not in text and not text.startswith(("Parts inventory", "Section tree")):   # the rod page, inventory and tree belong to no Section
                 self.assertRegex(text, r"Sections? [A-Z]")
 
     def test_the_guide_lists_every_section_and_step_in_plan_order(self):
         split_id = self.make_split(*grid_split())
         self.generate(split_id)
-        body = " ".join(page_texts(self.pdf(split_id))[1:])
+        body = " ".join(step_pages(page_texts(self.pdf(split_id))))     # the Section tree page before them lists A first
         positions = [body.index(label) for label in ("Section B", "B1", "Section A", "A1", "A2")]
         self.assertEqual(positions, sorted(positions))
 
@@ -302,6 +302,10 @@ def body_text(text: str) -> str:
 def step_pages(pages: list) -> list:
     """The pages of the step section: the ones with a Section header or a step (not the cover or the rod page)."""
     return [t for t in pages[1:] if "Made of" in body_text(t) or step_ids(t)]
+
+
+def rod_page(pages: list) -> str:
+    return next(t for t in pages if t.startswith("Rods to cut") or t.startswith("Pins to cut"))
 
 
 def step_ids(text: str) -> list:
@@ -438,7 +442,7 @@ class GluingGuidanceTests(GuideCase):
         split_id = self.make_split(*lattice_split())
         pages = self.pages(split_id)
         plan = splits.assembly_plan(split_id)
-        self.assertIn("Sits 6.5 mm deep in each part", pages[1])
+        self.assertIn("Sits 6.5 mm deep in each part", rod_page(pages))
         body = " ".join(body_text(t) for t in step_pages(pages))
         sections = [sec for sec in plan["sections"] if any(st["rods"] for st in sec["steps"])]
         self.assertGreater(len(sections), 1)
@@ -453,7 +457,7 @@ class GluingGuidanceTests(GuideCase):
                 self.assertIn(f"{assembly_pdf.plural(count, 'rod')} in this Section", body)
 
     def test_the_rod_page_has_a_dry_fit_and_a_cure_sentence_without_times(self):
-        page = self.pages(self.make_split(*lattice_split()))[1]
+        page = rod_page(self.pages(self.make_split(*lattice_split())))
         self.assertIn("Dry-fit every part and rod before gluing", page)
         self.assertIn("Let the glue cure as its label says", page)
         self.assertNotRegex(page, r"\d+\s*(minutes|min|hours|h)\b")

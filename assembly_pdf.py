@@ -21,6 +21,8 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas as pdfcanvas
 
+import assembly_rules as rules
+
 MM = mm
 PAPERS = {"a4": A4, "letter": letter}
 SAFE_WIDTH_MM, SAFE_HEIGHT_MM = 190, 265    # works on both A4 and Letter
@@ -99,6 +101,7 @@ class _GuideCanvas(pdfcanvas.Canvas):
     """A canvas that remembers each page so footers can say "page n of N" once the page count is known."""
 
     footer = None            # set by render_guide: footer(canvas, page_number, page_count, sections)
+    late = None              # set by the cover: late(canvas, page_count) draws what needs the page count on page 1
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -113,6 +116,8 @@ class _GuideCanvas(pdfcanvas.Canvas):
         count = len(self._saved)
         for number, (state, sections) in enumerate(self._saved, start=1):
             self.__dict__.update(state)
+            if number == 1 and self.late:
+                self.late(self, count)
             if number > 1 and self.footer:
                 self.footer(self, number, count, sections)
             super().showPage()
@@ -252,13 +257,27 @@ def _cover(flow: PageFlow, data: GuideData) -> None:
     c.drawString(area.left, area.top - 78 * MM, data.plan_line)
     c.drawString(area.left, area.top - 86 * MM, f"Plan code {data.plan['code']}")
     c.drawString(area.left, area.top - 94 * MM, f"Paper {'Letter' if data.paper == 'letter' else 'A4'}")
+    import assembly_overview
+    c.drawString(area.left, area.top - 102 * MM, f"Rough build time: about {assembly_overview.duration_text(assembly_overview.build_minutes(data.plan))}")
     c.setFont(FONT, MIN_FONT)
-    c.drawString(area.left, area.top - 110 * MM, f"Split {data.split_id}. Compare the plan code on two printed copies to see that they are the same plan.")
-    if not summary["rods"]:
-        c.drawString(area.left, area.top - 118 * MM, "Glue the faces: no rods needed.")
+    c.drawString(area.left, area.top - 107 * MM, f"A rough guide only: {rules.BUILD_MIN_PER_STEP} min a step and "
+                                                  f"{rules.CURE_MIN_PER_SIDE_SECTION} min to cure each side Section.")
+    sentence = (f"Split {data.split_id}. The plan code names the Sections, steps and their order, "
+                "so two printed copies with the same code are the same plan.")
+    lines = wrap(sentence, FONT, MIN_FONT, area.width) + (["Glue the faces: no rods needed."] if not summary["rods"] else [])
+    for n, line in enumerate(lines):
+        c.drawString(area.left, area.top - 114 * MM - n * 11, line)
+
+    def page_count(canvas, count: int) -> None:
+        canvas.setFillGray(0)
+        canvas.setFont(FONT, 12)
+        canvas.drawString(area.left + 60 * MM, area.top - 94 * MM, plural(count, "page"))
+    c.late = page_count
     if data.scene is not None:
-        import assembly_inventory
-        assembly_inventory.draw_overview(c, data.scene, (area.left, area.bottom + 5 * MM, area.width, area.height - 125 * MM))
+        legend_h = 16 * MM
+        assembly_overview.draw_legend(c, data.plan, area.left, area.bottom + legend_h, area.width)
+        assembly_overview.draw_overview(c, data.scene, (area.left, area.bottom + legend_h + 2 * MM, area.width, area.height - 128 * MM - legend_h),
+                                        plan=data.plan, colours=True)
     flow.y = area.bottom   # the cover is a page of its own
 
 
@@ -423,6 +442,9 @@ def render_guide(path, data: GuideData, progress=None) -> int:
     canvas.setCreator("Spooler")
     flow = PageFlow(canvas, data.paper)
     _cover(flow, data)
+    if data.scene is not None:
+        import assembly_overview
+        assembly_overview.draw_tree(flow, data.plan)
     if data.bom:
         import assembly_rod_page
         canvas.setViewerPreference("PrintScaling", "None")   # the rod page is true size: ask viewers not to scale
