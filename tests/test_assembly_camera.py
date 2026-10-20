@@ -207,10 +207,10 @@ class DrawingRulesTests(unittest.TestCase):
 
     def test_frame_two_uses_the_touching_placed_and_bold_rules(self):
         _, _, art = self.art(APART, receiver=(1, 3))
-        with mock.patch.object(rules, "TOUCHING", (0.211, 0.371)), mock.patch.object(rules, "PLACED", (0.733, 0.137)), \
+        with mock.patch.object(rules, "TOUCHING", (0.211, 0.371)), mock.patch.object(rules, "PLACED", (0.433, 0.137)), \
                 mock.patch.object(rules, "BOLD", 1.91), mock.patch.object(rules, "HALO", 2.77):
             canvas = self.drawn(render.draw_frame_two, art)
-        for grey in (0.211, 0.733):
+        for grey in (0.211, 0.433):
             self.assertIn(grey, canvas.greys)
         for weight in (0.371, 0.137, 1.91, round(1.91 + 2.77, 4)):
             self.assertIn(weight, canvas.weights)
@@ -401,3 +401,122 @@ class BadgeAndTurnCueTests(unittest.TestCase):
             render.draw_step(canvas, art, 0.0, 800.0, width)
             self.assertEqual("Turn it over" in canvas.texts, turned)
             self.assertEqual(render.turn_cue_layout(art, 0.0, 800.0, width) is not None, turned)
+
+# part 1 is a wide receiver, so the join (the 10 x 10 face of part 2) is only part of its face
+WIDE = {1: (0, 0, 0, 20, 30, 10), 2: (-10, 0, 0, 0, 10, 10)}
+
+
+def total_length(runs) -> float:
+    return float(sum(np.hypot(*(np.asarray(b) - np.asarray(a))) for a, b in runs))
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class GhostAndJoinEdgeTests(unittest.TestCase):
+    """Placed parts stay legible on a laser printer or photocopy (grey floor, hairline outline), the part being added is the
+    boldest thing in the step, and the join edge is one weight step heavier than the surface creases. Facts are read off the
+    strokes of the prepared step art (frame_one_strokes / frame_two_strokes), never off pixels."""
+
+    def art(self, boxes=APART, receiver=(1, 3)):
+        scene = make_scene(boxes)
+        step = step_of(receiver, [2], (1.0, 0.0, 0.0))
+        return render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+
+    def ghosts(self, art):
+        return [s for s in render.frame_two_strokes(art) if s.role != "m"]
+
+    def test_every_placed_part_is_at_or_darker_than_the_grey_floor_with_a_hairline_outline(self):
+        strokes = self.ghosts(self.art())
+        self.assertEqual({s.role for s in strokes}, {"t", "p"}, "the touching part and the part clear of the join are both drawn")
+        for s in strokes:
+            self.assertLessEqual(s.grey, rules.GHOST_FLOOR, s)
+            self.assertGreater(s.weight, 0)
+            self.assertLessEqual(s.weight, rules.GHOST_HAIRLINE_PT, s)
+
+    def test_a_ghost_rule_lighter_than_the_floor_is_held_at_the_floor(self):
+        art = self.art()
+        with mock.patch.object(rules, "TOUCHING", (0.9, 3.0)), mock.patch.object(rules, "PLACED", (0.95, 3.0)):
+            strokes = self.ghosts(art)
+        self.assertTrue(strokes)
+        for s in strokes:
+            self.assertEqual(s.grey, rules.GHOST_FLOOR)
+            self.assertEqual(s.weight, rules.GHOST_HAIRLINE_PT)
+
+    def test_the_part_being_added_is_heavier_than_everything_else_in_the_step(self):
+        art = self.art()
+        mover = [s.weight for s in render.frame_two_strokes(art) if s.role == "m" and s.grey == 0.0]
+        others = [s.weight for s in render.frame_two_strokes(art) if s.role != "m"] + [s.weight for s in render.frame_one_strokes(art)]
+        self.assertGreater(min(mover), max(others))
+
+    def test_the_join_edge_is_one_weight_step_heavier_than_the_surface_creases(self):
+        art = self.art(WIDE, receiver=(1,))
+        strokes = render.frame_one_strokes(art)
+        creases = [s for s in strokes if s.kind == "crease"]
+        joins = [s for s in strokes if s.kind == "join"]
+        self.assertTrue(joins and joins[0].runs, "the join edge is drawn")
+        self.assertAlmostEqual(joins[0].weight - creases[0].weight, rules.JOIN_EDGE_STEP)
+        self.assertLess(total_length(joins[0].runs), total_length(creases[0].runs), "only the join, not the receiver's whole face")
+
+    def test_the_moving_part_also_shows_its_join_edge_one_step_heavier(self):
+        art = self.art(WIDE, receiver=(1,))
+        mover = [s for s in render.frame_two_strokes(art) if s.role == "m" and s.grey == 0.0]
+        weights = sorted({s.weight for s in mover})
+        self.assertEqual(len(weights), 2)
+        self.assertAlmostEqual(weights[1] - weights[0], rules.JOIN_EDGE_STEP)
+
+    def test_the_drawn_strokes_are_the_ones_reported(self):
+        art = self.art()
+        with mock.patch.object(rules, "PLACED", (0.5, 0.31)):
+            canvas = RecordingCanvas()
+            render.draw_frame_two(canvas, art, (0.0, 0.0, 300.0, 200.0))
+        self.assertIn(0.31, canvas.weights)
+        self.assertIn(0.5, canvas.greys)
+
+
+def mesh_with_marks(marks: list):
+    """A 40 x 40 x 10 plate with small cubes (x, y, side) standing on its top face, as a trimesh."""
+    import manifold3d as m3d
+    import trimesh
+    solid = m3d.Manifold.cube([40, 40, 10])
+    for x, y, side in marks:
+        solid = solid + m3d.Manifold.cube([side, side, side]).translate([x, y, 10 - 0.01])
+    mesh = solid.to_mesh()
+    return trimesh.Trimesh(np.asarray(mesh.vert_properties)[:, :3], np.asarray(mesh.tri_verts), process=False)
+
+
+def crease_points_near(scene, part, x, y, reach=3.0) -> int:
+    """How many crease-line endpoints lie within `reach` mm of (x, y) (the plate's own edges are 10 mm or more away)."""
+    edges = scene.creases(part).reshape(-1, 3)
+    return int((np.hypot(edges[:, 0] - x, edges[:, 1] - y) < reach).sum())
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class StrayMarkTests(unittest.TestCase):
+    """Small marks on a part surface are suppressed below a size threshold unless they are a part number or a hole."""
+
+    def scene(self, marks, pins=()):
+        return render.Scene({1: mesh_with_marks(marks)}, list(pins), set())
+
+    def test_a_lone_tiny_mark_is_suppressed_and_the_plate_edges_stay(self):
+        scene = self.scene([(10, 10, 0.5)])
+        self.assertEqual(crease_points_near(scene, 1, 10.25, 10.25), 0)
+        self.assertGreater(len(scene.creases(1)), 0)
+
+    def test_a_mark_over_the_threshold_is_kept(self):
+        scene = self.scene([(10, 10, 3.0)])
+        self.assertGreater(crease_points_near(scene, 1, 11.5, 11.5), 0)
+
+    def test_the_threshold_is_a_rule(self):
+        scene = self.scene([(10, 10, 3.0)])
+        self.assertGreater(crease_points_near(scene, 1, 11.5, 11.5), 0)
+        with mock.patch.object(rules, "STRAY_MARK_MM", 1000.0):
+            scene = self.scene([(10, 10, 3.0)])
+            self.assertEqual(crease_points_near(scene, 1, 11.5, 11.5), 0)
+
+    def test_a_tiny_mark_in_a_hole_is_kept(self):
+        pin = {"p": [10.25, 10.25, 10.0], "axis": [0.0, 0.0, 1.0], "diameter": 2.0, "hole_diameter": 2.34, "depth": 6.5, "parts": [1, 2]}
+        scene = self.scene([(10, 10, 0.5)], pins=[pin])
+        self.assertGreater(crease_points_near(scene, 1, 10.25, 10.25), 0)
+
+    def test_tiny_marks_set_close_together_like_a_part_number_are_kept(self):
+        scene = self.scene([(10, 10, 0.5), (12.5, 10, 0.5), (15, 10, 0.5)])
+        self.assertGreater(crease_points_near(scene, 1, 12.75, 10.25, reach=5.0), 0)
