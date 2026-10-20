@@ -84,3 +84,9 @@ THUMB_CAMERA = 0              # "Where this is" and the Section pictures use the
 ZOOM_LEADER = (0.45, 0.5)     # the thin leader from the zoom circle to the rods it magnifies
 ZOOM_RING_PT = 0.9            # the ring round the zoom circle
 ZOOM_LINE_SCALE = 1.4         # lines inside the circle are this much heavier than in the frame, before magnifying
+
+# ── Inventory cards ────────────────────────────────────────────────────────────
+THIN_WIDTH_MM = 12.0          # a part whose middle dimension is under this gets a second view at another angle
+TALL_ASPECT = 3.0             # a part this many times longer than wide, or any thin part, gets a taller cell
+TALL_FACTOR = 1.6             # a tall cell is this many times an ordinary row height
+STRIP_MM = 14.0               # height of the strip of all parts at one common scale

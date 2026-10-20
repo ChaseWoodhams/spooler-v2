@@ -3,12 +3,47 @@ import re
 import unittest
 from unittest import mock
 
+import assembly_inventory
+import assembly_render
+import assembly_rules
 import splits
-from tests.test_assembly_guide import GEOMETRY, GuideCase, lattice_split, page_texts
-from tests.test_assembly_plan import grid_split
+from tests.test_assembly_guide import GEOMETRY, GuideCase, box_mesh, lattice_split, page_texts
+from tests.test_assembly_plan import cut, grid_split, joint, part, pins
 
 LABEL = {"text": "1", "face": "cut", "cut": 1, "neighbour": 2, "position": [40.0, 20.0, 5.0], "normal": [1.0, 0.0, 0.0],
          "up": [0.0, 0.0, 1.0], "height_mm": 7.0}
+
+
+def thin_split(count, width=120.0, depth=10.0):
+    """`count` long, thin bars side by side along y, each cut from the next by its own plane."""
+    parts = [part(i + 1, (0, i * depth, 0, width, (i + 1) * depth, 6)) for i in range(count)]
+    joints = [joint(i + 1, i + 2, i + 1) for i in range(count - 1)]
+    all_pins = [p for i in range(count - 1) for p in pins(i + 1, i + 2, "y", (width / 2, (i + 1) * depth, 3))]
+    return {"parts": parts, "joints": joints, "pins": all_pins}, [cut(i + 1, "y", (i + 1) * depth) for i in range(count - 1)]
+
+
+def scene_of(result):
+    boxes = [box_mesh(p["bbox"]) for p in sorted(result["parts"], key=lambda p: p["number"])]
+    return assembly_render.Scene.from_split(result, boxes)
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class CardSizingTests(unittest.TestCase):
+    def test_a_long_thin_part_gets_a_tall_cell_and_a_second_view(self):
+        scene = scene_of(thin_split(2)[0])
+        self.assertTrue(assembly_inventory.card_is_tall(scene, 1))
+        self.assertEqual(assembly_inventory.card_views(scene, 1), 2)
+
+    def test_a_broad_part_gets_one_view_in_an_ordinary_cell(self):
+        scene = scene_of(grid_split()[0])
+        self.assertFalse(assembly_inventory.card_is_tall(scene, 1))
+        self.assertEqual(assembly_inventory.card_views(scene, 1), 1)
+
+    def test_the_width_threshold_is_a_rule(self):
+        scene = scene_of(thin_split(2)[0])
+        with mock.patch.object(assembly_rules, "THIN_WIDTH_MM", 5.0), mock.patch.object(assembly_rules, "TALL_ASPECT", 100.0):
+            self.assertEqual(assembly_inventory.card_views(scene, 1), 1)
+            self.assertFalse(assembly_inventory.card_is_tall(scene, 1))
 
 
 @unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
@@ -65,6 +100,24 @@ class InventoryTests(GuideCase):
         text = self.inventory(self.texts(self.make_split(result, cuts)))[0]
         self.assertIn("number is here (face against part 2)", text)
         self.assertEqual(text.count("no number: identify by shape"), len(result["parts"]) - 1)
+
+    def test_each_card_shows_the_largest_dimension_in_millimetres(self):
+        text = self.inventory(self.texts(self.make_split(*grid_split())))[0]
+        self.assertEqual(re.findall(r"Largest: (\d+) mm", text), ["50"] * 4)
+
+    def test_long_thin_parts_take_taller_cells_so_the_inventory_runs_to_more_pages_without_losing_a_card(self):
+        pages = self.inventory(self.texts(self.make_split(*thin_split(12))))
+        self.assertEqual(len(pages), 2)
+        shown = [int(n) for t in pages for n in re.findall(r"(?<![\w:])(\d+)(?= (?:not on a plate yet|have it|Plate:))", t)]
+        self.assertEqual(shown, list(range(1, 13)))
+        self.assertEqual(sum(t.count("have it") for t in pages), 12)
+        self.assertEqual(sum(len(re.findall(r"Largest: 120 mm", t)) for t in pages), 12)
+
+    def test_a_single_strip_of_all_parts_at_one_scale_is_on_the_first_inventory_page_only(self):
+        result, cuts = lattice_split(n=4)
+        pages = self.inventory(self.texts(self.make_split(result, cuts)))
+        self.assertEqual(pages[0].count("All parts at one scale"), 1)
+        self.assertNotIn("All parts at one scale", pages[1])
 
     def test_page_order_is_cover_rod_inventory_steps_last(self):
         split_id = self.make_split(*lattice_split())
