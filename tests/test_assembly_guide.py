@@ -35,6 +35,19 @@ def page_texts(pdf: bytes) -> list:
     return out
 
 
+def text_positions(pdf: bytes) -> list:
+    """(x, y, text) of every string drawn on each page of an uncompressed PDF, one list per page."""
+    objects = pdf.split(b"endobj")
+    pages = [o for o in objects if re.search(rb"/Type /Page\s*>>", o)]
+    contents = {int(m.group(1)): m.group(2) for m in re.finditer(rb"(\d+) 0 obj\s*<<[^>]*?>>\s*stream\r?\n(.*?)endstream", pdf, re.S)}
+    out = []
+    for page in pages:
+        body = contents[int(re.search(rb"/Contents (\d+) 0 R", page).group(1))].decode("latin-1")
+        out.append([(float(m.group(1)), float(m.group(2)), m.group(3))
+                    for m in re.finditer(r"1 0 0 1 ([\d.]+) ([\d.]+) Tm \(((?:\.|[^\)])*)\) Tj", body)])
+    return out
+
+
 def media_box(pdf: bytes) -> tuple:
     box = re.search(rb"/MediaBox \[ ?0 0 ([\d.]+) ([\d.]+) ?\]", pdf)
     return float(box.group(1)), float(box.group(2))
@@ -339,6 +352,52 @@ class StepPageTests(GuideCase):
                 headers = list(re.finditer(r"Section [A-Z]( \(main\))? Made of", body))
                 if headers:
                     self.assertTrue(step_ids(body[headers[-1].start():]), f"header without a step on its page: {body[:200]}")
+
+    def test_short_sections_share_pages_and_the_plan_is_unchanged(self):
+        split_id = self.make_split(*lattice_split())
+        pages = step_pages(self.pages(split_id))
+        plan = splits.assembly_plan(split_id)
+        self.assertEqual([i for text in pages for i in step_ids(text)], [s["id"] for sec in plan["sections"] for s in sec["steps"]])
+        self.assertLessEqual(len(pages), 5)      # seven pages when every Section needed room for its own two steps
+
+    def test_a_page_holding_steps_from_two_sections_names_both_in_its_footer(self):
+        shared = []
+        for size in (3, 4, 5):
+            split_id = self.make_split(*lattice_split(size))
+            for text in step_pages(self.pages(split_id)):
+                letters = {i[0] for i in step_ids(text)}
+                if len(letters) > 1:
+                    shared.append((letters, text))
+        self.assertTrue(shared, "no page shares two Sections")
+        for letters, text in shared:
+            footer = text.rsplit("model  |  Split", 1)[1]
+            self.assertRegex(footer, r"Sections [A-Z], [A-Z]")
+            for letter in letters:
+                self.assertIn(letter, re.search(r"Sections ([A-Z, ]+) page", footer).group(1))
+
+    def test_everything_is_drawn_inside_the_safe_area_on_letter_and_a4(self):
+        for paper in ("letter", "a4"):
+            split_id = self.make_split(*lattice_split(4))
+            self.generate(split_id, paper)
+            safe = assembly_pdf.safe_area(paper)
+            pdf = self.pdf(split_id)
+            texts = page_texts(pdf)
+            on_steps = [number for number, text in enumerate(texts, start=1) if text in step_pages(texts)]
+            self.assertGreater(len(on_steps), 3)
+            for number, strings in enumerate(text_positions(pdf), start=1):
+                if number not in on_steps:      # the rod page and inventory have their own rules
+                    continue
+                for x, y, text in strings:
+                    self.assertGreaterEqual(x, safe.left - 0.5, f"{paper} page {number}: {text}")
+                    self.assertLessEqual(x, safe.right, f"{paper} page {number}: {text}")
+                    self.assertGreaterEqual(y, safe.bottom, f"{paper} page {number}: {text}")
+                    self.assertLessEqual(y, safe.top, f"{paper} page {number}: {text}")
+
+    def test_a_split_with_one_section_still_gets_a_sensible_guide(self):
+        split_id = self.make_split(*stack_split(3))
+        pages = step_pages(self.pages(split_id))
+        self.assertEqual([step_ids(t) for t in pages], [["A1", "A2"]])
+        self.assertIn("Section A (main) Made of", body_text(pages[0]))
 
     def test_the_same_split_draws_the_same_pages(self):
         first_id = self.make_split(*lattice_split())
