@@ -5,6 +5,7 @@ zoom circle's placement, which is a geometric promise ("never covers a rod") a r
 import re
 import unittest
 
+import assembly_rules
 import splits
 from tests.test_assembly_guide import (GEOMETRY, GuideCase, body_text, box_mesh, lattice_split, page_texts, step_ids,
                                        step_pages)
@@ -102,7 +103,7 @@ class ZoomPlacementTests(unittest.TestCase):
     def test_the_hole_map_numbers_every_hole_and_marks_which_way_is_up(self):
         art = self.art(wide_split(8), mover=(1,), receiver=(2,))
         canvas = self.canvas()
-        facts = assembly_extras.draw_hole_map(canvas, art, 0.0, 400.0, assembly_extras.STRIP_MAP_H)
+        facts = assembly_extras.draw_hole_map(canvas, art, 0.0, 400.0, assembly_rules.STRIP_MAP_H)
         self.assertEqual(facts["numbers"], list(range(1, 9)))
         for number in range(1, 9):
             self.assertIn(str(number), canvas.texts)
@@ -112,7 +113,7 @@ class ZoomPlacementTests(unittest.TestCase):
 
     def test_the_hole_map_is_drawn_over_a_picture_of_the_join_face(self):
         art = self.art(wide_split(8), mover=(1,), receiver=(2,))
-        facts = assembly_extras.draw_hole_map(self.canvas(), art, 0.0, 400.0, assembly_extras.STRIP_MAP_H)
+        facts = assembly_extras.draw_hole_map(self.canvas(), art, 0.0, 400.0, assembly_rules.STRIP_MAP_H)
         self.assertTrue(facts["face_drawn"])
         self.assertGreaterEqual(facts["face_edges"], 4)
         for number, (x, y), r in facts["holes"]:           # each number sits clear of every rod
@@ -126,7 +127,7 @@ class ZoomPlacementTests(unittest.TestCase):
         art = self.art(({"parts": parts, "joints": [joint(1, 2, 1, rods=6)], "pins": spread}, [cut(1, "z", 40.0)]),
                        direction=(0.0, 0.0, -1.0))
         canvas = self.canvas()
-        facts = assembly_extras.draw_hole_map(canvas, art, 0.0, 400.0, assembly_extras.STRIP_MAP_H)
+        facts = assembly_extras.draw_hole_map(canvas, art, 0.0, 400.0, assembly_rules.STRIP_MAP_H)
         self.assertEqual(facts["up"]["kind"], "flat")
         self.assertIn("Faces up", canvas.texts)
         self.assertEqual(facts["numbers"], list(range(1, 7)))

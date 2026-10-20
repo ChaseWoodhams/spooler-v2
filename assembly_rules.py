@@ -6,7 +6,7 @@ later adjustment is one change in this file, and a test can set a rule to see th
 
 A grey is 0 (black) to 1 (white). A "(grey, weight)" pair is a stroke: the grey and the line weight in points. A weight or
 length in "pt" is PDF points, "px" is a pixel of the depth buffer a frame is rendered into, "mm" is model millimetres.
-This module holds numbers only: no imports, nothing computed.
+This module holds numbers only: no imports, and nothing computed beyond a size in millimetres turned into points.
 """
 
 # ── Line extraction: how a mesh becomes lines ──────────────────────────────────
@@ -67,7 +67,7 @@ ARROW_HEAD_PT = 11
 STIPPLE_SPACING_PT = 3.4      # the glue stipple on the join face
 STIPPLE_GREY = 0.2
 STIPPLE_DOT_PT = 0.45
-STIPPLE_MAX_DOTS = 40000      # a face needing more dots than this is left unstippled
+STIPPLE_MAX_DOTS = 40000      # a face needing more dots than this is stippled more coarsely (wider spacing) to stay under it
 GLUE_DROP_PT = 8
 GLUE_DROP_GAP_PT = 26         # the glue drop sits this far from the rods
 BUBBLE_BOLD = (8.5, 1.0)      # radius and ring weight of a part number bubble, moving part
@@ -146,3 +146,55 @@ UNSEEN_TILT = 0.4             # the second finished view leans toward the sides 
 EXPOSED_PX = 300              # width of the depth buffer the exposed area of a face is measured in
 BUILD_MIN_PER_STEP = 5        # rough build time: minutes for each step ...
 CURE_MIN_PER_SIDE_SECTION = 30    # ... and to let each side Section cure before it is joined
+
+MM = 72 / 25.4                # points in a millimetre, for the sizes below given in millimetres
+TREE_ROW_H = 17 * MM          # Section tree: a row per Section ...
+TREE_HEAD_H = 14 * MM         # ... the heading of a tree page ...
+TREE_INDENT = 14 * MM         # ... how far a child is indented under its parent ...
+CHIP_R = 5.5 * MM             # ... and the radius of a Section's colour chip
+TREE_STEM = (0.45, 1.0)       # the lines from a parent down to its children: grey and weight
+TREE_STEM_GAP = 1 * MM        # a stem stops this short of the chip
+TREE_HEAD_FONT = 16           # heading of a tree page ...
+TREE_HEAD_TITLE_DROP = 8 * MM     # ... its baseline below the top of the heading ...
+TREE_HEAD_INTRO_DROP = 12.5 * MM  # ... and the baseline of the line under it
+TREE_CHIP_FONT = 14           # the letter in the chip
+TREE_CHIP_LETTER_DROP = 5     # pt from the chip's middle to the letter's baseline
+TREE_NAME_FONT = 12           # "Section B (main)"
+TREE_TEXT_FONT = 10           # what the Section holds, and where it joins
+TREE_TEXT_GAP = 3 * MM        # between the chip and the text
+TREE_NAME_RISE = 4            # pt: the name and the join note stand this far above the row's middle ...
+TREE_HOLDS_DROP = 8           # ... and the "Holds ..." line this far below it
+TREE_JOIN_X = 90 * MM         # the join note starts this far right of the text
+BADGE_RING_PT = 1.0           # ring weight of a part number badge on the cover and finished page
+BADGE_RING_SECTION_PT = 1.6   # the same for a badge in a Section's colour
+BADGE_LEADER_DOT_PT = 1.4     # radius of the dot at a badge leader's anchor
+BADGE_TEXT_DROP_PT = 3.2      # pt from a badge's centre to its text baseline
+LEGEND_LINE_H = 7 * MM        # cover legend: a row of chips ...
+LEGEND_CHIP_R = 3.2 * MM      # ... radius of a chip ...
+LEGEND_CHIP_GAP = 2 * MM      # ... gap added to each entry's width ...
+LEGEND_CHAR_W = 5.2           # ... pt a character of the label is reckoned to take ...
+LEGEND_ENTRY_GAP = 5 * MM     # ... space after an entry ...
+LEGEND_LABEL_X = 7.5 * MM     # ... where the label starts, from the chip's left ...
+LEGEND_LABEL_FONT = 10
+LEGEND_LABEL_DROP = 3.5       # ... and its baseline below the row's middle
+
+# ── Inventory and finished page ────────────────────────────────────────────────
+INVENTORY_TICK_MM = 4         # side of the "have it" tick box on a card
+INVENTORY_TICK_PT = 0.9       # its line weight
+INVENTORY_TICK_LABEL_X = 5.5 * MM     # where "have it" starts, from the box's left
+INVENTORY_TICK_LABEL_RISE = 3 # pt from the box's top to the label baseline
+INVENTORY_SPOT_PT = 1.1       # the ring that marks where a part's detail is shown
+INVENTORY_SPOT_R = 3.2        # its radius
+INVENTORY_SPOT_DOT_R = 0.8    # and the dot in the middle
+FINISHED_TICK = 7 * MM        # side of the "nothing left over" tick box on the finished page
+FINISHED_TICK_PT = 1.4        # its line weight
+
+# ── Step strip ─────────────────────────────────────────────────────────────────
+STRIP_MAP_H = 36 * MM         # a step with a hole map gets a taller strip
+NEED_W = 76 * MM              # width of the "you need" block
+MAP_X = 78 * MM               # where the hole map starts, from the strip's left
+MAP_W = 34 * MM               # width of the hole map ...
+MAP_UP_W = 10 * MM            # ... of which the column at its right edge holds the "Up" marker
+THUMB_W = 54 * MM             # width of the "Where this is" thumbnail
+HOLE_FACE_LINE_PT = 0.3       # line weight of the hole map's join-face fill (hides the seams between triangles)
+SMALL_GROUP = 4               # a built-so-far group of up to this many parts is named by its parts

@@ -103,7 +103,6 @@ class GuideTextTests(GuideCase):
 
     def test_the_helpers_are_empty_for_a_plain_plan(self):
         self.assertEqual(assembly_pdf.step_warning_lines({"warnings": []}), [])
-        self.assertEqual(assembly_pdf.plan_note_lines({"warnings": [{"kind": "heavy_join", "message": "x"}]}), [])
 
 
 if __name__ == "__main__":

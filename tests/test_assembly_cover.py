@@ -62,6 +62,31 @@ class CoverTests(GuideCase):
         self.assertIn(f"{len(texts)} pages", texts[0])
         self.assertIn("Rough build time: about 45 min", texts[0])    # 3 steps x 5 min + 30 min to cure the side Section
 
+    def test_a_glue_only_cover_has_no_zero_rod_count_but_keeps_the_no_rods_line(self):
+        result, cuts = grid_split()
+        result["pins"] = []
+        for joint_ in result["joints"]:
+            joint_["rods"], joint_["connectors"] = 0, {}
+        _, _, texts = self.cover(result, cuts)
+        self.assertNotRegex(texts[0], r"\b0 rods?\b")
+        self.assertIn("Glue the faces: no rods needed.", texts[0])
+
+    def test_the_cover_lists_each_section_with_the_page_it_starts_on(self):
+        _, pdf, texts = self.cover(*lattice_split())
+        listed = {m.group(1): int(m.group(2)) for m in re.finditer(r"Section ([A-Z]): page (\d+)", texts[0])}
+        expected = {}
+        for number, text in enumerate(texts[1:], start=2):
+            label = re.search(r"Sections? ([A-Z](?:, [A-Z])*) page \d+ of", text)
+            for letter in (label.group(1).split(", ") if label else []):
+                expected.setdefault(letter, number)
+        self.assertEqual(set(expected), set("ABC"))
+        self.assertEqual(listed, expected)
+
+    def test_a_one_section_cover_has_no_table_of_contents(self):
+        _, _, texts = self.cover(*stack_split(3))
+        self.assertNotRegex(texts[0], r"Section [A-Z]: page")
+        self.assertNotIn("Contents", texts[0])
+
     def test_a_longer_build_is_given_in_hours(self):
         _, _, texts = self.cover(*lattice_split())             # 8 steps x 5 min + 2 side Sections x 30 min = 100 min
         self.assertIn("Rough build time: about 1 h 40 min", texts[0])

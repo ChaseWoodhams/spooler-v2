@@ -139,9 +139,9 @@ def _cell(canvas, scene, part: int, label, plate, show_plates: bool, left: float
         if spot is not None:
             mark = assembly_render.Box(rect, picture.view).world(spot)[0]
             canvas.setStrokeGray(0)
-            canvas.setLineWidth(1.1)
-            canvas.circle(mark[0], mark[1], 3.2, stroke=1, fill=0)
-            canvas.circle(mark[0], mark[1], 0.8, stroke=0, fill=1)
+            canvas.setLineWidth(assembly_rules.INVENTORY_SPOT_PT)
+            canvas.circle(mark[0], mark[1], assembly_rules.INVENTORY_SPOT_R, stroke=1, fill=0)
+            canvas.circle(mark[0], mark[1], assembly_rules.INVENTORY_SPOT_DOT_R, stroke=0, fill=1)
     canvas.setFillGray(0)
     canvas.setFont(BOLD, 30)
     canvas.drawString(*number_at, str(part))
@@ -151,10 +151,11 @@ def _cell(canvas, scene, part: int, label, plate, show_plates: bool, left: float
         canvas.setFont(FONT, size)
         canvas.drawString(text_left, text_top - plate_row, fit(f"Plate: {plate}" if plate else NOT_ON_A_PLATE, FONT, size, room))
     canvas.setStrokeGray(0)
-    canvas.setLineWidth(0.9)
-    canvas.rect(text_left, text_top - tick_row, 4 * MM, 4 * MM, stroke=1, fill=0)    # tick box
+    canvas.setLineWidth(assembly_rules.INVENTORY_TICK_PT)
+    tick = assembly_rules.INVENTORY_TICK_MM * MM
+    canvas.rect(text_left, text_top - tick_row, tick, tick, stroke=1, fill=0)    # tick box
     canvas.setFont(FONT, MIN_FONT)
-    canvas.drawString(text_left + 5.5 * MM, text_top - tick_row + 3, "have it")
+    canvas.drawString(text_left + assembly_rules.INVENTORY_TICK_LABEL_X, text_top - tick_row + assembly_rules.INVENTORY_TICK_LABEL_RISE, "have it")
     canvas.drawString(text_left, text_top - size_row, fit(f"Largest: {largest_mm(scene, part)} mm", FONT, MIN_FONT, room))
     for n, line in enumerate(wrap(label_note(label), FONT, MIN_FONT, width - 2 * pad)[:2]):
         canvas.drawString(left + pad, note_top - n * LINE_H, line)
@@ -236,7 +237,7 @@ def draw_last_page(flow, data) -> None:
         draw_overview(canvas, data.scene, (left, caption - 3 * MM - VIEW_H, flow.content.width, VIEW_H), numbers=False, camera=camera)
     canvas.setStrokeGray(0)
     canvas.setFillGray(0)
-    canvas.setLineWidth(1.4)
-    canvas.rect(left, top - 235 * MM, 7 * MM, 7 * MM, stroke=1, fill=0)
+    canvas.setLineWidth(assembly_rules.FINISHED_TICK_PT)
+    canvas.rect(left, top - 235 * MM, assembly_rules.FINISHED_TICK, assembly_rules.FINISHED_TICK, stroke=1, fill=0)
     canvas.setFont(BOLD, 14)
     canvas.drawString(left + 11 * MM, top - 233 * MM, NOTHING_LEFT)
