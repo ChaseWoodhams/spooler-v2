@@ -331,8 +331,6 @@ def _steps(flow: PageFlow, data: GuideData, progress) -> None:
     sections, total, done, camera = data.plan["sections"], max(data.plan["summary"]["steps"], 1), 0, None
     flow.new_page()
     c = flow.canvas
-    for line in plan_note_lines(data.plan):
-        flow.paragraph(f"Note: {line}", FONT, 10, gap=2)
     for index, section in enumerate(sections):
         picture = assembly_render.section_picture(data.scene, section["parts"])
         steps = section["steps"]
