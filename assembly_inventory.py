@@ -63,39 +63,11 @@ def _bubble(canvas, x: float, y: float, text: str, radius: float = 8.5) -> None:
     canvas.drawCentredString(x, y - 3.2, text)
 
 
-def _spread(points: list, radius: float, rect) -> list:
-    """Nudge bubble centres apart (deterministically) so no two overlap and all stay inside `rect`."""
-    x0, y0, w, h = rect
-    placed = []
-    for x, y in points:
-        best = (x, y)
-        for ring in range(0, 12):
-            for step in range(0 if ring == 0 else 8):
-                angle = step * np.pi / 4
-                cx, cy = x + ring * radius * np.cos(angle), y + ring * radius * np.sin(angle)
-                cx, cy = min(max(cx, x0 + radius), x0 + w - radius), min(max(cy, y0 + radius), y0 + h - radius)
-                if all(np.hypot(cx - px, cy - py) >= 2 * radius for px, py in placed):
-                    best = (cx, cy)
-                    break
-            else:
-                continue
-            break
-        placed.append(best)
-    return placed
-
-
-def draw_overview(canvas, scene, rect, numbers: bool = True) -> None:
-    """The finished model in its assembled pose inside `rect` (x, y, w, h in points), with a bubble per part number."""
-    parts = sorted(scene.meshes)
-    picture = assembly_render.section_picture(scene, parts, width=900)
-    x, y, w, h = rect
-    assembly_render.draw_picture(canvas, picture, x, y, w, h)
-    if not numbers:
-        return
-    box = assembly_render.Box(rect, picture.view)
-    centres = [box.world(scene.meshes[p].vertices.mean(axis=0))[0] for p in parts]
-    for part, (cx, cy) in zip(parts, _spread([tuple(c) for c in centres], 9, rect)):
-        _bubble(canvas, cx, cy, str(part))
+def draw_overview(canvas, scene, rect, numbers: bool = True, camera=None) -> None:
+    """The finished model in its assembled pose inside `rect` (x, y, w, h in points), part boundaries heavier than creases,
+    with a bubble per part number."""
+    import assembly_overview
+    assembly_overview.draw_overview(canvas, scene, rect, numbers=numbers, camera=camera)
 
 
 def part_picture(scene, part: int, label, second: bool = False):
@@ -243,14 +215,27 @@ def draw_inventory(flow, data) -> None:
             y -= height
 
 
+VIEW_H = 95 * MM
+VIEW_CAPTIONS = ("View 1: from above, as on the cover.", "View 2: the largest face that View 1 cannot see.")
+
+
 def draw_last_page(flow, data) -> None:
+    """New page: the finished model from two views (the second onto the largest face the first cannot see) and the tick."""
+    import assembly_overview
     flow.new_page()
     top = flow.reserve(flow.content.height)
     canvas, left = flow.canvas, flow.content.left
     canvas.setFillGray(0)
     canvas.setFont(BOLD, 24)
     canvas.drawString(left, top - 10 * MM, "Finished")
-    draw_overview(canvas, data.scene, (left, top - 215 * MM, flow.content.width, 195 * MM), numbers=False)
+    for n, camera in enumerate(assembly_overview.finished_cameras(data.scene)):
+        caption = top - (17 + n * 104) * MM
+        canvas.setFillGray(0)
+        canvas.setFont(BOLD, 11)
+        canvas.drawString(left, caption, VIEW_CAPTIONS[n])
+        draw_overview(canvas, data.scene, (left, caption - 3 * MM - VIEW_H, flow.content.width, VIEW_H), numbers=False, camera=camera)
+    canvas.setStrokeGray(0)
+    canvas.setFillGray(0)
     canvas.setLineWidth(1.4)
     canvas.rect(left, top - 235 * MM, 7 * MM, 7 * MM, stroke=1, fill=0)
     canvas.setFont(BOLD, 14)

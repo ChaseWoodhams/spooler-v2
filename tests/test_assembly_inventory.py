@@ -122,17 +122,18 @@ class InventoryTests(GuideCase):
     def test_page_order_is_cover_rod_inventory_steps_last(self):
         split_id = self.make_split(*lattice_split())
         pages = self.texts(split_id)
-        kind = ["cover" if i == 0 else "rod" if "100 mm" in t and "Parts inventory" not in t else
+        kind = ["cover" if i == 0 else "tree" if t.startswith("Section tree") else "rod" if "100 mm" in t and "Parts inventory" not in t else
                 "inventory" if t.startswith("Parts inventory") else "last" if "left over" in t else "step"
                 for i, t in enumerate(pages)]
         collapsed = [k for i, k in enumerate(kind) if i == 0 or k != kind[i - 1]]
-        self.assertEqual(collapsed, ["cover", "rod", "inventory", "step", "last"])
+        self.assertEqual(collapsed, ["cover", "tree", "rod", "inventory", "step", "last"])
 
     def test_a_glue_only_split_has_no_rod_page_but_the_same_order(self):
         result, cuts = grid_split()
         result["pins"] = []
         pages = self.texts(self.make_split(result, cuts))
-        self.assertTrue(pages[1].startswith("Parts inventory"))
+        self.assertTrue(pages[1].startswith("Section tree"))      # the Sections still nest in a glue-only split
+        self.assertTrue(pages[2].startswith("Parts inventory"))
         self.assertIn("left over", pages[-1])
 
     def test_the_last_page_has_the_nothing_left_over_tick(self):

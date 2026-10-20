@@ -125,3 +125,24 @@ THIN_WIDTH_MM = 12.0          # a part whose middle dimension is under this gets
 TALL_ASPECT = 3.0             # a part this many times longer than wide, or any thin part, gets a taller cell
 TALL_FACTOR = 1.6             # a tall cell is this many times an ordinary row height
 STRIP_MM = 14.0               # height of the strip of all parts at one common scale
+
+# ── Cover, Section tree and finished page ──────────────────────────────────────
+SECTION_COLOURS = (           # one per Section in letter order (colour-blind safe, dark enough to read in greyscale); the
+    (0.00, 0.35, 0.65),       # Section's letter is drawn beside its colour, so two Sections never rely on colour alone
+    (0.80, 0.30, 0.00),
+    (0.00, 0.50, 0.35),
+    (0.60, 0.25, 0.50),
+    (0.75, 0.50, 0.00),
+    (0.20, 0.55, 0.80),
+    (0.45, 0.30, 0.15),
+)
+OVERVIEW_BOUNDARY_GREY = 0.1  # a part boundary on the cover and finished page ...
+OVERVIEW_BOUNDARY_STEPS = 2   # ... is drawn this many JOIN_EDGE_STEPs heavier than a surface crease
+OVERVIEW_PX = 900             # width of the depth buffer of the cover and finished views
+BADGE_OVERVIEW_RADIUS = 9.0   # part number and Section letter badges on the cover
+BADGE_LEADER_MIN = 0.5        # a badge moved further than this share of its radius from its part gets a leader line
+FACE_ALIGN = 0.9              # a face counts as facing an axis when its normal is this close to it
+UNSEEN_TILT = 0.4             # the second finished view leans toward the sides the first one sees by this much
+EXPOSED_PX = 300              # width of the depth buffer the exposed area of a face is measured in
+BUILD_MIN_PER_STEP = 5        # rough build time: minutes for each step ...
+CURE_MIN_PER_SIDE_SECTION = 30    # ... and to let each side Section cure before it is joined
