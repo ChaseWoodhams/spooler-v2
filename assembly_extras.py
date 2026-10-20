@@ -13,6 +13,7 @@ import numpy as np
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
 import assembly_render as render
+import assembly_rules as rules
 from assembly_bom import cut_length, mm_text
 
 MM = render.MM
@@ -22,14 +23,8 @@ SIZE = render.MIN_FONT                # nothing smaller is printed
 STRIP_MIN_H = 21 * MM                 # a step without a hole map keeps two steps to a page
 STRIP_MAP_H = 34 * MM                 # a step with a hole map gets a taller strip
 STRIP_GAP = 2 * MM
-ZOOM_MM = 26.0                        # the zoom circle is about this wide
-ZOOM_RADIUS = ZOOM_MM * MM / 2
-ZOOM_CLEAR = 3.0                      # points kept between the circle and the nearest rod
-ZOOM_LABEL = 12.0                     # room under the circle for its "Zoom 3x" label
 HOLE_MAP_MIN_RODS = 5
 NEED_W, MAP_X, MAP_W, THUMB_W = 76 * MM, 78 * MM, 30 * MM, 50 * MM
-THUMB_CAMERA = 0                      # the thumbnail is always the finished pose from the first diagonal view
-DARK, LIGHT = (0.35, 0.5), (0.82, 0.3)
 
 
 def attach(art, scene, section_parts) -> None:
@@ -38,6 +33,11 @@ def attach(art, scene, section_parts) -> None:
 
 
 # ── Zoom circle ────────────────────────────────────────────────────────────────
+
+def zoom_radius() -> float:
+    """Radius of the zoom circle in points (rule ZOOM_MM is its width in mm)."""
+    return rules.ZOOM_MM * MM / 2
+
 
 def segment_distance(point, a, b) -> float:
     p, a, b = np.asarray(point, float), np.asarray(a, float), np.asarray(b, float)
@@ -65,13 +65,13 @@ def zoom_circle(art, frame):
     ends = np.vstack([np.vstack([s, e]) for s, e, _ in rods])
     focus = ends.mean(axis=0)
     spread = float(np.linalg.norm(ends - focus, axis=1).max())
-    magnification = float(np.floor(np.clip(0.8 * ZOOM_RADIUS / max(spread, 6.0), 2.0, 8.0) * 2) / 2)
+    magnification = float(np.floor(np.clip(rules.ZOOM_FILL * zoom_radius() / max(spread, rules.ZOOM_MIN_SPREAD_PT), *rules.ZOOM_RANGE) * 2) / 2)
     box = render.Box(frame, art.view)
     ink = render._ink_points(box, art.runs_one)
     badge = np.array([frame[0] + 9, frame[1] + frame[3] - 9])
-    r = ZOOM_RADIUS
+    r = zoom_radius()
     xs = np.linspace(frame[0] + r + 3, frame[0] + frame[2] - r - 3, 14)
-    ys = np.linspace(frame[1] + r + 3 + ZOOM_LABEL, frame[1] + frame[3] - r - 3, 8)
+    ys = np.linspace(frame[1] + r + 3 + rules.ZOOM_LABEL_PT, frame[1] + frame[3] - r - 3, 8)
     corners = np.array([[frame[0], frame[1]], [frame[0] + frame[2], frame[1]], [frame[0], frame[1] + frame[3]],
                         [frame[0] + frame[2], frame[1] + frame[3]]])
     best, best_score = None, None
@@ -80,7 +80,7 @@ def zoom_circle(art, frame):
     for x in xs:
         for y in ys:
             centre = np.array([x, y])
-            if any(segment_distance(centre, s, e) < r + w / 2 + ZOOM_CLEAR for s, e, w in rods):
+            if any(segment_distance(centre, s, e) < r + w / 2 + rules.ZOOM_CLEAR_PT for s, e, w in rods):
                 continue
             covered = int((np.linalg.norm(ink - centre, axis=1) < r).sum()) if len(ink) else 0
             score = covered + (200 if np.linalg.norm(badge - centre) < r + 10 else 0) \
@@ -105,8 +105,8 @@ def draw_zoom(canvas, art, frame) -> None:
     gap = float(np.linalg.norm(toward))
     if gap > r + 4:                                       # a thin leader from the circle to the rods it magnifies
         edge = np.array([cx, cy]) + toward / gap * r
-        canvas.setStrokeGray(0.45)
-        canvas.setLineWidth(0.5)
+        canvas.setStrokeGray(rules.ZOOM_LEADER[0])
+        canvas.setLineWidth(rules.ZOOM_LEADER[1])
         canvas.line(*edge, *(focus - toward / gap * 2))
     canvas.saveState()
     clip = canvas.beginPath()
@@ -124,19 +124,19 @@ def draw_zoom(canvas, art, frame) -> None:
             pts = box.px(np.array([a, b]))
             if (pts.min(axis=0) <= focus + reach).all() and (pts.max(axis=0) >= focus - reach).all():
                 near.append((a, b))
-    render.stroke_runs(canvas, near, box, render.RECEIVER[0], render.RECEIVER[1] * 1.4 / k)
+    render.stroke_runs(canvas, near, box, rules.RECEIVER[0], rules.RECEIVER[1] * rules.ZOOM_LINE_SCALE / k)
     render._draw_rods(canvas, box, rods)
     canvas.restoreState()
     canvas.setStrokeGray(0)
-    canvas.setLineWidth(0.9)
+    canvas.setLineWidth(rules.ZOOM_RING_PT)
     canvas.circle(cx, cy, r, stroke=1, fill=0)
     label = f"Zoom {k:g}x"
     width = stringWidth(label, BOLD, SIZE)
     canvas.setFillGray(1)
-    canvas.rect(cx - width / 2 - 2, cy - r - ZOOM_LABEL + 1, width + 4, SIZE + 2, stroke=0, fill=1)
+    canvas.rect(cx - width / 2 - 2, cy - r - rules.ZOOM_LABEL_PT + 1, width + 4, SIZE + 2, stroke=0, fill=1)
     canvas.setFillGray(0)
     canvas.setFont(BOLD, SIZE)
-    canvas.drawCentredString(cx, cy - r - ZOOM_LABEL + 3, label)
+    canvas.drawCentredString(cx, cy - r - rules.ZOOM_LABEL_PT + 3, label)
 
 
 def draw_step_extras(canvas, art, left: float, top: float, width: float) -> None:
@@ -272,9 +272,9 @@ def _thumbnail(scene):
     """The whole model in the finished pose, drawn once per scene and restyled per step."""
     if not hasattr(scene, "_thumbnail"):
         parts = sorted(scene.meshes)
-        view = render.View(render.camera_candidates()[THUMB_CAMERA], np.vstack([scene.corners(p) for p in parts]),
+        view = render.View(render.camera_candidates()[rules.THUMB_CAMERA], np.vstack([scene.corners(p) for p in parts]),
                            width=520, aspect=(0.8, 1.6))
-        scene._thumbnail = (view, view.render(scene, [(p, p, np.zeros(3)) for p in parts], min_bit_px=12))
+        scene._thumbnail = (view, view.render(scene, [(p, p, np.zeros(3)) for p in parts], min_bit_px=rules.PICTURE_MIN_BIT_PX))
     return scene._thumbnail
 
 
@@ -290,10 +290,10 @@ def draw_thumbnail(canvas, art, x: float, top: float, w: float, h: float) -> Non
     moving, section = set(art.mover), set(art.extras.get("section_parts") or ()) | set(art.mover)
     for part in sorted(runs):
         if part not in moving:
-            render.stroke_runs(canvas, runs[part], box, *(DARK if part in section else LIGHT))
+            render.stroke_runs(canvas, runs[part], box, *(rules.THUMB_SECTION if part in section else rules.THUMB_REST))
     for part in sorted(moving):
-        render.stroke_runs(canvas, runs[part], box, 1.0, render.BOLD + 0.8)
-        render.stroke_runs(canvas, runs[part], box, 0.0, render.BOLD)
+        render.stroke_runs(canvas, runs[part], box, 1.0, rules.BOLD + rules.THUMB_HALO)
+        render.stroke_runs(canvas, runs[part], box, 0.0, rules.BOLD)
 
 
 def draw_strip(canvas, art, left: float, top: float, width: float) -> None:
