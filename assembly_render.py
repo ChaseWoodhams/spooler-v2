@@ -159,6 +159,33 @@ class Scene:
             near |= _points_in_triangles(flat + shift, against)
         return edges[near]
 
+    def is_curved(self, part: int) -> bool:
+        """A curved shell rather than a flat-faced part: enough of its bent mesh edges bend gently (not a crease)."""
+        angles = np.degrees(self.meshes[part].face_adjacency_angles)
+        if not len(angles):
+            return False
+        bent = angles > rules.CURVE_MIN_DEG                    # flat neighbours (a big flat face's triangles) say nothing
+        if not bent.any():
+            return False
+        return float((angles[bent] <= rules.CREASE_DEG).mean()) >= rules.CURVED_SHARE
+
+    def depth_cue(self, part: int, view: "View", spacing_px: float) -> np.ndarray:
+        """Hatch lines (n, 2, 3, world) over the surface of a curved part that turns away from the camera: parallel lines
+        `spacing_px` apart on the page, at +DEPTH_ANGLE_DEG on the outside and the opposite angle on the inside (seen through
+        an open shell). Nothing random: the same part from the same view gives the same lines."""
+        mesh = self.meshes[part]
+        if not self.is_curved(part):
+            return np.zeros((0, 2, 3))
+        facing = mesh.face_normals @ view.camera
+        out = []
+        for inside in (False, True):
+            chosen = np.where((facing < 0) if inside else (facing >= 0))[0]
+            chosen = chosen[np.abs(facing[chosen]) < rules.DEPTH_GRAZE]
+            angle = np.radians(-rules.DEPTH_ANGLE_DEG if inside else rules.DEPTH_ANGLE_DEG)
+            across = -np.sin(angle) * view.R[0] + np.cos(angle) * view.R[1]
+            out.append(_slice_triangles(mesh.vertices[mesh.faces[chosen]], across, spacing_px / view.scale))
+        return np.concatenate(out)
+
     def feature_edges(self, part: int, toward_camera: np.ndarray) -> np.ndarray:
         mesh = self.meshes[part]
         pairs, normals = mesh.face_adjacency, mesh.face_normals
@@ -169,6 +196,29 @@ class Scene:
     def corners(self, part: int, offset=0.0) -> np.ndarray:
         box = self.meshes[part].bounds
         return np.array([[x, y, z] for x in box[:, 0] for y in box[:, 1] for z in box[:, 2]]) + offset
+
+
+def _slice_triangles(tris: np.ndarray, across: np.ndarray, step: float) -> np.ndarray:
+    """Where the planes `x . across = k * step` cut the triangles (n, 3, 3): the cut segments (m, 2, 3)."""
+    if not len(tris):
+        return np.zeros((0, 2, 3))
+    t = tris @ across
+    first, last = np.ceil(t.min(axis=1) / step).astype(int), np.floor(t.max(axis=1) / step).astype(int)
+    count = np.maximum(last - first + 1, 0)
+    owner = np.repeat(np.arange(len(tris)), count)
+    k = first[owner] + np.arange(count.sum()) - np.repeat(np.cumsum(count) - count, count)
+    tri, tv, level = tris[owner], t[owner], (k * step)[:, None]
+    found = np.zeros((len(owner), 3, 3))
+    hit = np.zeros((len(owner), 3), bool)
+    for e, (a, b) in enumerate(((0, 1), (1, 2), (2, 0))):
+        da, db = tv[:, a:a + 1] - level, tv[:, b:b + 1] - level
+        w = da / np.where(da == db, 1.0, da - db)
+        found[:, e] = tri[:, a] + (tri[:, b] - tri[:, a]) * w
+        hit[:, e] = (da * db < 0)[:, 0]
+    keep = hit.sum(axis=1) == 2
+    order = np.argsort(~hit[keep], axis=1, kind="stable")[:, :2]
+    pts = found[keep]
+    return np.stack([np.take_along_axis(pts, order[:, :1, None], 1)[:, 0], np.take_along_axis(pts, order[:, 1:2, None], 1)[:, 0]], axis=1)
 
 
 def unit(v) -> np.ndarray:
@@ -332,7 +382,7 @@ class View:
                     last = [owner[a], a, b]
                     spans.append(last)
             runs = [(samples[a, :2], samples[b - 1, :2]) for _, a, b in spans if b - a >= 2]
-            out[key] = drop_small_bits(runs, min_bit_px)
+            out[key] = drop_small_bits(runs, rules.DEPTH_MIN_BIT_PX if isinstance(key, tuple) and key[0] == "d" else min_bit_px)
         return out
 
 
@@ -374,6 +424,9 @@ class StepArt:
     extras: dict = field(default_factory=dict)    # room for later tickets' per-step material (zoom, hole map...)
     join_one: dict = field(default_factory=dict)  # frame 1: {("r", part): runs} of the join edge of the receiving face
     join_two: dict = field(default_factory=dict)  # frame 2: {("m", part): runs} of the join edge of the moving unit
+    cue_one: dict = field(default_factory=dict)   # frame 1: {("r", part): runs} of the depth cue of curved receiving parts
+    cue_two: dict = field(default_factory=dict)   # frame 2: {("m", part): runs} of the depth cue of curved moving parts (ghosts get none)
+    cue_spacing_px: float = 0.0                   # distance between the hatch lines, in view pixels
 
 
 @dataclass
@@ -461,13 +514,19 @@ def _prepare_posed_step(scene: Scene, step: dict, camera) -> StepArt:
     if face is not None:
         joins_one = {("j", p): scene.join_edges(p, face, face.mover, u) for p in touching}
         joins_two = {("j", p): scene.join_edges(p, face, face.receiver, u) for p in mover}
-    runs_one = view.render(scene, items + [(key, key[1], np.zeros(3)) for key in joins_one], lines=joins_one)
+    spacing = cue_spacing_px(view)
+    cues_one = {("d", p): scene.depth_cue(p, view, spacing) for p in receiver if scene.is_curved(p)}
+    cues_two = {("d", p): scene.depth_cue(p, view, spacing) for p in mover if scene.is_curved(p)}
+    runs_one = view.render(scene, items + [(key, key[1], np.zeros(3)) for key in {**joins_one, **cues_one}], lines={**joins_one, **cues_one})
     keyed = [(("t" if p in touching else "r", p), p, o) for (_, p, o) in items]
-    runs_two = view.render(scene, keyed + moving + [(key, key[1], offset) for key in joins_two], lines=joins_two)
+    runs_two = view.render(scene, keyed + moving + [(key, key[1], offset) for key in {**joins_two, **cues_two}], lines={**joins_two, **cues_two})
     join_one = {("r", key[1]): runs_one.pop(key) for key in joins_one}
     join_two = {("m", key[1]): runs_two.pop(key) for key in joins_two}
+    cue_one = {("r", key[1]): runs_one.pop(key) for key in cues_one}
+    cue_two = {("m", key[1]): runs_two.pop(key) for key in cues_two}
     return StepArt(step, view, u, receiver, mover, touching, offset, pins, runs_one, runs_two,
-                   face=face, label=step.get("section") or "", join_one=join_one, join_two=join_two)
+                   face=face, label=step.get("section") or "", join_one=join_one, join_two=join_two,
+                   cue_one=cue_one, cue_two=cue_two, cue_spacing_px=spacing)
 
 
 # ── Camera quality: pose, scored fallback, close-up ────────────────────────────
@@ -981,7 +1040,8 @@ def _ink_points(box: Box, runs_by_key: dict) -> np.ndarray:
 @dataclass
 class Stroke:
     """One set of lines of a frame as it is drawn: `role` is "r" (receiver), "t" (placed, touching the moving unit), "p"
-    (placed, clear of it) or "m" (the moving unit, where grey 1.0 is its white halo); `kind` is "crease" or "join"."""
+    (placed, clear of it) or "m" (the moving unit, where grey 1.0 is its white halo); `kind` is "crease", "join" or "depth" (the hatching that shows a
+    curved part's inside and outside; placed parts never have it)."""
     role: str
     part: int
     kind: str
@@ -990,10 +1050,38 @@ class Stroke:
     runs: list
 
 
+def cue_style() -> tuple:
+    """(grey, weight) of the depth cue: the rule's grey held at or above the floor."""
+    return max(rules.DEPTH_GREY, rules.DEPTH_GREY_FLOOR), rules.DEPTH_WEIGHT_PT
+
+
+def cue_spacing_px(view: View) -> float:
+    """Hatch spacing in view pixels: rules.DEPTH_SPACING_PT on a reference frame, widened so the cue's darkness stays
+    within rules.DEPTH_MAX_DARKNESS."""
+    grey, weight = cue_style()
+    points = max(rules.DEPTH_SPACING_PT, (1 - grey) * weight / rules.DEPTH_MAX_DARKNESS)
+    frame_w = rules.DEPTH_REF_FRAME_PT
+    frame_h = min(max(frame_w * view.H / view.W, FRAME_MIN_H), FRAME_MAX_H)      # as layout_frames sizes a frame
+    return points / min(frame_w / view.W, frame_h / view.H)
+
+
+def cue_darkness(art: StepArt, width: float) -> float:
+    """The share of its area the depth cue blackens in a step `width` points wide: (1 - grey) x weight / line spacing."""
+    grey, weight = cue_style()
+    k = Box(layout_frames(art, width)[0], art.view).k
+    return (1 - grey) * weight / (art.cue_spacing_px * k)
+
+
+def _cue_strokes(role: str, cues: dict) -> list:
+    grey, weight = cue_style()
+    return [Stroke(role, key[1], "depth", grey, weight, runs) for key, runs in cues.items()]
+
+
 def frame_one_strokes(art: StepArt) -> list:
     """What frame 1 draws, in order: the receiving unit's lines, then the join edge one weight step heavier."""
     grey, weight = rules.RECEIVER
     strokes = [Stroke("r", key[1], "crease", grey, weight, runs) for key, runs in art.runs_one.items()]
+    strokes += _cue_strokes("r", art.cue_one)
     return strokes + [Stroke("r", key[1], "join", grey, weight + rules.JOIN_EDGE_STEP, runs) for key, runs in art.join_one.items()]
 
 
@@ -1009,6 +1097,7 @@ def frame_two_strokes(art: StepArt) -> list:
         if role == "m":
             strokes.append(Stroke("m", part, "crease", 1.0, rules.BOLD + rules.HALO, runs))
             strokes.append(Stroke("m", part, "crease", 0.0, rules.BOLD, runs))
+    strokes += _cue_strokes("m", art.cue_two)
     for key, runs in art.join_two.items():
         strokes.append(Stroke("m", key[1], "join", 0.0, rules.BOLD + rules.JOIN_EDGE_STEP, runs))
     return strokes

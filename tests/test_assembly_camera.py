@@ -695,3 +695,93 @@ class StrayMarkTests(unittest.TestCase):
     def test_tiny_marks_set_close_together_like_a_part_number_are_kept(self):
         scene = self.scene([(10, 10, 0.5), (12.5, 10, 0.5), (15, 10, 0.5)])
         self.assertGreater(crease_points_near(scene, 1, 12.75, 10.25, reach=5.0), 0)
+
+
+def curved_scene():
+    """Part 1 is a round drum (curved sides) from x 0 to 20, part 2 a box that joins its x = 0 end, part 3 a second drum
+    clear of the join (a placed part in frame 2)."""
+    import trimesh
+    def drum(x0, y):
+        mesh = trimesh.creation.cylinder(radius=12.0, height=20.0, sections=48)
+        mesh.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [0, 1, 0]))
+        mesh.apply_translation([x0 + 10.0, y, 12.0])
+        return mesh.vertices, mesh.faces
+    boxes = {1: None, 2: (-10, -12, 0, 0, 12, 24), 3: None}
+    result = {"parts": [part(n, (0, 0, 0, 1, 1, 1)) for n in boxes], "joints": [joint(2, 1, 1)],
+              "pins": [{"p": [-6.0, 0.0, 12.0], "axis": [1.0, 0, 0], "connector": "2 mm rod", "diameter": 2.0, "hole_diameter": 2.34,
+                        "depth": 6.5, "parts": [2, 1]}]}
+    return render.Scene.from_split(result, [drum(0, 0), box_mesh(boxes[2]), drum(0, 50)])
+
+
+STEP_WIDTH_PT = 510.0       # the width the guide gives a step on Letter paper
+
+
+@unittest.skipUnless(GEOMETRY, "geometry libraries not installed")
+class DepthCueTests(unittest.TestCase):
+    """Curved parts get a light depth cue taken from the mesh normals: same part, same cue; never darker than the stated
+    limit; flat parts and the ghosted placed parts get none. Facts are read off the art's strokes, never off pixels."""
+
+    def art(self, scene=None):
+        scene = scene or curved_scene()
+        step = step_of((1, 3), [2], (1.0, 0.0, 0.0))
+        return render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+
+    def cues(self, strokes):
+        return [s for s in strokes if s.kind == "depth"]
+
+    def test_a_curved_receiver_has_a_cue_in_frame_one(self):
+        cues = self.cues(render.frame_one_strokes(self.art()))
+        self.assertEqual([s.part for s in cues], [1, 3], "both receiving drums, not the flat mover")
+        self.assertTrue(all(s.runs for s in cues))
+
+    def test_the_same_part_gives_the_same_cue_every_time(self):
+        a, b = self.art(), self.art()
+        self.assertEqual([(s.part, np.asarray(s.runs).tolist()) for s in self.cues(render.frame_one_strokes(a))],
+                         [(s.part, np.asarray(s.runs).tolist()) for s in self.cues(render.frame_one_strokes(b))])
+
+    def test_the_cue_is_lighter_than_the_creases_and_never_darker_than_the_limit(self):
+        art = self.art()
+        for s in self.cues(render.frame_one_strokes(art)):
+            self.assertGreaterEqual(s.grey, rules.DEPTH_GREY_FLOOR)
+            self.assertLess(s.weight, rules.RECEIVER[1])
+        self.assertLessEqual(render.cue_darkness(art, STEP_WIDTH_PT), rules.DEPTH_MAX_DARKNESS)
+
+    def test_the_ink_actually_drawn_stays_under_the_limit(self):
+        art = self.art()
+        frame = render.layout_frames(art, STEP_WIDTH_PT)[0]
+        box = render.Box(frame, art.view)
+        every = [r for runs in art.runs_one.values() for r in runs]
+        lo, hi = render._bounds_pt(box, every)
+        area = float(np.prod(hi - lo))
+        for s in self.cues(render.frame_one_strokes(art)):
+            ink = sum(np.hypot(*(box.px(np.array([a, b]))[1] - box.px(np.array([a, b]))[0])) for a, b in s.runs) * s.weight * (1 - s.grey)
+            self.assertLessEqual(ink / area, rules.DEPTH_MAX_DARKNESS)
+
+    def test_a_denser_spacing_than_the_limit_allows_is_widened(self):
+        with mock.patch.object(rules, "DEPTH_SPACING_PT", 0.5):
+            art = self.art()
+        self.assertLessEqual(render.cue_darkness(art, STEP_WIDTH_PT), rules.DEPTH_MAX_DARKNESS)
+
+    def test_the_moving_unit_gets_the_cue_in_frame_two_but_placed_parts_do_not(self):
+        scene = curved_scene()
+        art = self.art(scene)
+        self.assertEqual(self.cues(render.frame_two_strokes(art)), [], "the mover is a flat box and the drums are ghosts")
+        step = step_of((3,), [1], (1.0, 0.0, 0.0))
+        step["parts"], step["receiver"] = (1,), (2, 3)
+        moved = render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+        cues = self.cues(render.frame_two_strokes(moved))
+        self.assertEqual({s.part for s in cues}, {1})
+        self.assertEqual({s.role for s in cues}, {"m"})
+
+    def test_flat_parts_get_no_cue(self):
+        scene = make_scene(OPEN)
+        step = step_of((1,), [2], (1.0, 0.0, 0.0))
+        art = render.prepare_step(scene, step, render.choose_camera(scene, step, None))
+        self.assertEqual(self.cues(render.frame_one_strokes(art)) + self.cues(render.frame_two_strokes(art)), [])
+
+    def test_the_cue_is_drawn_with_the_reported_grey(self):
+        art = self.art()
+        with mock.patch.object(rules, "DEPTH_GREY", 0.77):
+            canvas = RecordingCanvas()
+            render.draw_frame_one(canvas, art, (0.0, 0.0, 300.0, 200.0))
+        self.assertIn(0.77, canvas.greys)
