@@ -45,7 +45,7 @@ class BuiltSoFarTests(GuideCase):
         splits.edit_plan(split_id, {"op": "move", "parts": [18], "to": [19]})
         self.generate(split_id)
         body = body_of(self, split_id)
-        lists = re.findall(r"parts ((?:\d+, )+\d+)", body)
+        lists = re.findall(r"parts ((?:\d+, )+\d+)(?!\d| rod)", body)  # the tree page ends a list with ", 46 rods"
         self.assertTrue(any("18" in found for found in lists))
         for found in lists:
             self.assertTrue(all(1 <= int(n) <= 25 for n in found.split(", ")), found)
