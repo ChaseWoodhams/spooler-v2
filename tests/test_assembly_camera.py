@@ -631,6 +631,13 @@ class GhostAndJoinEdgeTests(unittest.TestCase):
         self.assertEqual(len(weights), 2)
         self.assertAlmostEqual(weights[1] - weights[0], rules.JOIN_EDGE_STEP)
 
+    def test_a_moving_part_away_from_the_join_face_has_no_join_edge(self):
+        # parts 2 and 4 move together; only part 2 meets the join face of part 1, part 4 sits behind it
+        scene = make_scene({**OPEN, 4: (-20, 0, 0, -10, 10, 10)})
+        art = render.prepare_step(scene, step_of((1,), [2, 4], (1.0, 0.0, 0.0)), render.unit([-1.0, 1.0, 0.8]))
+        self.assertEqual(art.join_two[("m", 4)], [])
+        self.assertTrue(art.join_two[("m", 2)])
+
     def test_the_drawn_strokes_are_the_ones_reported(self):
         art = self.art()
         with mock.patch.object(rules, "PLACED", (0.5, 0.31)):

@@ -307,6 +307,9 @@ class View:
         out = {}
         for key, part, offset in items:
             own = lines[key] if key in lines else scene.feature_edges(part, self.camera)
+            if not len(own):                         # e.g. a part of the moving unit away from the join plane: no join edge
+                out[key] = []
+                continue
             edges = self.project(own.reshape(-1, 3) + offset).reshape(-1, 2, 3)
             length = np.linalg.norm(edges[:, 1, :2] - edges[:, 0, :2], axis=1)
             count = np.maximum(2, np.ceil(length / rules.SAMPLE_PX).astype(int) + 1)
