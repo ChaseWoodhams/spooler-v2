@@ -24,7 +24,7 @@ def tools_lines(kind: str) -> list:
         "Glue for plastic: a gel cyanoacrylate for a quick hold or a two-part epoxy for strength",
         "Masking tape and a marker for the Section letters",
         "A few rubber bands or clamps",
-        f"Dry-fit every part and {kind} before gluing, with no glue, to check that each one goes in.",
+        f"Dry-fit every part and {kind} before gluing. Test-fit every {kind} with no glue to check that it goes in.",
         "Hold each glued join until it grips. Let the glue cure as its label says before you join a Section to the rest.",
     ]
 
