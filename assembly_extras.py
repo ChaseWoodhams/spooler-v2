@@ -76,9 +76,25 @@ def _round_half(value: float, up: bool = False) -> float:
     return float((np.ceil if up else np.floor)(value * 2) / 2)
 
 
-def _rod_share(art, ppm: float, r: float) -> float:
-    """How much of the circle's width the rods' own widths would cover at this magnification."""
-    return sum(render.rod_width(float(pin["diameter"]), ppm) for pin in art.pins) / (2 * r)
+def _rod_share(art, box, ppm: float, r: float, offsets) -> float:
+    """How much of the circle's width the rods standing in it would cover side by side: the union of their widths across
+    the way they point on the page, over the circle's diameter. `offsets` is each rod's offset from the circle's centre in
+    the circle, in points. Rods seen end on cover nothing across."""
+    way = box.world(art.direction)[0] - box.world(np.zeros(3))[0]
+    if np.linalg.norm(way) < 1e-6:
+        return 0.0
+    across = np.array([-way[1], way[0]]) / np.linalg.norm(way)
+    spans = []
+    for pin, offset in zip(art.pins, offsets):
+        if np.linalg.norm(offset) <= r:
+            centre, half = float(offset @ across), render.rod_width(float(pin["diameter"]), ppm) / 2
+            spans.append((max(centre - half, -r), min(centre + half, r)))
+    covered, end = 0.0, -np.inf
+    for lo, hi in sorted(spans):
+        if hi > lo:
+            covered += hi - max(lo, end)
+            end = hi
+    return covered / (2 * r)
 
 
 def zoom_factor(art, frame) -> float:
@@ -94,9 +110,11 @@ def zoom_factor(art, frame) -> float:
     k = _round_half(r / max(reach, 1e-6))
     if len(holes) > 1:
         gaps = np.linalg.norm(holes[:, None] - holes[None], axis=2)
-        k = min(k, _round_half(rules.ZOOM_HOLE_GAP_PT / max(float(gaps[gaps > 1e-6].min()), 1e-6), up=True))
+        gaps = gaps[gaps > 1e-6]
+        if len(gaps):
+            k = min(k, _round_half(rules.ZOOM_HOLE_GAP_PT / float(gaps.min()), up=True))
     k = float(np.clip(k, *rules.ZOOM_RANGE))
-    while k > rules.ZOOM_FLOOR and _rod_share(art, ppm * k, r) > rules.ZOOM_MAX_ROD_SHARE:
+    while k > rules.ZOOM_FLOOR and _rod_share(art, box, ppm * k, r, (holes - focus) * k) > rules.ZOOM_MAX_ROD_SHARE:
         k = max(k - 0.5, rules.ZOOM_FLOOR)
     return k
 
@@ -164,7 +182,8 @@ def zoom_facts(art, frame) -> "dict | None":
     gap = float("inf")
     if len(holes) > 1:
         gaps = np.linalg.norm(holes[:, None] - holes[None], axis=2)
-        gap = float(gaps[gaps > 1e-6].min())
+        gaps = gaps[gaps > 1e-6]
+        gap = float(gaps.min()) if len(gaps) else gap
     face_shown = False
     if spec.face is not None:
         face = spec.face
@@ -175,7 +194,7 @@ def zoom_facts(art, frame) -> "dict | None":
             pa, pb = (lens.world(face.plane * u + x * face.e1 + y * face.e2)[0] for x, y in (a, b))
             face_shown = face_shown or segment_distance(lens.centre, pa, pb) < r
     return {"factor": lens.k, "holes_shown": int(inside.sum()), "hole_gap_pt": gap, "face_shown": face_shown,
-            "rod_share": _rod_share(art, lens.pt_per_mm, r)}
+            "rod_share": _rod_share(art, lens.box, lens.pt_per_mm, r, holes - lens.centre)}
 
 
 def draw_zoom(canvas, art, frame) -> "dict | None":

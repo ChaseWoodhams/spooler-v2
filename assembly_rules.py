@@ -78,8 +78,8 @@ ZOOM_LABEL_PT = 12.0          # room under the circle for its "Zoom 3x" label
 ZOOM_RANGE = (2.0, 8.0)       # the magnification is kept between these
 ZOOM_MARGIN_MM = 3.0          # the circle shows this much neighbouring surface round the holes
 ZOOM_HOLE_GAP_PT = 24.0       # neighbouring holes are at least this far apart inside the circle
-ZOOM_MAX_ROD_SHARE = 0.5      # the rods may cover this share of the circle's width, or it reads as a barcode of bars
-ZOOM_FLOOR = 1.0              # the barcode rule may lower the magnification down to this
+ZOOM_MAX_ROD_SHARE = 0.8      # side by side, the rods may cover this share of the circle's width, or it reads as a barcode of bars
+ZOOM_FLOOR = 1.5              # the barcode rule may lower the magnification down to this
 ZOOM_HOLE_SIDES = 24          # a hole is drawn as a polygon with this many sides
 
 CAMERA_ELEVATION = 0.8        # the diagonal views look down (or up) at this height against a unit sideways

@@ -355,13 +355,13 @@ class ZoomCloseUpTests(unittest.TestCase):
         self.assertIn(f"Zoom {k:g}x", canvas.texts)
 
     def test_a_circle_that_would_be_only_bars_gets_a_lower_factor(self):
-        art = self.art(gap=1.2, count=4)
-        with mock.patch.object(rules, "ZOOM_MAX_ROD_SHARE", 10.0):
-            loose = assembly_extras.zoom_facts(art, self.FRAME)
-        tight = assembly_extras.zoom_facts(art, self.FRAME)
-        self.assertGreater(loose["rod_share"], rules.ZOOM_MAX_ROD_SHARE)
+        art = self.art(gap=4.0, count=4)
+        loose = assembly_extras.zoom_facts(art, self.FRAME)
+        self.assertGreater(loose["rod_share"], 0.3, "the rods fill a good part of the circle's width")
+        with mock.patch.object(rules, "ZOOM_MAX_ROD_SHARE", 0.3):
+            tight = assembly_extras.zoom_facts(art, self.FRAME)
         self.assertLess(tight["factor"], loose["factor"])
-        self.assertLessEqual(tight["rod_share"], rules.ZOOM_MAX_ROD_SHARE + 1e-9)
+        self.assertLessEqual(tight["rod_share"], 0.3)
 
     def test_the_circle_draws_the_hole_outlines_and_the_face(self):
         art = self.art(mid=(50.0, 5.0))                   # close to the bottom edge of the face, so the circle holds a piece of it
