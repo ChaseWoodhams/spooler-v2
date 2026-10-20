@@ -41,33 +41,19 @@ try:
 except ImportError:  # meshes are then drawn undecimated
     m3d = None
 
+import assembly_rules as rules
+
 MM = mm
 UP = np.array([0.0, 0.0, 1.0])
 MIN_FONT = 9
 
-DECIMATE_MM = 0.25            # part meshes are simplified to this tolerance before drawing
-CREASE_DEG = 35.0
-BIAS = 0.0035                 # depth-test bias as a share of the view diagonal
-BRIDGE_PX = 12                # silhouette gaps up to this are bridged
-MIN_BIT_PX = 30               # disconnected bits shorter than this are dropped
-RENDER_PX = 1200              # width of a frame's depth buffer (kept small enough for a quick run)
-SAMPLE_PX = 0.5               # spacing of the visibility samples along an edge
-
-RECEIVER = (0.25, 0.7)        # grey, weight in frame 1
-TOUCHING = (0.55, 0.35)       # placed parts touching the moving unit, frame 2
-PLACED = (0.8, 0.2)           # every other placed part, frame 2
-BOLD = 1.2                    # the moving unit, black with a white halo
-HALO = 1.8
-MIN_ROD_PT = 15.0             # rods stand out of the face at least this long, so they stay visible
-MIN_ARROW_PT = 46.0
-FACE_TOLERANCE_MM = 0.5       # vertices this close to the join plane belong to the join face
-
 
 # ── Geometry ───────────────────────────────────────────────────────────────────
 
-def decimated(vertices, triangles, tolerance: float = DECIMATE_MM) -> trimesh.Trimesh:
+def decimated(vertices, triangles, tolerance: "float | None" = None) -> trimesh.Trimesh:
     """The part mesh simplified to `tolerance` mm (it is left as it is when that fails or empties it)."""
     vertices, triangles = np.asarray(vertices, float), np.asarray(triangles)
+    tolerance = rules.DECIMATE_MM if tolerance is None else tolerance
     if m3d is not None:
         try:
             solid = m3d.Manifold(m3d.Mesh(vert_properties=np.array(vertices, np.float32, order="C"),
@@ -92,7 +78,7 @@ class Scene:
         self._creases = {}
 
     @classmethod
-    def from_split(cls, result: dict, preview: list, tolerance: float = DECIMATE_MM) -> "Scene":
+    def from_split(cls, result: dict, preview: list, tolerance: "float | None" = None) -> "Scene":
         """`result` is the split result, `preview` the per-part (vertices, triangles) of parts_preview.bin."""
         numbers = sorted(p["number"] for p in result.get("parts") or [])
         if not numbers or len(preview) != len(numbers):
@@ -113,7 +99,7 @@ class Scene:
         """Edges that do not depend on the view: open boundaries and creases (n, 2, 3)."""
         if part not in self._creases:
             mesh = self.meshes[part]
-            keep = mesh.face_adjacency_angles > np.radians(CREASE_DEG)
+            keep = mesh.face_adjacency_angles > np.radians(rules.CREASE_DEG)
             edges = mesh.face_adjacency_edges[keep]
             boundary = group_rows(mesh.edges_sorted, require_count=1)
             if len(boundary):
@@ -143,18 +129,18 @@ def unit(v) -> np.ndarray:
 def camera_candidates() -> list:
     """The 8 diagonal views (4 sides x 2 elevations), in the fixed order the first-fit rule walks them. Each is the
     direction from the model to the camera."""
-    return [unit([sx, sy, 0.8 * sz]) for sz in (1, -1) for sx in (1, -1) for sy in (1, -1)]
+    return [unit([sx, sy, rules.CAMERA_ELEVATION * sz]) for sz in (1, -1) for sx in (1, -1) for sy in (1, -1)]
 
 
 def _first_fit(u: np.ndarray, previous) -> np.ndarray:
     """Keep the previous camera while it still sees the receiving face (dot with the face normal above 0.3), else the first
     of the 8 diagonal views that sees it (above 0.05), preferring from above, then the angle closest to 55 degrees to the
     insertion axis."""
-    if previous is not None and float(np.dot(previous, -u)) > 0.3:
+    if previous is not None and float(np.dot(previous, -u)) > rules.REUSE_FACING:
         return np.asarray(previous, float)
     best, best_key = None, None
     for camera in camera_candidates():
-        key = (float(np.dot(camera, -u)) > 0.05, bool(camera[2] > 0), -abs(abs(float(np.dot(camera, u))) - np.cos(np.radians(55))))
+        key = (float(np.dot(camera, -u)) > rules.SEES_FACING, bool(camera[2] > 0), -abs(abs(float(np.dot(camera, u))) - np.cos(np.radians(rules.FIRST_FIT_DEGREES))))
         if best is None or key > best_key:
             best, best_key = camera, key
     return best
@@ -231,8 +217,9 @@ def drop_small_bits(runs: list, min_len: float) -> list:
 class View:
     """An orthographic view fitted to some world points, `width` pixels wide (the height follows the content)."""
 
-    def __init__(self, camera, fit_points, width: int = RENDER_PX, margin: float = 0.06, aspect=(0.8, 1.5)):
+    def __init__(self, camera, fit_points, width: "int | None" = None, margin: float = 0.06, aspect=(0.8, 1.5)):
         self.camera = unit(camera)
+        width = rules.RENDER_PX if width is None else width
         self.R = view_matrix(camera)
         screen = np.asarray(fit_points) @ self.R.T
         self.lo, self.hi = screen.min(axis=0), screen.max(axis=0)
@@ -241,7 +228,7 @@ class View:
         self.W, self.H = width, int(round(width / ratio))
         self.scale = (1 - 2 * margin) * min(self.W / sx, self.H / sy)      # pixels per mm
         self.centre = (self.hi + self.lo) / 2
-        self.bias = max(1.5, BIAS * np.linalg.norm(self.hi - self.lo) * self.scale)
+        self.bias = max(1.5, rules.BIAS * np.linalg.norm(self.hi - self.lo) * self.scale)
 
     def project(self, points) -> np.ndarray:
         """World points to (x px, y px down, depth px, larger is nearer the camera)."""
@@ -250,18 +237,20 @@ class View:
                      self.H / 2 - (screen[:, 1] - self.centre[1]) * self.scale,
                      (screen[:, 2] - self.lo[2]) * self.scale]
 
-    def render(self, scene: Scene, items: list, bridge_px: float = BRIDGE_PX, min_bit_px: float = MIN_BIT_PX) -> dict:
+    def render(self, scene: Scene, items: list, bridge_px: "float | None" = None, min_bit_px: "float | None" = None) -> dict:
         """items: [(key, part, offset)]. Returns {key: [(p0, p1), ...]}: the visible line runs in pixels."""
         depth = np.full((self.H, self.W), -np.inf, np.float32)
         for _key, part, offset in items:
             mesh = scene.meshes[part]
             raster_depth(self.project(mesh.vertices + offset), mesh.faces, self.W, self.H, depth)
-        bridge = int(round(bridge_px / SAMPLE_PX))
+        bridge_px = rules.BRIDGE_PX if bridge_px is None else bridge_px
+        min_bit_px = rules.MIN_BIT_PX if min_bit_px is None else min_bit_px
+        bridge = int(round(bridge_px / rules.SAMPLE_PX))
         out = {}
         for key, part, offset in items:
             edges = self.project(scene.feature_edges(part, self.camera).reshape(-1, 3) + offset).reshape(-1, 2, 3)
             length = np.linalg.norm(edges[:, 1, :2] - edges[:, 0, :2], axis=1)
-            count = np.maximum(2, np.ceil(length / SAMPLE_PX).astype(int) + 1)
+            count = np.maximum(2, np.ceil(length / rules.SAMPLE_PX).astype(int) + 1)
             owner = np.repeat(np.arange(len(edges)), count)
             t = np.concatenate([np.linspace(0, 1, n) for n in count]) if len(count) else np.zeros(0)
             samples = edges[owner, 0] * (1 - t[:, None]) + edges[owner, 1] * t[:, None]
@@ -361,15 +350,15 @@ def contact_face(scene: Scene, mover, touching, u: np.ndarray) -> "ContactFace |
     lead_at, lead_area = np.concatenate([o for o, _, _ in lead]), np.concatenate([a for _, a, _ in lead])
     back_at, back_area = np.concatenate([o for o, _, _ in back]), np.concatenate([a for _, a, _ in back])
     best, best_score = None, 0.0
-    for plane in np.unique(np.round(lead_at / FACE_TOLERANCE_MM) * FACE_TOLERANCE_MM):
-        score = min(lead_area[abs(lead_at - plane) <= FACE_TOLERANCE_MM].sum(), back_area[abs(back_at - plane) <= FACE_TOLERANCE_MM].sum())
+    for plane in np.unique(np.round(lead_at / rules.FACE_TOLERANCE_MM) * rules.FACE_TOLERANCE_MM):
+        score = min(lead_area[abs(lead_at - plane) <= rules.FACE_TOLERANCE_MM].sum(), back_area[abs(back_at - plane) <= rules.FACE_TOLERANCE_MM].sum())
         if score > best_score + 1e-6:
             best, best_score = plane, score
     if best is None:
         return None
     e1, e2 = _plane_basis(u)
     flatten = lambda tris: np.stack([tris @ e1, tris @ e2], axis=-1)
-    pick = lambda groups, at: np.concatenate([tri[abs(o - at) <= FACE_TOLERANCE_MM] for o, _, tri in groups])
+    pick = lambda groups, at: np.concatenate([tri[abs(o - at) <= rules.FACE_TOLERANCE_MM] for o, _, tri in groups])
     receiver_tris, mover_tris = pick(back, best), pick(lead, best)
     middle = receiver_tris.mean(axis=(0, 1)) if len(receiver_tris) else mover_tris.mean(axis=(0, 1))
     return ContactFace(float(best), e1, e2, flatten(receiver_tris), flatten(mover_tris), middle)
@@ -412,15 +401,6 @@ def _prepare_posed_step(scene: Scene, step: dict, camera) -> StepArt:
 
 # ── Camera quality: pose, scored fallback, close-up ────────────────────────────
 
-CLEAR_SHARE = 0.85            # a camera showing this much of the join face and of the rod tips is kept
-CLOSE_UP_BELOW = 0.70         # when even the best candidate scores under this, the step gets a close-up frame
-CLOSE_UP_ZOOM = 3.0
-CLOSE_UP_PX = 800
-QUALITY_PX = 500              # width of the low-resolution depth buffer the candidates are scored on
-FACE_SAMPLES = 300
-CUE_MM = 12.0                 # the "turn it over" cue
-
-
 def rotation_between(a, b) -> np.ndarray:
     """The smallest rotation turning direction `a` onto direction `b`."""
     a, b = unit(a), unit(b)
@@ -438,7 +418,7 @@ def pose_for(step: dict) -> "np.ndarray | None":
     """The rotation that turns the model over for a step, or None to draw it in the finished pose. A join that goes upward
     (no view from above sees its receiving face) is drawn with the model turned so the join goes down."""
     u = unit(step["direction"])
-    if any(float(camera @ -u) > 0.05 for camera in camera_candidates() if camera[2] > 0):
+    if any(float(camera @ -u) > rules.SEES_FACING for camera in camera_candidates() if camera[2] > 0):
         return None
     return rotation_between(u, -UP)
 
@@ -460,21 +440,21 @@ def posed(scene: "Scene | None", step: dict) -> tuple:
 
 
 def _face_samples(face: "ContactFace | None") -> np.ndarray:
-    """World points spread over the real join face (where both faces overlap), at most FACE_SAMPLES of them."""
+    """World points spread over the real join face (where both faces overlap), at most rules.FACE_SAMPLES of them."""
     if face is None or not len(face.receiver):
         return np.zeros((0, 3))
     both = face.receiver.reshape(-1, 2)
     lo, hi = both.min(axis=0), both.max(axis=0)
     area = max(float(np.prod(hi - lo)), 1e-6)
-    spacing = float(np.sqrt(area / (FACE_SAMPLES * 4)))
+    spacing = float(np.sqrt(area / (rules.FACE_SAMPLES * 4)))
     gx, gy = np.meshgrid(np.arange(lo[0] + spacing / 2, hi[0], spacing), np.arange(lo[1] + spacing / 2, hi[1], spacing))
     dots = np.c_[gx.ravel(), gy.ravel()]
     keep = _points_in_triangles(dots, face.receiver)
     if len(face.mover):
         keep &= _points_in_triangles(dots, face.mover)
     dots = dots[keep]
-    if len(dots) > FACE_SAMPLES:
-        dots = dots[np.linspace(0, len(dots) - 1, FACE_SAMPLES).astype(int)]
+    if len(dots) > rules.FACE_SAMPLES:
+        dots = dots[np.linspace(0, len(dots) - 1, rules.FACE_SAMPLES).astype(int)]
     u = np.cross(face.e1, face.e2)
     return face.plane * u + dots[:, :1] * face.e1 + dots[:, 1:] * face.e2
 
@@ -497,7 +477,7 @@ class _StepProbe:
         self.tips = np.array([np.array(pin["p"], float) - u * max(pin["depth"] - 0.5, 1.0) for pin in scene.pins_between(mover, receiver)])
 
     def quality(self, camera) -> dict:
-        view = View(camera, self.fit, width=QUALITY_PX)
+        view = View(camera, self.fit, width=rules.QUALITY_PX)
         depth = np.full((view.H, view.W), -np.inf, np.float32)
         for part, offset in self.items:
             mesh = self.scene.meshes[part]
@@ -514,7 +494,8 @@ class _StepProbe:
         face, rods = seen(self.face), seen(self.tips)
         facing = max(float(np.dot(camera, -self.u)), 0.0)
         above = bool(camera[2] > 0)
-        score = 0.5 * face + 0.3 * rods + 0.2 * min(facing / 0.5, 1.0) + (0.03 if above else 0.0)
+        w_face, w_rods, w_facing = rules.SCORE_WEIGHTS
+        score = w_face * face + w_rods * rods + w_facing * min(facing / rules.SCORE_FACING_FULL, 1.0) + (rules.SCORE_ABOVE_BONUS if above else 0.0)
         return {"score": score, "face": face, "rods": rods, "facing": facing, "above": above}
 
 
@@ -531,7 +512,7 @@ class CameraChoice:
     camera: np.ndarray           # in the pose of the step
     quality: "dict | None"       # face / rods / score of the camera, None when it was not measured (no scene)
     scored: bool = False         # the first-fit camera was not good enough and 10 candidates were scored
-    close_up: bool = False       # even the best candidate scores under CLOSE_UP_BELOW: add a close-up frame
+    close_up: bool = False       # even the best candidate scores under rules.CLOSE_UP_BELOW: add a close-up frame
 
 
 def choose_view(scene, step: dict, previous) -> CameraChoice:
@@ -545,12 +526,12 @@ def choose_view(scene, step: dict, previous) -> CameraChoice:
         return CameraChoice(first, None)
     probe = _StepProbe(pose_scene, pose_step)
     quality = probe.quality(first)
-    if quality["face"] >= CLEAR_SHARE and quality["rods"] >= CLEAR_SHARE:
+    if quality["face"] >= rules.CLEAR_SHARE and quality["rods"] >= rules.CLEAR_SHARE:
         return CameraChoice(first, quality)
     candidates = scoring_candidates(u)
     results = [probe.quality(camera) for camera in candidates]
     best = int(np.argmax([r["score"] for r in results]))      # the first of equal scores
-    return CameraChoice(candidates[best], results[best], scored=True, close_up=results[best]["score"] < CLOSE_UP_BELOW)
+    return CameraChoice(candidates[best], results[best], scored=True, close_up=results[best]["score"] < rules.CLOSE_UP_BELOW)
 
 
 @dataclass
@@ -569,10 +550,10 @@ def _close_up(scene: Scene, art: StepArt, camera) -> CloseUp:
     else:
         centre = np.mean(np.vstack([scene.corners(p) for p in art.receiver]), axis=0)
     main = art.view
-    half = main.W / main.scale / CLOSE_UP_ZOOM / 2          # mm
+    half = main.W / main.scale / rules.CLOSE_UP_ZOOM / 2          # mm
     corners = np.array([centre + sx * half * main.R[0] + sy * half * main.R[1] for sx in (-1, 1) for sy in (-1, 1)])
-    view = View(camera, corners, width=CLOSE_UP_PX, margin=0.0, aspect=(1.0, 1.0))
-    return CloseUp(view, view.render(scene, [(("r", p), p, np.zeros(3)) for p in art.receiver]), CLOSE_UP_ZOOM)
+    view = View(camera, corners, width=rules.CLOSE_UP_PX, margin=0.0, aspect=(1.0, 1.0))
+    return CloseUp(view, view.render(scene, [(("r", p), p, np.zeros(3)) for p in art.receiver]), rules.CLOSE_UP_ZOOM)
 
 
 def prepare_step(scene: Scene, step: dict, camera, close_up: bool = False) -> StepArt:
@@ -635,35 +616,35 @@ def _rods(art: StepArt, box: Box) -> list:
     out = []
     for pin in art.pins:
         p = np.array(pin["p"], float)
-        length = max(pin["depth"] - 0.5, MIN_ROD_PT / box.pt_per_mm)
-        out.append((p - art.direction * length, p + art.direction * 0.4, pin["diameter"]))
+        length = max(pin["depth"] - 0.5, rules.MIN_ROD_PT / box.pt_per_mm)
+        out.append((p - art.direction * length, p + art.direction * rules.ROD_TIP_MM, pin["diameter"]))
     return out
 
 
 def _draw_rods(canvas, box: Box, rods: list) -> None:
     for a, b, diameter in rods:
         start, end = box.world(np.array([a, b]))
-        width = max(diameter * box.pt_per_mm, 3.0)
+        width = max(diameter * box.pt_per_mm, rules.ROD_MIN_WIDTH_PT)
         canvas.setLineCap(0)
         canvas.setStrokeGray(0)
-        canvas.setLineWidth(width + 1.4)
+        canvas.setLineWidth(width + rules.ROD_OUTLINE_PT)
         canvas.line(*start, *end)
         canvas.setStrokeGray(1)
-        canvas.setLineWidth(max(width - 0.6, 0.8))
+        canvas.setLineWidth(max(width - rules.ROD_CORE_TRIM_PT, rules.ROD_CORE_MIN_PT))
         canvas.line(*start, *end)
 
 
-def _stipple_face(canvas, box: Box, face: ContactFace, spacing_pt: float = 3.4) -> None:
+def _stipple_face(canvas, box: Box, face: ContactFace, spacing_pt: "float | None" = None) -> None:
     """Dots over the real contact area (where the receiver's face and the moving unit's face overlap)."""
     if face is None or not len(face.receiver):
         return
-    step = spacing_pt / box.pt_per_mm
+    step = (rules.STIPPLE_SPACING_PT if spacing_pt is None else spacing_pt) / box.pt_per_mm
     both = face.receiver.reshape(-1, 2)
     lo, hi = both.min(axis=0), both.max(axis=0)
     gx, gy = np.meshgrid(np.arange(lo[0], hi[0], step), np.arange(lo[1], hi[1], step * 0.87))
     gx = gx + (np.arange(gx.shape[0]) % 2)[:, None] * step / 2
     dots = np.c_[gx.ravel(), gy.ravel()]
-    if len(dots) > 40000:
+    if len(dots) > rules.STIPPLE_MAX_DOTS:
         return
     keep = _points_in_triangles(dots, face.receiver)
     if len(face.mover):
@@ -672,13 +653,14 @@ def _stipple_face(canvas, box: Box, face: ContactFace, spacing_pt: float = 3.4) 
         return
     u = np.cross(face.e1, face.e2)
     world = face.plane * u + dots[keep, :1] * face.e1 + dots[keep, 1:] * face.e2
-    canvas.setFillGray(0.2)
+    canvas.setFillGray(rules.STIPPLE_GREY)
     for x, y in box.world(world):
-        canvas.circle(x, y, 0.45, stroke=0, fill=1)
+        canvas.circle(x, y, rules.STIPPLE_DOT_PT, stroke=0, fill=1)
 
 
-def glue_drop(canvas, xy, size: float = 8) -> None:
+def glue_drop(canvas, xy, size: "float | None" = None) -> None:
     x, y = xy
+    size = rules.GLUE_DROP_PT if size is None else size
     path = canvas.beginPath()
     path.moveTo(x, y + size)
     path.curveTo(x + size * 0.2, y + size * 0.5, x + size * 0.7, y + size * 0.1, x + size * 0.7, y - size * 0.35)
@@ -691,8 +673,10 @@ def glue_drop(canvas, xy, size: float = 8) -> None:
     canvas.circle(x - size * 0.25, y - size * 0.3, size * 0.15, stroke=0, fill=1)
 
 
-def _arrow(canvas, start, end, weight: float = 2.6, head: float = 11) -> None:
+def _arrow(canvas, start, end, weight: "float | None" = None, head: "float | None" = None) -> None:
     start, end = np.array(start, float), np.array(end, float)
+    weight = rules.ARROW_WEIGHT if weight is None else weight
+    head = rules.ARROW_HEAD_PT if head is None else head
     d = end - start
     length = np.linalg.norm(d)
     if length < 4:
@@ -712,12 +696,14 @@ def _arrow(canvas, start, end, weight: float = 2.6, head: float = 11) -> None:
     canvas.drawPath(path, fill=1, stroke=0)
 
 
-def _bubble(canvas, xy, text: str, bold: bool = True, radius: float = 8.5) -> None:
-    canvas.setStrokeGray(0 if bold else TOUCHING[0])
+def _bubble(canvas, xy, text: str, bold: bool = True, radius: "float | None" = None) -> None:
+    default_radius, ring = rules.BUBBLE_BOLD if bold else rules.BUBBLE_LIGHT
+    radius = default_radius if radius is None else radius
+    canvas.setStrokeGray(0 if bold else rules.TOUCHING[0])
     canvas.setFillGray(1)
-    canvas.setLineWidth(1.0 if bold else 0.7)
+    canvas.setLineWidth(ring)
     canvas.circle(xy[0], xy[1], radius, stroke=1, fill=1)
-    canvas.setFillGray(0 if bold else 0.4)
+    canvas.setFillGray(0 if bold else rules.BUBBLE_LIGHT_TEXT)
     canvas.setFont("Helvetica-Bold", MIN_FONT)
     canvas.drawCentredString(xy[0], xy[1] - 3.2, str(text))
 
@@ -728,15 +714,15 @@ def _place_bubble(canvas, box: Box, frame, runs, text, corner: str, bold: bool, 
     if bounds is None:
         return
     lo, hi = bounds
-    r = 8.5 if bold else 8.0
+    r = (rules.BUBBLE_BOLD if bold else rules.BUBBLE_LIGHT)[0]
     x = lo[0] - r - 2 if "l" in corner else hi[0] + r + 2
     y = hi[1] + r + 2 + slot * (2 * r + 3) if "t" in corner else lo[1] - r - 2 - slot * (2 * r + 3)
     x = float(np.clip(x, frame[0] + r + 1, frame[0] + frame[2] - r - 1))
     y = float(np.clip(y, frame[1] + r + 1, frame[1] + frame[3] - r - 1))
     ends = np.vstack([box.px(np.array([a, b])) for a, b in runs[::max(1, len(runs) // 400)]])
     nearest = ends[np.argmin(np.linalg.norm(ends - [x, y], axis=1))]
-    canvas.setStrokeGray(0 if bold else TOUCHING[0])
-    canvas.setLineWidth(0.6)
+    canvas.setStrokeGray(0 if bold else rules.TOUCHING[0])
+    canvas.setLineWidth(rules.LEADER_WEIGHT)
     canvas.line(x, y, *nearest)
     _bubble(canvas, (x, y), text, bold, r)
 
@@ -744,7 +730,7 @@ def _place_bubble(canvas, box: Box, frame, runs, text, corner: str, bold: bool, 
 def _frame_badge(canvas, frame, number: int) -> None:
     x, y = frame[0] + 9, frame[1] + frame[3] - 9
     canvas.setFillGray(0)
-    canvas.circle(x, y, 7.5, stroke=0, fill=1)
+    canvas.circle(x, y, rules.BADGE_RADIUS, stroke=0, fill=1)
     canvas.setFillGray(1)
     canvas.setFont("Helvetica-Bold", MIN_FONT)
     canvas.drawCentredString(x, y - 3.2, str(number))
@@ -759,7 +745,7 @@ def draw_frame_one(canvas, art: StepArt, frame) -> None:
     """Frame 1: the receiving unit in normal weight, the join face stippled for glue, the rods bold in the face, a glue drop."""
     box = Box(frame, art.view)
     for runs in art.runs_one.values():
-        stroke_runs(canvas, runs, box, *RECEIVER)
+        stroke_runs(canvas, runs, box, *rules.RECEIVER)
     _stipple_face(canvas, box, art.face)
     rods = _rods(art, box)
     _draw_rods(canvas, box, rods)
@@ -767,13 +753,13 @@ def draw_frame_one(canvas, art: StepArt, frame) -> None:
     if anchor_world is not None:
         anchor = box.world(anchor_world)[0]
         ink = _ink_points(box, art.runs_one)
-        spots = [anchor + 26 * np.array([np.cos(a), np.sin(a)]) for a in np.radians((45, 135, 315, 225, 90, 0, 180, 270))]
+        spots = [anchor + rules.GLUE_DROP_GAP_PT * np.array([np.cos(a), np.sin(a)]) for a in np.radians((45, 135, 315, 225, 90, 0, 180, 270))]
         inside = [s for s in spots if frame[0] + 10 < s[0] < frame[0] + frame[2] - 10 and frame[1] + 10 < s[1] < frame[1] + frame[3] - 10] or spots[:1]
         drop = min(inside, key=lambda s: int((np.linalg.norm(ink - s, axis=1) < 12).sum()) if len(ink) else 0)
         canvas.setStrokeGray(0)
-        canvas.setLineWidth(0.6)
+        canvas.setLineWidth(rules.LEADER_WEIGHT)
         canvas.line(*(drop + (anchor - drop) * 0.12), *anchor)
-        glue_drop(canvas, drop, 8)
+        glue_drop(canvas, drop)
     _frame_badge(canvas, frame, 1)
 
 
@@ -783,13 +769,13 @@ def frame_two_marks(art: StepArt, frame) -> tuple:
     mover_runs = [r for key, runs in art.runs_two.items() if key[0] == "m" for r in runs]
     bounds = _bounds_pt(box, mover_runs)
     if bounds is None:
-        return ((frame[0], frame[1]), (frame[0] + MIN_ARROW_PT, frame[1])), (np.zeros(2), np.zeros(2))
+        return ((frame[0], frame[1]), (frame[0] + rules.MIN_ARROW_PT, frame[1])), (np.zeros(2), np.zeros(2))
     lo, hi = bounds
     centre = (lo + hi) / 2
     way = box.world(np.zeros(3) + art.direction)[0] - box.world(np.zeros(3))[0]
     heading = way / (np.linalg.norm(way) or 1.0)                  # the way the part slides, on the page
     side = np.array([-heading[1], heading[0]])
-    length = max(MIN_ARROW_PT, 0.9 * float(np.linalg.norm(box.world(art.offset)[0] - box.world(np.zeros(3))[0])))
+    length = max(rules.MIN_ARROW_PT, 0.9 * float(np.linalg.norm(box.world(art.offset)[0] - box.world(np.zeros(3))[0])))
     inner = np.array([frame[0] + 10, frame[1] + 10]), np.array([frame[0] + frame[2] - 10, frame[1] + frame[3] - 10])
     half = lambda d: 0.5 * (abs(d[0]) * (hi[0] - lo[0]) + abs(d[1]) * (hi[1] - lo[1]))
     best = None
@@ -808,19 +794,19 @@ def draw_frame_two(canvas, art: StepArt, frame) -> None:
     box = Box(frame, art.view)
     for (role, _part), runs in art.runs_two.items():
         if role != "m":
-            stroke_runs(canvas, runs, box, *(TOUCHING if role == "t" else PLACED))
+            stroke_runs(canvas, runs, box, *(rules.TOUCHING if role == "t" else rules.PLACED))
     for (role, _part), runs in art.runs_two.items():
         if role == "m":
-            stroke_runs(canvas, runs, box, 1.0, BOLD + HALO)
-            stroke_runs(canvas, runs, box, 0.0, BOLD)
+            stroke_runs(canvas, runs, box, 1.0, rules.BOLD + rules.HALO)
+            stroke_runs(canvas, runs, box, 0.0, rules.BOLD)
     _draw_rods(canvas, box, _rods(art, box))
     (start, end), (lo, hi) = frame_two_marks(art, frame)
     mover_runs = {key: runs for key, runs in art.runs_two.items() if key[0] == "m"}
     travel = box.world(np.zeros(3))[0] - box.world(art.offset)[0]
     centre = (lo + hi) / 2
-    canvas.setStrokeGray(0.35)
-    canvas.setLineWidth(0.6)
-    canvas.setDash(3, 3)
+    canvas.setStrokeGray(rules.PATH_LINE[0])
+    canvas.setLineWidth(rules.PATH_LINE[1])
+    canvas.setDash(*rules.PATH_DASH)
     canvas.line(*centre, *(centre + travel))
     canvas.setDash()
     _arrow(canvas, start, end)
@@ -848,8 +834,8 @@ def draw_step(canvas, art: StepArt, left: float, top: float, width: float) -> fl
         canvas.clipPath(path, stroke=0, fill=0)
         draw(canvas, art, placed)
         canvas.restoreState()
-        canvas.setStrokeGray(0.82)
-        canvas.setLineWidth(0.5)
+        canvas.setStrokeGray(rules.FRAME_BORDER[0])
+        canvas.setLineWidth(rules.FRAME_BORDER[1])
         canvas.rect(*placed)
     if "close_up" in art.extras:
         height += draw_close_up(canvas, art, left, top - height, width)
@@ -880,7 +866,7 @@ def draw_close_up(canvas, art: StepArt, left: float, top: float, width: float) -
     canvas.clipPath(path, stroke=0, fill=0)
     box = Box(frame, close.view)
     for runs in close.runs.values():
-        stroke_runs(canvas, runs, box, *RECEIVER)
+        stroke_runs(canvas, runs, box, *rules.RECEIVER)
     _stipple_face(canvas, box, art.face)
     _draw_rods(canvas, box, _rods(art, box))
     canvas.setFillGray(0)
@@ -888,15 +874,15 @@ def draw_close_up(canvas, art: StepArt, left: float, top: float, width: float) -
     canvas.drawRightString(frame[0] + frame[2] - 4, frame[1] + 4, f"Close-up, about {close.zoom:g}x")
     _frame_badge(canvas, frame, 3)
     canvas.restoreState()
-    canvas.setStrokeGray(0.82)
-    canvas.setLineWidth(0.5)
+    canvas.setStrokeGray(rules.FRAME_BORDER[0])
+    canvas.setLineWidth(rules.FRAME_BORDER[1])
     canvas.rect(*frame)
     return FRAME_GAP + h
 
 
 def draw_turn_cue(canvas, frame) -> None:
     """A curved arrow about 12 mm across with "Turn it over" beside it, in the top right corner of the frame."""
-    r = CUE_MM * MM / 2
+    r = rules.CUE_MM * MM / 2
     text = "Turn it over"
     text_w = canvas.stringWidth(text, "Helvetica-Bold", MIN_FONT)
     cx, cy = frame[0] + frame[2] - 6 - r, frame[1] + frame[3] - 6 - r
@@ -905,7 +891,7 @@ def draw_turn_cue(canvas, frame) -> None:
     angles = np.radians(np.linspace(30, 300, 28))
     pts = np.c_[cx + r * 0.8 * np.cos(angles), cy + r * 0.8 * np.sin(angles)]
     canvas.setStrokeGray(0)
-    canvas.setLineWidth(1.6)
+    canvas.setLineWidth(rules.CUE_WEIGHT)
     canvas.setLineCap(1)
     path = canvas.beginPath()
     path.moveTo(*pts[0])
@@ -913,7 +899,7 @@ def draw_turn_cue(canvas, frame) -> None:
         path.lineTo(*pt)
     canvas.drawPath(path, stroke=1, fill=0)
     tangent = pts[-1] - pts[-2]
-    _arrow(canvas, pts[-1] - tangent / np.linalg.norm(tangent) * 6, pts[-1] + tangent / np.linalg.norm(tangent) * 1.5, weight=1.6, head=7)
+    _arrow(canvas, pts[-1] - tangent / np.linalg.norm(tangent) * 6, pts[-1] + tangent / np.linalg.norm(tangent) * 1.5, weight=rules.CUE_WEIGHT, head=7)
     canvas.setFillGray(0)
     canvas.setFont("Helvetica-Bold", MIN_FONT)
     canvas.drawRightString(cx - r - 4, cy - 3, text)
@@ -932,10 +918,10 @@ def section_picture(scene: Scene, parts, camera=None, width: int = 600) -> Pictu
     camera = camera_candidates()[0] if camera is None else camera
     items = [(p, p, np.zeros(3)) for p in sorted(parts)]
     view = View(camera, np.vstack([scene.corners(p) for p in sorted(parts)]), width=width, aspect=(0.7, 1.4))
-    return Picture(view, view.render(scene, items, min_bit_px=12))
+    return Picture(view, view.render(scene, items, min_bit_px=rules.PICTURE_MIN_BIT_PX))
 
 
 def draw_picture(canvas, picture: Picture, x: float, y: float, w: float, h: float) -> None:
     box = Box((x, y, w, h), picture.view)
     for runs in picture.runs.values():
-        stroke_runs(canvas, runs, box, 0.3, 0.45)
+        stroke_runs(canvas, runs, box, *rules.PICTURE)
