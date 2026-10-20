@@ -52,8 +52,53 @@ def rod_segments(art, frame) -> list:
     out = []
     for a, b, diameter in render._rods(art, box):
         start, end = box.world(np.array([a, b]))
-        out.append((start, end, max(diameter * box.pt_per_mm, 3.0) + 1.4))
+        out.append((start, end, render.rod_width(diameter, box.pt_per_mm) + rules.ROD_OUTLINE_PT))
     return out
+
+
+class Lens:
+    """Maps world points into the zoom circle the way `Box` maps them into the frame: the frame's page point of `focus`
+    lands on the circle's centre and everything is `k` times larger. Rods and the stipple take it where they take a Box."""
+
+    def __init__(self, box, centre, focus, k):
+        self.box, self.centre, self.focus, self.k = box, np.asarray(centre, float), np.asarray(focus, float), k
+        self.pt_per_mm = box.pt_per_mm * k
+
+    def world(self, points) -> np.ndarray:
+        return self.centre + self.k * (self.box.world(points) - self.focus)
+
+
+def _spec(art):
+    return art.extras.get("zoom") or render._zoom_spec(art)
+
+
+def _round_half(value: float, up: bool = False) -> float:
+    return float((np.ceil if up else np.floor)(value * 2) / 2)
+
+
+def _rod_share(art, ppm: float, r: float) -> float:
+    """How much of the circle's width the rods' own widths would cover at this magnification."""
+    return sum(render.rod_width(float(pin["diameter"]), ppm) for pin in art.pins) / (2 * r)
+
+
+def zoom_factor(art, frame) -> float:
+    """The magnification of the zoom circle. Holes must be clear of each other (ZOOM_HOLE_GAP_PT apart in the circle) without
+    zooming further than that, the holes and a margin of surface must fit in the circle, and the rods must not cover so
+    much of the circle that it reads as a barcode of bars: then the factor is lowered."""
+    box = render.Box(frame, art.view)
+    holes = box.world(np.array([p for p, _ in _spec(art).holes]))
+    focus = holes.mean(axis=0)
+    ppm, r = box.pt_per_mm, zoom_radius()
+    radii = np.array([d / 2 * ppm for _, d in _spec(art).holes])
+    reach = float((np.linalg.norm(holes - focus, axis=1) + radii).max()) + _spec(art).margin_mm * ppm
+    k = _round_half(r / max(reach, 1e-6))
+    if len(holes) > 1:
+        gaps = np.linalg.norm(holes[:, None] - holes[None], axis=2)
+        k = min(k, _round_half(rules.ZOOM_HOLE_GAP_PT / max(float(gaps[gaps > 1e-6].min()), 1e-6), up=True))
+    k = float(np.clip(k, *rules.ZOOM_RANGE))
+    while k > rules.ZOOM_FLOOR and _rod_share(art, ppm * k, r) > rules.ZOOM_MAX_ROD_SHARE:
+        k = max(k - 0.5, rules.ZOOM_FLOOR)
+    return k
 
 
 def zoom_circle(art, frame):
@@ -62,10 +107,7 @@ def zoom_circle(art, frame):
     rods = rod_segments(art, frame)
     if not rods:
         return None
-    ends = np.vstack([np.vstack([s, e]) for s, e, _ in rods])
-    focus = ends.mean(axis=0)
-    spread = float(np.linalg.norm(ends - focus, axis=1).max())
-    magnification = float(np.floor(np.clip(rules.ZOOM_FILL * zoom_radius() / max(spread, rules.ZOOM_MIN_SPREAD_PT), *rules.ZOOM_RANGE) * 2) / 2)
+    magnification = zoom_factor(art, frame)
     box = render.Box(frame, art.view)
     ink = render._ink_points(box, art.runs_one)
     badge = np.array([frame[0] + 9, frame[1] + frame[3] - 9])
@@ -92,19 +134,64 @@ def zoom_circle(art, frame):
     return (float(best[0]), float(best[1])), r, magnification
 
 
-def draw_zoom(canvas, art, frame) -> None:
+def _lens(art, frame):
     zoom = zoom_circle(art, frame)
     if zoom is None:
-        return
+        return None
     (cx, cy), r, k = zoom
     box = render.Box(frame, art.view)
-    rods = render._rods(art, box)
-    ends = np.vstack([box.world(np.array([a, b])) for a, b, _ in rods])
-    focus = ends.mean(axis=0)
-    toward = focus - np.array([cx, cy])
+    focus = box.world(np.array([p for p, _ in _spec(art).holes])).mean(axis=0)
+    return Lens(box, (cx, cy), focus, k), r
+
+
+def _hole_polygon(art, centre, diameter) -> np.ndarray:
+    face = _spec(art).face
+    e1, e2 = (face.e1, face.e2) if face is not None else render._plane_basis(art.direction)
+    angles = np.linspace(0, 2 * np.pi, rules.ZOOM_HOLE_SIDES, endpoint=False)
+    return centre + diameter / 2 * (np.cos(angles)[:, None] * e1 + np.sin(angles)[:, None] * e2)
+
+
+def zoom_facts(art, frame) -> "dict | None":
+    """What the zoom circle shows, read off the geometry: the `factor`, how many `holes_shown` are inside the circle, the
+    smallest gap between holes in the circle (`hole_gap_pt`), whether the join face is in it, and the `rod_share`."""
+    found = _lens(art, frame)
+    if found is None:
+        return None
+    lens, r = found
+    spec = _spec(art)
+    holes = lens.world(np.array([p for p, _ in spec.holes]))
+    inside = np.linalg.norm(holes - lens.centre, axis=1) <= r
+    gap = float("inf")
+    if len(holes) > 1:
+        gaps = np.linalg.norm(holes[:, None] - holes[None], axis=2)
+        gap = float(gaps[gaps > 1e-6].min())
+    face_shown = False
+    if spec.face is not None:
+        face = spec.face
+        face_shown = bool(inside.any())
+        edges = render.face_outline(face)
+        u = np.cross(face.e1, face.e2)
+        for a, b in edges:
+            pa, pb = (lens.world(face.plane * u + x * face.e1 + y * face.e2)[0] for x, y in (a, b))
+            face_shown = face_shown or segment_distance(lens.centre, pa, pb) < r
+    return {"factor": lens.k, "holes_shown": int(inside.sum()), "hole_gap_pt": gap, "face_shown": face_shown,
+            "rod_share": _rod_share(art, lens.pt_per_mm, r)}
+
+
+def draw_zoom(canvas, art, frame) -> "dict | None":
+    """The zoom circle: a close-up of the join face with its outline and stipple, the holes in it and the rods standing in
+    them, over a margin of the receiver's own lines. Returns the zoom facts plus `holes_drawn` and `face_edges_drawn`."""
+    found = _lens(art, frame)
+    if found is None:
+        return None
+    lens, r = found
+    facts = zoom_facts(art, frame)
+    spec = _spec(art)
+    (cx, cy), k, focus, box = lens.centre, lens.k, lens.focus, lens.box
+    toward = focus - lens.centre
     gap = float(np.linalg.norm(toward))
     if gap > r + 4:                                       # a thin leader from the circle to the rods it magnifies
-        edge = np.array([cx, cy]) + toward / gap * r
+        edge = lens.centre + toward / gap * r
         canvas.setStrokeGray(rules.ZOOM_LEADER[0])
         canvas.setLineWidth(rules.ZOOM_LEADER[1])
         canvas.line(*edge, *(focus - toward / gap * 2))
@@ -114,6 +201,7 @@ def draw_zoom(canvas, art, frame) -> None:
     canvas.clipPath(clip, stroke=0, fill=0)
     canvas.setFillGray(1)
     canvas.circle(cx, cy, r, stroke=0, fill=1)
+    canvas.saveState()
     canvas.translate(cx, cy)
     canvas.scale(k, k)
     canvas.translate(-focus[0], -focus[1])
@@ -125,7 +213,32 @@ def draw_zoom(canvas, art, frame) -> None:
             if (pts.min(axis=0) <= focus + reach).all() and (pts.max(axis=0) >= focus - reach).all():
                 near.append((a, b))
     render.stroke_runs(canvas, near, box, rules.RECEIVER[0], rules.RECEIVER[1] * rules.ZOOM_LINE_SCALE / k)
-    render._draw_rods(canvas, box, rods)
+    canvas.restoreState()
+    render._stipple_face(canvas, lens, spec.face)
+    edges_drawn = 0
+    if spec.face is not None:
+        face = spec.face
+        u = np.cross(face.e1, face.e2)
+        canvas.setStrokeGray(rules.RECEIVER[0])
+        canvas.setLineWidth(rules.RECEIVER[1] * rules.ZOOM_LINE_SCALE)
+        for a, b in render.face_outline(face):
+            pa, pb = (lens.world(face.plane * u + x * face.e1 + y * face.e2)[0] for x, y in (a, b))
+            canvas.line(*pa, *pb)
+            edges_drawn += segment_distance(lens.centre, pa, pb) < r
+    holes_drawn = 0
+    canvas.setStrokeGray(0)
+    canvas.setLineWidth(rules.LEADER_WEIGHT)
+    for point, diameter in spec.holes:
+        outline = lens.world(_hole_polygon(art, point, diameter))
+        path = canvas.beginPath()
+        path.moveTo(*outline[0])
+        for x, y in outline[1:]:
+            path.lineTo(x, y)
+        path.close()
+        canvas.setFillGray(1)
+        canvas.drawPath(path, stroke=1, fill=1)
+        holes_drawn += np.linalg.norm(outline.mean(axis=0) - lens.centre) <= r
+    render._draw_rods(canvas, lens, render._rods(art, lens))
     canvas.restoreState()
     canvas.setStrokeGray(0)
     canvas.setLineWidth(rules.ZOOM_RING_PT)
@@ -137,6 +250,7 @@ def draw_zoom(canvas, art, frame) -> None:
     canvas.setFillGray(0)
     canvas.setFont(BOLD, SIZE)
     canvas.drawCentredString(cx, cy - r - rules.ZOOM_LABEL_PT + 3, label)
+    return {**facts, "holes_drawn": int(holes_drawn), "face_edges_drawn": int(edges_drawn)}
 
 
 def draw_step_extras(canvas, art, left: float, top: float, width: float) -> None:
@@ -257,10 +371,7 @@ def draw_hole_map(canvas, art, x: float, top: float, height: float) -> None:
     for (rx, ry), diameter in zip(rods, sizes):
         r = max(diameter * k / 2, 1.8)
         cx, cy = to_page((rx, ry))
-        canvas.setFillGray(1)
-        canvas.circle(cx, cy, r + 1.3, stroke=0, fill=1)
-        canvas.setFillGray(0)
-        canvas.circle(cx, cy, r, stroke=0, fill=1)
+        render.draw_rod_end(canvas, cx, cy, r)
     canvas.setFillGray(0)
     canvas.setFont(BOLD, SIZE)
     canvas.drawString(x, top - SIZE, f"Hole map: {len(rods)} rods")
