@@ -91,7 +91,14 @@ class GuideTextTests(GuideCase):
         plan = splits.assembly_plan(split_id)
         step = next(w["step"] for w in plan["warnings"] if w["kind"] == "heavy_join")
         self.assertIn("Part 1 has no number", body)
-        self.assertLess(re.search(rf"\b{step} (Add|Join)", body).start(), body.index("Warning: Heavy join: get a helper or support it."))
+        self.assertLess(re.search(rf"\b{step} (Add|Join)", body).start(), body.index(
+            "Warning: Heavy join: about 2.6 kg on the heavier side, get a helper or support it."))
+
+    def test_every_heavy_step_has_the_same_wording_and_the_heavier_sides_mass(self):
+        split_id = self.make_split(*heavy_stack())
+        plan = splits.assembly_plan(split_id)
+        messages = {w["message"] for w in plan["warnings"] if w["kind"] == "heavy_join"}
+        self.assertEqual(messages, {"Heavy join: about 2.6 kg on the heavier side, get a helper or support it."})
 
     def test_the_helpers_are_empty_for_a_plain_plan(self):
         self.assertEqual(assembly_pdf.step_warning_lines({"warnings": []}), [])

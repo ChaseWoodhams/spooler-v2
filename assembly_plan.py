@@ -973,13 +973,19 @@ def unit_estimate(model: SplitModel, parts) -> tuple:
     return grams / 1000.0, float(np.max(high - low))
 
 
-def step_warnings(model: SplitModel, parts, heavy_kg: float = HEAVY_KG, heavy_mm: float = HEAVY_MM) -> tuple:
-    """The warnings for a step that moves the unit `parts` (a Section's parts for a Section step). The step-page code
-    reads them from Step.warnings; each warning is {"kind", "message", ...figures}."""
+def heavy_join_message(heavier_kg: float) -> str:
+    """The one wording of the heavy-join warning, with the estimated mass of the heavier side of the join."""
+    return f"Heavy join: about {heavier_kg:.1f} kg on the heavier side, get a helper or support it."
+
+
+def step_warnings(model: SplitModel, parts, heavy_kg: float = HEAVY_KG, heavy_mm: float = HEAVY_MM, receiver=()) -> tuple:
+    """The warnings for a step that moves the unit `parts` (a Section's parts for a Section step) onto `receiver`. The
+    step-page code reads them from Step.warnings; each warning is {"kind", "message", ...figures}."""
     kg, mm = unit_estimate(model, parts)
     if kg > heavy_kg or mm > heavy_mm:
-        return ({"kind": HEAVY_JOIN, "message": "Heavy join: get a helper or support it.",
-                 "weight_kg": round(kg, 2), "longest_mm": round(mm), "heavy_kg": heavy_kg, "heavy_mm": heavy_mm},)
+        heavier = max(kg, unit_estimate(model, receiver)[0])
+        return ({"kind": HEAVY_JOIN, "message": heavy_join_message(heavier), "weight_kg": round(kg, 2),
+                 "heavier_kg": round(heavier, 2), "longest_mm": round(mm), "heavy_kg": heavy_kg, "heavy_mm": heavy_mm},)
     return ()
 
 
@@ -991,7 +997,7 @@ def add_warnings(model: SplitModel, result: PlanResult, heavy_kg: float = HEAVY_
     sections = []
     for section in result.plan.sections:
         steps = tuple(replace(st, warnings=step_warnings(
-            model, by_letter[st.section].parts if st.kind == "section" and st.section in by_letter else st.parts, heavy_kg, heavy_mm))
+            model, by_letter[st.section].parts if st.kind == "section" and st.section in by_letter else st.parts, heavy_kg, heavy_mm, st.receiver))
             for st in section.steps)
         sections.append(replace(section, steps=steps))
     return PlanResult(plan=replace(result.plan, sections=tuple(sections), unlabelled=model.unlabelled))
