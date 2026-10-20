@@ -20,7 +20,7 @@ MM = render.MM
 FONT, BOLD = "Helvetica", "Helvetica-Bold"
 SIZE = render.MIN_FONT                # nothing smaller is printed
 
-STRIP_MIN_H = 24 * MM                 # a step without a hole map keeps two steps to a page
+STRIP_MIN_H = 21 * MM                 # a step without a hole map keeps two steps to a page
 STRIP_MAP_H = 36 * MM                 # a step with a hole map gets a taller strip
 STRIP_GAP = 2 * MM
 HOLE_MAP_MIN_RODS = 5

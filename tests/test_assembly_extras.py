@@ -139,8 +139,8 @@ class ZoomPlacementTests(unittest.TestCase):
         self.assertLessEqual(facts["highlight_grey"], 0.3)
         self.assertGreaterEqual(facts["rest_grey"], 0.75, "the rest, Section included, is very light")
         self.assertGreater(facts["highlight_area"], 0)
-        self.assertGreaterEqual(facts["picture_h"], 20 * assembly_render.MM)
-        self.assertGreaterEqual(assembly_extras.strip_height(art) - 12, 19 * assembly_render.MM, "the real strip leaves that room")
+        self.assertGreaterEqual(facts["picture_h"], 17 * assembly_render.MM)
+        self.assertGreaterEqual(assembly_extras.strip_height(art) - 12, 17 * assembly_render.MM, "the real strip leaves that room")
 
     def test_a_step_without_rods_has_no_zoom_circle(self):
         art = self.art(wide_split(8))
