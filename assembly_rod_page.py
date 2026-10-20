@@ -24,8 +24,8 @@ def tools_lines(kind: str) -> list:
         "Glue for plastic: a gel cyanoacrylate for a quick hold or a two-part epoxy for strength",
         "Masking tape and a marker for the Section letters",
         "A few rubber bands or clamps",
-        "Test-fit every rod before gluing.",
-        "Hold each glued join until it grips, then let a Section cure before it is joined to the rest (check your glue's label for times).",
+        f"Dry-fit every part and {kind} before gluing. Test-fit every {kind} with no glue to check that it goes in.",
+        "Hold each glued join until it grips. Let the glue cure as its label says before you join a Section to the rest.",
     ]
 
 
@@ -94,6 +94,7 @@ def _drawing(flow, size: RodSize) -> None:
     c.setFillGray(0)
     c.drawString(cx + diameter / 2 + 3 * MM, mid - 3, f"{mm_text(size.diameter)} mm across")
     c.drawString(left + 120 * MM, mid - 3, f"{size.label}, true size")
+    c.drawString(left + 120 * MM, mid + 8, f"Sits {mm_text((size.length + 1) / 2)} mm deep in each part")
 
 
 def _ruler(flow) -> None:
