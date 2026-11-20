@@ -4,6 +4,7 @@ pywebpush
 # splitting large models (split_engine.py)
 manifold3d>=3.5.3
 trimesh>=5.1
+embreex>=4.4   # ray-cast support volumes for orientation.rank (trimesh's embree backend)
 numpy
 scipy
 networkx

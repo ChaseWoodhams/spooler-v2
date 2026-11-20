@@ -12,6 +12,7 @@ import time
 
 import jobs
 import print_history
+from gcode_meta import extrusion_share_through_layer
 import state
 from persistence import FILAMENT_DENSITY, filament_mm_to_grams, save_printers
 from printers.protocol import decode_printinfo
@@ -310,6 +311,28 @@ class PrinterConnection:
             "printer": self.to_dict(),
         })
 
+    def _estimated_filament_mm(self, end_status: int | None) -> float:
+        """Filament used by the job that just ended, from its slice estimate. Blocking (reads the G-code).
+
+        The Centauri Carbons never report TotalExtrusion, so without this a finished
+        print deducts nothing from its spool. A finished print uses the whole estimate;
+        a stopped one uses the share of the G-code's extrusion up to the layer it reached."""
+        entry = jobs.active_job_for(self.id)
+        job = jobs.get_job(entry["id"]) if entry else None
+        estimate_mm = float((job or {}).get("estimate_mm") or 0)
+        if estimate_mm <= 0:
+            return 0.0
+        if end_status == 9:
+            return estimate_mm
+        layer, total = entry.get("layers") or (0, 0)
+        if not layer:
+            return 0.0
+        path = jobs.stored_gcode_path(job)
+        try:
+            return estimate_mm * extrusion_share_through_layer(path, layer)
+        except (OSError, TypeError):
+            return estimate_mm * min(layer / total, 1.0) if total else 0.0  # file gone: assume even layers
+
     async def _check_print_transition(self) -> None:
         pi = self._decoded_printinfo()
         cur_status = pi.get("Status")
@@ -332,6 +355,9 @@ class PrinterConnection:
         if cur_status in (9, 8, 14, 0) and self._last_print_status in PRINTING | {5, 6}:
             filament_mm = pi.get("TotalExtrusion", 0) or 0
             filename    = pi.get("Filename", "")
+            if filament_mm <= 0:
+                filament_mm = await asyncio.get_running_loop().run_in_executor(
+                    None, self._estimated_filament_mm, cur_status)
             if filament_mm > 0 or filename:
                 loop = asyncio.get_running_loop()
                 density    = await loop.run_in_executor(None, get_spool_density, self.id)

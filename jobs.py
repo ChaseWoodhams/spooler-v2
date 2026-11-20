@@ -153,6 +153,10 @@ def job_events(job_id: int) -> list:
         return [dict(r) for r in rows]
 
 
+def stored_gcode_path(job: dict) -> Path:
+    return _data_dir / (job.get("stored_file") or "")
+
+
 def active_job_for(printer_id: str) -> dict | None:
     entry = _active.get(printer_id)
     return dict(entry) if entry else None

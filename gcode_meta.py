@@ -75,6 +75,44 @@ def parse_estimates(text: str) -> dict:
     return {field: best.get(field, (0, None))[1] for field in ("estimate_s", "estimate_g", "estimate_mm")}
 
 
+_E_WORD = re.compile(rb"\bE(-?\d*\.?\d+)")
+
+
+def extrusion_share_through_layer(path: Path, layer: int) -> float:
+    """Share (0..1) of a G-code file's net extrusion that is done once `layer` layers have been printed.
+
+    Layers are counted by the slicer's ;LAYER_CHANGE markers; a half-printed layer counts as printed.
+    Net extrusion is the sum of every E move (retractions subtract), in relative (M83) or absolute (M82) mode.
+    """
+    path = Path(path)
+    absolute, last_e = False, 0.0
+    layers_seen, total, through = 0, 0.0, 0.0
+    with path.open("rb") as fh:
+        for raw in fh:
+            if raw.startswith(b";LAYER_CHANGE"):
+                if layers_seen == layer:
+                    through = total
+                layers_seen += 1
+                continue
+            if raw[:1] not in b"GM":
+                continue
+            if raw.startswith(b"M82"):
+                absolute = True
+            elif raw.startswith(b"M83"):
+                absolute = False
+            elif raw.startswith(b"G92"):
+                if m := _E_WORD.search(raw):
+                    last_e = float(m.group(1))
+            elif raw.startswith((b"G1 ", b"G0 ")):
+                if m := _E_WORD.search(raw.split(b";", 1)[0]):
+                    value = float(m.group(1))
+                    total += value - last_e if absolute else value
+                    last_e = value
+    if layer >= layers_seen:
+        through = total
+    return min(max(through / total, 0.0), 1.0) if total > 0 else 0.0
+
+
 def read_estimates(path: Path) -> dict:
     """Parse estimates from the head and tail of a G-code file without reading all of it."""
     path = Path(path)
